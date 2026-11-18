@@ -11,8 +11,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
 use gwt_core::paths::gwt_logs_dir;
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::{budget::PerfBudgets, route::PerfRoute, OPERATION_ROLE_MUTATION, OPERATION_ROLE_READ};
@@ -37,7 +37,7 @@ pub struct PerfLogRecord {
     #[serde(rename = "type")]
     pub record_type: String,
     /// When the measurement was taken.
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTimestamp,
     /// `ui`, `op` or `resource`.
     pub stream: String,
     /// Sanitized target name.
@@ -82,7 +82,7 @@ impl PerfLogRecord {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PerfFilter {
     /// Drop records older than this instant.
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<UtcTimestamp>,
     /// Keep only this stream (`ui` / `op` / `resource`).
     pub stream: Option<String>,
     /// Keep only targets containing this substring.
@@ -196,7 +196,7 @@ pub struct PerfSummary {
     pub schema_version: u32,
     /// Lower bound of the aggregated period, when one was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<UtcTimestamp>,
     /// Total samples aggregated.
     pub sample_count: usize,
     /// Total violations in the same period.
@@ -218,7 +218,7 @@ pub struct PerfViolationsReport {
     pub schema_version: u32,
     /// Lower bound of the reported period, when one was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<UtcTimestamp>,
     /// Number of violations reported.
     pub count: usize,
     /// The violations themselves, oldest first.
@@ -348,7 +348,7 @@ pub fn percentile(values: &[f64], quantile: f64) -> f64 {
 pub fn summarize(
     records: &[PerfLogRecord],
     budgets: &PerfBudgets,
-    since: Option<DateTime<Utc>>,
+    since: Option<UtcTimestamp>,
 ) -> PerfSummary {
     // Indexed by stream+target so aggregation stays linear in the record count
     // regardless of how many distinct targets a long period accumulated.
@@ -412,7 +412,7 @@ pub fn summarize(
 }
 
 /// Collect the violations of a period into the `perf.violations` payload.
-pub fn violations(records: &[PerfLogRecord], since: Option<DateTime<Utc>>) -> PerfViolationsReport {
+pub fn violations(records: &[PerfLogRecord], since: Option<UtcTimestamp>) -> PerfViolationsReport {
     let violations: Vec<PerfLogRecord> = records
         .iter()
         .filter(|record| record.is_violation())
@@ -477,17 +477,15 @@ impl Bucket {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone as _;
 
     use super::*;
 
-    fn at(hour: u32, minute: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 9, 8, hour, minute, 0)
-            .single()
+    fn at(hour: u32, minute: u32) -> UtcTimestamp {
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 9, 8, hour, minute, 0)
             .expect("valid timestamp")
     }
 
-    fn sample_line(timestamp: DateTime<Utc>, stream: &str, target: &str, value: f64) -> String {
+    fn sample_line(timestamp: UtcTimestamp, stream: &str, target: &str, value: f64) -> String {
         serde_json::json!({
             "schema_version": 1,
             "type": "sample",

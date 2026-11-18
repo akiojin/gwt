@@ -1,6 +1,6 @@
 //! Closed public vocabulary for unattended feedback. No caller text belongs here.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::FeedbackState;
@@ -304,7 +304,7 @@ impl SafeAutoSnapshot {
 pub struct AutoFeedbackRecord {
     mode: AutoMode,
     pub snapshot: SafeAutoSnapshot,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     pub state: FeedbackState,
     pub issue_number: Option<u64>,
     pub error: Option<AutoReason>,
@@ -318,7 +318,7 @@ pub struct AutoFeedbackRecord {
 }
 
 impl AutoFeedbackRecord {
-    pub(super) fn new(report: SafeAutoReport, created_at: DateTime<Utc>) -> Self {
+    pub(super) fn new(report: SafeAutoReport, created_at: UtcTimestamp) -> Self {
         let sendable = report.sendable();
         Self {
             mode: AutoMode::Auto,

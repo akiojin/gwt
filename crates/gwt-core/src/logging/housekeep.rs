@@ -5,7 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{NaiveDate, Utc};
+use time::{format_description::parse_strftime_borrowed, Date, Duration, OffsetDateTime};
+
+use crate::timestamp::parse_utc_date;
 
 /// Summary of a housekeeping run. Non-fatal errors are collected into
 /// `errors` rather than being returned as `Err`, so that a single
@@ -35,7 +37,7 @@ pub fn housekeep(
         retention_days,
         file_name_prefix,
         date_suffix_format,
-        Utc::now().date_naive(),
+        OffsetDateTime::now_utc().date(),
     )
 }
 
@@ -45,7 +47,7 @@ pub fn housekeep_at(
     retention_days: u32,
     file_name_prefix: &str,
     date_suffix_format: &str,
-    today: NaiveDate,
+    today: Date,
 ) -> HousekeepReport {
     let mut report = HousekeepReport::default();
     if retention_days == 0 {
@@ -65,7 +67,9 @@ pub fn housekeep_at(
 
     // "Keep the last N days (inclusive of today)" ⇒ cutoff = today - (N - 1).
     // A file dated exactly `cutoff` is still within the retention window.
-    let cutoff = today - chrono::Duration::days((retention_days.saturating_sub(1)) as i64);
+    let cutoff = today - Duration::days((retention_days.saturating_sub(1)) as i64);
+
+    let date_format = parse_strftime_borrowed(date_suffix_format).ok();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -77,7 +81,14 @@ pub fn housekeep_at(
         let Some(suffix) = file_name.strip_prefix(file_name_prefix) else {
             continue;
         };
-        let Ok(date) = NaiveDate::parse_from_str(suffix, date_suffix_format) else {
+        let date = match date_suffix_format {
+            "%Y-%m-%d" => parse_utc_date(suffix),
+            "%Y-%m-%d.jsonl" => suffix.strip_suffix(".jsonl").and_then(parse_utc_date),
+            _ => date_format
+                .as_ref()
+                .and_then(|format| Date::parse(suffix, format).ok()),
+        };
+        let Some(date) = date else {
             continue;
         };
 
@@ -125,7 +136,7 @@ pub(crate) fn enforce_size_limit(
         let Some(suffix) = name.strip_prefix("gwt.log.") else {
             continue;
         };
-        let Ok(date) = NaiveDate::parse_from_str(suffix, "%Y-%m-%d") else {
+        let Some(date) = parse_utc_date(suffix) else {
             continue;
         };
         if suffix != date.to_string() {
@@ -187,6 +198,7 @@ fn remove_history_file(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use time::macros::date;
 
     const GWT_LOG_PREFIX: &str = "gwt.log.";
     const GWT_LOG_DATE_SUFFIX_FORMAT: &str = "%Y-%m-%d";
@@ -219,12 +231,13 @@ mod tests {
     #[test]
     fn deletes_only_files_older_than_retention() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let today = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
+        let today = date!(2026 - 04 - 10);
         touch(&dir.path().join("gwt.log")); // active — must survive
         touch(&dir.path().join("gwt.log.2026-04-09")); // 1 day old
         touch(&dir.path().join("gwt.log.2026-04-04")); // 6 days old (boundary)
         touch(&dir.path().join("gwt.log.2026-04-03")); // 7 days old → deleted
         touch(&dir.path().join("gwt.log.2026-03-15")); // way old → deleted
+        touch(&dir.path().join("gwt.log.26-4-2")); // legacy unpadded date
         touch(&dir.path().join("unrelated.txt")); // unrelated — ignored
 
         let report = housekeep_at(
@@ -235,19 +248,20 @@ mod tests {
             today,
         );
 
-        assert_eq!(report.deleted.len(), 2);
+        assert_eq!(report.deleted.len(), 3);
         assert!(dir.path().join("gwt.log").exists());
         assert!(dir.path().join("gwt.log.2026-04-09").exists());
         assert!(dir.path().join("gwt.log.2026-04-04").exists());
         assert!(!dir.path().join("gwt.log.2026-04-03").exists());
         assert!(!dir.path().join("gwt.log.2026-03-15").exists());
+        assert!(!dir.path().join("gwt.log.26-4-2").exists());
         assert!(dir.path().join("unrelated.txt").exists());
     }
 
     #[test]
     fn deletes_daily_files_for_arbitrary_prefix_and_date_format() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let today = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
+        let today = date!(2026 - 04 - 10);
         touch(&dir.path().join("perf-2026-04-04.jsonl")); // retention boundary
         touch(&dir.path().join("perf-2026-04-03.jsonl")); // expired
         touch(&dir.path().join("other-2026-04-03.jsonl")); // different prefix
@@ -267,7 +281,7 @@ mod tests {
     fn malformed_suffix_is_left_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
         touch(&dir.path().join("gwt.log.not-a-date"));
-        let today = NaiveDate::from_ymd_opt(2099, 12, 31).unwrap();
+        let today = date!(2099 - 12 - 31);
         let report = housekeep_at(
             dir.path(),
             7,

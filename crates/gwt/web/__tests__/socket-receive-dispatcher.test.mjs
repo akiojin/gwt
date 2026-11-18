@@ -169,6 +169,19 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
+test("terminal snapshots preserve workspace identity and following output order", () => {
+  const queue = [
+    { kind: "workspace_state", session: "old" },
+    { kind: "terminal_output", id: "agent", data: "old output" },
+    { kind: "workspace_state", session: "new" },
+    { kind: "active_work_projection", session: "new" },
+    { kind: "terminal_snapshot", id: "agent", data: "new snapshot" },
+    { kind: "terminal_output", id: "agent", data: "new output" },
+  ];
+
+  assert.deepEqual(coalesceEvents(queue), queue);
+});
+
 // These fence tests exercise caller-supplied scoped outcomes independently
 // of the production census snapshot's default ordered-state policy.
 const SAMPLE_ORDERED_STATE_KINDS = new Set([
@@ -653,6 +666,24 @@ test("multiple streamed events maintain relative order, then idempotent follows"
     { kind: "workspace_state", n: 2 },
     { kind: "active_work_projection", v: 5 },
   ]);
+});
+
+test("runtime status keeps its position relative to the surviving workspace snapshot", () => {
+  const starting = { kind: "workspace_state", status: "starting" };
+  const idle = { kind: "terminal_status", id: "pm", status: "idle" };
+  const running = { kind: "window_state", window_id: "pm", state: "running" };
+  const scheduler = manualScheduler(), received = [];
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: event => received.push(event), schedule: scheduler.schedule, now: () => 0,
+  });
+  for (const event of [starting, idle]) dispatcher.handle({ data: JSON.stringify(event) });
+  scheduler.runAll();
+  assert.deepEqual(received, [starting, idle], "SessionStart Idle must not be rolled back to Starting");
+  received.length = 0;
+  for (const event of [idle, starting, running]) dispatcher.handle({ data: JSON.stringify(event) });
+  scheduler.runAll();
+  assert.deepEqual(received, [idle, starting, running], "a newer snapshot and later hook retain their order");
+  dispatcher.dispose();
 });
 
 test("idempotent state is delivered after a bounded streamed chunk during heavy backlog", () => {

@@ -13,7 +13,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+#[cfg(test)]
+use time::Duration as SignedDuration;
+
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::state::{age_secs, is_stale, DEFAULT_STALE_AFTER_SECS};
@@ -26,7 +29,7 @@ const PROVIDERS: [UsageProvider; 2] = [UsageProvider::Codex, UsageProvider::Clau
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredProviderUsage {
     /// When the poller produced these rows.
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     pub accounts: Vec<ProviderUsage>,
 }
 
@@ -82,7 +85,7 @@ pub fn provider_usage_snapshot_path() -> PathBuf {
 pub fn write_provider_usage_snapshot(
     path: &Path,
     accounts: &[ProviderUsage],
-    observed_at: DateTime<Utc>,
+    observed_at: UtcTimestamp,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -103,7 +106,7 @@ pub fn write_provider_usage_snapshot(
 }
 
 /// The readings in the snapshot at `path`, one row per provider, as of `now`.
-pub fn read_provider_usage_readings(path: &Path, now: DateTime<Utc>) -> Vec<ProviderUsageReading> {
+pub fn read_provider_usage_readings(path: &Path, now: UtcTimestamp) -> Vec<ProviderUsageReading> {
     let stored = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<StoredProviderUsage>(&bytes)
             .map(Some)
@@ -129,7 +132,7 @@ pub fn read_provider_usage_readings(path: &Path, now: DateTime<Utc>) -> Vec<Prov
 /// Project a published tick (or its absence) into one row per provider.
 pub fn provider_usage_readings(
     stored: Option<&StoredProviderUsage>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Vec<ProviderUsageReading> {
     PROVIDERS
         .iter()
@@ -164,8 +167,8 @@ fn provider_name(provider: UsageProvider) -> &'static str {
     }
 }
 
-fn rfc3339(instant: DateTime<Utc>) -> String {
-    instant.to_rfc3339_opts(SecondsFormat::Secs, true)
+fn rfc3339(instant: UtcTimestamp) -> String {
+    instant.to_rfc3339_seconds()
 }
 
 impl ProviderUsageReading {
@@ -182,11 +185,7 @@ impl ProviderUsageReading {
         }
     }
 
-    fn from_account(
-        account: &ProviderUsage,
-        observed_at: DateTime<Utc>,
-        now: DateTime<Utc>,
-    ) -> Self {
+    fn from_account(account: &ProviderUsage, observed_at: UtcTimestamp, now: UtcTimestamp) -> Self {
         let poller_age_secs = age_secs(observed_at, now);
         // Numbers are reported only when the provider actually returned some.
         let has_numbers = !account.windows.is_empty();
@@ -254,11 +253,11 @@ mod tests {
     use super::super::types::{UsageWindow, WindowKind};
     use super::*;
 
-    fn t(secs: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_790_000_000 + secs, 0).unwrap()
+    fn t(secs: i64) -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(1_790_000_000 + secs, 0).unwrap()
     }
 
-    fn codex_at_limit(fetched_at: DateTime<Utc>) -> ProviderUsage {
+    fn codex_at_limit(fetched_at: UtcTimestamp) -> ProviderUsage {
         ProviderUsage {
             provider: UsageProvider::Codex,
             account_id: Some("acct".to_string()),
@@ -269,7 +268,7 @@ mod tests {
             windows: vec![UsageWindow::new(
                 WindowKind::Weekly,
                 100.0,
-                Some(fetched_at + chrono::Duration::days(5)),
+                Some(fetched_at + SignedDuration::days(5)),
             )],
             limit_reached: true,
             state: UsageState::Ok,
@@ -316,18 +315,18 @@ mod tests {
         assert_eq!(
             codex.windows[0].resets_at.as_deref(),
             Some(
-                (t(-30) + chrono::Duration::days(5))
-                    .to_rfc3339_opts(SecondsFormat::Secs, true)
+                (t(-30) + SignedDuration::days(5))
+                    .to_rfc3339_seconds()
                     .as_str()
             )
         );
         assert_eq!(
             codex.fetched_at.as_deref(),
-            Some(t(-30).to_rfc3339_opts(SecondsFormat::Secs, true).as_str())
+            Some(t(-30).to_rfc3339_seconds().as_str())
         );
         assert_eq!(
             codex.observed_at.as_deref(),
-            Some(t(0).to_rfc3339_opts(SecondsFormat::Secs, true).as_str())
+            Some(t(0).to_rfc3339_seconds().as_str())
         );
         assert_eq!(codex.age_secs, Some(90));
     }

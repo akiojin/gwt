@@ -4,12 +4,66 @@
 
 use std::{fs, path::PathBuf};
 
+#[path = "support/installed_provider_fixture.rs"]
+mod installed_provider_fixture;
+
+#[path = "windows_shell_observer.rs"]
+mod shell_observer;
+
+#[test]
+fn public_shell_waits_for_prompt_after_startup_banner() {
+    let mut parser = vt100::Parser::new(32, 120, 0);
+    assert!(!shell_observer::input_ready(parser.screen()));
+    parser.process(b"startup output>\r\n");
+    assert!(
+        !shell_observer::input_ready(parser.screen()),
+        "output on the previous line must not trigger the one-shot Shell input"
+    );
+    // PR #6958: the first 149 bytes preceded the actual PowerShell prompt.
+    let banner = format!(
+        "\x1b[m\x1b[H\x1b[JPowerShell 7.6.9{}\x1b[2;1H\x1b[1;32r\x1b[?6l\x1b[H\x1b7\x1b[1;32r\x1b[?6l\x1b[2;1H\x1b[?25h\x1b>\x1b[?1l\x1b[?2004l",
+        "\r\n".repeat(31)
+    );
+    parser.process(banner.as_bytes());
+    assert!(parser.screen().contents().contains("PowerShell 7.6.9"));
+    assert!(
+        !shell_observer::input_ready(parser.screen()),
+        "the startup banner must not trigger the one-shot Shell input"
+    );
+    parser.process(format!("{banner}PS C:\\Users\\runneradmin\\AppData\\Local\\Temp\\.tmpuK2cUh\\public-repeat-1\\public ws 作業ツリー> ").as_bytes());
+    assert!(shell_observer::input_ready(parser.screen()));
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
         .expect("workspace root")
         .to_path_buf()
+}
+
+#[test]
+fn windows_startup_restore_waits_for_previous_gui_before_stopping_owner() {
+    let e2e = fs::read_to_string(repo_root().join("crates/gwt/tests/windows_agent_launch_e2e.rs"))
+        .expect("read Windows E2E source");
+    let (restart, _) = e2e
+        .split_once("fn windows_startup_restored_provider_tree_closes_through_public_gui()")
+        .and_then(|(_, test)| test.split_once("let restored_app = WindowsRealGwtFixture::start"))
+        .expect("cold restart setup");
+    let mut remaining = restart;
+    for step in [
+        "first_app.root.terminate();",
+        "first_app.root.assert_exited_by(",
+        "first.owner.terminate();",
+        "first.owner.assert_exited_by(",
+        "first.assert_tree_exited();",
+        "drop(first_app);",
+    ] {
+        remaining = remaining
+            .split_once(step)
+            .unwrap_or_else(|| panic!("cold restart is missing or reorders {step}"))
+            .1;
+    }
 }
 
 #[test]

@@ -96,6 +96,8 @@ pub struct ProcessSnapshot {
     pub pid: u32,
     pub ppid: Option<u32>,
     pub cpu_percent: Option<f64>,
+    /// Resident memory in bytes; unavailable measurements remain null.
+    pub rss_bytes: Option<u64>,
     pub elapsed: Option<String>,
     pub command: String,
 }
@@ -265,7 +267,7 @@ fn is_fseventsd(snapshot: &ProcessSnapshot) -> bool {
 
 fn collect_process_snapshots() -> Vec<ProcessSnapshot> {
     let output = match gwt_core::process::hidden_command("ps")
-        .args(["axww", "-o", "pid=,ppid=,%cpu=,etime=,command="])
+        .args(["axww", "-o", "pid=,ppid=,%cpu=,rss=,etime=,command="])
         .output()
     {
         Ok(output) if output.status.success() => output,
@@ -286,6 +288,11 @@ fn parse_process_snapshot_line(line: &str) -> Option<ProcessSnapshot> {
     let pid = parts.next()?.parse().ok()?;
     let ppid = parts.next().and_then(|value| value.parse().ok());
     let cpu_percent = parts.next().and_then(|value| value.parse().ok());
+    // Both macOS and Linux ps report RSS in KiB.
+    let rss_bytes = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|kib| kib.checked_mul(1024));
     let elapsed = parts.next().map(ToString::to_string);
     let command = parts.collect::<Vec<_>>().join(" ");
     if command.is_empty() {
@@ -295,6 +302,7 @@ fn parse_process_snapshot_line(line: &str) -> Option<ProcessSnapshot> {
         pid,
         ppid,
         cpu_percent,
+        rss_bytes,
         elapsed,
         command,
     })
@@ -535,11 +543,11 @@ mod tests {
     #[test]
     fn parses_ps_output_and_classifies_gwt_processes() {
         let text = "\
-  935     1 100.2 02:17:18 /Applications/GWT.app/Contents/MacOS/gwt
-936 935 78.4 00:00:05 /Users/me/.gwt/runtime/venvs/chroma/bin/python /Users/me/.gwt/runtime/runners/chroma_index_runner-abc.py --action status
-1200 1 0.0 00:01:00 /Users/me/project/target/debug/gwtd diagnostics cpu --json
-346 1 125.0 12:00:00 /System/Library/Frameworks/CoreServices.framework/Frameworks/FSEvents.framework/Support/fseventsd
-1201 1 0.0 00:00:01 /usr/bin/grep fseventsd
+  935     1 100.2 4096 02:17:18 /Applications/GWT.app/Contents/MacOS/gwt
+936 935 78.4 2048 00:00:05 /Users/me/.gwt/runtime/venvs/chroma/bin/python /Users/me/.gwt/runtime/runners/chroma_index_runner-abc.py --action status
+1200 1 0.0 1024 00:01:00 /Users/me/project/target/debug/gwtd diagnostics cpu --json
+346 1 125.0 512 12:00:00 /System/Library/Frameworks/CoreServices.framework/Frameworks/FSEvents.framework/Support/fseventsd
+1201 1 0.0 128 00:00:01 /usr/bin/grep fseventsd
 ";
         let snapshots = parse_process_snapshots(text);
         assert_eq!(snapshots.len(), 5);
@@ -553,8 +561,25 @@ mod tests {
     }
 
     #[test]
+    fn process_snapshot_json_reports_rss_bytes_or_null() {
+        let measured = parse_process_snapshot_line("935 1 100.2 4096 02:17:18 /target/debug/gwt")
+            .expect("process with RSS");
+        let unavailable =
+            parse_process_snapshot_line("936 1 0.0 - 00:00:05 python chroma_index_runner")
+                .expect("process without RSS");
+        let measured = serde_json::to_value(measured).unwrap();
+        let unavailable = serde_json::to_value(unavailable).unwrap();
+
+        assert_eq!(measured["rss_bytes"], 4_194_304);
+        assert_eq!(measured["elapsed"], "02:17:18");
+        assert_eq!(measured["command"], "/target/debug/gwt");
+        assert!(unavailable.get("rss_bytes").unwrap().is_null());
+        assert_eq!(unavailable["command"], "python chroma_index_runner");
+    }
+
+    #[test]
     fn host_cpu_warns_after_three_high_samples() {
-        let sample = parse_process_snapshot_line("346 1 125.0 12:00:00 /usr/libexec/fseventsd");
+        let sample = parse_process_snapshot_line("346 1 125.0 512 12:00:00 /usr/libexec/fseventsd");
         let samples = [sample.clone(), sample.clone(), sample.clone()];
         let diagnostics = summarize_host_cpu_samples(&samples);
 
@@ -566,7 +591,7 @@ mod tests {
 
     #[test]
     fn host_cpu_does_not_warn_for_transient_or_incomplete_overage() {
-        let sample = parse_process_snapshot_line("346 1 125.0 12:00:00 /usr/libexec/fseventsd");
+        let sample = parse_process_snapshot_line("346 1 125.0 512 12:00:00 /usr/libexec/fseventsd");
         let mut samples = [sample.clone(), sample.clone(), sample.clone()];
         assert!(summarize_host_cpu_samples(&samples[..1]).warning.is_none());
 

@@ -3381,6 +3381,58 @@ fn issue6682_view_receipt_is_single_use_and_client_bound() {
     );
 }
 
+/// Issue #7665: a Monitor launch that arrives before the Project view is
+/// registered used to be dropped, leaving its claim `launching` with no window.
+#[test]
+fn issue7665_monitor_launch_withheld_without_a_view_resumes_when_the_view_registers() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab("tab-1", "Repo", temp.path().into(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    let (spawner, _queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let withheld = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &context.project_root,
+        7303,
+        LinkedIssueKind::Issue,
+        Some("delivery-7303".into()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    assert!(withheld.is_empty());
+    assert!(runtime.issue_monitor_launch_preparations.is_empty());
+
+    let scope = ClientScope::Project(context.project_key.clone());
+    let hydrated =
+        runtime.handle_frontend_event_in_scope("a".into(), FrontendEvent::FrontendReady, &scope);
+    let nonce = hydrated
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ProjectViewChallenge { nonce, .. } => Some(nonce.clone()),
+            _ => None,
+        })
+        .unwrap();
+    runtime.handle_frontend_event_in_scope(
+        "a".into(),
+        serde_json::from_value(serde_json::json!({"kind":"project_view_ready", "generation":context.generation, "nonce":nonce, "view_id":"view-a"})).unwrap(),
+        &scope,
+    );
+    assert!(gwt::project_execution_policy::actual_open(&context.project_root).unwrap());
+    assert_eq!(
+        runtime.issue_monitor_launch_preparations.len(),
+        1,
+        "the withheld delivery starts once the view admits it"
+    );
+}
+
 #[test]
 fn issue6682_single_view_detach_preserves_other_view_and_choice() {
     let temp = tempdir().unwrap();

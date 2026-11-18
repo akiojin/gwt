@@ -2,12 +2,10 @@
 
 #![cfg(test)]
 
-use chrono::TimeZone;
-
 use super::*;
 
-fn now() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap()
+fn now() -> gwt_core::timestamp::UtcTimestamp {
+    gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap()
 }
 
 fn section(name: &str, content: &str) -> SectionInput {

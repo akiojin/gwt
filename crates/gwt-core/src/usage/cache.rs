@@ -6,7 +6,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use chrono::{DateTime, Utc};
+#[cfg(test)]
+use time::Duration as SignedDuration;
+
+use crate::timestamp::UtcTimestamp;
 use serde_json::Value;
 
 use super::{
@@ -18,10 +21,10 @@ use super::{
 
 struct CodexTranscript {
     session: SessionUsage,
-    account: Option<(codex::CodexAccount, Option<DateTime<Utc>>)>,
+    account: Option<(codex::CodexAccount, Option<UtcTimestamp>)>,
     events: Vec<ConsumptionEvent>,
     last_event_total: Option<Value>,
-    observed_at: Option<DateTime<Utc>>,
+    observed_at: Option<UtcTimestamp>,
     incomplete: bool,
 }
 
@@ -56,13 +59,17 @@ impl CodexTranscript {
             let observed_at = obj
                 .get("timestamp")
                 .and_then(Value::as_str)
-                .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
-                .map(|ts| ts.to_utc());
+                .and_then(UtcTimestamp::parse_rfc3339);
             self.account = payload
                 .get("rate_limits")
                 .and_then(|limits| codex::parse_rate_limits_at(limits, observed_at))
                 .map(|account| (account, observed_at));
             let info = payload.get("info");
+            // Cache only the reported window: a later model-only line must
+            // not inherit an estimate made for an earlier model.
+            self.session.context_limit_tokens = info
+                .and_then(|info| info.get("model_context_window"))
+                .and_then(Value::as_u64);
             let total = info.and_then(|info| info.get("total_token_usage"));
             let last = info.and_then(|info| info.get("last_token_usage"));
             if total.is_some() || last.is_some() {
@@ -87,7 +94,7 @@ impl CodexTranscript {
 struct ClaudeTranscript {
     session: SessionUsage,
     events: Vec<ConsumptionEvent>,
-    observed_at: Option<DateTime<Utc>>,
+    observed_at: Option<UtcTimestamp>,
     incomplete: bool,
 }
 
@@ -211,6 +218,16 @@ impl UsageCache {
             .clone();
         usage.session_id = session_id.to_owned();
         usage.provider_session_id = Some(session_id.to_owned());
+        // Incremental parsing restores the model from a separate line. Apply
+        // the estimate to the returned snapshot, keeping reported windows intact.
+        usage.context_limit_tokens = usage.context_limit_tokens.or_else(|| {
+            usage
+                .model
+                .as_deref()
+                .and_then(model_context::context_limit)
+        });
+        usage.context_left_pct =
+            SessionUsage::context_left_from(usage.context_used_tokens, usage.context_limit_tokens);
         Some(usage)
     }
 
@@ -218,7 +235,7 @@ impl UsageCache {
         &mut self,
         home: &Path,
         session_id: &str,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Option<SessionUsage> {
         let mut usage = self.codex_session(home, session_id)?;
         self.project_session_telemetry_at(home, &mut usage, now);
@@ -250,7 +267,7 @@ impl UsageCache {
         &mut self,
         home: &Path,
         session_id: &str,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Option<SessionUsage> {
         let mut usage = self.claude_session(home, session_id)?;
         self.project_session_telemetry_at(home, &mut usage, now);
@@ -264,7 +281,7 @@ impl UsageCache {
         &self,
         home: &Path,
         usage: &mut SessionUsage,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) {
         let Some(session_id) = usage.provider_session_id.as_deref() else {
             return;
@@ -317,8 +334,8 @@ impl UsageCache {
     pub fn codex_account_since(
         &mut self,
         home: &Path,
-        now: DateTime<Utc>,
-        authenticated_at: Option<DateTime<Utc>>,
+        now: UtcTimestamp,
+        authenticated_at: Option<UtcTimestamp>,
     ) -> ProviderUsage {
         codex::read_codex_account_with(home, now, authenticated_at, || {
             let paths: Vec<_> = self
@@ -343,8 +360,8 @@ impl UsageCache {
     pub fn codex_consumption(
         &mut self,
         home: &Path,
-        week_start: DateTime<Utc>,
-        now: DateTime<Utc>,
+        week_start: UtcTimestamp,
+        now: UtcTimestamp,
     ) -> ProviderConsumption {
         self.consumption(home, UsageProvider::Codex, week_start, now)
     }
@@ -352,8 +369,8 @@ impl UsageCache {
     pub fn claude_consumption(
         &mut self,
         home: &Path,
-        week_start: DateTime<Utc>,
-        now: DateTime<Utc>,
+        week_start: UtcTimestamp,
+        now: UtcTimestamp,
     ) -> ProviderConsumption {
         self.consumption(home, UsageProvider::ClaudeCode, week_start, now)
     }
@@ -362,8 +379,8 @@ impl UsageCache {
         &mut self,
         home: &Path,
         provider: UsageProvider,
-        week_start: DateTime<Utc>,
-        now: DateTime<Utc>,
+        week_start: UtcTimestamp,
+        now: UtcTimestamp,
     ) -> ProviderConsumption {
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs(
@@ -441,9 +458,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let now = DateTime::parse_from_rfc3339("2026-10-15T12:30:30Z")
-            .unwrap()
-            .to_utc();
+        let now = UtcTimestamp::parse_rfc3339("2026-10-15T12:30:30Z").unwrap();
         let mut cache = UsageCache::default();
         let usage = cache.codex_session_at(home.path(), "owned", now).unwrap();
         let telemetry = usage.telemetry.unwrap();
@@ -457,7 +472,7 @@ mod tests {
         assert_eq!(telemetry.today_output_tokens, Some(9));
         assert_eq!(
             telemetry.observed_at,
-            Some(now - chrono::Duration::seconds(150))
+            Some(now - SignedDuration::seconds(150))
         );
         assert_eq!(telemetry.source, "codex_rollout");
         let bytes = cache.bytes_read();
@@ -475,9 +490,7 @@ mod tests {
             r#"{"timestamp":"2026-10-15T12:29:00Z","type":"assistant","message":{"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
             "\n"
         )).unwrap();
-        let now = DateTime::parse_from_rfc3339("2026-10-15T12:30:30Z")
-            .unwrap()
-            .to_utc();
+        let now = UtcTimestamp::parse_rfc3339("2026-10-15T12:30:30Z").unwrap();
         let mut cache = UsageCache::default();
         let usage = cache
             .claude_session_at(home.path(), "session", now)
@@ -556,10 +569,8 @@ mod tests {
             r#"{"tokens":{"account_id":"fixture-account"}}"#,
         )
         .unwrap();
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-15T01:00:00Z")
-            .unwrap()
-            .to_utc();
-        let boundary = Some(now - chrono::Duration::days(1));
+        let now = UtcTimestamp::parse_rfc3339("2026-10-15T01:00:00Z").unwrap();
+        let boundary = Some(now - SignedDuration::days(1));
         let mut cache = UsageCache::default();
         assert_eq!(
             cache.codex_session(&codex_home, "cx"),
@@ -589,7 +600,10 @@ mod tests {
             bytes,
             "unchanged poll reads no transcript bytes"
         );
-        let cx_tail = "{\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":200,\"output_tokens\":30}}}}\n";
+        let cx_tail = concat!(
+            "{\"payload\":{\"type\":\"token_count\",\"model\":\"gpt-6-astra\",\"info\":{\"total_token_usage\":{\"input_tokens\":200,\"output_tokens\":30}}}}\n",
+            "{\"payload\":{\"model\":\"some-future-model\"}}\n",
+        );
         let cc_tail = "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":20,\"output_tokens\":3}}}\n";
         fs::OpenOptions::new()
             .append(true)
@@ -624,7 +638,7 @@ mod tests {
             cache.codex_account_since(&codex_home, now, Some(now)),
             codex::read_codex_account_since(&codex_home, now, Some(now))
         );
-        let week = now - chrono::Duration::days(7);
+        let week = now - SignedDuration::days(7);
         assert_eq!(
             cache.codex_consumption(&codex_home, week, now),
             consumption::read_codex_consumption(&codex_home, week, now)

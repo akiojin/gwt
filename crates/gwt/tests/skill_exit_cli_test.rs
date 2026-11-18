@@ -68,7 +68,7 @@ fn managed_build_start_refusal_is_typed_and_does_not_create_state() {
             status: gwt::cli::execution_state::ExecutionControlStatus::Active,
             blocked_reason: None,
             missing_verification: None,
-            launched_at: chrono::Utc::now(),
+            launched_at: gwt_core::timestamp::UtcTimestamp::now(),
             settled_at: None,
             completion_evidence: None,
             permission_decision: None,
@@ -365,7 +365,7 @@ fn seed_session_work(repo: &std::path::Path, session_id: &str) {
         &[],
         None,
         Some(session_id),
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .expect("seed session Work");
 }
@@ -404,7 +404,7 @@ fn seed_assigned_branch_assignment(
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: Some(work_id.to_string()),
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(project_state_root, &projection)
         .expect("save canonical Project State");
@@ -420,7 +420,7 @@ fn seed_assigned_branch_work(
     let mut event = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         work_id,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     event.title = Some("Assigned branch Work".to_string());
     event.owner = Some("SPEC-2359".to_string());
@@ -481,9 +481,8 @@ fn seed_ambiguous_legacy_assigned_work(
         .iter_mut()
         .find(|item| item.id == work_id)
         .expect("assigned Work");
-    let terminal_at = chrono::DateTime::parse_from_rfc3339("2026-07-16T10:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let terminal_at =
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-07-16T10:00:00Z").unwrap();
     item.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
     item.completed_at = Some(terminal_at);
     item.discarded = true;
@@ -750,11 +749,11 @@ fn build_complete_treats_latest_duplicate_unassigned_row_as_authoritative() {
             .unwrap()
             .unwrap();
     let mut current = projection.agents[0].clone();
-    projection.agents[0].updated_at -= chrono::Duration::minutes(1);
+    projection.agents[0].updated_at -= time::Duration::minutes(1);
     current.affiliation_status =
         gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
     current.workspace_id = None;
-    current.updated_at = chrono::Utc::now();
+    current.updated_at = gwt_core::timestamp::UtcTimestamp::now();
     projection.agents.push(current);
     gwt_core::workspace_projection::save_workspace_projection(&project_state_root, &projection)
         .unwrap();
@@ -801,7 +800,7 @@ fn build_complete_does_not_fall_back_when_assigned_work_is_terminal() {
     gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
         &project_state_root,
         work_id,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
 
@@ -843,7 +842,7 @@ fn build_complete_rejects_assigned_discarded_work_and_keeps_build_active() {
     gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
         &project_state_root,
         work_id,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
 
@@ -907,7 +906,7 @@ fn build_abort_rejects_assigned_done_work_and_keeps_build_active() {
     gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
         &project_state_root,
         work_id,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
 

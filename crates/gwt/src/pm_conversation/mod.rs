@@ -29,6 +29,8 @@ pub struct PmConversationMessage {
     pub id: String,
     pub role: PmConversationRole,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +395,16 @@ pub fn read_for_session(session: &Session) -> PmConversationSnapshot {
     PmConversationReader::default().read_for_session(session)
 }
 
+pub(crate) fn native_request_source_id(
+    provider: &str,
+    conversation: &str,
+    message: &str,
+) -> String {
+    let identity = serde_json::to_vec(&(provider, conversation, message))
+        .expect("native identity is a serializable string tuple");
+    format!("native:{}", gwt_core::pm_authorization::digest(&identity))
+}
+
 #[cfg(test)]
 fn read_path(agent: &AgentId, path: &Path, id: &str, cwd: &Path) -> PmConversationSnapshot {
     match std::fs::File::open(path) {
@@ -514,11 +526,15 @@ fn scan_records(
             }
             _ => return Err("This conversation format is unsupported."),
         };
-        let Some(message) = message else {
+        let Some(mut message) = message else {
             continue;
         };
         if message.role == PmConversationRole::User && internal_prompt(&message.text) {
             continue;
+        }
+        if message.role == PmConversationRole::User {
+            let source_id = native_request_source_id(key.agent.command(), &key.id, &message.id);
+            message.source_key = Some(gwt_core::pm_authorization::digest(source_id.as_bytes()));
         }
         if let Some(existing) = snapshot
             .messages
@@ -546,6 +562,38 @@ fn scan_records(
 }
 
 pub(crate) fn internal_prompt(text: &str) -> bool {
+    if single_internal_prompt(text) {
+        return true;
+    }
+    let mut remaining = text.trim();
+    while !remaining.is_empty() {
+        // Native providers join text blocks with newlines. Consume only
+        // complete notifications; any human text leaves the whole turn human.
+        // Task envelopes can span lines; all other generated notifications
+        // occupy one line. Include any text on the closing tag's line.
+        let body_end = if remaining.starts_with("<task-notification>") {
+            let Some(end) = remaining.find("</task-notification>") else {
+                return false;
+            };
+            end + "</task-notification>".len()
+        } else {
+            0
+        };
+        let end = remaining[body_end..]
+            .find('\n')
+            .map_or(remaining.len(), |end| body_end + end);
+        if !single_internal_prompt(&remaining[..end]) {
+            return false;
+        }
+        if end == remaining.len() {
+            return true;
+        }
+        remaining = remaining[end..].trim_start();
+    }
+    false
+}
+
+fn single_internal_prompt(text: &str) -> bool {
     use crate::pm_registry::{
         PM_AGENT_IDLE_WAKE_PREFIX, PM_CYCLE_REPORTING_CLAUSE, PM_ESCALATION_PROMPT_PREFIX,
         PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_PERIODIC_WAKE_INSTRUCTION, PM_STEERING_WAKE_CLAUSE,

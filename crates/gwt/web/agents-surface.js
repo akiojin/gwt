@@ -1,4 +1,9 @@
 import { mountProjectExecutionStatus } from "./project-execution-policy-model.js";
+import { renderMemberTuningControls } from "./settings-surface.js";
+
+const configuredPm = member => !!member?.pm_project_key;
+const holdsPmRole = member => !!member && (member.is_pm || !!member.pm_project_key || member.assignment?.role === "pm");
+const rosterReady = roster => roster.revision !== null && roster.revision !== undefined;
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 const hours = value => finite(value) ? `${Math.round(value / 3600 * 10) / 10}h` : "—";
@@ -7,14 +12,14 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, executionModel, projectTitle, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
-  scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onOpenWork = () => {} }) {
+export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+  tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
+  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
-    <p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><label class="settings-field">Model for new member<input class="settings-input" type="text" aria-label="Model for new member" list="roster-registration-models" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-models"></datalist></label><label class="settings-field">Reasoning for new member<input class="settings-input" type="text" aria-label="Reasoning for new member" list="roster-registration-reasoning" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-reasoning"></datalist></label><p class="settings-help" data-registration-catalog-status role="status" hidden></p><button type="button" data-action="retry-registration-catalog" hidden>Retry model catalog</button><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
+    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
   if (executionModel) {
@@ -26,26 +31,76 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   }
   const toolSelect = element.querySelector('[aria-label="Tool for new member"]');
   const nameInput = element.querySelector('[aria-label="Name for new member"]');
+  const modelInput = element.querySelector('[aria-label="Model for new member"]');
+  const reasoningInput = element.querySelector('[aria-label="Reasoning for new member"]');
+  const registrationCatalogStatus = element.querySelector("[data-registration-catalog-status]");
+  const retryRegistrationCatalog = element.querySelector('[data-action="retry-registration-catalog"]');
+  const registrationEligible = element.querySelector('[aria-label="PM eligible for new member"]');
+  registrationEligible.checked = false;
   let nameTouched = false, registeredDraft = null;
+  const registrationComposing = new Set();
   let registrationTools = [], renderedTools = "";
+  let registrationTool = "";
+  function syncRegistrationTool() {
+    const next = toolSelect.value || "";
+    if (!next || next === registrationTool) return;
+    registrationTool = next;
+    modelInput.value = ""; reasoningInput.value = "";
+    registrationComposing.delete(modelInput); registrationComposing.delete(reasoningInput);
+  }
+  const registrationError = element.querySelector("#roster-registration-error");
+  const registrationMessage = document.createElement("span");
+  const showConflict = document.createElement("button");
+  showConflict.type = "button"; showConflict.textContent = "Show member"; showConflict.hidden = true;
+  registrationError.append(registrationMessage, showConflict);
+  const registrationConflict = () => rosterModel.read().members.find(member =>
+    member.name.trim().toLowerCase() === nameInput.value.trim().toLowerCase());
+  showConflict.addEventListener("click", () => {
+    const member = registrationConflict();
+    if (!member || !selectMember(member.member_id)) return;
+    memberRows.get(member.member_id)?.row.scrollIntoView?.({ block: "nearest" });
+  });
   function syncRegistration() {
     const roster = rosterModel.read(), name = nameInput.value.trim();
     if (roster.error) registeredDraft = null;
     if (registeredDraft && roster.members.some(member => !registeredDraft.ids.has(member.member_id)
       && member.name === registeredDraft.name)) {
-      if (name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
+      if (!registrationComposing.has(nameInput) && name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
+      if (registrationEligible.checked === registeredDraft.pm_eligible) registrationEligible.checked = false;
+      if (!registrationComposing.has(modelInput) && modelInput.value.trim() === registeredDraft.model) modelInput.value = "";
+      if (!registrationComposing.has(reasoningInput) && reasoningInput.value.trim() === registeredDraft.reasoning) reasoningInput.value = "";
       registeredDraft = null;
     }
     const draft = nameInput.value.trim();
-    const error = !draft ? "Enter a display name." : roster.members.some(member => member.name.trim().toLowerCase() === draft.toLowerCase())
-      ? "This name is already registered, including resting members." : "";
-    const message = element.querySelector("#roster-registration-error");
-    message.textContent = nameTouched ? error : ""; message.hidden = !message.textContent;
+    const conflict = registrationConflict();
+    const error = !draft ? "Enter a display name." : conflict
+      ? `${conflict.name} (${conflict.agent_id || conflict.provider || "Unknown tool"}) is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
+    registrationMessage.textContent = nameTouched ? error : "";
+    showConflict.hidden = !nameTouched || !conflict;
+    registrationError.hidden = !nameTouched || !error;
     nameInput.setAttribute("aria-invalid", String(nameTouched && !!error));
     for (const button of element.querySelectorAll('[data-action="add"]')) {
-      button.disabled = !!error || registrationTools.length === 0 || !Number.isSafeInteger(roster.revision);
+      button.disabled = !!error || registrationComposing.size > 0 || registrationTools.length === 0 || !rosterReady(roster);
       button.title = registrationTools.length ? "Register this name with the selected tool." : "Loading supported and custom coding tools…";
     }
+    const choices = Array.isArray(roster.tuning_choices) ? roster.tuning_choices : roster.tuning_choices?.agents || [];
+    const entry = choices.find(agent => agent.id === toolSelect.value);
+    const selectedModel = entry?.models?.find(model => model.value === modelInput.value.trim());
+    for (const [input, suggestions] of [
+      [modelInput, [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]],
+      [reasoningInput, (selectedModel?.reasoning_options || entry?.reasoning_options || []).map(option => typeof option === "string" ? option : option.value)],
+    ]) {
+      const list = input.parentElement.querySelector("datalist"); list.replaceChildren();
+      for (const value of suggestions) {
+        const option = document.createElement("option"); option.value = value;
+        if (input === modelInput) option.label = entry?.models?.find(model => model.value === value)?.label || value;
+        list.append(option);
+      }
+      input.disabled = !rosterReady(roster);
+    }
+    registrationCatalogStatus.textContent = entry?.model_catalog_warning || "";
+    registrationCatalogStatus.hidden = !registrationCatalogStatus.textContent;
+    retryRegistrationCatalog.hidden = !registrationCatalogStatus.textContent || !onReloadProfile;
   }
   function syncTools() {
     const builtins = supportedAgentsModel?.read().agents;
@@ -54,7 +109,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       ...custom.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id }))] : [];
     const key = JSON.stringify(registrationTools.map(tool => [tool.id, tool.name]));
     if (key !== renderedTools) {
-      const selected = toolSelect.value; toolSelect.replaceChildren();
+      const selected = toolSelect.value || registrationTool; toolSelect.replaceChildren();
       for (const tool of registrationTools) {
         const option = document.createElement("option"); option.value = tool.id; option.textContent = tool.name || tool.id;
         option.selected = tool.id === selected; toolSelect.append(option);
@@ -63,9 +118,12 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       renderedTools = key;
     }
     toolSelect.disabled = registrationTools.length === 0;
+    syncRegistrationTool();
     syncRegistration();
   }
-  let selectedId = null, tab = "team", previewElement = null, disposed = false;
+  const selectionKey = "gwt:ui:agents-selected-member";
+  const savedSelection = storage?.get(selectionKey);
+  let selectedId = typeof savedSelection === "string" && savedSelection ? savedSelection : null, tab = "team", previewElement = null, disposed = false;
   let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule, renderedSwitch;
   let renderedPlans = null;
   let renderedDetail = null;
@@ -111,6 +169,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   function recordedConfig(item) {
     return `Recorded name: ${item?.name || "—"} · Tool: ${item?.provider || "—"} · Recorded model: ${item?.model || "—"}`;
   }
+  const recordedRole = item => `Role: ${{ pm: "Project Manager", review: "Review", implementation: "Implementation" }[item?.role] || "—"}`;
   function openCurrent(memberId, expected) {
     const member = rosterModel.read().members.find(member => member.member_id === memberId);
     const current = liveWork(member);
@@ -127,18 +186,36 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   function avatar(member) {
     const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); result.textContent = Array.from(member.name || "?")[0]; return result;
   }
+  function setSelectedMember(memberId) {
+    if (memberId === selectedId) return;
+    if (nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
+    selectedId = memberId;
+    if (memberId) storage?.set(selectionKey, memberId);
+    else storage?.delete(selectionKey);
+  }
   function selectMember(memberId) {
-    if (disposed || !rosterModel.read().members.some(member => member.member_id === memberId && (member.enabled || liveWork(member)))) return false;
+    if (disposed || !rosterModel.read().members.some(member => member.member_id === memberId)) return false;
     // Removing an IME target is not a commit. Preserve that unfinished draft
     // until a later input explicitly supplies a completed value.
-    if (memberId !== selectedId && nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
-    selectedId = memberId; tab = "team"; sync();
+    setSelectedMember(memberId); tab = "team"; sync();
     [...element.querySelectorAll(".roster-row")].find(row => row.dataset.memberId === memberId)?.focus({ preventScroll: true });
     return true;
   }
+  function openPmSettings(memberId) {
+    if (disposed) return;
+    if (memberId && !rosterReady(rosterModel.read())) {
+      setSelectedMember(memberId); tab = "team"; sync();
+      return;
+    }
+    if (memberId && memberId !== selectedId && rosterModel.read().members.some(member => member.member_id === memberId)) {
+      selectMember(memberId);
+      return;
+    }
+    if (tab !== "team") { tab = "team"; sync(); }
+  }
   function restSelected() {
     const member = rosterModel.read().members.find(member => member.member_id === selectedId && member.enabled);
-    if (member && rosterModel.read().members.filter(member => member.enabled).length > 1) onRestMember(member.member_id);
+    if (member && !configuredPm(member) && rosterModel.read().members.filter(member => member.enabled).length > 1) onRestMember(member.member_id);
   }
   function syncSwitchControls(section, member, current) {
     const switching = switchState(), intent = switching.intents.find(intent => intent.member_id === member.member_id);
@@ -225,7 +302,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       const select = document.createElement("select"), reassign = document.createElement("button");
       select.setAttribute("aria-label", `Assign issue #${issue.issue_number} to member`);
       const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "Choose member"; select.append(placeholder);
-      for (const target of rosterModel.read().members.filter(target => target.enabled && target.member_id !== member.member_id)) {
+      for (const target of rosterModel.read().members.filter(target => target.enabled && !holdsPmRole(target) && target.member_id !== member.member_id)) {
         const option = document.createElement("option"); option.value = target.member_id; option.textContent = target.name; select.append(option);
       }
       const blocked = pending || !!state.error || stale || !member.enabled;
@@ -236,7 +313,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
         const latest = scheduleState(), roster = rosterModel.read();
         if (latest.pending || submittedSnapshot || latest.error) return;
         const source = roster.members.find(target => target.member_id === member.member_id && target.enabled);
-        const target = roster.members.find(target => target.member_id === select.value && target.enabled && target.member_id !== member.member_id);
+        const target = roster.members.find(target => target.member_id === select.value && target.enabled && !holdsPmRole(target) && target.member_id !== member.member_id);
         if (latest.snapshot !== snapshot || roster.revision !== snapshot.roster_revision || !source || !target) {
           scheduleNotice = "Plans changed. Refresh plans before reassigning."; sync(); return;
         }
@@ -300,14 +377,16 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
         currentWork = document.createElement("section"); currentWork.className = "roster-history roster-current-work";
         currentWork.innerHTML = "<h4>Current work</h4><ol></ol>";
         const li = document.createElement("li"); li.className = "roster-now";
-        const label = document.createElement("small"), button = document.createElement("button"), config = document.createElement("small"), result = document.createElement("span");
+        const label = document.createElement("small"), button = document.createElement("button"), config = document.createElement("small"), role = document.createElement("small"), result = document.createElement("span");
         config.className = "roster-current-config";
+        role.className = "roster-current-role";
         label.textContent = "Now"; button.type = "button";
-        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, config, result);
+        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, config, role, result);
         currentWork.querySelector("ol").append(li); panel.insertBefore(currentWork, plans);
       }
       currentWork.querySelector("button").textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
       currentWork.querySelector(".roster-current-config").textContent = recordedConfig((member.history || []).find(item => item.session_id === current.session_id));
+      currentWork.querySelector(".roster-current-role").textContent = recordedRole((member.history || []).find(item => item.session_id === current.session_id));
     }
     const historyEntries = [...(member.history || [])].filter(item => !current || item.session_id !== current.session_id).sort((a, b) => (Date.parse(b.ended_at || b.started_at) || 0) - (Date.parse(a.ended_at || a.started_at) || 0));
     for (const item of historyEntries) {
@@ -315,7 +394,8 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       time.textContent = `${date(item.started_at)} – ${date(item.ended_at)} UTC`; title.textContent = `${item.issue_number ? `#${item.issue_number}` : "—"} ${item.title || "—"}`; result.textContent = item.result || "—";
       const config = document.createElement("small"); config.className = "roster-history-config";
       config.textContent = recordedConfig(item);
-      li.append(time, title, config, result); ol.append(li);
+      const role = document.createElement("small"); role.className = "roster-history-role"; role.textContent = recordedRole(item);
+      li.append(time, title, config, role, result); ol.append(li);
     }
     if (!ol.childNodes.length) { const empty = document.createElement("li"); empty.textContent = "No assignment history yet."; ol.append(empty); }
     if (member.assignment?.session_id && activityModel.read().count === null) {
@@ -326,7 +406,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       if (current) { const open = document.createElement("button"); open.type = "button"; open.className = "roster-open"; open.textContent = "Open terminal in Works"; open.addEventListener("click", () => openCurrent(member.member_id, current)); actions.append(open); }
       const rest = document.createElement("button"); rest.type = "button"; rest.dataset.action = "rest"; rest.textContent = "Rest member"; rest.addEventListener("click", restSelected); actions.append(rest); panel.append(actions);
     }
-    actions.querySelector('[data-action="rest"]').disabled = !member.enabled || rosterModel.read().members.filter(member => member.enabled).length <= 1;
+    actions.querySelector('[data-action="rest"]').disabled = !member.enabled || configuredPm(member) || rosterModel.read().members.filter(member => member.enabled).length <= 1;
     panel.insertBefore(history, actions);
     renderedDetail = { key, currentWork, actions, saved };
   }
@@ -352,20 +432,41 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       input.addEventListener("input", event => {
         if (selectedId === member.member_id && input.isConnected) edit(field.composing || event.isComposing === true);
       });
-      label.append(input); who.append(name, meta, label, status, retry); head.append(avatar(member), who);
+      const eligibleLabel = document.createElement("label"); eligibleLabel.className = "settings-field";
+      const eligible = document.createElement("input"); eligible.type = "checkbox"; eligible.className = "settings-checkbox"; eligible.dataset.action = "pm-eligible";
+      eligible.addEventListener("change", () => { if (!eligible.disabled) onSetPmEligibility(member.member_id, eligible.checked); }); eligibleLabel.append(eligible, document.createTextNode("PM eligible"));
+      const selectPm = document.createElement("button"); selectPm.type = "button"; selectPm.dataset.action = "select-pm";
+      selectPm.addEventListener("click", () => { const latest = rosterModel.read().members.find(item => item.member_id === member.member_id); if (latest?.pm_project_key && latest.pm_project_key !== rosterModel.read().project_key) onNavigateProject(latest.pm_project_key); else if (latest?.enabled && latest.pm_eligible && !holdsPmRole(latest)) onSelectPm(member.member_id); });
+      const tuning = document.createElement("section"); tuning.dataset.memberTuning = "";
+      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, tuning); head.append(avatar(member), who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
     field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     field.head.querySelector("p").textContent = `Registered tool: ${member.provider || "—"} · Member since ${date(member.created_at)} UTC`;
+    let memberId = field.head.querySelector(".roster-member-id");
+    if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
+    memberId.textContent = `Member ID: ${member.member_id}`;
     const value = edit?.value ?? member.name;
     if (field.input.value !== value) field.input.value = value;
-    field.input.disabled = !Number.isSafeInteger(rosterModel.read().revision);
+    field.input.disabled = !rosterReady(rosterModel.read());
     field.input.setAttribute("aria-invalid", String(!!edit?.error));
     field.status.textContent = edit?.error || ({ saving: "Saving…", queued: "Saving…", saved: "Saved" }[edit?.status] || "");
     field.status.hidden = !field.status.textContent;
     field.retry.hidden = !edit?.blocked;
     field.retry.disabled = edit?.composing || edit?.status === "invalid" || !!rosterModel.read().pending_name;
+    const pending = rosterModel.read().pending_roster?.action;
+    const eligible = field.head.querySelector('[data-action="pm-eligible"]');
+    eligible.checked = pending?.kind === "set_pm_eligibility" && pending.member_id === member.member_id ? pending.eligible === true : member.pm_eligible === true;
+    eligible.disabled = !rosterReady(rosterModel.read()) || holdsPmRole(member);
+    const selectPm = field.head.querySelector('[data-action="select-pm"]');
+    const foreign = member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key;
+    selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";
+    selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.enabled || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
+    const role = configuredPm(member) ? "pm" : "implementation";
+    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
+      onEdit: (patch, options) => tuningController?.editTuning(role, member.member_id, patch, options),
+      onRetry: () => tuningController?.retryTuning(role, member.member_id) });
     return field.head;
   }
   function renderPast(contributors, complete) {
@@ -415,18 +516,51 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
         }
         state.title = "Open current work in Works";
       }
-      who.append(name, purpose, stats(member, "roster-row-stats")); row.append(avatar(member), who, state);
+      const assignments = document.createElement("div"); assignments.className = "roster-assignments";
+      assignments.setAttribute("role", "group"); assignments.setAttribute("aria-label", "Project assignments");
+      const activate = document.createElement("button"); activate.type = "button";
+      activate.dataset.action = "activate"; activate.textContent = "Reactivate";
+      activate.addEventListener("click", () => {
+        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+        if (!disposed && rosterReady(roster) && !roster.pending_roster && latest && !latest.enabled) onActivateMember(latest.member_id);
+      });
+      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
     }
     const { row } = cached, unavailable = member.assignment?.session_id && activityModel.read().count === null;
     row.setAttribute("aria-selected", String(member.member_id === selectedId));
+    const activate = row.querySelector('[data-action="activate"]');
+    activate.hidden = member.enabled;
+    activate.disabled = member.enabled || !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     row.querySelector("h3").textContent = member.name;
     const purpose = row.querySelector(".roster-purpose");
-    purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
-    row.querySelector(".roster-state").textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? "Activity unavailable" : "Waiting";
+    purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : member.enabled ? "Waiting for the next issue" : "Not selected for new work"; purpose.title = purpose.textContent;
+    const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
+    if (cached.summariesKey !== summariesKey) {
+      const assignments = row.querySelector(".roster-assignments"); assignments.replaceChildren();
+      for (const summary of summaries) {
+        const button = document.createElement("button"); button.type = "button"; button.className = "roster-assignment";
+        button.dataset.assignmentProject = summary.project_key;
+        button.textContent = `${summary.project_name || "Unknown project"} · ${summary.issue_number ? `#${summary.issue_number}` : "No issue"} · ${summary.state || "Unknown"}`;
+        button.title = summary.project_key === rosterModel.read().project_key
+          ? current?.session_id === summary.session_id ? "Open current work in Works" : "Select this member"
+          : `Open project ${summary.project_name || "Unknown project"}`;
+        button.addEventListener("click", () => {
+          const latest = rosterModel.read().members.find(item => item.member_id === member.member_id);
+          if (!latest?.active_assignments?.some(item => item.project_key === summary.project_key && item.session_id === summary.session_id)) return;
+          if (summary.project_key !== rosterModel.read().project_key) { onNavigateProject(summary.project_key); return; }
+          const current = liveWork(latest);
+          if (current?.session_id === summary.session_id) openCurrent(member.member_id, current);
+          else selectMember(member.member_id);
+        });
+        assignments.append(button);
+      }
+      assignments.hidden = !summaries.length; cached.summariesKey = summariesKey;
+    }
+    row.querySelector(".roster-state").textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? `${member.enabled ? "" : "Resting · "}Activity unavailable` : member.enabled ? "Waiting" : "Resting";
     const values = [number(member.issue_count), number(member.landed_count), hours(member.active_seconds), number(member.tokens)];
     row.querySelectorAll(".roster-stat b").forEach((node, index) => { node.textContent = values[index]; });
     return row;
@@ -443,24 +577,22 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     identity.querySelector(".roster-pm-name").textContent = pm?.agent_name || (pm ? "Project Manager" : "");
     const schedule = scheduleState();
     if (submittedSnapshot && (schedule.error || schedule.snapshot !== submittedSnapshot)) submittedSnapshot = null;
-    const enabledMembers = (roster.members || []).filter(member => member.enabled && !member.is_pm);
-    const members = (roster.members || []).filter(member => !member.is_pm && (member.enabled || liveWork(member)));
+    const enabledMembers = (roster.members || []).filter(member => member.enabled);
+    const members = roster.members || [];
     const enabledCount = enabledMembers.length;
-    if (!members.some(member => member.member_id === selectedId)) {
-      if (nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
-      selectedId = members[0]?.member_id || null;
+    if (rosterReady(roster) && !members.some(member => member.member_id === selectedId)) {
+      setSelectedMember(members[0]?.member_id || null);
     }
     const selected = members.find(member => member.member_id === selectedId);
     element.querySelector(".roster-count").textContent = String(enabledCount);
     element.querySelector(".roster-capacity-value").textContent = number(roster.capacity);
-    element.querySelector(".roster-active").textContent = `Active ${number(activity.count)}`;
     const scale = Math.max(enabledCount, roster.recommended_capacity || 0, roster.capacity || 0, 1) * 1.25;
     const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(enabledCount));
     element.querySelector(".roster-capacity-fill").style.width = `${enabledCount / scale * 100}%`;
     const limit = element.querySelector(".roster-capacity-limit"); limit.hidden = !finite(roster.recommended_capacity); limit.style.left = `${(roster.recommended_capacity || 0) / scale * 100}%`;
     const reviewCount = renderReviews();
-    element.querySelector(".roster-capacity-note").textContent = `Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length + reviewCount)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
-    element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || enabledCount <= 1;
+    element.querySelector(".roster-capacity-note").textContent = `Registered ${number(rosterReady(roster) ? members.length : null)} · Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length + reviewCount)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
+    element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || configuredPm(selected) || enabledCount <= 1;
     const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
     const list = element.querySelector(".roster-list"), memberIds = new Set(members.map(member => member.member_id));
     for (const [id, { row }] of memberRows) if (!memberIds.has(id)) { row.remove(); memberRows.delete(id); }
@@ -481,20 +613,42 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => {
     nameTouched = true; syncRegistration();
     if (button.disabled || !registrationTools.some(tool => tool.id === toolSelect.value)) return;
-    registeredDraft = { name: nameInput.value.trim(), ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
-    onAddMember(toolSelect.value, registeredDraft.name);
+    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked,
+      model: modelInput.value.trim(), reasoning: reasoningInput.value.trim(), ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
+    onAddMember(toolSelect.value, registeredDraft.name, registeredDraft.pm_eligible,
+      registeredDraft.model || registeredDraft.reasoning ? { model: registeredDraft.model || null, reasoning: registeredDraft.reasoning || null } : undefined);
   });
-  nameInput.addEventListener("input", () => { nameTouched = true; syncRegistration(); syncPreview(); });
+  registrationEligible.addEventListener("change", syncPreview);
+  toolSelect.addEventListener("change", () => {
+    syncRegistrationTool(); syncRegistration(); syncPreview();
+  });
+  retryRegistrationCatalog.addEventListener("click", () => onReloadProfile?.());
+  for (const input of [nameInput, modelInput, reasoningInput]) {
+    input.addEventListener("compositionstart", () => { registrationComposing.add(input); syncRegistration(); });
+    input.addEventListener("compositionend", () => { registrationComposing.delete(input); syncRegistration(); syncPreview(); });
+    input.addEventListener("input", event => {
+      if (input === nameInput) nameTouched = true;
+      if (event.isComposing === true) registrationComposing.add(input);
+      syncRegistration(); syncPreview();
+    });
+  }
   element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
   for (const button of element.querySelectorAll("[data-tab]")) {
     button.addEventListener("click", () => { tab = button.dataset.tab; sync(); });
     button.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); tab = event.key === "Home" ? "team" : event.key === "End" ? "past" : tab === "team" ? "past" : "team"; sync(); element.querySelector(`[data-tab="${tab}"]`).focus(); });
   }
+  pmSettingsPanel?.mount(element.querySelector('[data-role="pm-project-operations"]'));
   sync(); syncTools();
   const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
+  const running = element.querySelector(".roster-active");
+  running.textContent = "Running —";
+  if (summaryModel) unsubscribers.push(summaryModel.subscribeFrame(state => state.running, count => {
+    running.textContent = `Running ${number(count)}`;
+  }));
   if (supportedAgentsModel) unsubscribers.push(supportedAgentsModel.subscribeFrame(state => state.agents, syncTools));
   if (customAgentsModel) unsubscribers.push(customAgentsModel.subscribeFrame(state => state.catalog, syncTools));
+  if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
-  return { element, sync, selectMember, setPreviewHost, dispose() { if (disposed) return; releaseExecution?.(); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
+  return { element, sync, syncPreview, selectMember, openPmSettings, setPreviewHost, dispose() { if (disposed) return; releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
 }

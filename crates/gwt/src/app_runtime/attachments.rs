@@ -10,10 +10,10 @@
 //! - Streaming save helpers with [`AttachmentProgressUpdate`] progress
 //!   dispatch (`save_file_attachment_with_progress`,
 //!   `save_image_paste_file_with_progress`)
-//! - [`AppRuntime::paste_image_events`] /
-//!   [`AppRuntime::paste_image_uploaded_events`] /
-//!   [`AppRuntime::attach_files_events`] and their operation-id variants,
-//!   plus [`AppRuntime::inject_attachment_prompt_events`]
+//! - Qualified ingress through [`AppRuntime::paste_image_uploaded_operation_events`]
+//!   and [`AppRuntime::attach_files_operation_events`], with immutable target
+//!   capture, visible legacy refusal, and [`AppRuntime::inject_attachment_prompt_events`]
+//!   dispatch to the private physical receipt path.
 //!
 //! SPEC-3064 FR-002 (Pass 2): the former `IMAGE_PASTE_SEQUENCE` module
 //! static now lives on [`AppRuntime`] as the `image_paste_sequence` field
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     AppEventProxy, AppRuntime, AttachmentProgressPhase, AttachmentUploadStore, BackendEvent,
-    ClientId, ContentLimits, OutboundEvent, UserEvent, WindowProcessStatus,
+    ClientId, ContentLimits, OutboundEvent, UserEvent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +41,7 @@ pub(crate) struct ImagePasteFile {
 pub(crate) enum ImagePasteError {
     UnsupportedMimeType(String),
     EmptyPayload,
+    #[cfg(test)]
     InvalidBase64(String),
     WriteFailed(String),
 }
@@ -52,6 +53,7 @@ impl std::fmt::Display for ImagePasteError {
                 write!(formatter, "unsupported image MIME type: {mime_type}")
             }
             Self::EmptyPayload => formatter.write_str("image paste payload is empty"),
+            #[cfg(test)]
             Self::InvalidBase64(error) => write!(formatter, "invalid image paste payload: {error}"),
             Self::WriteFailed(error) => write!(formatter, "failed to save pasted image: {error}"),
         }
@@ -340,10 +342,6 @@ pub(crate) fn prepare_file_attachment(
     }
 }
 
-fn save_file_attachment(file: &PreparedFileAttachment) -> Result<(), FileAttachmentError> {
-    save_file_attachment_with_progress(file, |_bytes_done, _bytes_total| {})
-}
-
 pub(super) fn save_file_attachment_with_progress(
     file: &PreparedFileAttachment,
     mut on_progress: impl FnMut(u64, Option<u64>),
@@ -425,11 +423,49 @@ fn display_name_for_file_attachment(file: &gwt::FileAttachment) -> String {
     }
 }
 
+/// The actual admitted producer, retained unchanged across staging and input.
+#[derive(Debug, Clone)]
+pub(crate) struct AttachmentOperation {
+    pub(crate) client_id: ClientId,
+    pub(crate) id: String,
+    pub(crate) operation_id: String,
+    pub(crate) expected_target: gwt::protocol::AttachmentExpectedTarget,
+    pub(crate) context: super::ProjectContext,
+    pub(crate) connection_id: u64,
+    pub(crate) identity: gwt::daemon_subscriber::ProjectOwnerIdentity,
+    pub(crate) owner_pane_id: String,
+    pub(crate) file_count: usize,
+    pub(crate) filename: Option<String>,
+}
+
+impl AttachmentOperation {
+    pub(super) fn progress(
+        &self,
+        phase: AttachmentProgressPhase,
+        message: Option<&str>,
+    ) -> OutboundEvent {
+        let mut update =
+            AttachmentProgressUpdate::new(&self.id, &self.operation_id, phase, self.file_count)
+                .target(Some(self.expected_target.clone()))
+                .filename(self.filename.clone());
+        if let Some(message) = message {
+            update = update.message(message);
+        }
+        update.outbound(self.client_id.clone())
+    }
+}
+
+const TARGET_UNAVAILABLE: &str =
+    "Attachment target unavailable. Reload the current UI and try again.";
+const LEGACY_RELOAD: &str =
+    "Reload the current UI before attaching files. This attachment was not sent.";
+
 #[derive(Debug, Clone)]
 struct AttachmentProgressUpdate {
     id: String,
     operation_id: String,
     phase: AttachmentProgressPhase,
+    expected_target: Option<gwt::protocol::AttachmentExpectedTarget>,
     file_index: Option<usize>,
     file_count: usize,
     filename: Option<String>,
@@ -449,6 +485,7 @@ impl AttachmentProgressUpdate {
             id: id.into(),
             operation_id: operation_id.into(),
             phase,
+            expected_target: None,
             file_index: None,
             file_count,
             filename: None,
@@ -456,6 +493,11 @@ impl AttachmentProgressUpdate {
             bytes_total: None,
             message: None,
         }
+    }
+
+    fn target(mut self, target: Option<gwt::protocol::AttachmentExpectedTarget>) -> Self {
+        self.expected_target = target;
+        self
     }
 
     fn filename(mut self, filename: Option<String>) -> Self {
@@ -487,6 +529,7 @@ impl AttachmentProgressUpdate {
                 id: self.id,
                 operation_id: self.operation_id,
                 phase: self.phase,
+                expected_target: self.expected_target,
                 file_index: self.file_index,
                 file_count: self.file_count,
                 filename: self.filename,
@@ -509,6 +552,7 @@ pub(super) struct UploadedImagePasteOperation {
     pub(super) size: u64,
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_image_paste_file(
     worktree_path: &Path,
     agent_project_root: &str,
@@ -655,10 +699,6 @@ fn copy_attachment_file_with_progress(
     Ok(())
 }
 
-fn save_image_paste_file(image: &ImagePasteFile) -> Result<(), ImagePasteError> {
-    save_image_paste_file_with_progress(image, |_bytes_done, _bytes_total| {})
-}
-
 fn save_image_paste_file_with_progress(
     image: &ImagePasteFile,
     mut on_progress: impl FnMut(u64, Option<u64>),
@@ -716,6 +756,147 @@ fn image_attachment_prompt(
 }
 
 impl AppRuntime {
+    /// A refusal only: echo untrusted correlation without resolving/staging a target.
+    pub(crate) fn rejected_attachment_request(
+        &self,
+        client_id: &ClientId,
+        event: &gwt::FrontendEvent,
+    ) -> Option<Vec<OutboundEvent>> {
+        let (id, operation_id, target, count) = match event {
+            gwt::FrontendEvent::AttachFiles {
+                id,
+                operation_id,
+                expected_target,
+                files,
+            } => (
+                id,
+                operation_id.clone(),
+                expected_target.clone(),
+                files.len(),
+            ),
+            gwt::FrontendEvent::PasteImageUploaded {
+                id,
+                operation_id,
+                expected_target,
+                ..
+            } => (id, operation_id.clone(), expected_target.clone(), 1),
+            gwt::FrontendEvent::PasteImage { id, .. } => (id, None, None, 1),
+            _ => return None,
+        };
+        Some(vec![AttachmentProgressUpdate::new(
+            id,
+            normalize_attachment_operation_id(operation_id, &self.image_paste_sequence),
+            AttachmentProgressPhase::Failed,
+            count,
+        )
+        .target(target)
+        .message(TARGET_UNAVAILABLE)
+        .outbound(client_id.clone())])
+    }
+
+    fn capture_attachment_operation(
+        &self,
+        client_id: ClientId,
+        id: String,
+        operation_id: Option<String>,
+        expected_target: Option<gwt::protocol::AttachmentExpectedTarget>,
+        file_count: usize,
+        filename: Option<String>,
+    ) -> Result<AttachmentOperation, Box<OutboundEvent>> {
+        let legacy = operation_id.as_ref().is_none_or(|op| op.trim().is_empty())
+            || expected_target.is_none();
+        let operation_id =
+            normalize_attachment_operation_id(operation_id, &self.image_paste_sequence);
+        let refused = || {
+            AttachmentProgressUpdate::new(
+                &id,
+                &operation_id,
+                AttachmentProgressPhase::Failed,
+                file_count,
+            )
+            .target(expected_target.clone())
+            .filename(filename.clone())
+            .message(if legacy {
+                LEGACY_RELOAD
+            } else {
+                TARGET_UNAVAILABLE
+            })
+            .outbound(client_id.clone())
+        };
+        if legacy || file_count == 0 {
+            return Err(Box::new(refused()));
+        }
+        let target = expected_target.as_ref().expect("nonlegacy target");
+        let Some(context) = self
+            .window_lookup
+            .get(&id)
+            .and_then(|a| self.project_context(&a.tab_id))
+        else {
+            return Err(Box::new(refused()));
+        };
+        let Some(state) = self.project_state(&context) else {
+            return Err(Box::new(refused()));
+        };
+        let Some(runtime) = self.runtimes.get(&id) else {
+            return Err(Box::new(refused()));
+        };
+        let Some(session) = self.active_agent_sessions.get(&id) else {
+            return Err(Box::new(refused()));
+        };
+        if target.project_key != context.project_key.to_string()
+            || target.session_id.is_empty()
+            || target.session_id != session.session_id
+            || target.runtime_incarnation == 0
+            || target.runtime_incarnation > 9_007_199_254_740_991
+            || target.runtime_incarnation != runtime.incarnation
+            || target.host_id
+                != format!(
+                    "{}:{}",
+                    runtime.owner_identity.pid, runtime.owner_identity.host_started_at
+                )
+            || gwt::process::host_process_start_time(runtime.owner_identity.pid)
+                != Some(runtime.owner_identity.host_started_at)
+            || runtime.owner_identity.host_started_at == 0
+            || runtime.owner_pane_id.is_empty()
+            || state.project_owner_identity.as_ref() != Some(&runtime.owner_identity)
+            || runtime.client.identity() != Some(&runtime.owner_identity)
+        {
+            return Err(Box::new(refused()));
+        }
+        Ok(AttachmentOperation {
+            client_id,
+            id,
+            operation_id,
+            expected_target: expected_target.unwrap(),
+            context,
+            connection_id: state.project_owner_connection_id,
+            identity: runtime.owner_identity.clone(),
+            owner_pane_id: runtime.owner_pane_id.clone(),
+            file_count,
+            filename,
+        })
+    }
+
+    pub(super) fn attachment_operation_is_current(&self, operation: &AttachmentOperation) -> bool {
+        self.project_owner_event_is_current(
+            &operation.context,
+            operation.connection_id,
+            &operation.identity,
+        ) && self.remote_runtime_is_current(
+            &operation.context,
+            &operation.identity,
+            &operation.id,
+            operation.expected_target.runtime_incarnation,
+        ) && self
+            .runtimes
+            .get(&operation.id)
+            .is_some_and(|runtime| runtime.owner_pane_id == operation.owner_pane_id)
+            && self
+                .active_agent_sessions
+                .get(&operation.id)
+                .is_some_and(|session| session.session_id == operation.expected_target.session_id)
+    }
+
     fn attachment_error_target(&self, id: &str) -> Option<gwt_core::error_ledger::ErrorTarget> {
         let address = self.window_lookup.get(id)?;
         let tab = self.tab(&address.tab_id)?;
@@ -744,131 +925,28 @@ impl AppRuntime {
 
     pub(crate) fn inject_attachment_prompt_events(
         &mut self,
-        client_id: ClientId,
-        window_id: String,
-        operation_id: String,
+        operation: AttachmentOperation,
         prompt: String,
-        file_count: usize,
-        filename: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let mut events = vec![AttachmentProgressUpdate::new(
-            window_id.clone(),
-            operation_id.clone(),
-            AttachmentProgressPhase::Injecting,
-            file_count,
-        )
-        .filename(filename.clone())
-        .outbound(client_id.clone())];
-        if !self.runtimes.contains_key(&window_id) {
-            let message = "failed to inject attachment prompt: terminal runtime not found";
-            self.attachment_upload_failed_events(&window_id, &operation_id, message);
-            events.push(
-                AttachmentProgressUpdate::new(
-                    window_id,
-                    operation_id,
-                    AttachmentProgressPhase::Failed,
-                    file_count,
-                )
-                .filename(filename)
-                .message(message)
-                .outbound(client_id),
-            );
-            return events;
+        if !self.attachment_operation_is_current(&operation) {
+            return vec![
+                operation.progress(AttachmentProgressPhase::Failed, Some(TARGET_UNAVAILABLE))
+            ];
         }
-        let terminal_events = self.terminal_input_events(&window_id, &prompt);
-        if terminal_events.is_empty() {
-            events.push(
-                AttachmentProgressUpdate::new(
-                    window_id,
-                    operation_id,
-                    AttachmentProgressPhase::Attached,
-                    file_count,
-                )
-                .filename(filename)
-                .outbound(client_id),
-            );
-        } else {
-            self.attachment_upload_failed_events(
-                &window_id,
-                &operation_id,
-                "failed to inject attachment prompt",
-            );
-            events.extend(terminal_events);
-            events.push(
-                AttachmentProgressUpdate::new(
-                    window_id,
-                    operation_id,
-                    AttachmentProgressPhase::Failed,
-                    file_count,
-                )
-                .filename(filename)
-                .message("failed to inject attachment prompt")
-                .outbound(client_id),
-            );
-        }
+        let mut events = vec![operation.progress(AttachmentProgressPhase::Injecting, None)];
+        let id = operation.id.clone();
+        let command = gwt::project_runtime::events::OwnerCommand::AttachmentInput {
+            id: operation.owner_pane_id.clone(),
+            incarnation: operation.expected_target.runtime_incarnation,
+            session_id: operation.expected_target.session_id.clone(),
+            data: prompt.into_bytes(),
+        };
+        events.extend(self.queue_remote_runtime_command(
+            &id,
+            command,
+            super::RemoteRuntimeCommandKind::AttachmentInput(Box::new(operation)),
+        ));
         events
-    }
-
-    pub(crate) fn paste_image_events(
-        &mut self,
-        id: &str,
-        data_base64: &str,
-        mime_type: &str,
-        filename: Option<&str>,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            tracing::debug!(window_id = %id, "image paste dropped: window not found");
-            return Vec::new();
-        };
-        if self.tab(&address.tab_id).is_none() {
-            tracing::debug!(window_id = %id, "image paste dropped: project tab not found");
-            return Vec::new();
-        }
-        let Some(session) = self.active_agent_sessions.get(id) else {
-            tracing::debug!(window_id = %id, "image paste dropped: active agent session not found");
-            return Vec::new();
-        };
-        let worktree_path = session.worktree_path.clone();
-        let agent_project_root = session.agent_project_root.clone();
-        let runtime_target = session.runtime_target;
-
-        let image = match prepare_image_paste_file(
-            &worktree_path,
-            &agent_project_root,
-            data_base64,
-            mime_type,
-            filename,
-            &image_paste_unique_token(&self.image_paste_sequence),
-        ) {
-            Ok(image) => image,
-            Err(error) => {
-                tracing::debug!(
-                    window_id = %id,
-                    mime_type,
-                    error = %error,
-                    "image paste dropped"
-                );
-                return Vec::new();
-            }
-        };
-
-        if let Err(error) = save_image_paste_file(&image) {
-            return self.handle_runtime_status(
-                id.to_string(),
-                WindowProcessStatus::Error,
-                Some(error.to_string()),
-            );
-        }
-
-        tracing::debug!(
-            window_id = %id,
-            runtime_target = ?runtime_target,
-            path = %image.storage_path.display(),
-            agent_path = %image.agent_path,
-            "saved pasted image"
-        );
-        let prompt = image_attachment_prompt(&image, &worktree_path, runtime_target);
-        self.terminal_input_events(id, &prompt)
     }
 
     pub(super) fn paste_image_uploaded_operation_events(
@@ -876,41 +954,28 @@ impl AppRuntime {
         client_id: ClientId,
         id: String,
         operation_id: Option<String>,
+        expected_target: Option<gwt::protocol::AttachmentExpectedTarget>,
         upload: UploadedImagePasteOperation,
     ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(&id).cloned() else {
-            tracing::debug!(window_id = %id, "uploaded image paste dropped: window not found");
-            return Vec::new();
-        };
-        if self.tab(&address.tab_id).is_none() {
-            tracing::debug!(window_id = %id, "uploaded image paste dropped: project tab not found");
-            return Vec::new();
-        }
-        let Some(session) = self.active_agent_sessions.get(&id) else {
-            tracing::debug!(
-                window_id = %id,
-                "uploaded image paste dropped: active agent session not found"
-            );
-            let operation_id =
-                normalize_attachment_operation_id(operation_id, &self.image_paste_sequence);
-            let message = "image paste failed: active Agent session not found";
-            self.attachment_upload_failed_events(&id, &operation_id, message);
-            return vec![AttachmentProgressUpdate::new(
-                id,
-                operation_id,
-                AttachmentProgressPhase::Failed,
-                1,
-            )
-            .message(message)
-            .outbound(client_id)];
-        };
-        let operation_id =
-            normalize_attachment_operation_id(operation_id, &self.image_paste_sequence);
         let display_filename = upload
             .filename
             .as_deref()
             .map(display_attachment_basename)
-            .or_else(|| Some(display_attachment_basename("image")));
+            .or_else(|| Some("image".to_string()));
+        let operation = match self.capture_attachment_operation(
+            client_id.clone(),
+            id.clone(),
+            operation_id,
+            expected_target,
+            1,
+            display_filename.clone(),
+        ) {
+            Ok(operation) => operation,
+            Err(event) => return vec![*event],
+        };
+        let operation_id = operation.operation_id.clone();
+        let expected_target = Some(operation.expected_target.clone());
+        let session = self.active_agent_sessions.get(&id).expect("admitted Agent");
         let worktree_path = session.worktree_path.clone();
         let runtime_target = session.runtime_target;
         let upload_store = self.attachment_uploads.clone();
@@ -925,18 +990,66 @@ impl AppRuntime {
             .attachment_error_target(&id)
             .expect("resolved attachment window");
 
-        spawner.spawn(move || {
-            let image = match prepare_uploaded_image_paste_file(
-                &worktree_path,
-                &upload_store,
-                &upload.upload_id,
-                &upload.mime_type,
-                upload.filename.as_deref(),
-                upload.size,
-                &unique_token,
-            ) {
-                Ok(image) => image,
-                Err(error) => {
+        let worker_target = expected_target.clone();
+        let failure_operation = operation.clone();
+        if spawner
+            .try_spawn(move || {
+                let image = match prepare_uploaded_image_paste_file(
+                    &worktree_path,
+                    &upload_store,
+                    &upload.upload_id,
+                    &upload.mime_type,
+                    upload.filename.as_deref(),
+                    upload.size,
+                    &unique_token,
+                ) {
+                    Ok(image) => image,
+                    Err(error) => {
+                        record_attachment_failure(
+                            error_target,
+                            &worker_operation_id,
+                            &error.to_string(),
+                        );
+                        AttachmentProgressUpdate::new(
+                            worker_window_id.clone(),
+                            worker_operation_id.clone(),
+                            AttachmentProgressPhase::Failed,
+                            1,
+                        )
+                        .target(worker_target.clone())
+                        .file(
+                            0,
+                            worker_filename
+                                .clone()
+                                .unwrap_or_else(|| "image".to_string()),
+                        )
+                        .message(error.to_string())
+                        .dispatch(&proxy, &worker_client_id);
+                        return;
+                    }
+                };
+                let progress_filename = worker_filename
+                    .clone()
+                    .or_else(|| Some(display_attachment_basename(&image.agent_path)));
+                if let Err(error) =
+                    save_image_paste_file_with_progress(&image, |bytes_done, total| {
+                        AttachmentProgressUpdate::new(
+                            worker_window_id.clone(),
+                            worker_operation_id.clone(),
+                            AttachmentProgressPhase::Staging,
+                            1,
+                        )
+                        .target(worker_target.clone())
+                        .file(
+                            0,
+                            progress_filename
+                                .clone()
+                                .unwrap_or_else(|| "image".to_string()),
+                        )
+                        .bytes(bytes_done, total)
+                        .dispatch(&proxy, &worker_client_id);
+                    })
+                {
                     record_attachment_failure(
                         error_target,
                         &worker_operation_id,
@@ -948,130 +1061,32 @@ impl AppRuntime {
                         AttachmentProgressPhase::Failed,
                         1,
                     )
-                    .file(
-                        0,
-                        worker_filename
-                            .clone()
-                            .unwrap_or_else(|| "image".to_string()),
-                    )
+                    .target(worker_target.clone())
+                    .filename(progress_filename)
                     .message(error.to_string())
                     .dispatch(&proxy, &worker_client_id);
                     return;
                 }
-            };
-            let progress_filename = worker_filename
-                .clone()
-                .or_else(|| Some(display_attachment_basename(&image.agent_path)));
-            if let Err(error) = save_image_paste_file_with_progress(&image, |bytes_done, total| {
-                AttachmentProgressUpdate::new(
-                    worker_window_id.clone(),
-                    worker_operation_id.clone(),
-                    AttachmentProgressPhase::Staging,
-                    1,
-                )
-                .file(
-                    0,
-                    progress_filename
-                        .clone()
-                        .unwrap_or_else(|| "image".to_string()),
-                )
-                .bytes(bytes_done, total)
-                .dispatch(&proxy, &worker_client_id);
-            }) {
-                record_attachment_failure(error_target, &worker_operation_id, &error.to_string());
-                AttachmentProgressUpdate::new(
-                    worker_window_id.clone(),
-                    worker_operation_id.clone(),
-                    AttachmentProgressPhase::Failed,
-                    1,
-                )
-                .filename(progress_filename)
-                .message(error.to_string())
-                .dispatch(&proxy, &worker_client_id);
-                return;
-            }
-            let prompt = image_attachment_prompt(&image, &worktree_path, runtime_target);
-            proxy.send(UserEvent::AttachmentPromptReady {
-                client_id: worker_client_id,
-                window_id: worker_window_id,
-                operation_id: worker_operation_id,
-                prompt,
-                file_count: 1,
-                filename: progress_filename,
-            });
-        });
+                let prompt = image_attachment_prompt(&image, &worktree_path, runtime_target);
+                proxy.send(UserEvent::AttachmentPromptReady {
+                    operation: Box::new(operation),
+                    prompt,
+                });
+            })
+            .is_err()
+        {
+            return vec![failure_operation.progress(
+                AttachmentProgressPhase::Failed,
+                Some("Attachment preparation could not start. Reload the current UI."),
+            )];
+        }
 
         vec![
             AttachmentProgressUpdate::new(id, operation_id, AttachmentProgressPhase::Queued, 1)
+                .target(expected_target.clone())
                 .filename(display_filename)
                 .outbound(client_id),
         ]
-    }
-
-    pub(crate) fn paste_image_uploaded_events(
-        &mut self,
-        id: &str,
-        upload_id: &str,
-        mime_type: &str,
-        filename: Option<&str>,
-        size: u64,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            tracing::debug!(window_id = %id, "uploaded image paste dropped: window not found");
-            return Vec::new();
-        };
-        if self.tab(&address.tab_id).is_none() {
-            tracing::debug!(window_id = %id, "uploaded image paste dropped: project tab not found");
-            return Vec::new();
-        }
-        let Some(session) = self.active_agent_sessions.get(id) else {
-            tracing::debug!(
-                window_id = %id,
-                "uploaded image paste dropped: active agent session not found"
-            );
-            return Vec::new();
-        };
-        let worktree_path = session.worktree_path.clone();
-        let runtime_target = session.runtime_target;
-
-        let image = match prepare_uploaded_image_paste_file(
-            &worktree_path,
-            &self.attachment_uploads,
-            upload_id,
-            mime_type,
-            filename,
-            size,
-            &image_paste_unique_token(&self.image_paste_sequence),
-        ) {
-            Ok(image) => image,
-            Err(error) => {
-                tracing::debug!(
-                    window_id = %id,
-                    mime_type,
-                    error = %error,
-                    "uploaded image paste dropped"
-                );
-                return Vec::new();
-            }
-        };
-
-        if let Err(error) = save_image_paste_file(&image) {
-            return self.handle_runtime_status(
-                id.to_string(),
-                WindowProcessStatus::Error,
-                Some(error.to_string()),
-            );
-        }
-
-        tracing::debug!(
-            window_id = %id,
-            runtime_target = ?runtime_target,
-            path = %image.storage_path.display(),
-            agent_path = %image.agent_path,
-            "saved uploaded pasted image"
-        );
-        let prompt = image_attachment_prompt(&image, &worktree_path, runtime_target);
-        self.terminal_input_events(id, &prompt)
     }
 
     pub(super) fn attach_files_operation_events(
@@ -1079,33 +1094,26 @@ impl AppRuntime {
         client_id: ClientId,
         id: String,
         operation_id: Option<String>,
+        expected_target: Option<gwt::protocol::AttachmentExpectedTarget>,
         files: Vec<gwt::FileAttachment>,
     ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(&id).cloned() else {
-            tracing::debug!(window_id = %id, "file attachment dropped: window not found");
-            return Vec::new();
-        };
-        if self.tab(&address.tab_id).is_none() {
-            tracing::debug!(window_id = %id, "file attachment dropped: project tab not found");
-            return Vec::new();
-        }
-        let Some(session) = self.active_agent_sessions.get(&id) else {
-            tracing::debug!(
-                window_id = %id,
-                "file attachment dropped: active agent session not found"
-            );
-            return Vec::new();
-        };
-        if files.is_empty() {
-            tracing::debug!(window_id = %id, "file attachment dropped: empty selection");
-            return Vec::new();
-        }
-
-        let operation_id =
-            normalize_attachment_operation_id(operation_id, &self.image_paste_sequence);
         let file_count = files.len();
         let display_filename =
             (file_count == 1).then(|| display_name_for_file_attachment(&files[0]));
+        let operation = match self.capture_attachment_operation(
+            client_id.clone(),
+            id.clone(),
+            operation_id,
+            expected_target,
+            file_count,
+            display_filename.clone(),
+        ) {
+            Ok(operation) => operation,
+            Err(event) => return vec![*event],
+        };
+        let operation_id = operation.operation_id.clone();
+        let expected_target = Some(operation.expected_target.clone());
+        let session = self.active_agent_sessions.get(&id).expect("admitted Agent");
         let worktree_path = session.worktree_path.clone();
         let agent_project_root = session.agent_project_root.clone();
         let runtime_target = session.runtime_target;
@@ -1126,83 +1134,93 @@ impl AppRuntime {
             })
             .collect();
 
-        spawner.spawn(move || {
-            let mut agent_paths = Vec::with_capacity(files.len());
-            for (index, file) in files.iter().enumerate() {
-                let filename = display_name_for_file_attachment(file);
-                let token = file_tokens[index].clone();
-                let prepared = match prepare_file_attachment(
-                    &worktree_path,
-                    &agent_project_root,
-                    runtime_target,
-                    file,
-                    &token,
-                    limits,
-                    &upload_store,
-                ) {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
+        let worker_target = expected_target.clone();
+        let failure_operation = operation.clone();
+        if spawner
+            .try_spawn(move || {
+                let mut agent_paths = Vec::with_capacity(files.len());
+                for (index, file) in files.iter().enumerate() {
+                    let filename = display_name_for_file_attachment(file);
+                    let token = file_tokens[index].clone();
+                    let prepared = match prepare_file_attachment(
+                        &worktree_path,
+                        &agent_project_root,
+                        runtime_target,
+                        file,
+                        &token,
+                        limits,
+                        &upload_store,
+                    ) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            AttachmentProgressUpdate::new(
+                                worker_window_id.clone(),
+                                worker_operation_id.clone(),
+                                AttachmentProgressPhase::Failed,
+                                file_count,
+                            )
+                            .target(worker_target.clone())
+                            .file(index, filename)
+                            .message(error.to_string())
+                            .dispatch(&proxy, &worker_client_id);
+                            return;
+                        }
+                    };
+                    if let Err(error) =
+                        save_file_attachment_with_progress(&prepared, |bytes_done, total| {
+                            AttachmentProgressUpdate::new(
+                                worker_window_id.clone(),
+                                worker_operation_id.clone(),
+                                AttachmentProgressPhase::Staging,
+                                file_count,
+                            )
+                            .target(worker_target.clone())
+                            .file(index, filename.clone())
+                            .bytes(bytes_done, total)
+                            .dispatch(&proxy, &worker_client_id);
+                        })
+                    {
                         AttachmentProgressUpdate::new(
                             worker_window_id.clone(),
                             worker_operation_id.clone(),
                             AttachmentProgressPhase::Failed,
                             file_count,
                         )
+                        .target(worker_target.clone())
                         .file(index, filename)
                         .message(error.to_string())
                         .dispatch(&proxy, &worker_client_id);
                         return;
                     }
-                };
-                if let Err(error) =
-                    save_file_attachment_with_progress(&prepared, |bytes_done, total| {
-                        AttachmentProgressUpdate::new(
-                            worker_window_id.clone(),
-                            worker_operation_id.clone(),
-                            AttachmentProgressPhase::Staging,
-                            file_count,
-                        )
-                        .file(index, filename.clone())
-                        .bytes(bytes_done, total)
-                        .dispatch(&proxy, &worker_client_id);
-                    })
-                {
+                    agent_paths.push(prepared.agent_path);
+                }
+
+                let prompt = format_file_attachment_prompt(&agent_paths);
+                if prompt.is_empty() {
                     AttachmentProgressUpdate::new(
                         worker_window_id.clone(),
                         worker_operation_id.clone(),
                         AttachmentProgressPhase::Failed,
                         file_count,
                     )
-                    .file(index, filename)
-                    .message(error.to_string())
+                    .target(worker_target.clone())
+                    .filename(worker_display_filename.clone())
+                    .message("no attachment prompt generated")
                     .dispatch(&proxy, &worker_client_id);
                     return;
                 }
-                agent_paths.push(prepared.agent_path);
-            }
-
-            let prompt = format_file_attachment_prompt(&agent_paths);
-            if prompt.is_empty() {
-                AttachmentProgressUpdate::new(
-                    worker_window_id.clone(),
-                    worker_operation_id.clone(),
-                    AttachmentProgressPhase::Failed,
-                    file_count,
-                )
-                .filename(worker_display_filename.clone())
-                .message("no attachment prompt generated")
-                .dispatch(&proxy, &worker_client_id);
-                return;
-            }
-            proxy.send(UserEvent::AttachmentPromptReady {
-                client_id: worker_client_id,
-                window_id: worker_window_id,
-                operation_id: worker_operation_id,
-                prompt,
-                file_count,
-                filename: worker_display_filename,
-            });
-        });
+                proxy.send(UserEvent::AttachmentPromptReady {
+                    operation: Box::new(operation),
+                    prompt,
+                });
+            })
+            .is_err()
+        {
+            return vec![failure_operation.progress(
+                AttachmentProgressPhase::Failed,
+                Some("Attachment preparation could not start. Reload the current UI."),
+            )];
+        }
 
         vec![AttachmentProgressUpdate::new(
             id,
@@ -1210,84 +1228,8 @@ impl AppRuntime {
             AttachmentProgressPhase::Queued,
             file_count,
         )
+        .target(expected_target.clone())
         .filename(display_filename)
         .outbound(client_id)]
-    }
-
-    pub(crate) fn attach_files_events(
-        &mut self,
-        id: &str,
-        files: Vec<gwt::FileAttachment>,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            tracing::debug!(window_id = %id, "file attachment dropped: window not found");
-            return Vec::new();
-        };
-        if self.tab(&address.tab_id).is_none() {
-            tracing::debug!(window_id = %id, "file attachment dropped: project tab not found");
-            return Vec::new();
-        }
-        let Some(session) = self.active_agent_sessions.get(id) else {
-            tracing::debug!(
-                window_id = %id,
-                "file attachment dropped: active agent session not found"
-            );
-            return Vec::new();
-        };
-        if files.is_empty() {
-            tracing::debug!(window_id = %id, "file attachment dropped: empty selection");
-            return Vec::new();
-        }
-        let worktree_path = session.worktree_path.clone();
-        let agent_project_root = session.agent_project_root.clone();
-        let runtime_target = session.runtime_target;
-        let limits = ContentLimits::default();
-
-        let mut agent_paths = Vec::with_capacity(files.len());
-        for (index, file) in files.iter().enumerate() {
-            let token = format!(
-                "{}-{index}",
-                image_paste_unique_token(&self.image_paste_sequence)
-            );
-            let prepared = match prepare_file_attachment(
-                &worktree_path,
-                &agent_project_root,
-                runtime_target,
-                file,
-                &token,
-                limits,
-                &self.attachment_uploads,
-            ) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    tracing::debug!(
-                        window_id = %id,
-                        error = %error,
-                        "file attachment dropped"
-                    );
-                    return Vec::new();
-                }
-            };
-            if let Err(error) = save_file_attachment(&prepared) {
-                return self.handle_runtime_status(
-                    id.to_string(),
-                    WindowProcessStatus::Error,
-                    Some(error.to_string()),
-                );
-            }
-            agent_paths.push(prepared.agent_path);
-        }
-
-        let prompt = format_file_attachment_prompt(&agent_paths);
-        if prompt.is_empty() {
-            return Vec::new();
-        }
-        tracing::debug!(
-            window_id = %id,
-            runtime_target = ?runtime_target,
-            count = agent_paths.len(),
-            "prepared file attachments"
-        );
-        self.terminal_input_events(id, &prompt)
     }
 }

@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::{summary::PerfLogRecord, PerfRecord};
@@ -103,7 +103,7 @@ impl StartupPhase {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StartupSample {
     pub startup_id: String,
-    pub process_started_at: DateTime<Utc>,
+    pub process_started_at: UtcTimestamp,
     pub phase: StartupPhase,
     pub start_ms: f64,
     pub restored_window_count: usize,
@@ -131,14 +131,14 @@ struct TerminalReadiness {
 /// Clock-independent state, so readiness ordering and budgets are testable.
 pub struct StartupRun {
     id: String,
-    started_at: DateTime<Utc>,
+    started_at: UtcTimestamp,
     restored_window_count: usize,
     seen: HashSet<StartupPhase>,
     terminals: HashMap<String, TerminalReadiness>,
 }
 
 impl StartupRun {
-    pub fn new(started_at: DateTime<Utc>) -> Self {
+    pub fn new(started_at: UtcTimestamp) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             started_at,
@@ -405,7 +405,8 @@ static STARTUP: OnceLock<Mutex<TimedRun>> = OnceLock::new();
 
 /// Install after the perf sink, retaining the instant captured at main entry.
 pub fn begin(started: Instant) {
-    let started_at = Utc::now() - chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
+    let started_at = gwt_core::timestamp::UtcTimestamp::now()
+        - time::Duration::try_from(started.elapsed()).unwrap_or_default();
     if STARTUP
         .set(Mutex::new(TimedRun {
             started,
@@ -597,7 +598,7 @@ pub struct StartupPhaseResult {
 #[derive(Debug, Serialize)]
 pub struct StartupReport {
     pub startup_id: String,
-    pub process_started_at: DateTime<Utc>,
+    pub process_started_at: UtcTimestamp,
     pub restored_window_count: usize,
     pub phases: Vec<StartupPhaseResult>,
     pub missing_phases: Vec<StartupPhase>,
@@ -724,7 +725,7 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
 mod tests {
     #[test]
     fn startup_git_commands_repeat_after_restore_and_total_without_phase_overlap() {
-        let mut run = StartupRun::new(Utc::now());
+        let mut run = StartupRun::new(gwt_core::timestamp::UtcTimestamp::now());
         let records = [
             run.phase_with_git(StartupPhase::ProjectStateLoad, 0.0, 500.0, 2, 300.0)
                 .unwrap(),
@@ -767,7 +768,7 @@ mod tests {
 
     #[test]
     fn startup_phase_reports_git_cost_and_tray_budget() {
-        let mut run = super::StartupRun::new(chrono::Utc::now());
+        let mut run = super::StartupRun::new(gwt_core::timestamp::UtcTimestamp::now());
         let record = run
             .phase_with_git(super::StartupPhase::ProjectStateLoad, 50.0, 400.0, 3, 210.0)
             .unwrap();
@@ -787,7 +788,7 @@ mod tests {
 
     #[test]
     fn first_input_can_be_ready_in_a_new_pm_before_restored_terminals() {
-        let mut run = super::StartupRun::new(chrono::Utc::now());
+        let mut run = super::StartupRun::new(gwt_core::timestamp::UtcTimestamp::now());
         run.track_terminal("restored", 0.0);
         run.track_startup_terminal("new-pm", 10.0, false);
         assert!(run.terminal_ready("new-pm", 20.0).is_empty());
@@ -812,7 +813,7 @@ mod tests {
         summary::{read_records, PerfFilter, PerfLogRecord},
         PerfRecord, PerfSink,
     };
-    use chrono::{TimeZone, Utc};
+
     use gwt_config::PerfConfig;
     use gwt_core::test_support::ScopedGwtHome;
 
@@ -824,7 +825,8 @@ mod tests {
     /// load and how many Session files it parsed on the startup thread.
     #[test]
     fn session_load_phase_carries_the_parsed_session_count() {
-        let mut run = StartupRun::new(Utc.timestamp_opt(100, 0).unwrap());
+        let mut run =
+            StartupRun::new(gwt_core::timestamp::UtcTimestamp::from_timestamp(100, 0).unwrap());
         let record = run.session_load(30.0, 12.0, 7).unwrap();
         let report = latest_startup(&[read_record(record)]).unwrap();
         let phase = report
@@ -844,7 +846,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let mut sink = PerfSink::from_config(&PerfConfig::default()).unwrap();
-        let mut run = StartupRun::new(Utc.timestamp_opt(100, 0).unwrap());
+        let mut run =
+            StartupRun::new(gwt_core::timestamp::UtcTimestamp::from_timestamp(100, 0).unwrap());
         run.set_restored_window_count(3);
         sink.append(&run.phase(StartupPhase::RuntimeInit, 50.0, 20.0).unwrap())
             .unwrap();
@@ -871,8 +874,10 @@ mod tests {
 
     #[test]
     fn latest_startup_excludes_late_samples_from_an_older_process_and_marks_missing_frame() {
-        let mut old = StartupRun::new(Utc.timestamp_opt(100, 0).unwrap());
-        let mut new = StartupRun::new(Utc.timestamp_opt(200, 0).unwrap());
+        let mut old =
+            StartupRun::new(gwt_core::timestamp::UtcTimestamp::from_timestamp(100, 0).unwrap());
+        let mut new =
+            StartupRun::new(gwt_core::timestamp::UtcTimestamp::from_timestamp(200, 0).unwrap());
         let mut records = vec![
             read_record(old.phase(StartupPhase::FirstFrame, 0.0, 100.0).unwrap()),
             read_record(new.phase(StartupPhase::ProcessStart, 0.0, 0.0).unwrap()),
@@ -897,7 +902,7 @@ mod tests {
     /// restore drain belong to later project work and are not counted.
     #[test]
     fn startup_report_counts_worktree_inventory_listings_until_restore_drain() {
-        let mut run = StartupRun::new(Utc::now());
+        let mut run = StartupRun::new(gwt_core::timestamp::UtcTimestamp::now());
         let records = [
             run.worktree_inventory(100.0, 250.0).unwrap(),
             run.worktree_inventory(900.0, 240.0).unwrap(),
@@ -916,7 +921,7 @@ mod tests {
     /// the tracing log.
     #[test]
     fn startup_report_carries_restore_drain_breakdown_and_event_loop_stalls() {
-        let mut run = StartupRun::new(Utc::now());
+        let mut run = StartupRun::new(gwt_core::timestamp::UtcTimestamp::now());
         let records = [
             run.phase_with_git(StartupPhase::RestoreDrainResume, 1_000.0, 20.0, 0, 0.0)
                 .unwrap(),
@@ -972,7 +977,7 @@ mod tests {
     #[test]
     fn terminal_interactive_requires_frontend_and_pty_in_either_order_without_waiting_for_a_key() {
         for frontend_first in [true, false] {
-            let mut run = StartupRun::new(Utc::now());
+            let mut run = StartupRun::new(gwt_core::timestamp::UtcTimestamp::now());
             run.track_terminal("restored", 100.0);
             let first = if frontend_first {
                 run.terminal_ready("restored", 200.0)

@@ -112,7 +112,7 @@ impl UpdateCliOps for RealUpdateCliOps {
                 version: latest.to_string(),
                 asset_url: asset_url.to_string(),
                 payload: payload.clone(),
-                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
                 auto_apply_deferred: false,
             },

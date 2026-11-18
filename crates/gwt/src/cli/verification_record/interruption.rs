@@ -8,6 +8,7 @@ use std::{
     process::{Child, ChildStdin, Stdio},
 };
 
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -62,11 +63,7 @@ impl RunLifecycle {
 
 /// A reused PID is not the old runner. Unreadable process identity retains
 /// the runner; only definite absence or an observed mismatch permits recovery.
-pub(super) fn runner_is_alive(
-    pid: u32,
-    started_at: Option<u64>,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> bool {
+pub(super) fn runner_is_alive(pid: u32, started_at: Option<u64>, created_at: UtcTimestamp) -> bool {
     if !crate::process::is_host_process_alive(pid) {
         return false;
     }
@@ -80,7 +77,7 @@ pub(super) fn runner_is_alive(
     #[cfg(not(target_os = "linux"))]
     {
         crate::process::host_process_start_epoch_secs(pid)
-            .and_then(|start| chrono::DateTime::from_timestamp(i64::try_from(start).ok()?, 0))
+            .and_then(|start| UtcTimestamp::from_unix_seconds(i64::try_from(start).ok()?))
             .is_none_or(|start| start <= created_at)
     }
     #[cfg(target_os = "linux")]
@@ -382,7 +379,7 @@ fn persist_interrupted(
     );
     record.all_passed = false;
     record.plan_covered = false;
-    record.created_at = chrono::Utc::now();
+    record.created_at = UtcTimestamp::now();
     save(worktree, record)
 }
 
@@ -468,9 +465,8 @@ mod tests {
         let worktree = fixture.dir.path();
         let mut record = super::super::tests::passing_record("predecessor", "unused");
         record.lifecycle = Some(RunLifecycle::running("token"));
-        record.created_at = chrono::DateTime::from_timestamp(
+        record.created_at = UtcTimestamp::from_unix_seconds(
             crate::process::host_process_start_epoch_secs(std::process::id()).unwrap() as i64 - 1,
-            0,
         )
         .unwrap();
         let mut document = serde_json::to_value(record).unwrap();

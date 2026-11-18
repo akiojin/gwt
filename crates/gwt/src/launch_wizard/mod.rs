@@ -19,6 +19,7 @@ mod view_model;
 use options::*;
 
 pub use memory_cache::LaunchWizardMemoryCache;
+pub(crate) use options::default_launch_tuning;
 
 pub use options::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,
@@ -154,6 +155,8 @@ pub struct IssueMonitorAgentChoices {
     pub name: String,
     pub is_custom: bool,
     pub models: Vec<IssueMonitorModelChoices>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_catalog_warning: Option<String>,
     pub model_suggestions: Vec<String>,
     pub default_model: String,
     pub reasoning_options: Vec<LaunchWizardOptionView>,

@@ -46,6 +46,142 @@ const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-is
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
 
+test.describe("Issues touch navigation", () => {
+  test.use({ hasTouch: true });
+  test("Issues mode and preview tabs are 44px tap targets on a phone", async ({ page }, info) => {
+    const root = page.locator(".issue-bridge-root");
+    const detail = root.locator(".knowledge-detail-pane");
+    const controls = root.locator(".knowledge-state-filter button:visible");
+    const heights = () => controls.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+    await row(page, 1).locator(".knowledge-row-select").click();
+    await expect(detail).toContainText("Description for #1");
+    await expect(controls).toHaveCount(5);
+    const desktopHeights = await heights();
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await heights(), "601px retains desktop control heights").toEqual(desktopHeights);
+    await detail.locator('[data-action="close-issue-preview"]').tap();
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await root.locator('[data-issue-view="split"]').tap();
+      await expect(root).toHaveAttribute("data-view-mode", "split");
+      await expect(root.locator('[data-issue-view="split"]')).toHaveAttribute("aria-pressed", "true");
+      await root.locator('[data-issue-view="list"]').tap();
+      await expect(root).toHaveAttribute("data-view-mode", "list");
+      await row(page, 1).locator(".knowledge-row-select").tap();
+      await expect(detail).toContainText("Description for #1");
+      await expect(controls).toHaveCount(5);
+      const main = (await root.locator(".workspace-toolbar-main").boundingBox())!;
+      const actions = (await root.locator(".workspace-toolbar-actions").boundingBox())!;
+      expect(actions.y, "toolbar actions do not cover the mode tabs").toBeGreaterThanOrEqual(main.y + main.height);
+      expect(await root.locator(".issue-filter-hint").evaluate(node => node.scrollWidth <= node.clientWidth),
+        "the existing view hint fits its column").toBe(true);
+      const sizes = await controls.evaluateAll(nodes => nodes.map(node => {
+        const rect = node.getBoundingClientRect();
+        return { label: node.textContent, width: rect.width, height: rect.height, left: rect.left, right: rect.right };
+      }));
+      for (const size of sizes) {
+        expect(size.width, `${size.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(size.height, `${size.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(size.left, `${size.label} left edge at ${width}px`).toBeGreaterThanOrEqual(0);
+        expect(size.right, `${size.label} right edge at ${width}px`).toBeLessThanOrEqual(width);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await detail.locator('[data-issue-detail-view="output"]').tap();
+      await expect(detail.locator('[data-issue-detail-view="output"]')).toHaveAttribute("aria-pressed", "true");
+      await expect(detail).toContainText("No agent is running for this issue.");
+      await detail.locator('[data-issue-detail-view="issue"]').tap();
+      await expect(detail.locator('[data-issue-detail-view="issue"]')).toHaveAttribute("aria-pressed", "true");
+      await expect(detail).toContainText("Description for #1");
+      await page.screenshot({ path: info.outputPath(`issues-tabs-${width}.png`) });
+      await detail.locator('[data-action="close-issue-preview"]').tap();
+      await expect(detail).toBeHidden();
+    }
+  });
+
+  // SPEC #6476 T-005q: the monitor row, search and New/Refresh measured
+  // 30-42px tall on a phone. Below 601px they are 44px tap targets.
+  test("Issues monitor controls, search and actions are 44px tap targets on a phone", async ({ page }, info) => {
+    const root = page.locator(".issue-bridge-root");
+    const controls = root.locator(".knowledge-monitor-controls :is(button, input):visible, .knowledge-search:visible, .workspace-toolbar-actions button:visible");
+    const sizes = () => controls.evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { label: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30) || node.className, width: rect.width, height: rect.height };
+    }));
+    const minHeights = () => controls.evaluateAll(nodes => nodes.map(node => getComputedStyle(node).minHeight));
+    expect((await sizes()).some(control => control.height < 44), "the fixture starts with desktop-sized controls").toBe(true);
+    const desktop = await minHeights();
+    expect(desktop).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await minHeights(), "601px retains desktop control sizes").toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const measured = await sizes();
+      expect(measured.map(control => control.label)).toEqual(expect.arrayContaining(["Auto-refill", "Autonomous mode", "Agent limit", "Issues settings", "Refresh cached work items"]));
+      expect(measured).toHaveLength(9);
+      for (const control of measured) {
+        expect(control.width, `${control.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.height, `${control.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await page.screenshot({ path: info.outputPath(`issues-controls-${width}.png`) });
+    }
+    const toggle = root.getByRole("switch", { name: "Auto-refill", exact: true });
+    await toggle.scrollIntoViewIfNeeded();
+    await toggle.tap();
+    await expect.poll(() => messages(page)).toEqual([expect.objectContaining({ kind: "set_issue_monitor_auto_refill", enabled: true })]);
+  });
+
+  // SPEC #6476 T-005ic: card controls measured 13-36px on a phone (selection
+  // 19px with a 13px box, card 35px, actions 36px, menu 28px, items 31px).
+  test("Issues card selection, actions and menu are 44px tap targets on a phone", async ({ page }, info) => {
+    const board = page.locator(".issue-queue-board");
+    const cardControls = ".issue-queue-select:visible, .knowledge-row-select:visible, .knowledge-row-actions button:visible, .knowledge-row-menu-trigger:visible, .knowledge-row-menu-item:visible";
+    const sizes = () => board.locator(cardControls).evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { name: `${node.className.split(" ").at(-1)} ${node.getAttribute("data-action") ?? ""}`.trim(), width: rect.width, height: rect.height };
+    }));
+    const minHeights = () => board.locator(cardControls).evaluateAll(nodes => nodes.map(node =>
+      `${node.className.split(" ").at(-1)} ${node.getAttribute("data-action") ?? ""} ${getComputedStyle(node).minHeight}`));
+    const menu = row(page, 3).locator(".knowledge-row-menu");
+    await menu.locator("summary").click();
+    await expect(menu).toHaveAttribute("open", "");
+    const desktop = await minHeights();
+    expect(desktop.length, "desktop card controls, including open menu items, are present").toBeGreaterThan(5);
+    expect(desktop.join("\n")).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await minHeights(), "601px retains each desktop card control size").toEqual(desktop);
+    await menu.locator("summary").click();
+    await expect(menu).not.toHaveAttribute("open", "");
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const card = row(page, 3);
+      await card.scrollIntoViewIfNeeded();
+      await card.locator(".knowledge-row-menu-trigger").tap();
+      await expect(card.locator(".knowledge-row-menu")).toHaveAttribute("open", "");
+      const measured = await sizes();
+      expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(
+        ["issue-queue-select", "knowledge-row-select", "knowledge-row-action queue-push", "knowledge-row-menu-trigger", "knowledge-row-menu-item move-down"]));
+      for (const control of measured) {
+        expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await page.screenshot({ path: info.outputPath(`issues-cards-${width}.png`) });
+      await card.locator(".knowledge-row-menu-trigger").tap();
+      await expect(card.locator(".knowledge-row-menu")).not.toHaveAttribute("open", "");
+      const select = card.locator(".issue-queue-select");
+      const box = (await select.boundingBox())!;
+      // Tap the label's enlarged lower-right area, away from the 13px box itself.
+      await select.tap({ position: { x: box.width - 4, y: box.height - 4 } });
+      await expect(select.locator("input")).toBeChecked();
+      await select.locator("input").uncheck();
+    }
+  });
+});
+
 test("Issue #6994 merged work awaits measurement in Backlog with an explicit requeue action", async ({ page }) => {
   const reason = "Waiting for one day of production observations: AC-4";
   await page.evaluate(reason => {
@@ -68,6 +204,35 @@ test("Issue #6994 merged work awaits measurement in Backlog with an explicit req
   await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
     .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([
     { kind: "issue_monitor_requeue", issue_number: 6994 },
+  ]);
+});
+
+test("Issue #7536 merged work awaits external verification without taking attention or an active slot", async ({ page }) => {
+  const reason = "Only release, main or another host verification remains: AC-4";
+  await page.evaluate(reason => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 7536, title: "Merged work awaiting release verification",
+      state: "open", labels: [], related_work_refs: [] }]);
+    fixture.__queueConfirm([7536], { state: "idle", active_count: 0, max_active_agents: 2,
+      autonomous_issues: [{ issue_number: 7536, phase: "implementing", needs_human: false,
+        review_dispatch_hold: { reason: "Old dispatch hold" }, steering: { reason: "Old steering request" } }] });
+    fixture.__queueInbox([{ issue: { number: 7536 }, state: "awaiting_verification", exclusion_reason: reason }]);
+  }, reason);
+  const waiting = column(page, "backlog").locator('[data-issue-number="7536"]');
+  await expect(waiting).toBeVisible();
+  const badge = waiting.locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Awaiting verification");
+  await expect(badge).toHaveAttribute("data-issue-explanation", /Only release, main or another host verification remains/);
+  await expect(waiting).toContainText(reason);
+  await expect(waiting).not.toContainText(/Needs human|Agent failed|Old dispatch hold|Old steering request/);
+  await expect(page.locator(".knowledge-monitor-pill")).toHaveAttribute("title", /Awaiting attention 0/);
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
+  await expect(column(page, "queued").locator('[data-issue-number="7536"]')).toHaveCount(0);
+  await waiting.locator('[data-action="requeue-issue"]').click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([
+    { kind: "issue_monitor_requeue", issue_number: 7536 },
   ]);
 });
 
@@ -300,6 +465,9 @@ test("Issue #5400 unchanged entry revisions retain the list and current detail",
 });
 
 test("Issue #5401 replays retain focus and only changed Issue keys replace rows", async ({ page }, info) => {
+  // The initial census moves Issue 5 independently of the entries response.
+  // Finish that move before counting mutations caused by entry replays.
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
   const select = row(page, 2).locator(".knowledge-row-select");
   await select.focus();
   await page.evaluate(() => {
@@ -883,6 +1051,25 @@ test("Issue #6141 closed issues follow live sessions and explain cleanup, counts
   await expect(popup).toBeVisible();
   await expect(popup).not.toContainText(cause);
   await expect(popup).toContainText(/no.*(?:cause|detail|reason)|not.*reported/i);
+
+  // Issue #7507: a delivered slice can release its execution while the parent
+  // SPEC remains open. The operator stop must not ask for a human decision.
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueAgentState("stopped");
+    fixture.__queueSetEntries([{ number: 5, title: "Open SPEC with a delivered slice", state: "open", labels: [] }]);
+    fixture.__queueInbox([{ issue: { number: 5, state: "open" }, state: "released" }]);
+  });
+  await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
+  await expect(activeMetric).toHaveText("Active 0 · 0 issues · PM 0");
+  await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText("Released");
+  await expect(row(page, 5).locator('[data-key="closed"]')).toHaveCount(0);
+  await expect(row(page, 5)).not.toContainText(/Needs human|Session cleanup pending/);
+  await row(page, 5).locator(".knowledge-row-badge").hover();
+  await expect(popup).toContainText("confirmed delivery");
+  await expect(popup).toContainText("GitHub issue may remain open");
 });
 
 test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
@@ -980,7 +1167,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
   await expect(status.locator('[data-metric="capacity"]')).toHaveText("1 of 3");
   await expect(status.locator('[data-metric="backlog"]')).toHaveText("7");
   await expect(status.locator('[data-metric="last-scan"]')).toHaveText("00:00:00 UTC");
-  await expect(status.locator('[data-metric="verification"]')).toHaveText("Not reported");
+  await expect(status.locator('[data-metric="verification"]')).toHaveText("Unavailable");
   const boxes=await Promise.all([status,controls,filter].map(node=>node.boundingBox()));
   expect(boxes[0]!.y+boxes[0]!.height).toBeLessThanOrEqual(boxes[1]!.y);
   expect(boxes[1]!.y+boxes[1]!.height).toBeLessThanOrEqual(boxes[2]!.y);
@@ -1084,6 +1271,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const before = await controlMessages();
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
+  await page.keyboard.press("Tab");
+  const verification = page.locator('[data-metric="verification"]');
+  await expect(verification).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveText("Host verification capacity is unavailable.");
+  await expect(verification).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
   await page.keyboard.press("Tab");
   const refill = page.getByRole("switch", { name: "Auto-refill", exact: true });
   await expect(refill).toBeFocused();
@@ -1560,7 +1753,7 @@ test("T-F2: exact running profile stays distinct from the next override in both 
 
 test("urgent priority, cap fallback and PM demotion preserve assignment provenance", async ({page}) => {
   await confirm(page, [3, 4, 1], { terminal_queue: [
-    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
+    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
     {number: 4, queued_by: "auto-refill", priority: "normal", priority_reason: "urgent_limit_reached"},
     {number: 1, queued_by: "operator", priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z"},
   ]});

@@ -25,7 +25,9 @@ mod projection;
 pub mod store_migration;
 mod work_items;
 
-pub(crate) use persistence::resolve_workspace_work_event_container;
+pub(crate) use persistence::{
+    machine_local_close_event_matches_projected_lifecycle, resolve_workspace_work_event_container,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub use persistence::ScopedWorkItemsDecodeObserver;
@@ -74,6 +76,7 @@ pub use persistence::{
     mark_workspace_agent_stopped_at, mutate_existing_workspace_projection,
     mutate_existing_workspace_projection_for_cleanup, mutate_workspace_projection,
     mutate_workspace_projection_at, preserve_workspace_work_event_log_as_shards,
+    read_machine_local_workspace_work_events_from_path_read_only,
     rebuild_work_items_from_events_for_repo, rebuild_work_items_from_events_paths,
     reconcile_worktree_work_items, reconcile_worktree_work_items_paths,
     record_workspace_backfill_event_paths, record_workspace_pr_metadata_for_execution,

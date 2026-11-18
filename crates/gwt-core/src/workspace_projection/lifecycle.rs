@@ -20,9 +20,10 @@
 //! `recompute_*` functions and close-decision helpers) live in this module
 //! only; other submodules call into them instead of re-deriving stages.
 
+use crate::timestamp::UtcTimestamp;
+
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -67,8 +68,8 @@ pub enum WorkspaceAgentAffiliationStatus {
 /// classifies as Done.
 pub fn derive_merged_done_equivalent(
     merged_into_base: bool,
-    last_updated_at: DateTime<Utc>,
-    merge_reference_time: Option<DateTime<Utc>>,
+    last_updated_at: UtcTimestamp,
+    merge_reference_time: Option<UtcTimestamp>,
 ) -> bool {
     let Some(reference) = merge_reference_time else {
         return false;
@@ -216,7 +217,6 @@ pub fn decide_work_close(live_agent: bool, _worktree_path: Option<PathBuf>) -> W
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
 
     use super::*;
 
@@ -258,9 +258,9 @@ mod tests {
 
     #[test]
     fn derive_merged_done_equivalent_classifies_only_merged_and_stale() {
-        let merged_at = chrono::Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
-        let before = merged_at - chrono::Duration::hours(1);
-        let after = merged_at + chrono::Duration::hours(1);
+        let merged_at = "2026-06-10T12:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let before = merged_at - time::Duration::hours(1);
+        let after = merged_at + time::Duration::hours(1);
 
         // merged ∧ stale (no update after the merge) → Done-equivalent.
         assert!(derive_merged_done_equivalent(true, before, Some(merged_at)));

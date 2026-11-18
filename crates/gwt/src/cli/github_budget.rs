@@ -6,9 +6,9 @@
 //! get right now — so a PM can see *why* `pr.list` was thinned out and an
 //! operator can see the budget before it is gone.
 
-use chrono::{DateTime, Utc};
 use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
 use gwt_core::github_quota::GitHubQuota;
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_github::SpecOpsError;
 
 use crate::cli::CliEnv;
@@ -30,7 +30,7 @@ pub(super) fn run<E: CliEnv>(
         env,
         command.refresh,
         &BudgetLedger::global(),
-        Utc::now(),
+        UtcTimestamp::now(),
         out,
     )
 }
@@ -39,7 +39,7 @@ fn run_with<E: CliEnv>(
     env: &mut E,
     refresh: bool,
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let policy = ThrottlePolicy::current();
@@ -97,12 +97,9 @@ fn run_with<E: CliEnv>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
-    fn at(seconds: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(1_756_800_000 + seconds, 0)
-            .single()
-            .expect("timestamp")
+    fn at(seconds: i64) -> UtcTimestamp {
+        UtcTimestamp::from_unix_seconds(1_756_800_000 + seconds).expect("timestamp")
     }
 
     fn payload(graphql_remaining: u64) -> String {

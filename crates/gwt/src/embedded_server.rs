@@ -32,7 +32,7 @@ use crate::app_runtime::ClientScope;
 #[cfg(test)]
 use crate::DispatchTarget;
 use axum::{
-    extract::{ws::WebSocketUpgrade, Query, Request, State},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, FromRequest, Query, Request, State},
     http::{
         header::{AUTHORIZATION, HOST, ORIGIN},
         HeaderMap, StatusCode,
@@ -104,6 +104,9 @@ impl ServerState {
                 TransportEvent::RuntimeHook(event) => {
                     state.proxy.send(UserEvent::RuntimeHook(event))
                 }
+                TransportEvent::AuthenticatedRuntimeHook { grant, event } => state
+                    .proxy
+                    .send(UserEvent::AuthenticatedRuntimeHook { grant, event }),
                 TransportEvent::WorkspaceProjectionChanged { project_root } => state
                     .proxy
                     .send(UserEvent::WorkspaceProjectionChanged { project_root }),
@@ -353,6 +356,12 @@ impl EmbeddedServer {
                 post(project_open_control_handler),
             )
             .route(
+                gwt::project_open_control::PANE_LAYOUT_PLACE_CONTROL_PATH,
+                post(pane_layout_place_control_handler).layer(DefaultBodyLimit::max(
+                    gwt::project_open_control::PROJECT_OPEN_CONTROL_MAX_BODY_BYTES,
+                )),
+            )
+            .route(
                 gwt::update_control::UPDATE_APPLY_CONTROL_PATH,
                 post(update_apply_control_handler),
             )
@@ -548,7 +557,7 @@ async fn oauth_callback_handler(
             &oauth_state,
             &poster,
             &gwt::board_remote::token_store::default_dir(),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
     })
     .await;
@@ -780,6 +789,59 @@ async fn project_open_control_handler(
     }
 }
 
+async fn pane_layout_place_control_handler(
+    State(state): State<ServerState>,
+    request: Request,
+) -> Response {
+    let refuse = |status, message: &str| {
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
+    };
+    if gwt::project_open_control::authorize_control_request(
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        state.control_token.as_deref(),
+    )
+    .is_err()
+    {
+        return refuse(StatusCode::UNAUTHORIZED, "missing or invalid control token");
+    }
+    let body =
+        Json::<gwt::project_open_control::PaneLayoutPlaceRequest>::from_request(request, &state);
+    let Json(request) = match tokio::time::timeout(Duration::from_secs(5), body).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => return refuse(error.status(), "invalid pane placement request"),
+        Err(_) => return refuse(StatusCode::REQUEST_TIMEOUT, "pane placement body timed out"),
+    };
+    let (reply, mut result) = tokio::sync::mpsc::channel(1);
+    if state
+        .proxy
+        .send_event(UserEvent::ControlPaneLayoutPlace { request, reply })
+        .is_err()
+    {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gwt is not accepting project requests",
+        );
+    }
+    match tokio::time::timeout(Duration::from_secs(10), result.recv()).await {
+        Ok(Some(true)) => Json(serde_json::json!({"placed": true})).into_response(),
+        Ok(Some(false)) => refuse(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "expected an agent pane and a Kanban board in the current project",
+        ),
+        Ok(None) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gwt is not accepting project requests",
+        ),
+        Err(_) => refuse(
+            StatusCode::GATEWAY_TIMEOUT,
+            "pane placement acknowledgement timed out",
+        ),
+    }
+}
+
 /// An explicit CLI apply belongs to the resident GUI, which owns the panes,
 /// resume marker and helper parent PID. Acknowledgement only means queued.
 async fn update_apply_control_handler(
@@ -852,7 +914,7 @@ async fn update_apply_control_handler(
         latest: manifest.version.clone(),
         release_url: manifest.asset_url.clone(),
         asset_url: Some(manifest.asset_url),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     if state
         .proxy
@@ -2347,7 +2409,11 @@ mod tests {
         let recorded = events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let [UserEvent::RuntimeHook(recorded_event)] = recorded.as_slice() else {
+        let [UserEvent::AuthenticatedRuntimeHook {
+            event: recorded_event,
+            ..
+        }] = recorded.as_slice()
+        else {
             panic!("only the current matching capability should dispatch: {recorded:?}");
         };
         let canonical_project = dunce::canonicalize(project.path())
@@ -2567,10 +2633,12 @@ mod tests {
             .issue(project.path(), "session-reopen")
             .expect("agent capability");
         let mut url = reqwest::Url::parse(&target.url).expect("agent URL");
-        url.set_path("/internal/workspace-reopen");
-        let response = reqwest::blocking::Client::new()
-            .post(url)
-            .json(&serde_json::json!({
+        for endpoint in [
+            "/internal/workspace-reopen",
+            "/internal/workspace-close-proof-repair",
+        ] {
+            url.set_path(endpoint);
+            let mut request = serde_json::json!({
                 "schema_version": 1,
                 "claimed_session_id": "session-reopen",
                 "observation": {
@@ -2578,14 +2646,20 @@ mod tests {
                     "repo_hash": "repo", "branch": "work/reopen"
                 },
                 "primary_provider_session_id": "private-primary-id",
-                "reason": "continue after premature completion",
-                "observed_done_event_id": "done-event"
-            }))
-            .send()
-            .expect("reopen request without bearer");
-        assert_eq!(response.status(), HttpStatusCode::UNAUTHORIZED);
-        let body = response.text().expect("rejection body");
-        assert!(!body.contains("private-primary-id"));
+                "reason": "restore unfinished work"
+            });
+            if endpoint == "/internal/workspace-reopen" {
+                request["observed_done_event_id"] = serde_json::json!("done-event");
+            }
+            let response = reqwest::blocking::Client::new()
+                .post(url.clone())
+                .json(&request)
+                .send()
+                .expect("protected recovery request without bearer");
+            assert_eq!(response.status(), HttpStatusCode::UNAUTHORIZED);
+            let body = response.text().expect("rejection body");
+            assert!(!body.contains("private-primary-id"));
+        }
         server.shutdown();
     }
 
@@ -2668,7 +2742,7 @@ mod tests {
             kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
             number: 2359,
         };
-        let completed_at = chrono::Utc::now();
+        let completed_at = gwt_core::timestamp::UtcTimestamp::now();
         gwt::cli::execution_state::save(
             &repo,
             &gwt::cli::execution_state::ExecutionControlRecord {
@@ -2705,7 +2779,7 @@ mod tests {
             session_binding_id: "binding-prepared-probe".to_string(),
             initial_session_id: continuation_session_id.to_string(),
             entrypoint: "resume".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
             .expect("prepare successor");
@@ -3251,7 +3325,7 @@ mod tests {
             .save(&gwt_core::paths::gwt_sessions_dir())
             .expect("persist initial execution binding");
         let work_id = "work-materialization-probe-route";
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         projection.agents = vec![gwt_core::workspace_projection::WorkspaceAgentSummary {
@@ -3274,8 +3348,9 @@ mod tests {
         }];
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save materialization probe assignment");
-        let mut work_items =
-            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         let mut work_event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             work_id,
@@ -3573,8 +3648,9 @@ mod tests {
             work_items_before,
             "materialization route must not mutate WorkItems"
         );
-        let missing_work_items =
-            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let missing_work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &work_items_path,
             &missing_work_items,
@@ -3879,7 +3955,7 @@ mod tests {
             .expect("save bound Session");
 
         let work_id = "work-blocked-build-abort-http";
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut current =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         current
@@ -4159,7 +4235,7 @@ mod tests {
             .split("async fn workspace_update_handler(")
             .next()
             .unwrap();
-        assert!(hook.contains("TransportEvent::RuntimeHook(event)"));
+        assert!(hook.contains("TransportEvent::AuthenticatedRuntimeHook { grant, event }"));
         assert!(
             !hook.contains(".dispatch("),
             "hook events require project routing in the runtime"
@@ -4168,6 +4244,18 @@ mod tests {
             .rsplit_once("fn main() ->")
             .expect("the final main signature follows test fixture strings")
             .1;
+        let accepted_hook = main
+            .split("Event::UserEvent(UserEvent::AuthenticatedRuntimeHook { grant, event })")
+            .nth(1)
+            .expect("GUI transport retains the authenticated grant")
+            .split("event => event,")
+            .next()
+            .unwrap();
+        assert!(
+            accepted_hook.find("hook_grant_is_current(&grant)").unwrap()
+                < accepted_hook.find("UserEvent::RuntimeHook(event)").unwrap(),
+            "GUI dispatch checks the captured grant before normalizing the hook"
+        );
         for (arm, policy) in [
             (
                 "ActiveWorkProjectionPrepared(prepared)",
@@ -4512,7 +4600,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
-        let _env_lock = gwt_core::test_support::env_lock();
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #7204: the verdict must not depend on the 2 s wake budget. A
+        // loaded runner spent it inside a file lock after the reservation, and
+        // the retry reserved a second transaction. The provider ACK below ends
+        // the delivery instead of an expiry into the Unconfirmed replay path.
+        let _wake_budget = ScopedEnvVar::set(
+            "GWT_TEST_BUDGET_PM_WAKE_DELIVERY_MS",
+            gwt_core::deadline_budget::HANG_GUARD
+                .as_millis()
+                .to_string(),
+        );
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let (mut runtime, probe, id) =
@@ -4574,7 +4674,34 @@ mod tests {
             Instant::now(),
         );
         forward_browser_inputs(&events, &mut runtime);
+        // Acknowledge the protected wake as its provider prompt hook would,
+        // once the owner has prepared its durable receipt.
+        let receipts = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(
+            &runtime.project_context("browser-tab").unwrap().project_root,
+        );
+        let provider_ack = std::thread::spawn(move || loop {
+            let prepared = gwt::pm_registry::load_pm_delivery_receipts(&receipts)
+                .unwrap()
+                .into_iter()
+                .find(|receipt| {
+                    receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Prepared
+                });
+            if let Some(receipt) = prepared {
+                gwt::pm_registry::finish_pm_delivery_receipt(
+                    &receipts,
+                    &receipt.operation_id,
+                    &receipt.target_session_id,
+                    &receipt.body_sha256,
+                    gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+                    None,
+                )
+                .unwrap();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        });
         crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+        provider_ack.join().unwrap();
         assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
         assert!(!probe.pty.has_unsent_user_input());
         assert!(!runtime.pane_has_unsent_user_input(&id));
@@ -4755,7 +4882,7 @@ mod tests {
         assert!(recorded.iter().any(|user_event| {
             matches!(
                 user_event,
-                UserEvent::RuntimeHook(recorded_event)
+                UserEvent::AuthenticatedRuntimeHook { event: recorded_event, .. }
                     if recorded_event.kind == RuntimeHookEventKind::RuntimeState
                         && recorded_event.source_event.as_deref() == Some("PreToolUse")
                         && recorded_event.agent_session_id.as_deref() == Some("agent-1")
@@ -5436,7 +5563,7 @@ mod tests {
                 version: "99.1.0".into(),
                 asset_url: "https://example.invalid/gwt.zip".into(),
                 payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
                 auto_apply_deferred: false,
             },

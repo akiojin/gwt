@@ -1994,10 +1994,19 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
             started = _model_load_clock()
             from sentence_transformers import SentenceTransformer  # type: ignore
 
-            if model_revision is None:
-                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+            options = {} if model_revision is None else {"revision": model_revision}
+            if _SEARCH_WORKER_QOS == "background":
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, **options)
             else:
-                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=model_revision)
+                # A ready local index already has its model cached. Hub metadata
+                # probes must not consume a cold search's bounded heavy lease.
+                try:
+                    model = SentenceTransformer(
+                        FILE_INDEX_V2_MODEL_ID, local_files_only=True, **options
+                    )
+                except OSError:
+                    # Preserve first-use provisioning for an incomplete cache.
+                    model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, **options)
             _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
         _MODEL_CACHE[revision] = model
         if revision is None and model_revision is not None:
@@ -2733,12 +2742,24 @@ def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] =
 def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     """Pin the first available canonical local ref without fetching."""
     boundary_fields = []
+    head_tree_oid = None
     try:
         boundary_probe = _git_command(
-            root, ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix"]
+            root, ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix",
+                   "--verify", "--quiet", "HEAD^{tree}"]
         )
-        if boundary_probe.returncode == 0 and isinstance(boundary_probe.stdout, bytes):
+        if boundary_probe.returncode in (0, 1) and isinstance(boundary_probe.stdout, bytes):
             boundary_fields = boundary_probe.stdout.split(b"\n")
+            if boundary_probe.returncode == 0:
+                if len(boundary_fields) == 5 and boundary_fields[-1] == b"":
+                    candidate = boundary_fields[3].lower()
+                    if len(candidate) in (40, 64) and all(char in b"0123456789abcdef" for char in candidate):
+                        head_tree_oid = candidate.decode("ascii")
+                        del boundary_fields[3]
+                    else:
+                        boundary_fields = []
+                else:
+                    boundary_fields = []
     except RuntimeError:
         # Keep the original boundary/error classification on probe failure.
         pass
@@ -2746,6 +2767,7 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
             and boundary_fields[0] in (b"true", b"false")):
         root_output, prefix_bytes = boundary_fields[1:3]
     else:
+        head_tree_oid = None
         repository_probe = _git_command(root, ["rev-parse", "--is-inside-work-tree"])
         if repository_probe.returncode != 0:
             if (root / ".git").exists():
@@ -2799,6 +2821,9 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     for reference, exists in candidate_presence:
         if not exists:
             continue
+        if reference == "HEAD" and head_tree_oid is not None:
+            return {"reference": reference, "root_tree_oid": head_tree_oid,
+                    "tree_prefix": tree_prefix}
         expression = f"{reference}^{{tree}}"
         completed = _git_command(root, ["rev-parse", "--verify", "--quiet", expression])
         if completed.returncode != 0:
@@ -3667,16 +3692,19 @@ def _prune_file_record_pool(v2_root: Path) -> int:
             for pool in pools_root.iterdir():
                 if not pool.is_dir() or pool.is_symlink() or not _is_sha256(pool.name):
                     continue
-                for scope, collection_name in (
-                    ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
-                ):
-                    client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
-                    try:
+                opened = []
+                try:
+                    for scope, collection_name in (
+                        ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
+                    ):
+                        client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
+                        opened.append(client)
                         retained = marks.get(pool.name, {}).get(scope, set())
                         removed = _prune_unreferenced_record_block(collection, retained)
                         if removed:
                             return removed
-                    finally:
+                finally:
+                    for client in opened:
                         _close_chroma_client(client)
     except Exception:
         # Cleanup cannot invalidate a completed refresh. Contention, malformed
@@ -3812,11 +3840,6 @@ def _staged_artifact_vectors_are_verified(
     )
     opened: Dict[str, tuple[Any, Any]] = {}
     try:
-        for bucket, collection_name in (
-            ("code", V2_FILES_CODE_COLLECTION),
-            ("docs", V2_FILES_DOCS_COLLECTION),
-        ):
-            opened[bucket] = _open_file_index_v2_collection(store, collection_name)
         for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
             stop = start + FILE_INDEX_V2_VECTOR_BATCH
             indexes = range(start, min(stop, len(records)))
@@ -3839,6 +3862,9 @@ def _staged_artifact_vectors_are_verified(
                     if vector is None:
                         return False
                     expected_vectors.append(vector)
+                if bucket not in opened:
+                    collection_name = V2_FILES_CODE_COLLECTION if bucket == "code" else V2_FILES_DOCS_COLLECTION
+                    opened[bucket] = _open_file_index_v2_collection(store, collection_name)
                 collection = opened[bucket][1]
                 stored = collection.get(
                     ids=[_file_record_id(manifest_entries[index]) if pooled else records[index]["path"] for index in selected],
@@ -3906,6 +3932,7 @@ def _materialize_file_artifact_pair(
     progress_total: Optional[int] = None,
     on_checkpoint: Optional[Callable[[int], None]] = None,
     reuse_entries: Optional[Dict[str, Dict[str, Any]]] = None,
+    invalid_paths: Optional[set[str]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
@@ -3935,7 +3962,11 @@ def _materialize_file_artifact_pair(
                 and not candidate.is_symlink()
             ):
                 shutil.rmtree(candidate, ignore_errors=True)
-        if _artifact_pair_metadata_is_verified(
+        # IDs alone cannot clear payload failures observed by this build.
+        has_invalid_payloads = bool(invalid_paths) and not invalid_paths.isdisjoint(
+            record["path"] for record in records
+        )
+        if not has_invalid_payloads and _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
             if on_checkpoint is not None:
@@ -3943,11 +3974,6 @@ def _materialize_file_artifact_pair(
             return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
-        if artifact_dir.exists():
-            quarantine = artifact_dir.with_name(
-                f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
-            )
-            os.replace(artifact_dir, quarantine)
         staging = artifact_dir.with_name(
             f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
         )
@@ -3957,6 +3983,7 @@ def _materialize_file_artifact_pair(
         computed = 0
         hits = 0
         opened: Dict[str, tuple[Any, Any]] = {}
+        quarantine: Optional[Path] = None
         try:
             for bucket, collection_name in (
                 ("code", V2_FILES_CODE_COLLECTION),
@@ -4126,6 +4153,12 @@ def _materialize_file_artifact_pair(
                 _fsync_file_index_v2_directory(store)
                 for parent in list(store.parents)[:4]:
                     _fsync_directory(parent)
+            # Keep the published metadata in place across yields and staging failures.
+            if artifact_dir.exists():
+                quarantine = artifact_dir.with_name(
+                    f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+                )
+                os.replace(artifact_dir, quarantine)
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits, False
         finally:
@@ -4134,6 +4167,9 @@ def _materialize_file_artifact_pair(
             # Windows cannot delete SQLite files while Chroma owns their handles.
             # A process kill or delayed native close is retried under the next lock.
             shutil.rmtree(staging, ignore_errors=True)
+            if quarantine is not None and not artifact_dir.exists():
+                os.replace(quarantine, artifact_dir)
+                _fsync_directory(artifact_dir.parent)
 
 
 _BASE_DESCRIPTOR_FIELDS = {
@@ -5589,11 +5625,7 @@ def _action_index_files_protocol_v2_pinned(
     reuse_inputs = _file_index_v2_reuse_inputs(repo_hash, worktree_hash, descriptor, db_root)
     canonical = _canonical_git_tree(root)
     if canonical is not None and canonical.get("root_tree_oid") is not None:
-        base_reuse = reuse_inputs.get("base")
-        if base_reuse is not None and base_reuse["descriptor"]["root_tree_oid"] != canonical["root_tree_oid"]:
-            base_records = _canonical_base_records(root, canonical, reuse_inputs=base_reuse)
-        else:
-            base_records = _canonical_base_records(root, canonical)
+        base_records = _canonical_base_records(root, canonical, reuse_inputs=reuse_inputs.get("base"))
     else:
         base_records = []
     base_by_path = {record["path"]: record for record in base_records}
@@ -5729,7 +5761,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(done, "base"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["base"]["entries"].items()
-                            if path not in reuse_inputs["base"]["invalid_paths"]}} if "base" in reuse_inputs else {}),
+                            if path not in reuse_inputs["base"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["base"]["invalid_paths"]} if "base" in reuse_inputs else {}),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -5765,7 +5798,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["overlay"]["entries"].items()
-                            if path not in reuse_inputs["overlay"]["invalid_paths"]}} if "overlay" in reuse_inputs else {}),
+                            if path not in reuse_inputs["overlay"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["overlay"]["invalid_paths"]} if "overlay" in reuse_inputs else {}),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -6380,27 +6414,36 @@ def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     return _cached_issue_source(repo_hash, "documents", lambda: _read_cached_issue_documents(repo_hash))
 
 
-def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
-    root = _issue_cache_root(repo_hash)
-    if not root.is_dir():
-        return []
+def _load_cached_issue_metadata(repo_hash: str) -> List[tuple[Path, int, Dict[str, Any]]]:
+    def load() -> List[tuple[Path, int, Dict[str, Any]]]:
+        root = _issue_cache_root(repo_hash)
+        if not root.is_dir():
+            return []
+        metadata = []
+        for entry in sorted(root.iterdir(), key=lambda item: item.name):
+            if not entry.is_dir():
+                continue
+            try:
+                number = int(entry.name)
+            except ValueError:
+                continue
+            meta_path = entry / "meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
+                continue
+            metadata.append((entry, number, meta))
+        return metadata
 
+    return _cached_issue_source(repo_hash, "metadata", load)
+
+
+def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     issues: List[Dict[str, Any]] = []
-    for entry in sorted(root.iterdir(), key=lambda item: item.name):
-        if not entry.is_dir():
-            continue
-        try:
-            number = int(entry.name)
-        except ValueError:
-            continue
-        meta_path = entry / "meta.json"
+    for entry, number, meta in _load_cached_issue_metadata(repo_hash):
         body_path = entry / "body.md"
-        if not meta_path.is_file():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
-            continue
         try:
             body = (
                 body_path.read_text(encoding="utf-8") if body_path.is_file() else ""
@@ -6563,31 +6606,14 @@ def _load_cached_spec_documents(
 def _read_cached_spec_documents(
     repo_hash: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    root = _issue_cache_root(repo_hash)
-    if not root.is_dir():
-        return [], []
-
     specs: List[Dict[str, Any]] = []
     manifest_entries: List[Dict[str, Any]] = []
-    for entry in sorted(root.iterdir(), key=lambda item: item.name):
-        if not entry.is_dir():
-            continue
-        try:
-            number = int(entry.name)
-        except ValueError:
-            continue
-        meta_path = entry / "meta.json"
-        if not meta_path.is_file():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
-            continue
-
+    for entry, number, meta in _load_cached_issue_metadata(repo_hash):
         labels = _normalize_labels(meta.get("labels", []))
         if not _is_spec_issue(labels):
             continue
 
+        meta_path = entry / "meta.json"
         spec_path = entry / "sections" / "spec.md"
         body_path = entry / "body.md"
         source_path = spec_path if spec_path.is_file() else body_path
@@ -8409,7 +8435,17 @@ def _layered_document_count(
     for store, hidden in _active_store_layers(db_path):
         client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
         try:
-            total += int(collection.count())
+            count = int(collection.count())
+            if count:
+                # count() only reads metadata: a broken HNSW segment can still
+                # report the expected size. Exercise the query reader with a
+                # stored vector so health matches search without loading E5.
+                sample = collection.get(limit=1, include=["embeddings"])
+                vectors = E5EmbeddingFunction._native_finite_query_vectors(sample["embeddings"])
+                if len(vectors) != 1:
+                    raise ValueError("missing scope health probe vector")
+                collection.query(query_embeddings=vectors, n_results=1, include=[])
+            total += count
             if hidden:
                 total -= len(collection.get(ids=sorted(hidden), include=[])["ids"])
         finally:

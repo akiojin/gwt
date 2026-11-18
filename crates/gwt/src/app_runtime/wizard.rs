@@ -19,7 +19,6 @@ use std::{
     thread,
 };
 
-use chrono::Utc;
 use gwt::{
     knowledge_launch_target_branch_name, KnowledgeKind, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
@@ -270,10 +269,14 @@ fn build_knowledge_launch_wizard_session_from_inputs(
     // SPEC #3431 FR-070: this must be the spelling the durable execution
     // binding produces, not a display label. `workspace.ensure` compares
     // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
-    let owner_label = match canonical_owner_kind {
-        LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
-        LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
-    };
+    let owner_label = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: match canonical_owner_kind {
+            LinkedIssueKind::Issue => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            LinkedIssueKind::Spec => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        },
+        number: issue_number,
+    }
+    .canonical_work_owner_label();
     let workspace_resume_context = Some(linked_issue_workspace_context(
         project_root,
         issue_number,
@@ -433,7 +436,8 @@ fn revalidate_issue_monitor_launch_prepared(
             profile_config_path,
             expected.codex_preflight.clone(),
         );
-        if current != *expected {
+        if current != *expected || !expected.base_branch_is_current(&prepared.request.project_root)
+        {
             prepared.delivery.result =
                 Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             prepared.delivery.admission = None;
@@ -456,7 +460,7 @@ struct IssueMonitorGuiPhase {
     delivery_id: Option<String>,
     elapsed_ms: f64,
     prefs_stamp_elapsed_ms: Option<f64>,
-    captured_at: chrono::DateTime<Utc>,
+    captured_at: gwt_core::timestamp::UtcTimestamp,
 }
 
 impl IssueMonitorGuiPhase {
@@ -501,7 +505,7 @@ impl IssueMonitorGuiPhases {
             delivery_id: delivery_id.map(str::to_owned),
             elapsed_ms: now.duration_since(self.started).as_secs_f64() * 1000.0,
             prefs_stamp_elapsed_ms,
-            captured_at: Utc::now(),
+            captured_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         self.phases.push(row);
         self.started = now;
@@ -846,6 +850,9 @@ type IssueMonitorLaunchSelection = (
 struct IssueMonitorLaunchSourceFacts {
     selection: Result<Option<IssueMonitorLaunchSelection>, String>,
     handoff: IssueMonitorResumeHandoff,
+    /// Successful launch facts validate their Git base separately from prefs.
+    /// Answers and rejected preparations do not need another Git lookup.
+    base_branch: Option<String>,
     /// Issue #6299: the host Codex preflight this delivery already ran. It is
     /// not a prefs-derived input, so it is reused, never compared.
     codex_preflight: IssueMonitorCodexPreflightMemo,
@@ -886,6 +893,13 @@ impl IssueMonitorCodexPreflightMemo {
 }
 
 impl IssueMonitorLaunchSourceFacts {
+    fn base_branch_is_current(&self, project_root: &Path) -> bool {
+        self.base_branch.as_ref().is_none_or(|expected| {
+            gwt::issue_monitor::issue_monitor_implementation_base_branch(project_root)
+                .is_ok_and(|current| current == *expected)
+        })
+    }
+
     fn read(
         cache: &LaunchWizardMemoryCache,
         provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
@@ -929,6 +943,7 @@ impl IssueMonitorLaunchSourceFacts {
         Self {
             selection,
             handoff: issue_monitor_resume_handoff(&request.project_root, issue_number),
+            base_branch: None,
             codex_preflight,
             answer_profile_expectation: None,
         }
@@ -1165,7 +1180,7 @@ fn prepare_issue_monitor_launch(
 ) -> Result<IssueMonitorLaunchFacts, String> {
     let mut phase_started = std::time::Instant::now();
     let project_root = &request.project_root;
-    let base_branch = gwt::start_work::resolve_launch_agent_base_branch(project_root)?;
+    let base_branch = gwt::issue_monitor::issue_monitor_implementation_base_branch(project_root)?;
     record_issue_monitor_worker_phase("monitor_base_branch", &mut phase_started);
     let Some(profile) = choice.profiles.preferred_profile() else {
         return Ok(IssueMonitorLaunchFacts {
@@ -1544,7 +1559,9 @@ impl AppRuntime {
                     description: Some(format!(
                         "{} · {}",
                         member.agent_id.as_deref().unwrap_or("Tool unavailable"),
-                        if !member.enabled {
+                        if !member.implementation_eligible() {
+                            "Configured or reserved as PM; unavailable for implementation"
+                        } else if !member.enabled {
                             "Resting; launches wait"
                         } else if member.assignment.is_some() {
                             "Busy; launches wait"
@@ -1659,7 +1676,8 @@ impl AppRuntime {
             .members
             .into_iter()
             .find(|member| {
-                member.agent_id.is_some()
+                member.implementation_eligible()
+                    && member.agent_id.is_some()
                     && !profiles.iter().any(|profile| {
                         profile.agent_member_id.as_ref() == Some(&member.agent_member_id)
                     })
@@ -1685,21 +1703,25 @@ impl AppRuntime {
             });
         let open_other_set = match action {
             gwt::LaunchWizardAction::SetAgentMember { agent_member_id } => {
-                let Some(member) =
+                let Some(prefs) =
                     gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
                         &session.wizard.context.quick_start_root,
                     ))
                     .ok()
-                    .and_then(|prefs| prefs.agent_roster)
-                    .and_then(|roster| {
-                        roster
-                            .members
-                            .into_iter()
-                            .find(|member| member.agent_member_id == *agent_member_id)
-                    })
                 else {
                     return Some(Err("Registered Agent is unavailable; reload Agents".into()));
                 };
+                let Some(member) = prefs.agent_roster.as_ref().and_then(|roster| {
+                    roster
+                        .members
+                        .iter()
+                        .find(|member| member.agent_member_id == *agent_member_id)
+                }) else {
+                    return Some(Err("Registered Agent is unavailable; reload Agents".into()));
+                };
+                if !member.implementation_eligible() {
+                    return Some(Err("This Agent is configured or reserved as PM; choose an implementation member".into()));
+                }
                 if let Some(taken) =
                     sets.profiles
                         .iter()
@@ -1717,6 +1739,11 @@ impl AppRuntime {
                 let Some(tool) = member.agent_id.as_deref() else {
                     return Some(Err("Registered Agent tool is unavailable".into()));
                 };
+                let Some(saved) = gwt::agent_registry::member_profile(&prefs, agent_member_id)
+                    .or_else(|| new_agent_settings_profile(&[], tool))
+                else {
+                    return Some(Err("Registered Agent tool is unavailable".into()));
+                };
                 let open = match open_agent_settings_profile(&sets, &session.wizard) {
                     Ok(open) => open,
                     Err(error) => return Some(Err(error)),
@@ -1725,27 +1752,14 @@ impl AppRuntime {
                 let Some(slot) = sets.profiles.get_mut(sets.active) else {
                     return Some(Err("Agent Settings is unavailable".into()));
                 };
-                if agent_settings_provider_key(&slot.agent_id) != agent_settings_provider_key(tool)
-                {
-                    let Some(replacement) = new_agent_settings_profile(&[], tool) else {
-                        return Some(Err("Registered Agent tool is unavailable".into()));
-                    };
-                    let shared = (
-                        slot.skip_permissions,
-                        slot.runtime_target,
-                        slot.docker_lifecycle_intent,
-                        slot.windows_shell,
-                    );
-                    *slot = replacement;
-                    (
-                        slot.skip_permissions,
-                        slot.runtime_target,
-                        slot.docker_lifecycle_intent,
-                        slot.windows_shell,
-                    ) = shared;
-                }
                 slot.agent_id = tool.into();
                 slot.agent_member_id = Some(agent_member_id.clone());
+                slot.model = saved.model;
+                slot.reasoning = saved.reasoning;
+                slot.version = saved.version;
+                slot.fast_mode = saved.fast_mode;
+                slot.runtime_target = saved.runtime_target;
+                slot.skip_permissions = saved.skip_permissions;
                 true
             }
             gwt::LaunchWizardAction::SetAgent { agent_id } => {
@@ -1805,6 +1819,31 @@ impl AppRuntime {
                 else {
                     return Some(Err("Registered Agent tool is unavailable".into()));
                 };
+                let prefs = match gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(
+                        &session.wizard.context.quick_start_root,
+                    ),
+                ) {
+                    Ok(prefs) => prefs,
+                    Err(_) => {
+                        return Some(Err("Registered Agent is unavailable; reload Agents".into()))
+                    }
+                };
+                let Some(saved) = gwt::agent_registry::member_profile(
+                    &prefs,
+                    &member.agent_member_id,
+                )
+                .or_else(|| {
+                    new_agent_settings_profile(&[], member.agent_id.as_deref().unwrap_or(""))
+                }) else {
+                    return Some(Err("Registered Agent tool is unavailable".into()));
+                };
+                added.model = saved.model;
+                added.reasoning = saved.reasoning;
+                added.version = saved.version;
+                added.fast_mode = saved.fast_mode;
+                added.runtime_target = saved.runtime_target;
+                added.skip_permissions = saved.skip_permissions;
                 added.agent_member_id = Some(member.agent_member_id);
                 profiles.push(added);
                 sets.active = profiles.len() - 1;
@@ -1980,7 +2019,10 @@ impl AppRuntime {
             );
             return launch_agent_open_error(
                 client_id,
-                format!("Window preset {:?} is not a Work surface", window.preset),
+                format!(
+                    "{} is not a Work surface. Open Works to use this action.",
+                    window.preset.title()
+                ),
             );
         }
         // SPEC-1934 US-7 / FR-034
@@ -2247,8 +2289,8 @@ impl AppRuntime {
             return start_work_open_error(
                 client_id,
                 format!(
-                    "Window preset {:?} is not an Agent Kanban surface",
-                    board_window.preset
+                    "{} is not an Agent Kanban surface. Open Agents to launch work.",
+                    board_window.preset.title()
                 ),
             );
         }
@@ -2300,8 +2342,8 @@ impl AppRuntime {
             return launch_agent_open_error(
                 client_id,
                 format!(
-                    "Window preset {:?} is not an Agent Kanban surface",
-                    board_window.preset
+                    "{} is not an Agent Kanban surface. Open Agents to launch work.",
+                    board_window.preset.title()
                 ),
             );
         }
@@ -2385,7 +2427,7 @@ impl AppRuntime {
                                 projection,
                                 &current_sessions,
                                 &tab_title,
-                                Utc::now(),
+                                gwt_core::timestamp::UtcTimestamp::now(),
                             )
                         });
                 let branch = projection
@@ -2824,8 +2866,8 @@ impl AppRuntime {
                 "resume_branch_latest_agent rejected: wrong preset"
             );
             return branch_error(format!(
-                "Window preset {:?} is not a Work surface",
-                window.preset
+                "{} is not a Work surface. Open Works to use this action.",
+                window.preset.title()
             ));
         }
         if tab.kind != gwt::ProjectKind::Git {
@@ -3087,11 +3129,7 @@ impl AppRuntime {
                     display_name: session.display_name.clone(),
                     branch: (!session.branch.trim().is_empty()).then(|| session.branch.clone()),
                     worktree_path: Some(session.worktree_path.display().to_string()),
-                    last_activity_at: Some(
-                        session
-                            .last_activity_at
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    ),
+                    last_activity_at: Some(session.last_activity_at.to_rfc3339_seconds()),
                     resume_kind: resume_kind_for_session(session),
                     lifecycle_status: lifecycle_status_for_session(session),
                 });
@@ -3120,9 +3158,11 @@ impl AppRuntime {
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let base_branch = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
-        let work_branch =
-            gwt::start_work::reserve_start_work_branch_name_for_project(project_root, Utc::now())
-                .map_err(|error| error.to_string())?;
+        let work_branch = gwt::start_work::reserve_start_work_branch_name_for_project(
+            project_root,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )
+        .map_err(|error| error.to_string())?;
         let quick_start_root = project_root.to_path_buf();
         let quick_start_entries = Vec::new();
         let previous_profiles = agent_settings_launch_defaults(
@@ -3365,7 +3405,7 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         let base_branch_name =
-            match gwt::start_work::resolve_launch_agent_base_branch(&project_root) {
+            match gwt::issue_monitor::issue_monitor_implementation_base_branch(&project_root) {
                 Ok(branch) => branch,
                 Err(error) => {
                     return vec![OutboundEvent::reply(
@@ -3548,7 +3588,11 @@ impl AppRuntime {
         }
         let mut profiles = pool.clone();
         if profiles.is_empty() {
-            if let Some(member) = roster.members.iter().find(|member| member.enabled) {
+            if let Some(member) = roster
+                .members
+                .iter()
+                .find(|member| member.enabled && member.implementation_eligible())
+            {
                 if let Some(tool) = member.agent_id.as_ref() {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent {
                         agent_id: tool.clone(),
@@ -3685,8 +3729,12 @@ impl AppRuntime {
             )
             .ok()
             .and_then(|prefs| prefs.agent_roster)
-            .and_then(|roster| roster.members.into_iter().find(|member| member.enabled))
-            {
+            .and_then(|roster| {
+                roster
+                    .members
+                    .into_iter()
+                    .find(|member| member.enabled && member.implementation_eligible())
+            }) {
                 if let Some(tool) = member.agent_id {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent { agent_id: tool });
                     if let Some(mut profile) = wizard.preview_launch_profile() {
@@ -3733,6 +3781,27 @@ impl AppRuntime {
             ),
             self.launch_wizard_state_outbound(context),
         ]
+    }
+
+    /// Agent/model assistance without Monitor enrollment or Docker probing.
+    pub(super) fn member_tuning_choices(
+        &self,
+        project_root: &Path,
+    ) -> Vec<gwt::launch_wizard::IssueMonitorAgentChoices> {
+        let mut wizard = self.issue_monitor_settings_wizard(
+            project_root.to_path_buf(),
+            gwt::LaunchWizardPreviousProfiles::default(),
+        );
+        for agent in gwt::build_builtin_agent_options(Vec::new()) {
+            if !wizard
+                .detected_agents
+                .iter()
+                .any(|known| known.id == agent.id)
+            {
+                wizard.detected_agents.push(agent);
+            }
+        }
+        wizard.issue_monitor_agent_choices(&[])
     }
 
     pub(super) fn issue_monitor_profile_choices(
@@ -3920,14 +3989,31 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
-        if let Err(reason) = self
-            .project_context_for_root(project_root)
+        let context = self.project_context_for_root(project_root);
+        if let Err(reason) = context
+            .as_ref()
             .ok_or_else(|| "Project context is unavailable".to_string())
             .and_then(|context| {
-                self.project_execution_admission(&context, &[format!("issue:{issue_number}")])
+                self.project_execution_admission(context, &[format!("issue:{issue_number}")])
             })
         {
             tracing::warn!(issue_number, %reason, "Monitor materialization withheld by Project execution policy");
+            // Issue #7665: keep the delivery; a registered view resumes it.
+            if let Some(state) = context.and_then(|context| self.project_state_mut(&context)) {
+                let withheld = super::DeferredIssueMonitorLaunch {
+                    project_root: project_root.to_path_buf(),
+                    issue_number,
+                    linked_issue_kind,
+                    delivery_id,
+                    launch_session_strategy,
+                };
+                let launches = &mut state.project_views.withheld_monitor_launches;
+                launches.retain(|launch| {
+                    (launch.issue_number, launch.linked_issue_kind)
+                        != (withheld.issue_number, withheld.linked_issue_kind)
+                });
+                launches.push(withheld);
+            }
             return Vec::new();
         }
         self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
@@ -4501,8 +4587,14 @@ impl AppRuntime {
             let source_prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
             let answer_profile_expectation = prefs.as_ref().and_then(|prefs|
                 capture_monitor_answer_profile_expectation(&request, prefs, &result));
-            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, codex_preflight, answer_profile_expectation };
-            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone()) {
+            let base_branch = match result.as_ref() {
+                Ok(IssueMonitorLaunchPreparation::Launch(facts)) => Some(facts.base_branch.clone()),
+                _ => None,
+            };
+            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, base_branch, codex_preflight, answer_profile_expectation };
+            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone())
+                || !source_facts.base_branch_is_current(&request.project_root)
+            {
                 result = Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             }
             record_issue_monitor_worker_phase("monitor_source_revalidation", &mut phase_started);
@@ -4799,6 +4891,16 @@ impl AppRuntime {
         ]
     }
 
+    /// Remember a failed launch and tell the operator; never report it to the
+    /// Monitor from here.
+    ///
+    /// The owner that ran the launch holds the delivery and its cleanup, so it
+    /// alone settles the failure. A report from the GUI for a redelivered
+    /// delivery would release the row while that cleanup is still open.
+    /// When the owner's own record fails (Issue #7670), the Monitor's
+    /// windowless timeout is the safety net: `expire_stale_unbound_launches`
+    /// releases a delivery that has no window after 120 seconds, and since
+    /// Issue #7679 an unproven process hold no longer stops it.
     pub(super) fn schedule_issue_monitor_launch_failure(
         &mut self,
         context: super::ProjectContext,
@@ -5085,7 +5187,7 @@ impl AppRuntime {
                     Some(attempt),
                 );
             }
-            let captured_at = Utc::now();
+            let captured_at = gwt_core::timestamp::UtcTimestamp::now();
             let span = tracing::Span::current();
             let prefs_path = issue_monitor_prepared_prefs_path(&context);
             let _ = self.blocking_tasks.try_spawn(move || {
@@ -5889,7 +5991,7 @@ impl AppRuntime {
 
         let base_branch_name = match prepared.as_ref() {
             Some(facts) => facts.base_branch.clone(),
-            None => gwt::start_work::resolve_launch_agent_base_branch(&project_root)?,
+            None => gwt::issue_monitor::issue_monitor_implementation_base_branch(&project_root)?,
         };
         let IssueMonitorLaunchProfileChoice {
             profiles: previous_profiles,
@@ -8217,6 +8319,37 @@ mod launch_agent_branch_resolution_tests {
     const NO_BRANCHES_ERROR: &str =
         "No branches exist in this repository; create an initial commit first";
 
+    #[test]
+    fn issue_7536_prefetched_launch_base_must_still_match_integration_ref() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        init_committed_repo(&repo, "main");
+        let facts = super::IssueMonitorLaunchSourceFacts {
+            selection: Ok(None),
+            handoff: Ok(None),
+            base_branch: Some("main".into()),
+            codex_preflight: Default::default(),
+            answer_profile_expectation: None,
+        };
+        assert!(facts.base_branch_is_current(&repo));
+        run_git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        assert!(!facts.base_branch_is_current(&repo));
+        let develop = super::IssueMonitorLaunchSourceFacts {
+            base_branch: Some("develop".into()),
+            ..facts
+        };
+        assert!(develop.base_branch_is_current(&repo));
+        run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
+        assert!(!develop.base_branch_is_current(&repo));
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = gwt_core::process::hidden_command("git")
             .args(args)
@@ -8655,7 +8788,7 @@ fn issue_monitor_owner_launch_profile_choice(
             return Err("Waiting for the selected Agent: its fixed tool, enabled slot or exact member is unavailable".into());
         }
         if !pool.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let selection = select_issue_monitor_profiles_with_codex_config(
                 &pool,
                 codex_config_error,
@@ -8703,7 +8836,7 @@ fn issue_monitor_owner_launch_profile_choice(
         .filter(|option| option.available)
         .map(|option| option.id)
         .collect::<Vec<_>>();
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let selection = select_issue_monitor_automatic_profile(
         &prefs,
         &available,
@@ -8761,7 +8894,7 @@ fn issue_monitor_launch_profile_choice(
     if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
         let pool = prefs.launch_profile_pool();
         if !pool.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let selection = gwt::select_launch_profile(
                 &pool,
                 &prefs.launch_admission_provider_quota_holds(),
@@ -8922,7 +9055,8 @@ fn prepare_issue_monitor_resume(
     // Keep that work with the other launch facts, before returning to the GUI.
     let mut config = super::launch_config_from_persisted_session(&session);
     if autonomous_handoff.is_none() && linked_issue_kind == gwt::LinkedIssueKind::Issue {
-        let base_branch = gwt::start_work::resolve_launch_agent_base_branch(project_root)?;
+        let base_branch =
+            gwt::issue_monitor::issue_monitor_implementation_base_branch(project_root)?;
         let delivery =
             gwt::issue_monitor_owner_branch_delivery(project_root, &base_branch, target_branch);
         config.args.push(gwt::issue_monitor_launch_prompt_for_base(

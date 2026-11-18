@@ -1,4 +1,6 @@
 //! Runtime failure and screen policy shared by the physical project owner and read-only GUI adapters.
+use gwt_core::timestamp::UtcTimestamp;
+
 use crate as gwt;
 
 pub const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
@@ -69,11 +71,11 @@ pub fn classify_issue_monitor_failure(
 ///
 /// Detection lives in `gwt_core::usage` because the message formats and their
 /// reset clauses are provider domain knowledge, not runtime-event knowledge.
-/// `Local::now()` is the reference zone on purpose: both providers print a
+/// The host's local offset anchors the observation: both providers print a
 /// local wall clock with no offset, so the machine running the agent is the
 /// only anchor available.
 pub fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
-    let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
+    let notice = gwt_core::usage::detect_provider_limit_notice(detail, UtcTimestamp::now())?;
     Some(provider_usage_limit_failure(&notice, None, None))
 }
 
@@ -88,9 +90,7 @@ pub fn provider_usage_limit_failure(
 ) -> gwt::IssueMonitorFailure {
     gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider: provider_label(notice, pane_agent_id),
-        resets_at: notice
-            .resets_at
-            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        resets_at: notice.resets_at.map(UtcTimestamp::to_rfc3339_seconds),
         evidence: evidence.map(Box::new),
     }
 }
@@ -226,7 +226,7 @@ fn tagged_agent_error_detail(
 
 pub(crate) struct OrdinaryAgentErrorDetail {
     base_detail: Option<String>,
-    observed_at: chrono::DateTime<chrono::Utc>,
+    observed_at: gwt_core::timestamp::UtcTimestamp,
 }
 
 impl OrdinaryAgentErrorDetail {
@@ -250,13 +250,10 @@ impl OrdinaryAgentErrorDetail {
             self.base_detail.as_deref().unwrap_or_default(),
             final_screen
         );
-        if gwt_core::usage::detect_provider_limit_notice(
-            &haystack,
-            &self.observed_at.with_timezone(&chrono::Local),
-        )
-        .filter(|notice| notice.provider == quota_provider(agent_id))
-        .filter(|notice| released_quota_notice != Some(notice))
-        .is_some()
+        if gwt_core::usage::detect_provider_limit_notice(&haystack, self.observed_at)
+            .filter(|notice| notice.provider == quota_provider(agent_id))
+            .filter(|notice| released_quota_notice != Some(notice))
+            .is_some()
         {
             return None;
         }
@@ -388,12 +385,12 @@ pub(crate) struct ProviderCapacityResume {
 pub struct RuntimePolicyState {
     pub approval: Option<ApprovalPromptState>,
     pub approval_settle_at: Option<std::time::Instant>,
-    pub quota_candidate_since: Option<chrono::DateTime<chrono::Utc>>,
+    pub quota_candidate_since: Option<gwt_core::timestamp::UtcTimestamp>,
     pub quota_hold: Option<crate::IssueMonitorFailure>,
     pub released_quota_notice: Option<gwt_core::usage::ProviderLimitNotice>,
     pub api_error: Option<gwt_core::usage::ProviderApiError>,
     pub recoverable_error: bool,
-    pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_heartbeat: Option<gwt_core::timestamp::UtcTimestamp>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -415,7 +412,7 @@ pub struct ExitPolicyInput<'a> {
     pub detail: Option<String>,
     pub final_screen: Option<&'a str>,
     pub accounts: &'a [gwt_core::usage::ProviderUsage],
-    pub now: chrono::DateTime<chrono::Utc>,
+    pub now: gwt_core::timestamp::UtcTimestamp,
 }
 
 pub struct ExitPolicyOutcome {
@@ -495,21 +492,16 @@ pub fn classify_exit(
                 detail.as_deref().unwrap_or_default(),
                 input.final_screen.unwrap_or_default()
             );
-            gwt_core::usage::detect_provider_limit_notice(
-                &haystack,
-                &input.now.with_timezone(&chrono::Local),
-            )
-            .filter(|notice| notice.provider == quota_provider(input.agent_id))
-            .filter(|notice| state.released_quota_notice.as_ref() != Some(notice))
-            .map(|notice| (notice, haystack))
+            gwt_core::usage::detect_provider_limit_notice(&haystack, input.now)
+                .filter(|notice| notice.provider == quota_provider(input.agent_id))
+                .filter(|notice| state.released_quota_notice.as_ref() != Some(notice))
+                .map(|notice| (notice, haystack))
         } else {
             None
         };
     state.quota_hold = quota_match.as_ref().map(|(notice, screen)| {
         let evidence = crate::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
-            &input
-                .now
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &input.now.to_rfc3339_millis(),
             input.window_id,
             screen,
         )
@@ -582,7 +574,7 @@ pub struct ScreenPolicyInput<'a> {
     pub agent_id: Option<&'a str>,
     pub screen: Option<&'a str>,
     pub accounts: &'a [gwt_core::usage::ProviderUsage],
-    pub now: chrono::DateTime<chrono::Utc>,
+    pub now: gwt_core::timestamp::UtcTimestamp,
     pub monotonic_now: std::time::Instant,
 }
 
@@ -655,12 +647,7 @@ pub fn observe_screen_policy(
     if state.quota_hold.is_none() {
         let notice = input
             .screen
-            .and_then(|screen| {
-                gwt_core::usage::limit_notice::detect_provider_limit_notice_with_clock(
-                    screen,
-                    || input.now.with_timezone(&chrono::Local),
-                )
-            })
+            .and_then(|screen| gwt_core::usage::detect_provider_limit_notice(screen, input.now))
             .filter(|notice| notice.provider == quota_provider(input.agent_id));
         match notice {
             None => {
@@ -674,13 +661,12 @@ pub fn observe_screen_policy(
                 let corroborated = input.agent_id.is_some_and(|agent_id| {
                     crate::issue_monitor::provider_limit_reached_for_agent(agent_id, input.accounts)
                 });
-                if corroborated || input.now.signed_duration_since(first_seen).num_seconds() >= 120
+                if corroborated
+                    || input.now.signed_duration_since(first_seen).whole_seconds() >= 120
                 {
                     state.quota_candidate_since = None;
                     let evidence = crate::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
-                        &input
-                            .now
-                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        &input.now.to_rfc3339_millis(),
                         input.window_id,
                         input.screen.unwrap_or_default(),
                     )
@@ -744,7 +730,7 @@ pub fn observe_screen_policy(
 pub fn release_policy_quota(
     state: &mut RuntimePolicyState,
     accounts: &[gwt_core::usage::ProviderUsage],
-    now: chrono::DateTime<chrono::Utc>,
+    now: gwt_core::timestamp::UtcTimestamp,
 ) -> bool {
     let Some(crate::IssueMonitorFailure::ProviderUsageLimit {
         provider,
@@ -763,9 +749,10 @@ pub fn release_policy_quota(
     if !contradicted {
         return false;
     }
-    state.released_quota_notice = evidence.screen_text.as_deref().and_then(|screen| {
-        gwt_core::usage::detect_provider_limit_notice(screen, &now.with_timezone(&chrono::Local))
-    });
+    state.released_quota_notice = evidence
+        .screen_text
+        .as_deref()
+        .and_then(|screen| gwt_core::usage::detect_provider_limit_notice(screen, now));
     state.quota_hold = None;
     state.quota_candidate_since = None;
     true
@@ -778,9 +765,8 @@ mod tests {
     #[test]
     fn late_agent_detail_refines_final_output_from_the_original_base() {
         use super::{classify_exit, ExitPolicyInput, RuntimePolicyState};
-        let now = chrono::DateTime::parse_from_rfc3339("2026-08-22T09:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now =
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-08-22T09:00:00Z").unwrap();
         let input = |screen| ExitPolicyInput {
             window_id: "owner::agent",
             preset: crate::WindowPreset::Agent,
@@ -835,9 +821,8 @@ mod tests {
 
     #[test]
     fn late_agent_detail_respects_approval_and_own_quota_at_the_captured_time() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-08-22T09:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now =
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-08-22T09:00:00Z").unwrap();
         let context = super::OrdinaryAgentErrorDetail {
             base_detail: Some("Process exited with status 1".into()),
             observed_at: now,
@@ -856,11 +841,8 @@ mod tests {
         assert!(context.promote(&approval, Some("codex"), None).is_none());
         let quota = "Claude usage limit reached. Your limit will reset at 3pm.";
         let screen = format!("{}\n{quota}", super::EXACT_RESUME_FAILURE_SIGNATURE);
-        let released = gwt_core::usage::detect_provider_limit_notice(
-            quota,
-            &now.with_timezone(&chrono::Local),
-        )
-        .expect("existing relative reset fixture");
+        let released = gwt_core::usage::detect_provider_limit_notice(quota, now)
+            .expect("existing relative reset fixture");
         assert!(context.promote(&screen, Some("claude"), None).is_none());
         assert!(context.promote(&screen, Some("codex"), None).is_some());
         assert!(context
@@ -871,15 +853,11 @@ mod tests {
     #[test]
     fn exit_policy_does_not_relatch_released_quota_but_keeps_a_fresh_refusal() {
         use super::{classify_exit, ExitPolicyInput, RuntimePolicyState};
-        let now = chrono::DateTime::parse_from_rfc3339("2026-08-22T09:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now =
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-08-22T09:00:00Z").unwrap();
         let screen="■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n  to purchase more credits or try again at Aug 22nd, 2026 12:46 PM.";
-        let notice = gwt_core::usage::detect_provider_limit_notice(
-            screen,
-            &now.with_timezone(&chrono::Local),
-        )
-        .expect("existing provider quota fixture");
+        let notice = gwt_core::usage::detect_provider_limit_notice(screen, now)
+            .expect("existing provider quota fixture");
         let input = || ExitPolicyInput {
             window_id: "owner::agent",
             preset: crate::WindowPreset::Agent,

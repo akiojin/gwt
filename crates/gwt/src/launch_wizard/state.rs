@@ -10,12 +10,6 @@ impl LaunchWizardState {
                 .live_sessions
                 .iter()
                 .find(|session| session.session_id == entry.session_id)
-                .or_else(|| {
-                    context
-                        .live_sessions
-                        .iter()
-                        .find(|session| session.agent_id == entry.agent_id)
-                })
                 .map(|session| session.window_id.clone());
         }
     }
@@ -2116,26 +2110,14 @@ impl LaunchWizardState {
     }
 
     pub(super) fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
-        if self.agent_is_codex() {
-            codex_reasoning_options_for_model(&self.model)
-        } else if self.effective_agent_id() == "grok" {
-            GROK_REASONING_OPTIONS.to_vec()
-        } else if self.effective_agent_id() == "claude"
-            && is_claude_opus_tier_model(self.model.as_str())
-        {
-            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
-            // `ultracode` is opt-in and only usable on Opus-tier models with
-            // Claude Code >= 2.1.154 and workflows enabled. It is the last
-            // non-default row, so removing it keeps every other index stable.
-            if !self.current_claude_ultracode_supported() {
-                options.retain(|option| option.stored_value != "ultracode");
-            }
-            options
-        } else if self.effective_agent_id() == "claude" && self.model == "sonnet" {
-            CLAUDE_SONNET_REASONING_OPTIONS.to_vec()
-        } else {
-            Vec::new()
+        if self.effective_agent_id() == "codex" && !self.launch_target_is_agent() {
+            return Vec::new();
         }
+        reasoning_options_for_agent_model(
+            self.effective_agent_id(),
+            &self.model,
+            self.current_claude_ultracode_supported(),
+        )
     }
 
     fn current_claude_ultracode_supported(&self) -> bool {
@@ -2250,7 +2232,6 @@ impl LaunchWizardState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
 
     use super::super::test_support::*;
     use super::*;
@@ -3591,7 +3572,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         codex.model = Some("gpt-6-luna".to_string());
@@ -3651,7 +3632,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =
@@ -3697,7 +3678,7 @@ mod tests {
                 "feature/old",
                 Path::new("/tmp/old-repo"),
                 gwt_agent::AgentId::Codex,
-                Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+                gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
                 None,
             );
             let previous_profiles =
@@ -3980,7 +3961,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =

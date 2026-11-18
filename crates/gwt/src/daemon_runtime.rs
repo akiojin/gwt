@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
     Session, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
@@ -638,6 +637,12 @@ impl HookForwardTarget {
     pub fn workspace_reopen_url(&self) -> Result<Url, String> {
         let mut url = self.workspace_update_url()?;
         url.set_path("/internal/workspace-reopen");
+        Ok(url)
+    }
+
+    pub fn workspace_close_proof_repair_url(&self) -> Result<Url, String> {
+        let mut url = self.workspace_update_url()?;
+        url.set_path("/internal/workspace-close-proof-repair");
         Ok(url)
     }
 
@@ -1329,6 +1334,65 @@ pub(crate) fn send_workspace_reopen_via_agent_bridge(
     Ok(receipt)
 }
 
+pub(crate) fn send_workspace_close_proof_repair_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceCloseProofRepairRequest,
+) -> Result<crate::AgentWorkspaceCloseProofRepairReceipt, AgentBridgeFailure> {
+    require_primary_bridge_claim(request.primary_provider_session_id.as_deref())?;
+    let url = target.workspace_close_proof_repair_url().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host close proof repair target is invalid",
+        )
+    })?;
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // A complete multi-worktree replay can take longer than a small mutation.
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "failed to build the Host close proof repair client",
+            )
+        })?;
+    let response = client.post(url).bearer_auth(&target.token).json(request).send()
+        .map_err(|_| AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host close proof repair is unavailable; no local fallback was attempted and its outcome may be unknown",
+        ))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host close proof repair rejection could not be read safely; no local fallback was attempted",
+        )?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        return Err(AgentBridgeFailure::rejected(
+            AgentBridgeFailureReason::OperationRejected,
+            status,
+            diagnostic.as_ref(),
+            false,
+            "Host rejected close proof repair; no local fallback was attempted",
+        ));
+    }
+    let receipt = response.json::<crate::AgentWorkspaceCloseProofRepairReceipt>().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host close proof repair returned an invalid success response; no local fallback was attempted",
+        )
+    })?;
+    if receipt.schema_version != crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION
+        || receipt.work_id.trim().is_empty()
+    {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host close proof repair returned invalid receipt evidence; no local fallback was attempted",
+        ));
+    }
+    Ok(receipt)
+}
+
 fn send_terminalization_via_agent_bridge(
     target: &HookForwardTarget,
     url: Url,
@@ -1537,14 +1601,6 @@ fn emit_runtime_state_notice(event: &str, input: &str, session: Option<Session>)
         Duration::ZERO,
         "ok",
     );
-    // Hook-live is a best-effort notification after the authoritative runtime
-    // state write. A missing GUI must not consume half of the aggregate
-    // UserPromptSubmit budget before the Board and obligation handlers run.
-    let _live_deadline = (event == "UserPromptSubmit").then(|| {
-        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() + USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET.resolve(),
-        )
-    });
     let live_started = Instant::now();
     let notice = RuntimeHookEvent::from_hook(
         RuntimeHookEventKind::RuntimeState,
@@ -1714,7 +1770,7 @@ impl RuntimeHookEvent {
                 .as_ref()
                 .and_then(|event| event.tool_name().map(str::to_string)),
             message,
-            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            occurred_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         }
     }
 }
@@ -2711,10 +2767,36 @@ mod tests {
             url: std::env::var("GWT_MEASURE_HOOK_URL").expect("measurement receiver"),
             token: "measurement-only".into(),
         };
-        let event = hook_live_test_event("PreToolUse", None);
+        let mode = std::env::var("GWT_MEASURE_HOOK_MODE").unwrap_or_default();
+        let event = hook_live_test_event(
+            if mode == "journal" {
+                "UserPromptSubmit"
+            } else {
+                "PreToolUse"
+            },
+            None,
+        );
         crate::cli::hook::diagnostics::begin_event();
         let started = Instant::now();
-        let result = if std::env::var("GWT_MEASURE_HOOK_MODE").as_deref() == Ok("plain") {
+        let result = if mode == "journal" {
+            let home = tempfile::tempdir().unwrap();
+            let runtime_path = home.path().join("runtime/123/gwt-session-test.json");
+            let _aggregate = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                // test-hygiene: allow-wall-clock-deadline Measure the real unchanged UserPromptSubmit aggregate deadline.
+                Instant::now() + Duration::from_millis(200),
+            );
+            hook_delivery::deliver(&runtime_path, &event, |event| {
+                emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+            })
+            .and_then(|()| {
+                let health = hook_live_delivery_health(&runtime_path).unwrap();
+                if health.pending_runtime_state || health.last_success_at.is_none() {
+                    Err("journal did not record the transport ACK".into())
+                } else {
+                    Ok(())
+                }
+            })
+        } else if mode == "plain" {
             bounded_plain_http_hook_live_attempt(
                 &event,
                 &target,
@@ -2726,7 +2808,7 @@ mod tests {
         };
         let elapsed = started.elapsed();
         crate::cli::hook::diagnostics::record_event_total(
-            "PreToolUse",
+            event.source_event.as_deref().unwrap(),
             elapsed,
             if result.is_ok() { "ok" } else { "error" },
             crate::cli::hook::diagnostics::event_metrics(0),
@@ -3938,6 +4020,44 @@ mod tests {
         request.primary_provider_session_id = Some("private-primary-id".into());
         let missing_route = send_workspace_reopen_via_agent_bridge(&target, &request)
             .expect_err("older Host without reopen must fail closed");
+        assert!(missing_route.is_missing_route_rejection());
+        assert!(!missing_route.is_exact_workspace_ensure_required());
+        assert!(!format!("{missing_route:?}").contains("private-primary-id"));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "must not fall back to another mutation route"
+        );
+    }
+
+    #[test]
+    fn workspace_close_proof_repair_missing_route_and_missing_primary_fail_closed() {
+        let server = BindingProbeServer::start(StatusCode::OK, serde_json::json!({}));
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "secret".into(),
+        };
+        let mut request = crate::AgentWorkspaceCloseProofRepairRequest {
+            schema_version: crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+            claimed_session_id: "session-reopen".into(),
+            primary_provider_session_id: None,
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/repo".into(),
+                git_toplevel: "/repo".into(),
+                repo_hash: "repo".into(),
+                branch: "work/reopen".into(),
+            },
+            reason: "continue unfinished work".into(),
+        };
+        let missing_claim = send_workspace_close_proof_repair_via_agent_bridge(&target, &request)
+            .expect_err("missing claim must be rejected before HTTP");
+        assert_eq!(
+            missing_claim.error_code(),
+            Some(crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired)
+        );
+        assert!(missing_claim.http_status.is_none());
+        request.primary_provider_session_id = Some("private-primary-id".into());
+        let missing_route = send_workspace_close_proof_repair_via_agent_bridge(&target, &request)
+            .expect_err("older Host without proof repair must fail closed");
         assert!(missing_route.is_missing_route_rejection());
         assert!(!missing_route.is_exact_workspace_ensure_required());
         assert!(!format!("{missing_route:?}").contains("private-primary-id"));

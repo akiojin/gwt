@@ -90,6 +90,7 @@ pub fn run_maintenance(
         Some(cwd),
     );
     result.before_version = detected.as_ref().and_then(|agent| agent.version.clone());
+    let mut installed_path = None;
     let operation = (|| -> Result<String, String> {
         let mut checked_target = None;
         let (program, args) = match action {
@@ -163,6 +164,9 @@ pub fn run_maintenance(
             descriptor.display_name, descriptor.command
         ))?;
         result.after_version = after.version;
+        if action == MaintenanceAction::Install {
+            installed_path = Some(after.path);
+        }
         if let Some(target) = checked_target {
             let actual = result
                 .after_version
@@ -216,7 +220,55 @@ pub fn run_maintenance(
     result.after_version = result
         .after_version
         .map(|value| redact_output(&value, &environment.0));
+    if result.success {
+        if let Some(path) = installed_path {
+            result.message.push_str(". ");
+            result
+                .message
+                .push_str(&shell_path_guidance(descriptor, &path, &environment.0));
+        }
+    }
     result
+}
+
+fn shell_path_guidance(
+    descriptor: &BuiltinAgentDescriptor,
+    executable: &Path,
+    environment: &HashMap<String, String>,
+) -> String {
+    let directory = executable.parent().unwrap_or(executable).to_string_lossy();
+    // Only this detected filesystem location uses the audit classifier.
+    // Installer/version output retains the stricter blanket env redaction.
+    let mut safe_directory =
+        gwt_core::process_console::redact_line(&gwt_core::process_console::strip_ansi(&directory));
+    for (_, value) in environment
+        .iter()
+        .filter(|(key, value)| gwt_agent::is_secret_env_key(key) && !value.is_empty())
+    {
+        safe_directory = safe_directory.replace(value, gwt_core::process_console::REDACTED);
+    }
+    let check = std::iter::once(descriptor.command)
+        .chain(descriptor.version_prefix_args.iter().copied())
+        .chain([descriptor.version_flag])
+        .collect::<Vec<_>>()
+        .join(" ");
+    if safe_directory != directory {
+        return format!(
+            "gwt detection does not verify your terminal's PATH. The installation directory contains protected data and cannot be shown safely. Find the CLI's installation directory in your profile and add it to your terminal's PATH, then open a new terminal and run `{check}`."
+        );
+    }
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let setup = if cfg!(windows) {
+        format!("add `{directory}` to your user Path environment variable in Windows Settings")
+    } else {
+        let directory = quote(&directory);
+        format!(
+            "add `export PATH={directory}:\"$PATH\"` to ~/.zshrc (zsh) or ~/.bashrc (bash; login shells may use ~/.bash_profile), or run `fish_add_path -- {directory}` in fish"
+        )
+    };
+    format!(
+        "gwt detection does not verify your terminal's PATH. If you get command not found, {setup}. Open a new terminal and run `{check}`."
+    )
 }
 
 fn install_command(descriptor: &BuiltinAgentDescriptor) -> Option<(String, Vec<String>)> {
@@ -557,12 +609,128 @@ mod tests {
             "printf '%s\\n' \"$*\" >> calls\nprintf '#!/bin/sh\\nexit 1\\n' > codex\n/bin/chmod +x codex",
             None,
         );
+        let mut settings = gwt_config::Settings::load_from_path(&fixture.config).unwrap();
+        settings.profiles.profiles[0]
+            .env_vars
+            .insert("HOME".into(), "/different-profile-home".into());
+        settings.save(&fixture.config).unwrap();
         let result = fixture.run(MaintenanceAction::Install);
         assert!(result.success, "{}", result.message);
         assert_eq!(result.before_version, None);
         assert_eq!(result.after_version, None);
         assert!(result.message.contains("version unavailable"));
+        assert!(
+            result.message.contains("terminal's PATH"),
+            "{}",
+            result.message
+        );
+        assert!(result.message.contains("command not found"));
+        assert!(result.message.contains("~/.zshrc"));
+        assert!(result.message.contains("~/.bashrc"));
+        assert!(result.message.contains("fish_add_path"));
+        assert!(result.message.contains("codex --version"));
+        assert!(
+            result
+                .message
+                .contains(fixture.root.path().to_str().unwrap()),
+            "{}",
+            result.message
+        );
         assert_eq!(fixture.calls().trim(), "install -g @openai/codex@latest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_path_instructions_preserve_literal_paths_and_shell_metacharacters() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".local/bin with '$() and `backticks`");
+        let environment = HashMap::from([
+            ("HOME".into(), home.path().display().to_string()),
+            ("PATH".into(), directory.display().to_string()),
+        ]);
+        let descriptor = gwt_agent::builtin_agent_descriptor_for_command("claude").unwrap();
+        let message = shell_path_guidance(descriptor, &directory.join("claude"), &environment);
+        assert!(message.contains(home.path().to_str().unwrap()));
+        assert!(!message.contains("redacted"), "{message}");
+        let command = message
+            .split_once('`')
+            .unwrap()
+            .1
+            .split_once("` to ~/.zshrc")
+            .unwrap()
+            .0;
+        let output = gwt_core::process::resolved_command(
+            gwt_core::process::ProcessPlanRequest::new("/bin/sh"),
+        )
+        .unwrap()
+        .arg("-c")
+        .arg(format!("{command}; printf '%s' \"$PATH\""))
+        .env_clear()
+        .env("HOME", "/different-terminal-home")
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{}:/usr/bin:/bin", directory.display())
+        );
+    }
+
+    #[test]
+    fn shell_path_instructions_do_not_expose_protected_directory_values() {
+        let secret = "private-installation-token";
+        let environment = HashMap::from([("SERVICE_TOKEN".into(), secret.into())]);
+        let descriptor = gwt_agent::builtin_agent_descriptor_for_command("claude").unwrap();
+        let executable = std::path::PathBuf::from("/opt").join(secret).join("claude");
+        let message = shell_path_guidance(descriptor, &executable, &environment);
+        assert!(!message.contains(secret));
+        assert!(!message.contains("export PATH="));
+        assert!(message.contains("protected data"));
+        assert!(message.contains("claude --version"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_claude_install_explains_shell_path_even_when_detection_succeeds() {
+        let fixture = Fixture::new("exit 99", None);
+        fixture.program(
+            "curl",
+            r#"/bin/cat <<'INSTALLER'
+/bin/mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\nprintf "2.1.0 (Claude Code)\\n"\n' > "$HOME/.local/bin/claude"
+/bin/chmod +x "$HOME/.local/bin/claude"
+INSTALLER"#,
+        );
+        let mut settings = gwt_config::Settings::load_from_path(&fixture.config).unwrap();
+        settings.profiles.profiles[0].env_vars.extend([
+            ("HOME".into(), fixture.root.path().display().to_string()),
+            (
+                "PATH".into(),
+                format!(
+                    "{}:{}/.local/bin:/usr/bin:/bin",
+                    fixture.root.path().display(),
+                    fixture.root.path().display()
+                ),
+            ),
+        ]);
+        settings.save(&fixture.config).unwrap();
+        let result = run_maintenance(
+            "claude",
+            MaintenanceAction::Install,
+            &fixture.config,
+            fixture.root.path(),
+        );
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.after_version.as_deref(), Some("2.1.0 (Claude Code)"));
+        assert!(result.message.contains("command not found"));
+        assert!(result
+            .message
+            .contains(fixture.root.path().join(".local/bin").to_str().unwrap()));
+        assert!(result.message.contains("claude --version"));
+        assert!(!result.message.contains("redacted"));
+        assert!(!fixture.root.path().join(".zshrc").exists());
+        assert!(!fixture.root.path().join(".bashrc").exists());
     }
 
     #[cfg(unix)]

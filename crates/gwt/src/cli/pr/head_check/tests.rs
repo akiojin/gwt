@@ -173,7 +173,7 @@ impl RemoteFixture {
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
                 worktree_fingerprint: String::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }
             .into(),
@@ -218,7 +218,7 @@ impl RemoteFixture {
         if let Some(base) = base {
             let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
                 &format!("[{value}]"),
-                chrono::Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
             )
             .unwrap()
             .remove(0);

@@ -410,17 +410,18 @@ impl IssueMonitorPrefs {
 pub(crate) fn record_work_done_tier_landing(
     target: &crate::agent_project_state::SessionWorkMutationTarget,
 ) -> io::Result<()> {
-    use crate::cli::execution_state::ExecutionOwnerKind;
+    use crate::cli::execution_state::ExecutionOwnerKey;
     let Some(execution) = crate::cli::execution_state::load(&target.work_event_root)
         .ok()
         .flatten()
     else {
         return Ok(());
     };
-    let owner = match execution.owner_kind {
-        ExecutionOwnerKind::Issue => format!("Issue #{}", execution.owner_number),
-        ExecutionOwnerKind::Spec => format!("SPEC-{}", execution.owner_number),
-    };
+    let owner = ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    }
+    .canonical_work_owner_label();
     if execution.primary_session_id != target.session_id
         || target.owner.as_deref() != Some(owner.as_str())
     {

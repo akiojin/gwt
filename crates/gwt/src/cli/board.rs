@@ -1,3 +1,5 @@
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::io;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
@@ -172,14 +174,12 @@ pub(super) fn run<E: CliEnv>(
                     .map_err(gwt_error_to_spec_ops_error)?
             };
             let complete_read = (all && limit.is_none() && !unresolved)
-                .then(|| (chrono::Utc::now(), snapshot.board.clone()));
+                .then(|| (UtcTimestamp::now(), snapshot.board.clone()));
             // all:true is the recovery path for unread posts older than the hot projection.
             if all {
-                snapshot.board.entries = crate::board_provider::load_entries_since(
-                    env.repo_path(),
-                    chrono::DateTime::<chrono::Utc>::MIN_UTC,
-                )
-                .map_err(gwt_error_to_spec_ops_error)?;
+                snapshot.board.entries =
+                    crate::board_provider::load_entries_since(env.repo_path(), UtcTimestamp::MIN)
+                        .map_err(gwt_error_to_spec_ops_error)?;
                 snapshot.board.has_more_before = false;
             }
             snapshot.board.entries.retain(|entry| {
@@ -1455,7 +1455,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status,
             workspace_id: workspace_id.map(str::to_string),
-            updated_at: chrono::Utc::now(),
+            updated_at: UtcTimestamp::now(),
         }
     }
 

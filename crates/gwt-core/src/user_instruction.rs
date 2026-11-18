@@ -8,7 +8,7 @@ use std::{
     sync::OnceLock,
 };
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use fs2::FileExt;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,7 @@ pub struct UserInstructionInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInstruction {
     pub id: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     pub original: String,
     pub summary: String,
     pub answer: String,
@@ -173,7 +173,7 @@ fn record_inner(
     }
     let saved = UserInstruction {
         id: uuid::Uuid::new_v4().to_string(),
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
         original: redact(&input.original),
         summary: redact(&input.summary),
         answer: redact(&input.answer),

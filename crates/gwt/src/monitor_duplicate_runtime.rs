@@ -33,6 +33,115 @@ pub struct RegisteredMonitorRuntime {
     pub handle: Arc<PtyHandle>,
 }
 
+/// The matching Session exclusion already held by a prompt's caller. These
+/// snapshots identify that existing exclusion; they grant no execution authority.
+#[derive(Clone, Copy)]
+pub enum HeldMonitorPromptSession<'a> {
+    Bound(&'a gwt_agent::SessionExecutionIdentity),
+    Unbound(&'a gwt_agent::Session),
+}
+
+/// Fence an explicit prompt at its existing protected input commit.
+pub(crate) fn with_monitor_prompt_acceptance<T>(
+    registration: &MonitorRuntimeRegistration,
+    child_pid: u32,
+    held_session: Option<HeldMonitorPromptSession<'_>>,
+    commit: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    gwt_agent::validate_session_id_path_component(&registration.session_id)
+        .map_err(io::Error::other)?;
+    let accept = |session: &gwt_agent::Session| {
+        let identity =
+            gwt_agent::SessionExecutionIdentity::from_session(session).map_err(io::Error::other)?;
+        if registration.review_dispatch
+            || session.id != registration.session_id
+            || session.linked_issue_number != Some(registration.issue_number)
+            || dunce::canonicalize(&session.worktree_path)?
+                != dunce::canonicalize(&registration.worktree_path)?
+        {
+            return Err(io::Error::other("Monitor prompt Session identity changed"));
+        }
+        let matches_held = match held_session {
+            Some(HeldMonitorPromptSession::Bound(expected)) => identity.as_ref() == Some(expected),
+            Some(HeldMonitorPromptSession::Unbound(expected)) => {
+                identity.is_none()
+                    && expected.execution_binding.is_none()
+                    && session.id == expected.id
+                    && session.created_at == expected.created_at
+                    && session.worktree_path == expected.worktree_path
+                    && session.agent_id == expected.agent_id
+                    && session.exact_resume_session_id() == expected.exact_resume_session_id()
+            }
+            None => true,
+        };
+        if !matches_held {
+            return Err(io::Error::other("Monitor prompt held Session changed"));
+        }
+        let Some(identity) = identity else {
+            // Existing degraded Resume remains input-capable. Without a bound
+            // execution identity it cannot authorize Switch, so no fence is needed.
+            return commit();
+        };
+        if identity.execution_binding.owner_number != registration.issue_number {
+            return Err(io::Error::other("Monitor prompt execution owner changed"));
+        }
+        let path = gwt_agent::runtime_state_path(&registration.sessions_dir, &session.id);
+        {
+            let _writer = gwt_agent::session::runtime_writer_lease(&path)?;
+            let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
+            let bytes = std::fs::read(&path)?;
+            let runtime: gwt_agent::SessionRuntimeState = serde_json::from_slice(&bytes)?;
+            if registration.incarnation == 0
+                || child_pid == 0
+                || runtime.execution_identity.as_ref() != Some(&identity)
+                || runtime.runtime_incarnation != Some(registration.incarnation)
+                || runtime.host_started_at.is_none()
+                || runtime.host_started_at
+                    != crate::process::host_process_start_time(std::process::id())
+                || runtime.child_pid != Some(child_pid)
+                || runtime.child_started_at.is_none()
+                || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
+                || matches!(
+                    runtime.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                )
+            {
+                return Err(io::Error::other("Monitor prompt runtime identity changed"));
+            }
+            if runtime.current_hook_event.is_some() {
+                // Retain every historical/status/native field, including unknown
+                // fields. A stale hook receipt cannot restore the removed current.
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| io::Error::other("Monitor prompt runtime is not an object"))?
+                    .remove("current_hook_event");
+                gwt_github::cache::write_atomic_with_durability(
+                    &path,
+                    &serde_json::to_vec_pretty(&value)?,
+                    gwt_github::cache::Durability::RenameOnly,
+                )?;
+            }
+        }
+        // Never carry writer/publication locks into input-state or physical I/O.
+        // Failure after invalidation keeps current unknown; it is not restored.
+        gwt_core::operation_deadline::ensure_remaining("Monitor prompt input")?;
+        commit()
+    };
+    if held_session.is_some() {
+        // These callers are inside their exact owner/Session transaction and
+        // pass its matching snapshot explicitly. Do not infer a path from TLS.
+        let session = gwt_agent::Session::load(
+            &registration
+                .sessions_dir
+                .join(format!("{}.toml", registration.session_id)),
+        )?;
+        accept(&session)
+    } else {
+        gwt_agent::with_session_lease(&registration.sessions_dir, &registration.session_id, accept)
+    }
+}
+
 /// Capture a live holder's complete runtime identity before revoking its launch.
 /// No OS process is signalled here; the owning host uses its retained PTY later.
 #[doc(hidden)]
@@ -142,12 +251,137 @@ pub fn capture_stop_request(
 /// The host owns the handles; this worker only retains exact captured references.
 /// No client connection, canvas snapshot or GUI event dispatch is needed.
 pub struct MonitorRuntimeReconciler {
-    stop: std::sync::mpsc::Sender<()>,
+    stop: std::sync::mpsc::Sender<WorkerCommand>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
+
+#[derive(Clone)]
+pub(crate) struct MonitorRuntimeScan(std::sync::mpsc::Sender<WorkerCommand>);
+
+enum WorkerCommand {
+    Stop,
+    Reconcile {
+        deadline: std::time::Instant,
+        done: std::sync::mpsc::Sender<()>,
+    },
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    Pause {
+        ready: std::sync::mpsc::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    },
+}
+
+impl MonitorRuntimeReconciler {
+    pub(crate) fn scan_trigger(&self) -> MonitorRuntimeScan {
+        MonitorRuntimeScan(self.stop.clone())
+    }
+}
+
+impl MonitorRuntimeScan {
+    pub(crate) fn reconcile_closed_slots(
+        &self,
+        prefs: &crate::IssueMonitorPrefs,
+    ) -> io::Result<bool> {
+        let has_closed_slot = prefs.monitor_runtime_counts.values().any(|census| {
+            census.host_pid == std::process::id()
+                && census
+                    .counts
+                    .keys()
+                    .any(|&number| is_confirmed_closed(prefs, number))
+        });
+        if !has_closed_slot {
+            return Ok(false);
+        }
+        self.publish_current_census()?;
+        Ok(true)
+    }
+
+    /// Publish the host census now and wait until that pass commits.
+    ///
+    /// The worker otherwise wakes on a 5s timeout. A close that has already
+    /// reaped its child still occupies an active slot until the next pass,
+    /// because a stale physical count remains after the logical launch is gone.
+    pub(crate) fn publish_current_census(&self) -> io::Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline =
+            gwt_core::operation_deadline::current().map_or(deadline, |at| at.min(deadline));
+        let (done, completed) = std::sync::mpsc::channel();
+        self.0
+            .send(WorkerCommand::Reconcile { deadline, done })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "Monitor runtime worker stopped")
+            })?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        completed.recv_timeout(remaining).map_err(|error| {
+            let kind = match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                std::sync::mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
+            };
+            io::Error::new(
+                kind,
+                "Monitor runtime reconciliation did not finish before the scan",
+            )
+        })?;
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[derive(Clone)]
+pub(crate) struct TestReconcilerControl(std::sync::mpsc::Sender<WorkerCommand>);
+
+/// Holds the fixture's actual reconciliation worker between completed passes.
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub struct RuntimeReconciliationPause {
+    resume: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl Drop for RuntimeReconciliationPause {
+    fn drop(&mut self) {
+        let _ = self.resume.send(());
+    }
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl TestReconcilerControl {
+    pub(crate) fn pause(&self) -> io::Result<RuntimeReconciliationPause> {
+        let (ready, ready_receiver) = std::sync::mpsc::channel();
+        let (resume, resume_receiver) = std::sync::mpsc::channel();
+        // Release the worker on every failed ACK path, including unwinding.
+        let pause = RuntimeReconciliationPause { resume };
+        self.0
+            .send(WorkerCommand::Pause {
+                ready,
+                resume: resume_receiver,
+            })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "reconciliation worker stopped")
+            })?;
+        ready_receiver
+            // test-hygiene: allow-wall-clock-deadline Bound the fixture's actual worker ACK, rather than deciding success from elapsed time.
+            .recv_timeout(gwt_core::deadline_budget::HANG_GUARD)
+            .map_err(|error| {
+                let kind = match error {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
+                };
+                io::Error::new(kind, format!("reconciliation pause ACK failed: {error}"))
+            })?;
+        Ok(pause)
+    }
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl MonitorRuntimeReconciler {
+    pub(crate) fn test_control(&self) -> TestReconcilerControl {
+        TestReconcilerControl(self.stop.clone())
+    }
+}
+
 impl Drop for MonitorRuntimeReconciler {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        let _ = self.stop.send(WorkerCommand::Stop);
         if let Some(worker) = self.worker.take() {
             if worker.join().is_err() {
                 tracing::error!(target: "gwt.monitor.runtime", "Monitor runtime reconciliation worker failed during owner drain");
@@ -174,10 +408,25 @@ pub fn spawn(
             let mut retained = BTreeMap::new();
             let projects = BTreeMap::from([(project_root, sessions_dir)]);
             loop {
-                let draining = match stopped.recv_timeout(Duration::from_secs(5)) {
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                let (draining, request) = match stopped.recv_timeout(Duration::from_secs(5)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (false, None),
+                    Ok(WorkerCommand::Stop)
+                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => (true, None),
+                    Ok(WorkerCommand::Reconcile { deadline, done }) => {
+                        (false, Some((deadline, done)))
+                    }
+                    #[cfg(any(test, feature = "test-gh-guard"))]
+                    Ok(WorkerCommand::Pause { ready, resume }) => {
+                        // Receiving here proves the preceding reconciliation,
+                        // including its prefs transaction, has completed.
+                        let _ = ready.send(());
+                        let _ = resume.recv();
+                        continue;
+                    }
                 };
+                let _deadline = request.as_ref().map(|(deadline, _)| {
+                    gwt_core::operation_deadline::ScopedOperationDeadline::enter(*deadline)
+                });
                 if let Some(current) = snapshot() {
                     for entry in current {
                         let registration = &entry.registration;
@@ -187,6 +436,9 @@ pub fn spawn(
                         );
                     }
                     reconcile_retained_projects(&projects, &mut retained);
+                }
+                if let Some((_, done)) = request {
+                    let _ = done.send(());
                 }
                 if draining {
                     break;
@@ -284,7 +536,7 @@ fn publish_counts(
     let host_pid = std::process::id();
     let host_started_at = crate::process::host_process_start_time(host_pid)
         .ok_or_else(|| io::Error::other("Monitor host process identity unavailable"))?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(
         &crate::issue_monitor_prefs_path_for_repo_path(project_root),
         |prefs| {
@@ -358,12 +610,35 @@ fn park(project_root: &Path, issue_number: u64, reason: &str) -> io::Result<()> 
                 crate::IssueMonitorConfig::default(),
                 prefs.clone(),
             );
+            let mut message = format!(
+                "duplicate Monitor runtimes: {reason}; no automatic stop (Issue #4466 AC-5)"
+            );
+            // Issue #5132: parking clears the binding, so record which window
+            // held it and keep that record while the same facts are re-observed.
+            match prefs
+                .launched_issues
+                .iter()
+                .find(|launched| launched.issue_number == issue_number)
+            {
+                Some(bound) => {
+                    message.push_str(&format!(
+                        "; Monitor binding before park: {}",
+                        bound.window_id
+                    ));
+                }
+                None if monitor.agent_status().needs_human.contains(&issue_number)
+                    && prefs.failed_issues.iter().any(|failed| {
+                        failed.issue_number == issue_number && failed.message.starts_with(&message)
+                    }) =>
+                {
+                    return Ok(());
+                }
+                None => {}
+            }
             monitor.escalate_to_needs_human(
                 issue_number,
                 crate::issue_monitor::NeedsHumanKind::UserChoiceRequired,
-                format!(
-                    "duplicate Monitor runtimes: {reason}; no automatic stop (Issue #4466 AC-5)"
-                ),
+                message,
             );
             *prefs = monitor.prefs();
             Ok(())
@@ -411,22 +686,26 @@ pub fn stop_requested_runtimes(
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         project_root,
     ))?;
+    apply_requested_runtime_stops(project_root, entries, &prefs.monitor_runtime_stop_requests)
+}
+
+fn apply_requested_runtime_stops(
+    project_root: &Path,
+    entries: &[RegisteredMonitorRuntime],
+    requests: &[crate::issue_monitor::IssueMonitorRuntimeStopRequest],
+) -> io::Result<bool> {
     let mut refresh_inventory = false;
     for entry in entries
         .iter()
         .filter(|entry| !entry.registration.review_dispatch)
     {
         let registration = &entry.registration;
-        for request in prefs
-            .monitor_runtime_stop_requests
-            .iter()
-            .filter(|request| {
-                request.issue_number == registration.issue_number
-                    && request.session_id == registration.session_id
-                    && request.host_pid == std::process::id()
-                    && request.runtime_incarnation == registration.incarnation
-            })
-        {
+        for request in requests.iter().filter(|request| {
+            request.issue_number == registration.issue_number
+                && request.session_id == registration.session_id
+                && request.host_pid == std::process::id()
+                && request.runtime_incarnation == registration.incarnation
+        }) {
             let proof = match runtime_proof(entry) {
                 Ok(proof) => proof,
                 Err(error) => {
@@ -502,6 +781,104 @@ pub fn stop_requested_runtimes(
     Ok(refresh_inventory)
 }
 
+fn is_confirmed_closed(prefs: &crate::IssueMonitorPrefs, number: u64) -> bool {
+    use crate::issue_monitor::{IssueClosureEvidence, IssueClosureState};
+    prefs.closure_records.iter().any(|record| {
+        record.issue_number == number
+            && record.state == IssueClosureState::Closed
+            && record.evidence != IssueClosureEvidence::CompleteLiveAbsence
+    })
+}
+
+/// A close can retire the launch before the native pane reaches its prompt.
+/// Run before publishing the physical census, using only handles owned here.
+fn reclaim_closed_idle_runtimes(
+    prefs_path: &Path,
+    prefs: &crate::IssueMonitorPrefs,
+    entries: &[RegisteredMonitorRuntime],
+) -> bool {
+    use crate::cli::{action_obligation, execution_state};
+    let is_idle = |runtime: &gwt_agent::SessionRuntimeState| {
+        runtime.status == gwt_agent::AgentStatus::Idle && runtime.is_current_normal_stop()
+    };
+    let mut refresh_inventory = false;
+    for entry in entries {
+        let registration = &entry.registration;
+        let number = registration.issue_number;
+        if registration.review_dispatch
+            || entry.handle.tree_exit_confirmed()
+            || !is_confirmed_closed(prefs, number)
+        {
+            continue;
+        }
+        let close = || {
+            let proof = runtime_proof(entry)?;
+            if !is_idle(&proof.runtime) {
+                return Ok(None);
+            }
+            let Some(identity) = gwt_agent::SessionExecutionIdentity::from_session(&proof.session)
+                .map_err(io::Error::other)?
+            else {
+                return Ok(None);
+            };
+            let worktree = &registration.worktree_path;
+            crate::session_finalizer::finalize_exact_close_if(
+                &registration.sessions_dir,
+                &identity,
+                registration.incarnation,
+                &entry.handle,
+                &registration.window_id,
+                Some(false),
+                None,
+                |runtime| {
+                    // An accepted prompt invalidates the Stop receipt, even
+                    // before its first hook publishes Running.
+                    if !is_idle(runtime) {
+                        return Ok(false);
+                    }
+                    let Some(record) = execution_state::load(worktree)? else {
+                        return Ok(false);
+                    };
+                    if record.owner_number != number
+                        || record.primary_session_id != registration.session_id
+                        || record.status != ExecutionControlStatus::Completed
+                        || !execution_state::integrity_ok(&record)
+                        || !execution_state::execution_binding_authorizes_current_generation(
+                            worktree,
+                            ExecutionOwnerKey {
+                                kind: record.owner_kind,
+                                number,
+                            },
+                            &identity.session_id,
+                            &identity.execution_binding.identity,
+                        )?
+                    {
+                        return Ok(false);
+                    }
+                    let clear = action_obligation::load(worktree)?.is_none_or(|state| {
+                        state.session_id == identity.session_id
+                            && action_obligation::integrity_ok(&state)
+                            && state.obligations.iter().all(|item| item.settled.is_some())
+                    });
+                    Ok(clear
+                        && is_confirmed_closed(
+                            &crate::load_issue_monitor_prefs(prefs_path)?,
+                            number,
+                        ))
+                },
+            )
+        };
+        match close() {
+            Ok(Some(())) => refresh_inventory = true,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(target: "gwt.monitor.runtime", issue_number = number, session_id = %registration.session_id, %error, "could not reclaim settled Monitor runtime");
+            }
+        }
+    }
+    refresh_inventory
+}
+
 fn reconcile_project(
     project_root: &Path,
     sessions_dir: &Path,
@@ -511,7 +888,12 @@ fn reconcile_project(
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         std::time::Instant::now() + Duration::from_secs(5),
     );
-    let refreshed_inventory = stop_requested_runtimes(project_root, entries)?.then(|| {
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path)?;
+    let stopped =
+        apply_requested_runtime_stops(project_root, entries, &prefs.monitor_runtime_stop_requests)?;
+    let reclaimed = reclaim_closed_idle_runtimes(&prefs_path, &prefs, entries);
+    let refreshed_inventory = (stopped || reclaimed).then(|| {
         crate::session_inventory::ProjectSessionCensus::capture(sessions_dir).observe(project_root)
     });
     let inventory = refreshed_inventory.as_ref().unwrap_or(inventory);
@@ -528,7 +910,7 @@ fn reconcile_project(
     }
     for (issue_number, pair) in groups {
         // A review process is an independent dispatch, not a duplicate implementation.
-        let live_implementations = inventory
+        let mut live_sessions = inventory
             .sessions
             .iter()
             .filter(|observed| {
@@ -538,7 +920,8 @@ fn reconcile_project(
                             && entry.registration.session_id == observed.session_id
                     })
             })
-            .count();
+            .collect::<Vec<_>>();
+        let live_implementations = live_sessions.len();
         if pair.len() < 2
             && live_implementations < 2
             && complete_counts.get(&issue_number).copied().unwrap_or(0) < 2
@@ -549,10 +932,35 @@ fn reconcile_project(
             monitor_runtime_uncertainty_affects_issue(uncertainty, sessions_dir, issue_number)
         });
         if pair.len() != 2 || live_implementations != 2 || uncertain {
+            // Issue #5132: name what was observed so the duplicate can be
+            // picked without a separate pane.list.
+            live_sessions.sort_by(|a, b| {
+                (&a.started_at, &a.session_id).cmp(&(&b.started_at, &b.session_id))
+            });
+            let sessions = live_sessions
+                .iter()
+                .map(|observed| {
+                    let window = pair
+                        .iter()
+                        .find(|entry| entry.registration.session_id == observed.session_id)
+                        .map_or("not registered on this host", |entry| {
+                            entry.registration.window_id.as_str()
+                        });
+                    format!(
+                        "{} started {} window {window}",
+                        observed.session_id, observed.started_at
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             park(
                 project_root,
                 issue_number,
-                "the complete exact pair could not be established",
+                &format!(
+                    "the complete exact pair could not be established (registered runtimes: {}, live implementation Sessions: {live_implementations}, uncertain evidence: {}; oldest first: {sessions})",
+                    pair.len(),
+                    if uncertain { "yes" } else { "no" },
+                ),
             )?;
             continue;
         }
@@ -956,6 +1364,61 @@ mod tests {
     }
 
     #[test]
+    fn issue_5132_unestablished_pair_reason_names_the_sessions_and_the_monitor_binding() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let project = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(project.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let pair =
+            crate::cli::execution_state::seed_monitor_pair_for_test(project.path(), &sessions);
+        let (local, _local_guard) = runtime(project.path(), &sessions, &pair[0], 1);
+        let (_peer, _peer_guard) = runtime(project.path(), &sessions, &pair[1], 2);
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::issue_monitor::IssueMonitorLaunchedIssue {
+                    issue_number: 4466,
+                    window_id: local.registration.window_id.clone(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let reason = || {
+            reconcile_project(project.path(), &sessions, std::slice::from_ref(&local)).unwrap();
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .failed_issues
+                .into_iter()
+                .find(|failed| failed.issue_number == 4466)
+                .expect("parked with a reason")
+                .message
+        };
+        let first = reason();
+        for expected in [
+            "duplicate Monitor runtimes: the complete exact pair could not be established",
+            "registered runtimes: 1",
+            "live implementation Sessions: 2",
+            "holder started ",
+            "window tab::holder",
+            "nonholder started ",
+            "window not registered on this host",
+            "no automatic stop (Issue #4466 AC-5)",
+            "Monitor binding before park: tab::holder",
+        ] {
+            assert!(first.contains(expected), "missing {expected:?} in {first}");
+        }
+        // Parking clears the binding; the next scan must not erase that evidence.
+        assert_eq!(reason(), first);
+    }
+
+    #[test]
     fn registered_project_without_ptys_releases_a_dead_hosts_slots() {
         let _env = crate::env_test_lock()
             .lock()
@@ -1233,6 +1696,140 @@ mod stop_tests {
             entry,
             child_pid,
             root_exit_file,
+        });
+    }
+
+    #[test]
+    fn closed_idle_completed_runtime_releases_its_slot_on_reconciliation() {
+        use crate::cli::action_obligation;
+        use gwt_github::{Cache, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+
+        with_stop_fixture(|fixture| {
+            let StopFixture {
+                project,
+                sessions,
+                owner,
+                session,
+                runtime,
+                entry,
+                ..
+            } = fixture;
+            let root = project.path();
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(root);
+            let cache =
+                Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(root));
+            let revision = "2026-11-17T21:35:00Z";
+            cache
+                .write_snapshot(&IssueSnapshot {
+                    author_login: None,
+                    number: IssueNumber(owner.number),
+                    title: "Owner with a stale open cache row".into(),
+                    body: String::new(),
+                    labels: vec![gwt_github::issue_auto_claim::QUEUED_LABEL.into()],
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new(revision),
+                    comments: Vec::new(),
+                })
+                .unwrap();
+            session.status = AgentStatus::Idle;
+            session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+            session.save(sessions).unwrap();
+            runtime.status = AgentStatus::Idle;
+            let mut stop =
+                gwt_agent::session::CurrentHookEventObservation::pending("Stop").unwrap();
+            stop.outcome = Some(gwt_agent::session::HookCompletionOutcome::Normal);
+            runtime.current_hook_event = Some(stop.clone());
+            let runtime_path = gwt_agent::runtime_state_path(sessions, &session.id);
+            let publish_runtime = |runtime: &gwt_agent::SessionRuntimeState| {
+                std::fs::write(&runtime_path, serde_json::to_vec(runtime).unwrap()).unwrap();
+            };
+            publish_runtime(runtime);
+            let tick = || {
+                let inventory = crate::session_inventory::observe_sessions(root, sessions);
+                reconcile_project(root, sessions, std::slice::from_ref(entry), &inventory).unwrap();
+            };
+            let status = || {
+                let mut env = crate::cli::TestEnv::new(root.into());
+                let (code, output) = crate::cli::run_collect(
+                    &mut env,
+                    crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStatus {
+                        project_root: Some(root.into()),
+                    }),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{output}");
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()
+            };
+            tick();
+            assert_eq!(status()["occupied_slot_count"], 1);
+
+            assert!(matches!(
+                execution_state::settle(
+                    root,
+                    &session.id,
+                    execution_state::ExecutionSettlement::Completed,
+                )
+                .unwrap(),
+                execution_state::SettleResult::Settled(_)
+            ));
+            tick();
+            assert_eq!(
+                status()["occupied_slot_count"],
+                1,
+                "open owner keeps its pane"
+            );
+
+            action_obligation::mark_from_prompt(root, &session.id, "Create a pull request")
+                .unwrap();
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            monitor.record_closed(owner.number, Some(revision.into()));
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+            tick();
+            assert_eq!(status()["occupied_slot_count"], 1, "unsettled obligation");
+            let mismatch = status()["session_row_mismatch"]["working_without_active_row"]
+                .as_array()
+                .unwrap()
+                .clone();
+            assert_eq!(mismatch[0]["issue_number"], owner.number);
+
+            action_obligation::settle_kinds_best_effort(
+                root,
+                &session.id,
+                &[action_obligation::ObligationKind::Pr],
+                "test: delivery complete",
+            );
+            // Prompt admission invalidates Stop before the hook switches
+            // the projected status to Running.
+            runtime.current_hook_event = None;
+            publish_runtime(runtime);
+            tick();
+            assert_eq!(
+                status()["occupied_slot_count"],
+                1,
+                "idle status without Stop"
+            );
+
+            runtime.current_hook_event = Some(stop);
+            publish_runtime(runtime);
+            let registered = entry.clone();
+            let worker = spawn(root.to_path_buf(), sessions.clone(), move || {
+                Some(vec![registered.clone()])
+            })
+            .unwrap();
+            let before = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            assert!(worker
+                .scan_trigger()
+                .reconcile_closed_slots(&before)
+                .unwrap());
+            let after = status();
+            assert_eq!(after["occupied_slot_count"], 0, "{after}");
+            assert_eq!(
+                after["session_row_mismatch"]["working_without_active_row"],
+                serde_json::json!([]),
+            );
         });
     }
 

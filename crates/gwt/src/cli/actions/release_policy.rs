@@ -98,6 +98,34 @@ fn safe_config_error(target: WorkflowPolicyTarget, _: impl std::fmt::Display) ->
     io::Error::other(format!("workflow policy configuration is unreadable or could not be persisted; inspect {} before retrying", status_operation(target)))
 }
 
+fn session_is_live_for(
+    session: &gwt_agent::Session,
+    session_id: &str,
+    worktree: &Path,
+) -> io::Result<bool> {
+    let repository_hash = gwt_core::repo_hash::detect_repo_hash(worktree)
+        .ok_or_else(|| refused("current repository identity is unavailable"))?;
+    Ok(session.id == session_id
+        && matches!(
+            session.status,
+            gwt_agent::AgentStatus::Running
+                | gwt_agent::AgentStatus::Idle
+                | gwt_agent::AgentStatus::WaitingInput
+        )
+        && dunce::canonicalize(&session.worktree_path).ok().as_deref() == Some(worktree)
+        && session
+            .repo_hash
+            .as_ref()
+            .is_none_or(|hash| hash == repository_hash.as_str())
+        // The project root of a Nested Bare + Worktree layout is not a
+        // repository itself; an ambiguous or foreign root still resolves to
+        // no matching identity and stays refused.
+        && session.project_state_root.as_deref().is_none_or(|root| {
+            gwt_core::repo_hash::detect_repo_identity(root)
+                .is_some_and(|identity| identity.hash == repository_hash)
+        }))
+}
+
 /// Inspection PMs deliberately have capability generation zero. This proof
 /// authenticates the existing issuer; it never mints or rebinds a capability.
 pub(crate) fn context(repo: &Path) -> io::Result<ReleasePolicyContext> {
@@ -115,25 +143,7 @@ pub(crate) fn context(repo: &Path) -> io::Result<ReleasePolicyContext> {
     )
     .map_err(|_| refused("PM Session is unavailable; inspect the current PM registration"))?;
     let worktree = dunce::canonicalize(gwt_core::paths::resolve_current_worktree_root(repo))?;
-    let repository_hash = gwt_core::repo_hash::detect_repo_hash(&worktree)
-        .ok_or_else(|| refused("current repository identity is unavailable"))?;
-    if session.id != session_id
-        || !matches!(
-            session.status,
-            gwt_agent::AgentStatus::Running
-                | gwt_agent::AgentStatus::Idle
-                | gwt_agent::AgentStatus::WaitingInput
-        )
-        || dunce::canonicalize(&session.worktree_path).ok().as_ref() != Some(&worktree)
-        || session
-            .repo_hash
-            .as_ref()
-            .is_some_and(|hash| hash != repository_hash.as_str())
-        || session.project_state_root.as_deref().is_some_and(|root| {
-            gwt_core::repo_hash::detect_repo_hash(root)
-                != gwt_core::repo_hash::detect_repo_hash(&worktree)
-        })
-    {
+    if !session_is_live_for(&session, &session_id, &worktree)? {
         return Err(refused(
             "PM Session does not match the current live repository and worktree",
         ));
@@ -407,7 +417,7 @@ pub(crate) fn execute<E: CliEnv>(
                     scope: scope.clone(),
                     authorization: normalized.clone(),
                     actor: current_context,
-                    at: chrono::Utc::now().to_rfc3339(),
+                    at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     reason: gwt_core::error_ledger::redact_credentials(&input.reason),
                     before,
                     after,
@@ -543,6 +553,51 @@ mod tests {
     fn proofs(env: &mut crate::cli::TestEnv) {
         env.release_policy_contexts
             .extend([Ok(proof()), Ok(proof())]);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    /// Issue #4249 AC-8: a PM of a Nested Bare + Worktree project records the
+    /// layout root as its `project_state_root`. That root is not a repository
+    /// itself, so a strict identity read refused the registered PM.
+    #[test]
+    fn nested_bare_layout_root_is_the_same_project_as_its_worktree() {
+        const ORIGIN: &str = "https://github.com/akiojin/gwt.git";
+        let layout = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(layout.path()).unwrap();
+        let (bare, worktree) = (root.join("gwt.git"), root.join("pm-worktree"));
+        for (dir, init) in [
+            (&bare, &["init", "-q", "--bare"][..]),
+            (&worktree, &["init", "-q"]),
+        ] {
+            fs::create_dir(dir).unwrap();
+            git(dir, init);
+            git(dir, &["remote", "add", "origin", ORIGIN]);
+        }
+        let mut session = gwt_agent::Session::new(&worktree, "develop", gwt_agent::AgentId::Codex);
+        session.status = gwt_agent::AgentStatus::Running;
+        session.project_state_root = Some(root.clone());
+        let id = session.id.clone();
+        assert!(session_is_live_for(&session, &id, &worktree).unwrap());
+
+        // A layout root of another repository stays refused.
+        git(
+            &bare,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/akiojin/other.git",
+            ],
+        );
+        assert!(!session_is_live_for(&session, &id, &worktree).unwrap());
     }
 
     #[test]
@@ -910,7 +965,7 @@ mod tests {
             scope: intent.scope().unwrap(),
             authorization: authorization.clone(),
             actor: proof(),
-            at: chrono::Utc::now().to_rfc3339(),
+            at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             reason: "Fixture".into(),
             before: snapshot("owner/repo", &raw),
             after: Snapshot {

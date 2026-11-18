@@ -130,6 +130,7 @@ pub enum CliCommand {
     Issue(IssueCommand),
     Pr(PrCommand),
     Actions(ActionsCommand),
+    AgentRegistry(AgentRegistryCommand),
     Board(BoardCommand),
     /// Issue #3970: `branch.prune_merged` merged remote-branch sweep.
     Branch(branch::BranchCommand),
@@ -166,11 +167,20 @@ pub enum CliCommand {
     Pm(pm::PmCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
+    ProjectControl(open::ProjectControlCommand),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
     GithubBudget(github_budget::GithubBudgetCommand),
     /// Issue #3516: `release.*` interrupted-release standing check.
     Release(release::ReleaseCommand),
+}
+
+/// Common Agent registry diagnosis and explicitly observed recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRegistryCommand {
+    Status { source_key: Option<String> },
+    Reconcile(Box<crate::agent_registry::RegistryReconcileRequest>),
+    RestoreSchema3,
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -303,6 +313,9 @@ pub enum CliParseError {
     InvalidJson(String),
     /// Fixed diagnostic: safe to display even when caller input must be redacted.
     InvalidVerificationMode,
+    /// Params diagnostic built only from operation and schema-owned field
+    /// names, so it is safe to display under the redacting safe intake.
+    InvalidParams(String),
     InvalidNumber(String),
     MissingFlag(&'static str),
     InvalidValue {
@@ -316,6 +329,7 @@ impl std::fmt::Display for CliParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CliParseError::InvalidJson(message) => write!(f, "invalid JSON envelope: {message}"),
+            CliParseError::InvalidParams(message) => write!(f, "{message}"),
             CliParseError::InvalidVerificationMode => {
                 write!(f, "verify.plan mode must be full or pre-pr")
             }
@@ -568,6 +582,21 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Issue(inner) => issue::run(env, inner, &mut out)?,
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
+        CliCommand::AgentRegistry(command) => {
+            let status = match command {
+                AgentRegistryCommand::Status { source_key } => {
+                    crate::agent_registry::status(source_key.as_deref())
+                }
+                AgentRegistryCommand::Reconcile(request) => {
+                    crate::agent_registry::reconcile(&request)
+                }
+                AgentRegistryCommand::RestoreSchema3 => crate::agent_registry::restore_schema3(),
+            }
+            .map_err(io_as_api_error)?;
+            out.push_str(&serde_json::to_string_pretty(&status).map_err(serde_as_api_error)?);
+            out.push('\n');
+            0
+        }
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
         CliCommand::Branch(inner) => branch::run(env, inner, &mut out)?,
         CliCommand::Worktree(inner) => worktree_gc::run(env, inner, &mut out)?,
@@ -683,6 +712,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Perf(inner) => perf::run(env, inner, &mut out)?,
         CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
+        CliCommand::ProjectControl(command) => open::run_control(env, command, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
     };
     Ok((code, out))

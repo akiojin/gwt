@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::LogLevel;
@@ -33,7 +33,7 @@ pub struct LogEvent {
     pub source: String,
     pub message: String,
     pub detail: Option<String>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTimestamp,
     /// Resolved registered project token; absent for machine-wide events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_scope: Option<String>,
@@ -54,7 +54,7 @@ impl LogEvent {
             source: source.into(),
             message: message.into(),
             detail: None,
-            timestamp: Utc::now(),
+            timestamp: UtcTimestamp::now(),
             project_scope: None,
             fields: serde_json::Map::new(),
         }
@@ -146,9 +146,9 @@ mod tests {
 
     #[test]
     fn timestamp_is_recent() {
-        let before = Utc::now();
+        let before = UtcTimestamp::now();
         let e = LogEvent::new(LogLevel::Debug, "test", "ts check");
-        let after = Utc::now();
+        let after = UtcTimestamp::now();
         assert!(e.timestamp >= before && e.timestamp <= after);
     }
 }

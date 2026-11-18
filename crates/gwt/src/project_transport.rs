@@ -8,9 +8,9 @@ use crate::agent_capability::{
 };
 use crate::{
     AgentBuildAbortTerminalizationRequest, AgentWorkMaterializationProbeRequest,
-    AgentWorkTerminalizationRequest, AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError,
-    AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent,
-    RuntimeHookEvent,
+    AgentWorkTerminalizationRequest, AgentWorkspaceCloseProofRepairRequest,
+    AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, RuntimeHookEvent,
 };
 use axum::{
     extract::{
@@ -287,6 +287,10 @@ pub enum TransportEvent {
         >,
     },
     RuntimeHook(RuntimeHookEvent),
+    AuthenticatedRuntimeHook {
+        grant: AgentCapabilityGrant,
+        event: RuntimeHookEvent,
+    },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -1481,6 +1485,10 @@ pub fn agent_router(state: TransportState, access_log: AccessLogSink) -> Router 
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route("/internal/workspace-reopen", post(workspace_reopen_handler))
         .route(
+            "/internal/workspace-close-proof-repair",
+            post(workspace_close_proof_repair_handler),
+        )
+        .route(
             "/internal/work-materialization-probe",
             post(work_materialization_probe_handler),
         )
@@ -1633,9 +1641,10 @@ async fn hook_live_handler(
     State(state): State<TransportState>,
     Json(mut event): Json<RuntimeHookEvent>,
 ) -> StatusCode {
-    let Some(principal) = agent_capability_principal(&headers, &state) else {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
         return StatusCode::UNAUTHORIZED;
     };
+    let principal = grant.principal();
     if event.gwt_session_id.as_deref() != Some(principal.session_id()) {
         tracing::warn!(
             target: "gwt_security",
@@ -1661,11 +1670,12 @@ async fn hook_live_handler(
         None => "none",
         _ => "other",
     };
-    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
-        event.occurred_at.as_str()
-    } else {
-        "invalid"
-    };
+    let occurred_at =
+        if gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&event.occurred_at).is_ok() {
+            event.occurred_at.as_str()
+        } else {
+            "invalid"
+        };
     tracing::info!(
         target: "gwt.hook.delivery",
         stage = "receipt",
@@ -1675,7 +1685,22 @@ async fn hook_live_handler(
         occurred_at,
         "runtime hook delivery"
     );
-    state.send(TransportEvent::RuntimeHook(event));
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    {
+        let captured = grant.clone();
+        if tokio::task::spawn_blocking(move || {
+            crate::project_runtime::agent_frontend::run_owner_agent_dispatch_test_hook(
+                &captured,
+                crate::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::BeforeHookDispatch,
+            );
+        })
+        .await
+        .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+    state.send(TransportEvent::AuthenticatedRuntimeHook { grant, event });
     StatusCode::NO_CONTENT
 }
 
@@ -1814,6 +1839,74 @@ async fn workspace_reopen_handler(
             AgentWorkspaceUpdateError::new(
                 AgentWorkspaceUpdateErrorCode::Internal,
                 "Host workspace reopen task failed before a response was produced",
+            ),
+        ),
+    }
+}
+
+async fn workspace_close_proof_repair_handler(
+    headers: HeaderMap,
+    State(state): State<TransportState>,
+    Json(request): Json<AgentWorkspaceCloseProofRepairRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "close_proof_repair_requires_active_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::cli::execution_state::with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &execution_binding,
+            || {
+                crate::apply_bound_authenticated_workspace_close_proof_repair(
+                    &mutation_project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                )
+            },
+        )
+        .map_err(|_| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "close proof repair authority lease is unavailable",
+            )
+        })?
+        .ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "close proof repair authority changed before mutation",
+            )
+        })?
+    })
+    .await;
+    match result {
+        Ok(Ok(receipt)) => {
+            state.send(TransportEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host close proof repair task failed before a response was produced",
             ),
         ),
     }
@@ -2611,6 +2704,27 @@ impl ClientSessionScope {
     }
 }
 
+/// Malformed tuning can only be correlated on its own authenticated browser project.
+/// Payload identity is never routing authority, and parser diagnostics are not echoed.
+fn rejected_tuning_parse(scope: &ClientSessionScope, text: &str) -> Option<BackendEvent> {
+    let ClientSessionScope::Browser(ClientScope::Project(key)) = scope else {
+        return None;
+    };
+    let raw: serde_json::Value = serde_json::from_str(text).ok()?;
+    if raw.get("kind")?.as_str()? != "agent_roster"
+        || raw.get("action")?.get("kind")?.as_str()? != "set_tuning"
+        || raw.get("project_key")?.as_str()? != key.as_str()
+    {
+        return None;
+    }
+    let request_id = raw.get("request_id")?.as_str()?;
+    if request_id.trim().is_empty() || request_id.len() > 256 {
+        return None;
+    }
+    Some(BackendEvent::AgentRosterError { project_key: key.to_string(), request_id: Some(request_id.to_string()),
+        message: "Invalid tuning request. Reload registered members and retry with explicit model and reasoning fields.".into() })
+}
+
 fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
     let event = serde_json::from_str(text)?;
     if matches!(&event, FrontendEvent::PaneName { .. }) {
@@ -3168,6 +3282,9 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(event) = rejected_tuning_parse(&scope, text.as_ref()) {
+                                    send_agent_terminal_result(&mut sender, event, Duration::from_secs(1)).await;
+                                }
                                 if let Some(request_id) = name_request_id {
                                     pending_names.remove(&request_id);
                                     send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
@@ -3545,10 +3662,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         assert!(matches!(
+            // test-hygiene: allow-wall-clock-deadline Bound delivery of the actual authenticated HTTP request; channel receipt establishes progress.
             tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
                 .await
                 .unwrap(),
-            Some(TransportEvent::RuntimeHook(_))
+            Some(TransportEvent::AuthenticatedRuntimeHook { .. })
         ));
         let text = std::fs::read_to_string(hook_log.path()).unwrap();
         let records: Vec<serde_json::Value> = text
@@ -4386,6 +4504,7 @@ mod tests {
         BackendEvent::AttachmentProgress {
             id: pane.to_string(),
             operation_id: operation_id.to_string(),
+            expected_target: None,
             phase,
             file_index: Some(0),
             file_count: 1,
@@ -5837,5 +5956,30 @@ mod tests {
         assert_eq!(hub.scope("a"), None);
         hub.register("a".into());
         assert_eq!(hub.scope("a"), Some(ClientScope::Hub));
+    }
+}
+
+#[cfg(test)]
+mod tuning_parse_tests {
+    use super::*;
+    #[test]
+    fn malformed_tuning_correlates_only_the_authenticated_browser_project() {
+        let key = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+        let scope = ClientSessionScope::Browser(ClientScope::Project(key.clone()));
+        let request = serde_json::json!({"kind":"agent_roster","project_key":key.as_str(),"request_id":"tune-1",
+            "action":{"kind":"set_tuning","member_id":"member","model":null,"expected_core_revision":"token","authority":"forged"}});
+        assert!(decode_frontend_event(&request.to_string()).is_err());
+        let event = rejected_tuning_parse(&scope, &request.to_string()).unwrap();
+        assert!(
+            matches!(event, BackendEvent::AgentRosterError { project_key, request_id: Some(id), .. } if project_key == key.as_str() && id == "tune-1")
+        );
+        assert!(rejected_tuning_parse(
+            &ClientSessionScope::Browser(ClientScope::Hub),
+            &request.to_string()
+        )
+        .is_none());
+        let mut foreign = request;
+        foreign["project_key"] = serde_json::json!("fedcba9876543210");
+        assert!(rejected_tuning_parse(&scope, &foreign.to_string()).is_none());
     }
 }

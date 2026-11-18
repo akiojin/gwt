@@ -22,7 +22,7 @@ use tokio_tungstenite::{
 };
 
 use base64::Engine;
-use chrono::{TimeZone, Utc};
+
 use gwt::{
     empty_workspace_state, load_workspace_state, refresh_managed_gwt_assets_for_worktree,
     save_workspace_state, workspace_state_path, BackendEvent, BranchCleanupInfo, BranchListEntry,
@@ -250,8 +250,12 @@ fn issue_5596_gui_phase_logging_waits_for_worker_dispatch() {
         assert_eq!(event.fields["thread"], "gui");
         assert_eq!(event.fields["emitter"], "worker");
         assert!(event.fields["elapsed_ms"].parse::<f64>().unwrap() >= 0.0);
-        let observed = chrono::DateTime::parse_from_rfc3339(&event.fields["captured_at"]).unwrap();
-        assert_eq!(observed.offset().local_minus_utc(), 0);
+        let observed = time::OffsetDateTime::parse(
+            &event.fields["captured_at"],
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(observed.offset(), time::UtcOffset::UTC);
     }
     assert_eq!(emitted[0].fields["phase"], "monitor_gui_context");
     assert_eq!(emitted[1].fields["phase"], "monitor_gui_freshness");
@@ -864,6 +868,7 @@ fn sample_window(
         runtime_started_at_ms: None,
         surface_owner: None,
         is_pm: false,
+        pm_activity: None,
     }
 }
 
@@ -1155,7 +1160,7 @@ fn workspace_agent_summary_for_test(
         affiliation_status:
             gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
         workspace_id: workspace_id.map(str::to_string),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 
@@ -1683,7 +1688,7 @@ pub(super) fn owner_runtime_status_event(
     );
     hook.branch = Some(session.branch.clone());
     hook.agent_session_id.clone_from(&session.agent_session_id);
-    hook.occurred_at = chrono::Utc::now().to_rfc3339();
+    hook.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let expected =
         gwt::window_state::runtime_hook_window_state(&hook).expect("fixture hook status");
     let mut source = owner.subscribe();
@@ -2069,6 +2074,7 @@ fn sample_runtime_with_events(
         restore_launch_windows: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         startup_auto_resume_admission_in_flight: false,
+        startup_auto_resume_ready_pending: false,
         startup_restore_drain_phase: None,
         update_resume_tab_ids: HashSet::new(),
         update_drain_released_projects: Vec::new(),
@@ -2159,7 +2165,7 @@ impl AppRuntime {
             assert!(self.project_context_is_current(&context));
             let receipt = gwt::project_execution_policy::ActualViewReceipt {
                 receipt_id: uuid::Uuid::new_v4().to_string(),
-                accepted_at: chrono::Utc::now(),
+                accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
                 admitted_policy_revision: gwt_core::project_execution_policy::load(
                     &context.project_root,
                 )
@@ -2186,7 +2192,7 @@ impl AppRuntime {
                     )]),
                     last_open_receipt: Some(receipt),
                     close_intents: Default::default(),
-                    observed_at: chrono::Utc::now(),
+                    observed_at: gwt_core::timestamp::UtcTimestamp::now(),
                 },
             )
             .expect("accepted visible Project fixture receipt");
@@ -2243,15 +2249,18 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
     runtime
         .recoverable_agent_error_windows
         .insert(window_id.to_string());
-    runtime
-        .last_agent_activity
-        .insert(window_id.to_string(), chrono::Utc::now());
-    runtime
-        .last_issue_monitor_heartbeat
-        .insert(window_id.to_string(), chrono::Utc::now());
-    runtime
-        .window_last_output_at
-        .insert(window_id.to_string(), chrono::Utc::now());
+    runtime.last_agent_activity.insert(
+        window_id.to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    );
+    runtime.last_issue_monitor_heartbeat.insert(
+        window_id.to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    );
+    runtime.window_last_output_at.insert(
+        window_id.to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    );
 }
 
 async fn next_test_agent_websocket_event<S>(
@@ -2864,7 +2873,7 @@ fn append_workspace_resume_journal(
         agent_session_id: None,
         agent_current_focus: None,
         agent_title_summary: Some("Suspended review".to_string()),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt_core::workspace_projection::append_workspace_journal_entry_to_path(&path, &entry)
         .expect("append journal");
@@ -3487,7 +3496,8 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     let artifact = target.join("fixture-artifact");
     fs::write(&artifact, b"measured target fixture").expect("target artifact");
     let target_bytes = fs::metadata(&artifact).expect("measured artifact").len();
-    let now = u64::try_from(Utc::now().timestamp()).expect("positive epoch");
+    let now = u64::try_from(gwt_core::timestamp::UtcTimestamp::now().timestamp())
+        .expect("positive epoch");
     let snapshot = serde_json::json!({
         "observed_at": now, "expires_at": now + 30,
         "performance_cores": 2, "gui_cpu_millicores": 0,
@@ -3588,7 +3598,12 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         })
         .collect();
     prefs_before_typed.set_launch_profile_pool(profiles);
-    assert_eq!(after, prefs_before_typed);
+    // First registration advances snapshot metadata; every persisted setting
+    // outside the explicitly asserted roster must still match the original.
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&prefs_before_typed).unwrap()
+    );
     assert_eq!(
         gwt::machine_agent_settings::load().unwrap(),
         Some(machine_policy_before)
@@ -3648,9 +3663,9 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             readiness: gwt::IssueMonitorReadiness::Ready,
             updated_at: None,
         });
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let since = if case == "expired" {
-            now - chrono::Duration::hours(4)
+            now - time::Duration::hours(4)
         } else {
             now
         };
@@ -3666,7 +3681,25 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         }
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save wait");
-        let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
+        let host_pid = std::process::id();
+        let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
+        let host_key = format!("{host_pid}:{host_started_at}");
+        let prefs_before = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Observe the initial census before comparing all preference fields; the owner publishes it independently of launch admission.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let bytes = fs::read(&prefs_path).expect("prefs before admission");
+                    let prefs: gwt::IssueMonitorPrefs = serde_json::from_slice(&bytes).unwrap();
+                    if let Some(census) = prefs.monitor_runtime_counts.get(&host_key) {
+                        assert!(census.counts.is_empty() && census.windows.is_empty());
+                        break bytes;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("initial host census must precede the preference baseline")
+        });
         let mut prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir(&repo)
@@ -3763,7 +3796,12 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
                 })
                 .collect();
             prefs_before_typed.set_launch_profile_pool(profiles);
-            assert_eq!(after, prefs_before_typed);
+            // The new common generation is read metadata, while the complete
+            // persisted project settings remain covered by this comparison.
+            assert_eq!(
+                serde_json::to_value(&after).unwrap(),
+                serde_json::to_value(&prefs_before_typed).unwrap()
+            );
         } else {
             assert_eq!(
                 prefs_after, prefs_before,
@@ -3886,7 +3924,10 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     .unwrap();
     relay(&mut runtime, &mut source);
     let snapshot = runtime
-        .issue_monitor_window_snapshot_for_tab_cached("tab-1", &Utc::now().to_rfc3339())
+        .issue_monitor_window_snapshot_for_tab_cached(
+            "tab-1",
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+        )
         .unwrap();
     assert_eq!(
         snapshot.windows.len(),
@@ -4046,6 +4087,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
     seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let executor = tokio::runtime::Runtime::new().unwrap();
     let owner = Arc::new(executor.block_on(production_owner_fixture(&repo)));
     let mut runtime = sample_runtime(
@@ -4333,7 +4375,7 @@ fn continue_work_launch_failure_fixture(temp_root: &Path) -> ContinueWorkLaunchF
 
     let selected_work_id = "work-selected";
     let candidate_session_id = "candidate-session";
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         selected_work_id,
@@ -4358,7 +4400,7 @@ fn continue_work_launch_failure_fixture(temp_root: &Path) -> ContinueWorkLaunchF
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             selected_work_id,
-            now + chrono::Duration::seconds(1),
+            now + time::Duration::seconds(1),
         ),
     )
     .expect("complete selected Work");
@@ -4631,7 +4673,7 @@ fn projection_only_continue_runtime(
     }
 
     let work_id = format!("work-{case_name}");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         &work_id,
@@ -4657,7 +4699,7 @@ fn projection_only_continue_runtime(
         let mut update = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            now + chrono::Duration::microseconds(1),
+            now + time::Duration::microseconds(1),
         );
         update.owner = Some("SPEC #3248".to_string());
         gwt_core::workspace_projection::record_workspace_work_event(&project_root, update)
@@ -4682,7 +4724,7 @@ fn projection_only_continue_runtime(
         let mut update = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            now + chrono::Duration::milliseconds(1),
+            now + time::Duration::milliseconds(1),
         );
         update.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -4703,7 +4745,7 @@ fn projection_only_continue_runtime(
         let mut update = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            now + chrono::Duration::milliseconds(1),
+            now + time::Duration::milliseconds(1),
         );
         update.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -4722,7 +4764,7 @@ fn projection_only_continue_runtime(
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             &work_id,
-            now + chrono::Duration::milliseconds(2),
+            now + time::Duration::milliseconds(2),
         ),
     )
     .expect("settle projection-only Work");
@@ -5087,7 +5129,7 @@ fn continue_work_activated_successor_recovery_case(
     let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
         .expect("read predecessor binding")
         .expect("predecessor binding");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let (execution, planned) = if same_generation_takeover {
         let request = gwt::cli::execution_state::GenerationTakeoverRequest {
             operation_id: operation_id.to_string(),
@@ -5157,7 +5199,7 @@ fn continue_work_activated_successor_recovery_case(
             gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Done,
                 work_id,
-                now + chrono::Duration::seconds(1),
+                now + time::Duration::seconds(1),
             ),
         )
         .expect("settle Work");
@@ -5234,7 +5276,7 @@ fn continue_work_activated_successor_recovery_case(
                         created_by_start_work: true,
                     },
                     live_session_ids: &live_session_ids,
-                    now: now + chrono::Duration::seconds(2),
+                    now: now + time::Duration::seconds(2),
                 },
             );
             Ok(((), vec![event]))
@@ -5590,7 +5632,7 @@ fn continue_work_heal_session_start_events(
         let mut changed = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            chrono::Utc::now() + chrono::Duration::seconds(1),
+            gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1),
         );
         changed.owner = Some(work_owner_text.into());
         gwt_core::workspace_projection::record_workspace_work_event(&repo, changed)
@@ -5963,7 +6005,7 @@ fn pending_fresh_execution_fixture_in_worktree(
         session_binding_id: format!("binding-{operation_id}"),
         initial_session_id: candidate_session_id.clone(),
         entrypoint,
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     if completed {
         gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
@@ -6126,7 +6168,7 @@ fn leave_fresh_execution_activated_before_projection_commit(
                     resume_context: pending.resume_context.as_ref(),
                     kind: WorkspaceLaunchProjectionKind::StartWork,
                     live_session_ids: &live_session_ids,
-                    now: Utc::now(),
+                    now: gwt_core::timestamp::UtcTimestamp::now(),
                 },
                 true,
             )?;
@@ -6225,7 +6267,7 @@ impl AppRuntime {
 
     pub(crate) fn update_drain_tick_events_and_drain_at(
         &mut self,
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
     ) -> Vec<OutboundEvent> {
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         let previous = std::mem::replace(&mut self.blocking_tasks, spawner);
@@ -7300,6 +7342,35 @@ fn spawn_owner_codex_fixture_with_output(
     configure_owner_fixture_tools(&root, &[config.agent_id.command()]);
     let temp = runtime.sessions_dir.parent().unwrap().to_path_buf();
     pin_live_pm_fixture_agents(runtime, &temp);
+    let mut child_config = config.clone();
+    gwt_agent::LaunchEnvironment::from_active_profile(
+        runtime.profile_config_path.as_deref().unwrap(),
+        child_config.runtime_target,
+    )
+    .unwrap()
+    .with_project_root(&root)
+    .apply_to_config(&mut child_config);
+    let semantics = if cfg!(windows) {
+        gwt::project_runtime::launch::HostEnvKeySemantics::WindowsCaseInsensitive
+    } else {
+        gwt::project_runtime::launch::HostEnvKeySemantics::CaseSensitive
+    };
+    let codex_path = gwt::project_runtime::launch::effective_host_codex_config_path(
+        &root,
+        &child_config.env_vars,
+        semantics,
+        dirs::home_dir().as_deref(),
+    );
+    assert!(
+        codex_path.is_ok(),
+        "fake-provider Codex path must resolve before checking isolation"
+    );
+    assert!(
+        codex_path
+            .as_ref()
+            .is_ok_and(|path| path.starts_with(dunce::canonicalize(&temp).unwrap())),
+        "fake-provider child Codex config must be confined to its private fixture home"
+    );
     runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     runtime.launch_wizard_cache =
         LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, Vec::new());
@@ -7579,7 +7650,7 @@ fn git_details_for_active_work_test(
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 
@@ -7686,7 +7757,7 @@ fn owner_monitor_fixture_with_prefs(
     let root = temp.join("monitor-project");
     fs::create_dir_all(&root).unwrap();
     init_repo_with_initial_commit(&root);
-    let now = Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut prefs = gwt::IssueMonitorPrefs {
         enabled: true,
         max_active_agents: 8,
@@ -7738,6 +7809,11 @@ fn owner_monitor_fixture_with_prefs(
             &now,
         ))
         .unwrap();
+    gwt::issue_cache::set_issue_launch_readback_fixture(
+        &root,
+        issue,
+        &serde_json::json!({"state": "OPEN", "updatedAt": now}).to_string(),
+    );
     gwt::issue_monitor::mutate_project_agent_schedule(
         &root,
         &gwt_core::paths::gwt_sessions_dir(),
@@ -8159,14 +8235,17 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
         .into_iter()
         .take(capacity)
         .map(|name| gwt::agent_names::AgentMember {
+            pm_eligible: false,
+            pm_project_key: None,
             agent_member_id: format!("member-{name}"),
             agent_id: None,
             name: name.into(),
             enabled: true,
-            created_at: Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin_session_id: None,
             last_issue_number: None,
             last_spec_number: None,
+            last_owner_project_key: None,
             assignment: None,
         })
         .collect(),
@@ -8251,10 +8330,8 @@ fn quota_live_runtime(temp: &Path, agent_id: &str) -> (AppRuntime, String) {
     (runtime, window_id)
 }
 
-fn instant(text: &str) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339(text)
-        .expect("fixture instant")
-        .with_timezone(&chrono::Utc)
+fn instant(text: &str) -> gwt_core::timestamp::UtcTimestamp {
+    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(text).expect("fixture instant")
 }
 
 // SPEC-2359 US-42 — Workspace Resume Picker tests.
@@ -8463,7 +8540,7 @@ fn approval_owner_screen(
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
         now,
     ))
     .unwrap();
@@ -8658,7 +8735,7 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
                 .launching_issues
                 .push(gwt::IssueMonitorLaunchingIssue {
                     issue_number: 3165,
-                    claimed_at: Some(Utc::now().to_rfc3339()),
+                    claimed_at: Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()),
                 });
             Ok(())
         },
@@ -9020,7 +9097,7 @@ fn start_monitor_relaunch_owner_with_monitor(
     gwt::machine_agent_settings::set(
         Some(8),
         gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
-        &Utc::now().to_rfc3339(),
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
     )
     .unwrap();
     gwt::issue_monitor::mutate_project_agent_schedule(
@@ -9366,6 +9443,11 @@ fn monitor_relaunch_fixture_with_settlement(
             "2026-08-13T00:00:00Z",
         ))
         .expect("seed monitored owner authority");
+    gwt::issue_cache::set_issue_launch_readback_fixture(
+        &repo,
+        3165,
+        r#"{"state":"OPEN","updatedAt":"2026-08-13T00:00:00Z"}"#,
+    );
     let worktree = case_root.join("issue-worktree");
     let target_branch = "work/issue-3165";
     let status = gwt_core::process::hidden_command("git")
@@ -9383,7 +9465,7 @@ fn monitor_relaunch_fixture_with_settlement(
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let native_conversation_id = format!("native-monitor-{case_name}");
     let source_session_id = format!("session-monitor-{case_name}");
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut source = gwt_agent::Session::new(&worktree, target_branch, gwt_agent::AgentId::Codex);
     source.id = source_session_id.clone();
     source.agent_session_id = Some(native_conversation_id.clone());
@@ -9465,7 +9547,7 @@ fn monitor_relaunch_fixture_with_settlement(
             }
             MonitorNativeHolderFixture::None => unreachable!("holder window implies holder"),
         };
-        let holder_at = now - chrono::Duration::hours(1);
+        let holder_at = now - time::Duration::hours(1);
         let mut holder_session =
             gwt_agent::Session::new(&worktree, target_branch, gwt_agent::AgentId::Codex);
         holder_session.id = holder_session_id.clone();
@@ -10085,6 +10167,9 @@ fn open_agent_settings_sets(
                 repo,
                 &sessions,
                 gwt::agent_names::AgentRosterAction::Add {
+                    model: None,
+                    reasoning: None,
+                    pm_eligible: false,
                     name: None,
                     agent_id: Some(tool.into()),
                 },
@@ -10255,7 +10340,7 @@ fn apply_title_sync_sample_projection(
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     projection
 }
@@ -10326,7 +10411,7 @@ fn active_work_off_loop_setup(
             // recorded summary and the tip-subject fallback — the AC-3 path —
             // is the only thing that can fill it.
             "work-offloop-a1b2c3",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -10945,6 +11030,16 @@ fn pin_live_pm_fixture_agents(runtime: &AppRuntime, root: &Path) {
     }
     let mut settings = Settings::default();
     pin_launch_agents(&mut settings, &bin);
+    let codex_home = root.join(".codex");
+    fs::create_dir_all(&codex_home).expect("private fake-provider Codex home");
+    settings
+        .profiles
+        .set_env_var(
+            "default",
+            "CODEX_HOME",
+            codex_home.to_str().expect("UTF-8 private Codex home"),
+        )
+        .expect("pin fake-provider Codex home");
     write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
     settings
         .save(&gwt_core::paths::gwt_config_path())
@@ -11386,11 +11481,11 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
         serde_json::from_value(snapshot).unwrap(),
         pm.session.clone(),
     );
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     assert!(runtime
         .pm_periodic_wake_decision_at(&repo, &now.to_rfc3339())
         .is_none());
-    runtime.pm_periodic_wake_events_at(&repo, &(now + chrono::Duration::seconds(61)).to_rfc3339());
+    runtime.pm_periodic_wake_events_at(&repo, &(now + time::Duration::seconds(61)).to_rfc3339());
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert_native_pm_received_periodic_wake(&repo, &result, &pm);
 }
@@ -11534,7 +11629,67 @@ fn assert_pm_ensure_spawns_from_default_branch(
         }));
         return;
     }
+    let (snapshot, session) = match completion.result.as_ref().unwrap() {
+        super::RemoteOwnerLaunchOutcome::Runtime(snapshot, session) => {
+            (snapshot.clone(), session.clone())
+        }
+        _ => panic!("expected actual PM runtime"),
+    };
+    let client = completion
+        .client_cell
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.install_remote_owner_projection(
+        &completion.context,
+        &window_id,
+        client,
+        snapshot.clone(),
+        session,
+    );
+    runtime.sync_pm_session_cache(&repo, None);
     let completion_events = runtime.handle_remote_owner_launch_complete(completion);
+    assert_eq!(
+        runtime.runtimes[&window_id].incarnation,
+        snapshot.incarnation
+    );
+    assert_eq!(
+        runtime.pm_session_for_root(&repo).map(String::as_str),
+        snapshot.session_id.as_deref(),
+        "same-runtime completion must refresh the registered PM cache"
+    );
+    let workspace = completion_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("same-runtime cache refresh publishes workspace");
+    let pm_window = &workspace.tabs[0].workspace.windows[0];
+    assert!(pm_window.is_pm);
+    assert_eq!(
+        pm_window.session_id.as_deref(),
+        snapshot.session_id.as_deref()
+    );
+    drain_queued_blocking_tasks(&tasks);
+    assert!(recorded_events.lock().unwrap().iter().any(|event| {
+        match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => events.iter().any(|event| {
+                matches!(&event.event, BackendEvent::LocalAgentActivity { activity }
+                    if activity.agents.as_ref().is_some_and(|agents| agents.iter().any(|agent|
+                        agent.window_id == window_id && agent.session_id == snapshot.session_id.as_deref().unwrap()
+                        && agent.runtime_incarnation == snapshot.incarnation && agent.is_pm)))
+            }),
+            _ => false,
+        }
+    }), "same-runtime cache refresh queues current registered PM activity");
     assert!(
         runtime
             .tab("tab-1")
@@ -12137,10 +12292,15 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
         create_detached_pm_worktree_fixture(&root);
     }
     pin_live_pm_fixture_agents(runtime, &root);
-    let config = AppRuntime::pm_launch_config(
-        &worktree,
-        &gwt::pm_registry::PmLaunchProfile::default_profile(),
-    );
+    // Replace pm_wake_fixture's metadata-only placeholder through the normal
+    // intentional-stop writer before asking the owner for an actual NEW PM.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&root),
+        "pm-session-live",
+    )
+    .expect("retire metadata-only PM wake registration");
+    let config = AppRuntime::pm_new_launch_config(&root, &worktree)
+        .expect("the same readonly NEW draft as the PM launcher");
     let owner = project_owner_fixture(runtime, window_id);
     let owner_id = owner.pane_id(window_id);
     let receipt = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
@@ -12241,6 +12401,7 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
     // The draining native provider has reached its first prompt. Use the
     // managed hook, including its authenticated owner notification, to publish
     // that fact without replacing the launch's physical process proof.
+    let mut status_events = owner.subscribe();
     probe.with_agent_environment(|| {
         let input = serde_json::json!({
             "session_id": format!("pm-fixture-{}", uuid::Uuid::new_v4()),
@@ -12260,6 +12421,25 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
         !gwt::project_runtime::pm_delivery::pm_wake_runtime_is_busy(&runtime_path, incarnation),
         "managed native PM readiness must clear the busy gate: {ready:?}"
     );
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The exact managed hook event establishes owner readiness; this only bounds an IPC hang.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let event = status_events
+                    .recv()
+                    .await
+                    .expect("actual PM owner status event");
+                if matches!(&event, gwt::project_runtime::events::OwnerEvent::Status {
+                    id, incarnation: event_incarnation, status: WindowProcessStatus::Idle, ..
+                } if id == &owner_id && *event_incarnation == incarnation)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("owner applied the managed native PM readiness hook");
+    });
     let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
         id: owner_id.clone(),
         incarnation,
@@ -12455,7 +12635,7 @@ fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
     session.record_completed_stop();
     // Older than the 24h startup auto-resume window: skipped on a normal
     // launch, resumed when the launch is the tail of an update apply.
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session.last_activity_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(30);
     session
         .save(&runtime.sessions_dir)
         .expect("save stale resumable session");
@@ -12603,10 +12783,10 @@ fn restore_admission_summary(events: &[CapturedTracingEvent]) -> &CapturedTracin
 
 /// Issue #4441: backdate a restore fixture Session so it reads as history
 /// rather than as a window that was open at the last exit.
-fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: chrono::Duration) {
+fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: time::Duration) {
     let path = sessions_dir.join(format!("{session_id}.toml"));
     let mut session = gwt_agent::Session::load(&path).expect("load restore fixture session");
-    session.last_activity_at = chrono::Utc::now() - age;
+    session.last_activity_at = gwt_core::timestamp::UtcTimestamp::now() - age;
     session
         .save(sessions_dir)
         .expect("save aged fixture session");
@@ -12617,24 +12797,28 @@ fn assert_pm_delivery_refused(
     other_session: bool,
     pending_refusal: bool,
 ) {
-    use self::pane_control_tests::{control_close, control_launch_config, control_owner_launch};
+    use self::pane_control_tests::control_close;
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _home = ScopedGwtHome::set(temp.path());
-    let fixture = pm_delivery_tests::pm_delivery_owner_fixture(temp.path());
-    let other = other_session.then(|| {
-        let worktree = create_detached_pm_worktree_fixture(&fixture.repo);
-        let mut config = control_launch_config(&fixture.repo, 44);
-        config.working_dir = Some(worktree);
-        config.branch = None;
-        config.linked_issue_number = None;
-        config.explicit_follow_up = false;
-        config.suppress_execution_control = true;
-        control_owner_launch(&fixture.owner, "other-pm-role", config)
-    });
-    let target = other.as_ref().unwrap_or(&fixture.pm);
+    let fixture =
+        pm_delivery_tests::pm_delivery_owner_fixture_with_target_role(temp.path(), other_session);
+    let target = if other_session {
+        &fixture.target
+    } else {
+        &fixture.pm
+    };
     let target_id = target.id.clone();
+    if other_session {
+        let session = target.session.as_ref().unwrap();
+        assert_ne!(session.id, fixture.pm.session.as_ref().unwrap().id);
+        assert!(gwt::pm_registry::pane_is_pm(
+            &fixture.repo,
+            Some(&session.worktree_path),
+            Some(&session.id),
+        ));
+    }
     let operation_id = uuid::Uuid::new_v4().to_string();
     let pending = pending_refusal.then(|| {
         let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
@@ -12642,7 +12826,7 @@ fn assert_pm_delivery_refused(
         let receipt = gwt::pm_registry::PmDeliveryReceipt {
             grok_prompt: None,
             operation_id: operation_id.clone(),
-            recorded_at: Utc::now().to_rfc3339(),
+            recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
             principal_session_id: fixture.pm.session.as_ref().unwrap().id.clone(),
             target_window_id: target_id.clone(),
@@ -12726,8 +12910,8 @@ fn assert_pm_delivery_refused(
         .reason
         .as_ref()
         .is_some_and(|reason| reason.contains("self") && reason.contains(&target_id)));
-    if let Some(other) = other {
-        control_close(&fixture.owner, &other);
+    if other_session {
+        control_close(&fixture.owner, &fixture.target);
     }
 }
 

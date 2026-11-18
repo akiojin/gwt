@@ -49,9 +49,9 @@ pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::{CodexAuthRoot, CodexAuthRootOrigin, LaunchEnvironment};
 pub use launch::{
-    canonical_launch_args, normalize_launch_args, AgentLaunchBuilder, CodexSpeed,
-    ExecutionLaunchIntent, LaunchConfig, ManualLaunchRuntimeEvidence, ManualLaunchRuntimeProof,
-    ManualLaunchSuccessorPredecessor,
+    canonical_launch_args, codex_reasoning_effort, normalize_launch_args, validate_native_tuning,
+    AgentLaunchBuilder, CodexSpeed, ExecutionLaunchIntent, LaunchConfig,
+    ManualLaunchRuntimeEvidence, ManualLaunchRuntimeProof, ManualLaunchSuccessorPredecessor,
 };
 pub use permission_mode::{
     decide as decide_permission_mode, provider_key, provider_skip_mapping,
