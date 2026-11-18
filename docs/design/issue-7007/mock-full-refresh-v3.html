@@ -547,7 +547,7 @@
           <div class="screen-pane" data-screen="agent-edit-tsumugi">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — ツムギ</p>
-            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="ツムギ" aria-label="名前" style="width:200px"></div>
@@ -574,13 +574,18 @@
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる" aria-label="性格" style="width:min(420px,100%)"></div>
             </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip on" type="button">default（端末の既定）</button><button class="chip" type="button">専用の上書き</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書き 0件 — 端末のプロファイルをそのまま使います。上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
+            </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-haruto">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — Haruto</p>
-            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Haruto" aria-label="名前" style="width:200px"></div>
@@ -606,13 +611,24 @@
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip" type="button">Fast</button><button class="chip on" type="button">Ultrafast</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="実装を重点に。変更は小さく刻み、テストで確かめてから進める" aria-label="性格" style="width:min(420px,100%)"></div>
             </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip" type="button">default（端末の既定）</button><button class="chip on" type="button">専用の上書き</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
+              <table class="list" aria-label="Haruto の環境変数の上書き">
+                <thead><tr><th>キー</th><th>扱い</th><th>値</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">RUST_BACKTRACE</td><td>上書き</td><td class="num">1</td></tr>
+                </tbody>
+              </table>
+            </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-yui">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — Yui</p>
-            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#c2410c">Y</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Yui" aria-label="名前" style="width:200px"></div>
@@ -638,13 +654,18 @@
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="画面と体験の実装を重点に。実機で見て確かめる" aria-label="性格" style="width:min(420px,100%)"></div>
             </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip on" type="button">default（端末の既定）</button><button class="chip" type="button">専用の上書き</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書き 0件 — 端末のプロファイルをそのまま使います。上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
+            </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-sora">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — Sora</p>
-            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Sora" aria-label="名前" style="width:200px"></div>
@@ -670,13 +691,24 @@
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="データの調査と取り込みを重点に。形式の変化は止めて知らせる" aria-label="性格" style="width:min(420px,100%)"></div>
             </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip" type="button">default（端末の既定）</button><button class="chip on" type="button">専用の上書き</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
+              <table class="list" aria-label="Sora の環境変数の上書き">
+                <thead><tr><th>キー</th><th>扱い</th><th>値</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">TZ</td><td>上書き</td><td class="num">Asia/Tokyo</td></tr>
+                </tbody>
+              </table>
+            </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-new">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェントを追加</p>
-            <p class="h-sub">新しいエージェントの属性と特性を決めます。追加したエージェントは台帳の末尾に入り、並び順がそのまま利用優先度になります。</p>
+            <p class="h-sub">新しいエージェントの属性・特性・プロファイルを決めます。追加したエージェントは台帳の末尾に入り、並び順がそのまま利用優先度になります。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前（例：Ren）" aria-label="名前" style="width:200px"></div>
@@ -701,6 +733,11 @@
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" placeholder="性格（例：調査を重点に。根拠を確かめてから進める）" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip on" type="button">default（端末の既定）</button><button class="chip" type="button">専用の上書き</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">追加する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -1828,7 +1865,7 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、コマンドパレット、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。プロファイルはエージェント単位で設定し、そのエージェントのセッションに効く環境変数・起動まわりを設定画面で持つ。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、コマンドパレット、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
