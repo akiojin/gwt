@@ -3989,14 +3989,31 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
-        if let Err(reason) = self
-            .project_context_for_root(project_root)
+        let context = self.project_context_for_root(project_root);
+        if let Err(reason) = context
+            .as_ref()
             .ok_or_else(|| "Project context is unavailable".to_string())
             .and_then(|context| {
-                self.project_execution_admission(&context, &[format!("issue:{issue_number}")])
+                self.project_execution_admission(context, &[format!("issue:{issue_number}")])
             })
         {
             tracing::warn!(issue_number, %reason, "Monitor materialization withheld by Project execution policy");
+            // Issue #7665: keep the delivery; a registered view resumes it.
+            if let Some(state) = context.and_then(|context| self.project_state_mut(&context)) {
+                let withheld = super::DeferredIssueMonitorLaunch {
+                    project_root: project_root.to_path_buf(),
+                    issue_number,
+                    linked_issue_kind,
+                    delivery_id,
+                    launch_session_strategy,
+                };
+                let launches = &mut state.project_views.withheld_monitor_launches;
+                launches.retain(|launch| {
+                    (launch.issue_number, launch.linked_issue_kind)
+                        != (withheld.issue_number, withheld.linked_issue_kind)
+                });
+                launches.push(withheld);
+            }
             return Vec::new();
         }
         self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(

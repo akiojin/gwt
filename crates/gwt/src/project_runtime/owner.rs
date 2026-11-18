@@ -12251,33 +12251,8 @@ pub(super) fn retire_unspawned_launch_runtime(
         |current, expected| Ok(serde_json::to_value(current)? == serde_json::to_value(expected)?),
         |current| {
             let path = gwt_agent::runtime_state_path(sessions_dir, &current.id);
-            let _writer = gwt_agent::session::runtime_writer_lease(&path)?;
-            let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
             match captured_runtime {
-                Some(Ok(Some(expected))) => {
-                    let captured: gwt_agent::SessionRuntimeState =
-                        serde_json::from_slice(expected)?;
-                    if captured.execution_identity.is_some()
-                        || captured.runtime_incarnation.is_some()
-                        || captured.host_started_at.is_some()
-                        || captured.child_pid.is_some()
-                        || captured.child_started_at.is_some()
-                        || captured.source_event.is_some()
-                        || captured.active_tool_calls.is_some()
-                        || captured.last_completed_hook_event_at.is_some()
-                        || captured.last_completed_hook_outcome.is_some()
-                        || captured.current_hook_event.is_some()
-                        || captured.pending_discussion.is_some()
-                        || std::fs::read(&path)? != *expected
-                    {
-                        return Err(std::io::Error::other(
-                            "failed launch runtime changed or carries physical evidence",
-                        ));
-                    }
-                    std::fs::remove_file(&path)?;
-                    #[cfg(unix)]
-                    std::fs::File::open(path.parent().expect("runtime namespace"))?.sync_all()?;
-                }
+                Some(Ok(Some(expected))) => remove_unspawned_provisional_runtime(&path, expected)?,
                 Some(Ok(None)) if !path.try_exists()? => {}
                 _ => {
                     return Err(std::io::Error::other(
@@ -12292,8 +12267,52 @@ pub(super) fn retire_unspawned_launch_runtime(
     .map_err(|error| error.to_string())?;
     match outcome {
         gwt_agent::SessionSnapshotUpdateOutcome::Updated(stopped) => Ok(stopped),
-        _ => Err("failed launch Session changed before provisional runtime retirement".into()),
+        _ => {
+            // Issue #7665: the Session moved on, so it is not rewritten here.
+            // This launch never spawned a child, though: its own unchanged
+            // provisional runtime must not stay `Running` under the live host,
+            // where it makes the machine Agent census uncertain for everyone.
+            if let Some(Ok(Some(captured))) = captured_runtime {
+                let path = gwt_agent::runtime_state_path(sessions_dir, &expected.id);
+                if let Err(error) = remove_unspawned_provisional_runtime(&path, captured) {
+                    tracing::warn!(%error, session_id = %expected.id, "failed launch provisional runtime remains");
+                }
+            }
+            Err("failed launch Session changed before provisional runtime retirement".into())
+        }
     }
+}
+
+/// Removes exactly the provisional runtime this launch wrote: the captured
+/// bytes, unchanged on disk, carrying no physical child or hook evidence.
+fn remove_unspawned_provisional_runtime(
+    path: &std::path::Path,
+    expected: &[u8],
+) -> std::io::Result<()> {
+    let _writer = gwt_agent::session::runtime_writer_lease(path)?;
+    let _publication = gwt_agent::session::runtime_publication_lease(path)?;
+    let captured: gwt_agent::SessionRuntimeState = serde_json::from_slice(expected)?;
+    if captured.execution_identity.is_some()
+        || captured.runtime_incarnation.is_some()
+        || captured.host_started_at.is_some()
+        || captured.child_pid.is_some()
+        || captured.child_started_at.is_some()
+        || captured.source_event.is_some()
+        || captured.active_tool_calls.is_some()
+        || captured.last_completed_hook_event_at.is_some()
+        || captured.last_completed_hook_outcome.is_some()
+        || captured.current_hook_event.is_some()
+        || captured.pending_discussion.is_some()
+        || std::fs::read(path)? != *expected
+    {
+        return Err(std::io::Error::other(
+            "failed launch runtime changed or carries physical evidence",
+        ));
+    }
+    std::fs::remove_file(path)?;
+    #[cfg(unix)]
+    std::fs::File::open(path.parent().expect("runtime namespace"))?.sync_all()?;
+    Ok(())
 }
 
 fn finish_agent_session(
@@ -13049,7 +13068,7 @@ fn retry_unclaimed_monitor_capacity(
     detail: &str,
 ) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
-        (detail.starts_with("Issues max_active reached (")
+        (crate::issue_monitor::is_monitor_spawn_hold_refusal(detail)
             || detail.starts_with("Machine Agent capacity is occupied;")
             || detail.starts_with("Machine Agent capacity observation is unavailable;")
             || detail.starts_with("Machine Agent census is uncertain;"))
@@ -13446,6 +13465,47 @@ mod worker_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Issue #7665: a failed launch whose Session moved on left its
+    /// provisional `Running` runtime under the live host. One such file makes
+    /// the machine Agent census uncertain and refuses every launch.
+    #[test]
+    fn issue7665_failed_launch_removes_its_unchanged_provisional_runtime_when_the_session_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let provisional = |evidence: bool| {
+            let mut session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+            session.save(&sessions).unwrap();
+            let captured_session = session.clone();
+            let path = gwt_agent::runtime_state_path(&sessions, &session.id);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+            if evidence {
+                runtime.child_pid = Some(std::process::id());
+            }
+            let bytes = serde_json::to_vec(&runtime).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            // The Session changes after the launch captured its snapshot.
+            session.agent_session_id = Some("moved-on".into());
+            session.save(&sessions).unwrap();
+            (captured_session, path, Ok(Some(bytes)))
+        };
+
+        let (captured, path, runtime) = provisional(false);
+        let refusal = retire_unspawned_launch_runtime(&sessions, &captured, Some(&runtime));
+        assert!(refusal.is_err(), "the moved Session is never rewritten");
+        assert!(
+            !path.exists(),
+            "this launch's own unchanged provisional runtime is retired"
+        );
+
+        let (captured, path, runtime) = provisional(true);
+        assert!(retire_unspawned_launch_runtime(&sessions, &captured, Some(&runtime)).is_err());
+        assert!(path.exists(), "physical child evidence is never removed");
+    }
     use crate::agent_capability::AgentCapabilityRegistry;
 
     fn run_fixture_owner(state: OwnerState, receiver: mpsc::Receiver<OwnerMessage>) {

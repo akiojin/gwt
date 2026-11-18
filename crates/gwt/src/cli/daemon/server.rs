@@ -8500,12 +8500,50 @@ fn issue_monitor_project_submission_permitted(
     }
 }
 
+/// Issue #7665 AC-5: a claim the Project policy withholds is skipped on every
+/// executor pass. Log each hold once, and again only when its reason changes.
+fn log_claim_project_policy_holds(monitor: &crate::IssueMonitorState) {
+    type Logged = std::sync::Mutex<std::collections::HashMap<(PathBuf, u64), String>>;
+    static LOGGED: std::sync::OnceLock<Logged> = std::sync::OnceLock::new();
+    let Some(root) = monitor.wait_project_root() else {
+        return;
+    };
+    let mut logged = LOGGED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    logged.retain(|(project, issue), _| {
+        project != root
+            || monitor.pending_effects().iter().any(|effect| {
+                matches!(effect.payload, crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if issue_number == *issue)
+            })
+    });
+    for effect in monitor.pending_effects() {
+        let crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } = effect.payload
+        else {
+            continue;
+        };
+        let key = (root.to_path_buf(), issue_number);
+        match monitor.claim_project_policy_hold(issue_number) {
+            Some(reason) if logged.get(&key) != Some(&reason) => {
+                tracing::warn!(issue_number, %reason, "Issues claim withheld by Project execution policy");
+                logged.insert(key, reason);
+            }
+            Some(_) => {}
+            None => {
+                logged.remove(&key);
+            }
+        }
+    }
+}
+
 fn select_issue_monitor_effect(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
     permit: &IssueMonitorEffectPermitToken,
     now: &str,
 ) -> Option<(crate::PendingIssueMonitorEffect, bool)> {
+    log_claim_project_policy_holds(monitor);
     let effect = monitor
         .pending_effects()
         .iter()
