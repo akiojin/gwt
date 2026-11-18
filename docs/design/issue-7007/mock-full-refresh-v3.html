@@ -383,13 +383,13 @@
   <header class="doc">
     <div class="doc-kicker">gwt — Issue #7007</div>
     <h1>全画面刷新モック v3</h1>
-    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面はチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（状態などの目安つきの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
+    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>ホーム</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。ホームはチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（状態などの目安つきの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
     <p style="margin-top:14px"><button class="btn primary" type="button" id="fullEnter">全画面で見る</button> <span class="rel">アプリ画面だけを画面いっぱいに表示します（このページの説明・目次・フッターは隠れます）。URL に <b>?full=1</b> を付けても、最初から全画面で開けます。モバイル幅の確認にも使えます。</span></p>
   </header>
 
   <nav class="screens" aria-label="画面一覧">
     <div class="row">
-      <a data-openpage="start">開始画面</a>
+      <a data-openpage="start">ホーム</a>
       <a data-openpage="firstrun">初回セットアップ</a>
       <a data-openpage="projects">プロジェクト</a>
       <a data-openpage="agents">エージェント</a>
@@ -402,12 +402,11 @@
       <a data-openpage="notifications">通知</a>
       <a data-openpage="addproject">プロジェクトを追加</a>
       <span class="sep">gwt：</span>
-      <a data-openpage="gwt" data-openscreen="g-ask">相談</a>
       <a data-openpage="gwt" data-openscreen="g-tasks">タスク</a>
       <a data-openpage="gwt" data-openscreen="g-issues">課題</a>
       <a data-openpage="gwt" data-openscreen="g-issue">課題詳細</a>
       <a data-openpage="gwt" data-openscreen="g-works">作業</a>
-      <a data-openpage="gwt" data-openscreen="g-agents">担当者</a>
+      <a data-openpage="gwt" data-openscreen="g-agents">エージェント</a>
       <a data-openpage="gwt" data-openscreen="g-board">掲示板</a>
       <a data-openpage="gwt" data-openscreen="g-branches">ブランチ</a>
       <a data-openpage="gwt" data-openscreen="g-decide">判断待ち</a>
@@ -426,7 +425,7 @@
   <div class="mock" id="app">
     <div class="mock-head">
       <span class="dots"><i style="background:#e0655f"></i><i style="background:#e5b95c"></i><i style="background:#63b06a"></i></span>
-      <span class="mock-title"><b>gwt</b> — <span id="appTitle">開始画面</span></span>
+      <span class="mock-title"><b>gwt</b> — <span id="appTitle">ホーム</span></span>
     </div>
     <div class="app-head">
       <span class="brand">gwt</span>
@@ -442,12 +441,12 @@
     </div>
     <div class="mock-body">
 
-      <!-- ================= 開始画面 ================= -->
+      <!-- ================= ホーム ================= -->
       <div class="pagegroup on" data-page="start">
         <div class="start-wrap">
           <div class="statebar">
             <span class="lab">状態：</span>
-            <div class="seg" role="group" aria-label="開始画面の状態切替">
+            <div class="seg" role="group" aria-label="ホームの状態切替">
               <button type="button" data-startstate="has" aria-pressed="true">プロジェクトあり</button>
               <button type="button" data-startstate="empty" aria-pressed="false">プロジェクトなし</button>
             </div>
@@ -485,15 +484,16 @@
                         <dt>理由</dt><dd>土台のマージで前提が揃い、これ以上待っても計画は変わりません。</dd>
                         <dt>影響範囲</dt><dd>gwt の全画面。作業中のセッションは影響を受けません。</dd>
                       </dl>
-                      <div class="btnrow"><button class="btn primary" type="button" data-say="#7007 の計画を承認して" data-reply="かしこまりました。承認を記録しました。担当の 姫野 大樹 がそのまま再開します。">承認して始める</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断で決める</button></div>
+                      <div class="btnrow"><button class="btn primary" type="button" data-say="#7007 の計画を承認して" data-reply="かしこまりました。承認を記録しました。担当の 姫野 大樹 がそのまま再開します。">承認して始める</button><button class="btn" type="button" data-say="#7007 の計画に変更を求めて" data-reply="かしこまりました。変更点の候補をまとめます。決まったら、またボタンで選んでください。">変更を求める</button><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断で決める</button></div>
                     </div></div>
                   <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫</div>頼まれたことと決まったことは、会話から自動で各プロジェクトの「タスク」に記録します。あとからタスクの画面でまとめて見られます。
                     <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-tasks">gwt のタスクを見る</button></div></div>
                 </div>
                 <div class="composer">
-                  <textarea id="startInput" placeholder="秦泉寺 章夫に話しかける…"></textarea>
+                  <textarea id="startInput" placeholder="補足や新しい相談を入力…（判断への回答は、上のカードのボタンで選んでください）"></textarea>
                   <div class="send"><button class="btn primary" type="button" id="startSend">送る</button></div>
                 </div>
+                <p class="rel" style="margin-top:8px">相談・判断への回答は、カードのボタン（選択式）が基本です。この入力欄は、補足のコメントや新しい相談のためのものです。</p>
               </div>
           </div>
 
@@ -525,12 +525,12 @@
         <div class="content">
           <div class="screen-pane on" data-screen="setup-welcome">
             <p class="h-big">ようこそ、gwt へ</p>
-            <p class="h-sub">これは初回セットアップです。初回起動のときだけ表示され、終わると開始画面（PM とのチャット）へ移ります。エージェントの起動計画である「起動ウィザード」とは別の流れです。</p>
+            <p class="h-sub">これは初回セットアップです。初回起動のときだけ表示され、終わるとホーム（PM とのチャット）へ移ります。エージェントの起動計画である「起動ウィザード」とは別の流れです。</p>
             <div class="steps"><span class="st on">1. ようこそ</span><span>→</span><span class="st">2. アカウント</span><span>→</span><span class="st">3. エージェントと PM</span><span>→</span><span class="st">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
             <div class="set-group">
               <h4>これから必要になること</h4>
               <div class="set-row"><div class="grow"><div class="t">アカウント（必須）</div><div class="d2">エージェントが使うアカウントを、最低1つ登録してサインインします。これが済むまで先へは進めません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">最初のエージェント（必須）</div><div class="d2">担当者になるエージェントを1人作ります。その人が台帳の先頭になり、この端末の PM を務めます。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">最初のエージェント（必須）</div><div class="d2">エージェントを1人作ります。その人が台帳の先頭になり、この端末の PM を務めます。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">プロジェクト（任意）</div><div class="d2">最初のプロジェクトを開きます。ここで開かなくても、後からいつでも開けます。</div></div></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="setup-account">始める — アカウントへ</button></div>
@@ -548,11 +548,11 @@
           </div>
           <div class="screen-pane" data-screen="setup-agent">
             <p class="h-big">最初のエージェントを作る</p>
-            <p class="h-sub">担当者になるエージェントを1人作ります。<b>作った人が台帳の先頭になり、この端末の PM を務めます</b>（PM の指定は、後から台帳で変えられます）。特性や性格などの詳しい設定は、後からエージェント設定でいつでも変えられます。</p>
+            <p class="h-sub">エージェントを1人作ります。<b>作った人が台帳の先頭になり、この端末の PM を務めます</b>（PM の指定は、後から台帳で変えられます）。特性や性格などの詳しい設定は、後からエージェント設定でいつでも変えられます。</p>
             <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st done">2. アカウント</span><span>→</span><span class="st on">3. エージェントと PM</span><span>→</span><span class="st">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
             <div class="set-group">
               <h4>エージェント</h4>
-              <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">ホームとヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前" aria-label="名前" style="width:200px"></div>
               <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#0f766e">秦</span>
@@ -578,21 +578,21 @@
           </div>
           <div class="screen-pane" data-screen="setup-done">
             <p class="h-big">準備ができました</p>
-            <p class="h-sub">セットアップが終わりました。<b>PM が自動で起動しています。</b>開始画面で PM と話せます。</p>
+            <p class="h-sub">セットアップが終わりました。<b>PM が自動で起動しています。</b>ホームで PM と話せます。</p>
             <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st done">2. アカウント</span><span>→</span><span class="st done">3. エージェントと PM</span><span>→</span><span class="st done">4. プロジェクト</span><span>→</span><span class="st on">5. 完了</span></div>
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">登録とサインインが済んでいます。プールに入り、割り当て候補になっています。</div></div><span class="badge b-done">完了</span></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントと PM</div><div class="d2">最初のエージェントが台帳の先頭になり、PM として起動しています。</div></div><span class="badge b-done">完了</span></div>
               <div class="set-row"><div class="grow"><div class="t">プロジェクト</div><div class="d2">開いていない場合は、ヘッダーの「プロジェクト」から後で開けます。</div></div><span class="badge b-plan">後でも可</span></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-openpage="start">開始画面へ</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-openpage="start">ホームへ</button></div>
           </div>
         </div>
       </div>
 
       <!-- ================= プロジェクト ================= -->
       <div class="pagegroup" data-page="projects">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">プロジェクトは端末全体の画面です（ヘッダーから開きます）</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">プロジェクトは端末全体の画面です（ヘッダーから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="projects-main">
             <p class="h-big">プロジェクト</p>
@@ -620,7 +620,7 @@
               <div class="prow"><span class="ptag"><i style="background:#0d9488"></i>garden-plan</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span class="loopst run">自律駆動中</span><span>最終更新 3か月前</span><span class="path">~/Repos/garden-plan</span></div></div><button class="btn ghost" type="button">停止</button><button class="btn" type="button">開く</button></div>
               <div class="prow"><span class="ptag"><i style="background:#9333ea"></i>trip-note</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span class="loopst run">自律駆動中</span><span>最終更新 半年前</span><span class="path">~/Repos/trip-note</span></div></div><button class="btn ghost" type="button">停止</button><button class="btn" type="button">開く</button></div>
             </div>
-            <p class="rel" style="margin-top:8px">プロジェクトが多いときは、上の検索で名前から探せます（この一覧が全件の置き場です）。開始画面にはプロジェクトの状態は出さず、件数が多くても開始画面の見え方は変わりません。</p>
+            <p class="rel" style="margin-top:8px">プロジェクトが多いときは、上の検索で名前から探せます（この一覧が全件の置き場です）。ホームにはプロジェクトの状態は出さず、件数が多くてもホームの見え方は変わりません。</p>
             <p class="h-sec" style="margin-top:18px">プロジェクトを追加する</p>
             <div class="btnrow">
               <button class="btn primary" type="button" data-openpage="addproject" data-openscreen="add-github">GitHub から取り込む</button>
@@ -633,7 +633,7 @@
 
       <!-- ================= プロジェクトを追加 ================= -->
       <div class="pagegroup" data-page="addproject">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">プロジェクトの追加は端末全体の流れです</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">プロジェクトの追加は端末全体の流れです</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="add-github">
             <p class="h-big">GitHub から取り込む</p>
@@ -662,7 +662,7 @@
               <div class="set-row"><div class="grow"><div class="t">akiojin/keiba-db を複製しています</div><div class="d2">保存先：~/Repos/keiba-db · 終わるとプロジェクトとして開けます</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:72%"></i></div></div><span class="badge b-run">複製中 72%</span></div>
               <div class="set-row"><div class="grow"><div class="t">失敗したとき</div><div class="d2">理由（認証・空き容量・URL の誤りなど）をこの場に出し、やり直せる形にします。途中で止まった複製は残しません。</div></div></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-openpage="start">開始画面へ戻る</button><button class="btn ghost" type="button" data-nav="add-folder">フォルダから開く</button><button class="btn ghost" type="button" data-nav="add-clone">URL から複製する</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-openpage="start">ホームへ戻る</button><button class="btn ghost" type="button" data-nav="add-folder">フォルダから開く</button><button class="btn ghost" type="button" data-nav="add-clone">URL から複製する</button></div>
           </div>
           <div class="screen-pane" data-screen="add-folder">
             <p class="h-big">フォルダを開く</p>
@@ -689,7 +689,7 @@
               <span class="badge b-wait">未 Git 化</span>
               <button class="btn" type="button">開く</button>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-openpage="start">開始画面へ戻る</button><button class="btn ghost" type="button" data-nav="add-github">GitHub から取り込む</button><button class="btn ghost" type="button" data-nav="add-clone">URL から複製する</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-openpage="start">ホームへ戻る</button><button class="btn ghost" type="button" data-nav="add-github">GitHub から取り込む</button><button class="btn ghost" type="button" data-nav="add-clone">URL から複製する</button></div>
           </div>
           <div class="screen-pane" data-screen="add-clone">
             <p class="h-big">URL から複製する</p>
@@ -705,14 +705,14 @@
               <div class="set-head">複製の進み具合</div>
               <div class="set-row"><div class="grow"><div class="t">まだ始めていません</div><div class="d2">「複製する」を押すと、ここに進み具合と結果が出ます。同じ場所にプロジェクトがあるときは、複製せずにそのプロジェクトを開く案内を出します。</div></div></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">複製する</button><button class="btn" type="button" data-openpage="start">開始画面へ戻る</button><button class="btn ghost" type="button" data-nav="add-github">GitHub から取り込む</button><button class="btn ghost" type="button" data-nav="add-folder">フォルダから開く</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">複製する</button><button class="btn" type="button" data-openpage="start">ホームへ戻る</button><button class="btn ghost" type="button" data-nav="add-github">GitHub から取り込む</button><button class="btn ghost" type="button" data-nav="add-folder">フォルダから開く</button></div>
           </div>
         </div>
       </div>
 
       <!-- ================= 通知 ================= -->
       <div class="pagegroup" data-page="notifications">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">通知は端末全体の画面です（ヘッダーのベルから開きます）</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">通知は端末全体の画面です（ヘッダーのベルから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="notifications-main">
             <p class="h-big">通知</p>
@@ -755,11 +755,11 @@
 
       <!-- ================= エージェント台帳 ================= -->
       <div class="pagegroup" data-page="agents">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">台帳は端末全体の画面です（ヘッダーから開きます）</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">台帳は端末全体の画面です（ヘッダーから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="agents-ledger">
             <p class="h-big">エージェント台帳</p>
-            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持つ担当者です（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータです（実際に割り当てられたツールでは、その幅に最も近い段階が使われます）。性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM の担当者は入れ替わりません。アカウントの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
+            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持ちます（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータです（実際に割り当てられたツールでは、その幅に最も近い段階が使われます）。性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM のエージェントは入れ替わりません。アカウントの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
             <div class="set-group">
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
             </div>
@@ -772,7 +772,7 @@
               <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hamada">編集</button></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button" data-nav="agent-new">追加</button></div>
             </div>
-            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのアカウントで動くかは、セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。担当の履歴と予定、いま何をしているか（現在の作業状態）は台帳には置かず、各プロジェクトの「担当者」と「作業」で見ます。エージェントは特定のプロジェクトに所属せず、全プロジェクト共通のマスタです。</div>
+            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのアカウントで動くかは、セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。担当の履歴と予定、いま何をしているか（現在の作業状態）は台帳には置かず、各プロジェクトの「エージェント」と「作業」で見ます。エージェントは特定のプロジェクトに所属せず、全プロジェクト共通のマスタです。</div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-jinsenji">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
@@ -780,9 +780,9 @@
             <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
-              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="秦泉寺 章夫" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">ホームとヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="秦泉寺 章夫" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">優先指定されています。この人が PM を務めます。担当者はエージェントの層で決まるため、レート制限では入れ替わりません。アカウントの割り当ては別の層で、PM のセッションはプールから優先的に割り当てられ、使える間は同じインスタンスに sticky です。インスタンスが枯渇したときだけ gwtd が別のインスタンスへ切り替えます（担当者は変わりません）。</div></div><button class="btn" type="button">優先指定を外す</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">優先指定されています。この人が PM を務めます。PM はエージェントの層で決まるため、レート制限では入れ替わりません。アカウントの割り当ては別の層で、PM のセッションはプールから優先的に割り当てられ、使える間は同じインスタンスに sticky です。インスタンスが枯渇したときだけ gwtd が別のインスタンスへ切り替えます（エージェントは変わりません）。</div></div><button class="btn" type="button">優先指定を外す</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">この端末の PM を務めています。PM の振る舞い（知らせ方など）は、設定の「あなたの PM」で変えます。</div></div><button class="btn" type="button" data-openpage="settings">あなたの PM を開く</button></div>
             </div>
             <div class="set-group">
@@ -825,7 +825,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="小田 洋平" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（PM はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -866,7 +866,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="姫野 大樹" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（PM はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -907,7 +907,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="安藤 健二" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（PM はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -948,7 +948,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="原 和正" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（PM はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -989,7 +989,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="鈴木 和斗" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（PM はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -1030,7 +1030,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="濱田 嵩翔" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（PM はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -1106,7 +1106,7 @@
 
       <!-- ================= アカウント ================= -->
       <div class="pagegroup" data-page="tools">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">アカウントは端末全体の画面です（ヘッダーから開きます）</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">アカウントは端末全体の画面です（ヘッダーから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="tools-pool">
             <p class="h-big">アカウント</p>
@@ -1257,7 +1257,7 @@
 
       <!-- ================= アプリ設定 ================= -->
       <div class="pagegroup" data-page="settings">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a></div>
         <div class="content">
           <div class="screen-pane on" data-screen="appsettings">
             <p class="h-big">設定</p>
@@ -1272,7 +1272,7 @@
                 <div class="set-row"><div class="grow"><div class="t">判断は、出てきた時点で知らせる</div><div class="d2">オフにすると、判断は朝と夜の報告にまとめられます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">止まった作業は、理由と次の手つきで知らせる</div><div class="d2">「止まりました」だけで終わらせず、原因の見立てと PM が次にやることを添えます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">23:00〜7:00 は、止まった作業と判断だけを知らせます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">相談の内容から、担当プロジェクトを自動で決める</div><div class="d2">開始画面の会話の内容から PM が候補を出し、必ずあなたに見せてから決めます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">ホームの会話の内容から、担当プロジェクトを自動で決める</div><div class="d2">ホームの会話の内容から PM が候補を出し、必ずあなたに見せてから決めます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
               </div>
               <div class="set-group">
                 <h4>アプリの更新 — gwt 本体</h4>
@@ -1281,7 +1281,7 @@
               </div>
               <div class="set-group">
                 <h4>性能とシステム — この端末</h4>
-                <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">担当者のプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button">バランス ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">エージェントのプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button">バランス ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">ログイン時に gwt を起動する</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">作業の出力行数</div><div class="d2">作業セッションで表示する出力の行数です（3〜10）。</div></div><button class="btn" type="button">6 ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">端末のプロファイル</div><div class="d2">プロファイルは端末で定義し、エージェントに割り当てます。定義の管理はプロファイルの画面、割り当ては各エージェント設定で行います。</div></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
@@ -1355,14 +1355,14 @@
 
       <!-- ================= プロジェクト：gwt ================= -->
       <div class="pagegroup" data-page="gwt">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">このプロジェクトは独立したページです（URL: /p/gwt）— ブラウザのタブで並べて開けます</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">このプロジェクトは独立したページです（URL: /p/gwt）— ブラウザのタブで並べて開けます</span></div>
         <nav class="mtabs" aria-label="プロジェクト内メニュー（モバイル）">
-          <a href="#" data-nav="g-ask">相談</a>
+          <a href="#" data-openpage="start">相談（ホームで）</a>
           <a href="#" data-nav="g-tasks">タスク</a>
           <a href="#" data-nav="g-issues" class="on">課題</a>
           <a href="#" data-nav="g-works">作業</a>
           <a href="#" data-nav="g-decide">判断<span class="cnt">2</span></a>
-          <a href="#" data-nav="g-agents">担当者</a>
+          <a href="#" data-nav="g-agents">エージェント</a>
           <a href="#" data-nav="g-board">掲示板</a>
           <a href="#" data-nav="g-index">検索</a>
           <a href="#" data-nav="g-branches">ブランチ</a>
@@ -1375,12 +1375,12 @@
               <span class="ptag"><i style="background:#0f766e"></i>gwt</span>
               <div class="sub">プロジェクトページ · ポリシー：実行中</div>
             </div>
-            <a href="#" data-nav="g-ask">相談</a>
+            <a href="#" data-openpage="start">相談（ホームで）</a>
             <a href="#" data-nav="g-tasks">タスク</a>
             <a href="#" data-nav="g-issues" class="on">課題</a>
             <a href="#" data-nav="g-works">作業</a>
             <a href="#" data-nav="g-decide">判断<span class="cnt">2</span></a>
-            <a href="#" data-nav="g-agents">担当者</a>
+            <a href="#" data-nav="g-agents">エージェント</a>
             <a href="#" data-nav="g-board">掲示板</a>
             <a href="#" data-nav="g-index">検索</a>
             <a href="#" data-nav="g-branches">ブランチ</a>
@@ -1390,40 +1390,11 @@
           </div>
           <div class="content">
 
-            <div class="screen-pane" data-screen="g-ask">
-              <p class="h-big">相談 — gwt</p>
-              <p class="h-sub">このプロジェクトの PM との会話はここだけです。判断・報告・進捗は、それぞれの画面と掲示板が正本です。</p>
-              <div class="chat">
-                <div class="msg me"><div class="meta">あなた · たった今</div>メモリの課題（#5561）はどうなってる？</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>待ち行列に入っていて、次に始まります。計画は承認済みで、妨げるものはありません。進み具合は「作業」と「タスク」で見られます。
-                  <br><span class="route">範囲：gwt</span>
-                  <div class="btnrow"><button class="btn" type="button" data-nav="g-issue">課題 #5561 を開く</button><button class="btn ghost" type="button" data-nav="g-works">作業を見る</button></div></div>
-                <div class="msg me"><div class="meta">あなた · たった今</div>全画面刷新（#7007）の残りは？</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>残りは共有ステータスバーと、E2E・回帰確認です。計画の承認が「判断」に 1件あります。ここでも決められます。
-                  <div class="dcard inchat">
-                    <div class="top"><span class="badge b-wait">判断待ち</span><span class="rel">1時間待ち</span></div>
-                    <div class="t">「全画面刷新のホームと判断の画面」（#7007）の計画を承認しますか？</div>
-                    <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>承認して始める</b> — 残りの作業はステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
-                    <dl>
-                      <dt>理由</dt><dd>土台のマージで前提が揃い、これ以上待っても計画は変わりません。</dd>
-                      <dt>影響範囲</dt><dd>gwt の全画面。作業中のセッションは影響を受けません。</dd>
-                    </dl>
-                    <div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn ghost" type="button" data-nav="g-decide">判断待ちで見る</button></div>
-                  </div></div>
-                <div class="msg me"><div class="meta">あなた · たった今</div>小田 洋平 の出力、そのまま見せて</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>基本はこの会話で要約しますが、実物はいつでもターミナル表示で見られます。私（PM）の出力も含め、全エージェント分が開けます。
-                  <div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナル表示を開く</button></div></div>
-              </div>
-              <div class="composer">
-                <div class="scope"><span>範囲：<b>gwt</b></span><span class="rel">開始画面の会話と同じ PM です。文脈だけが違います。頼んだことは「タスク」に自動で記録されます。</span></div>
-                <textarea placeholder="gwt のことを聞く…"></textarea>
-                <div class="send"><button class="btn primary" type="button">送る</button></div>
-              </div>
-            </div>
+            
 
             <div class="screen-pane" data-screen="g-tasks">
               <p class="h-big">タスク</p>
-              <p class="h-sub">複数の課題を束ねるテーマの単位です。タスクは、相談や開始画面の会話で頼まれたこと・決まったことから、PM が自動で記録します。</p>
+              <p class="h-sub">複数の課題を束ねるテーマの単位です。タスクは、ホームの会話で頼まれたこと・決まったことから、PM が自動で記録します。</p>
               <div class="stat-row">
                 <div class="stat"><div class="num">5</div><div class="lab">今日完了したタスク</div></div>
                 <div class="stat"><div class="num">3</div><div class="lab">進行中のタスク</div></div>
@@ -1444,19 +1415,19 @@
                 <span class="badge b-done">ほぼ完了</span>
                 <button class="btn" type="button" data-nav="g-task">タスクを開く</button>
               </div>
-              <p class="rel" style="margin-top:12px">タスクの記録もと：相談の会話（自動）。手で作ることもできます。</p>
+              <p class="rel" style="margin-top:12px">タスクの記録もと：ホームの会話（自動）。手で作ることもできます。</p>
               <div class="btnrow"><button class="btn" type="button" data-nav="g-task-new">タスクを作る</button></div>
             </div>
 
             <div class="screen-pane" data-screen="g-task">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-tasks">&larr; タスク一覧へ</button></div>
               <p class="h-big">全画面刷新（#7007）</p>
-              <p class="h-sub">タスク · <b>gwt</b> · 会話から自動で記録（11月12日、相談で決定）· 配下の課題 4件</p>
+              <p class="h-sub">タスク · <b>gwt</b> · 会話から自動で記録（11月12日、ホームで決定）· 配下の課題 4件</p>
               <div class="set-group">
                 <h4>このタスクについて</h4>
-                <p class="d">画面をタスク中心に作り替えるテーマです。開始画面は PM との会話の場所にし、判断はその場で決められる形にします。</p>
+                <p class="d">画面をタスク中心に作り替えるテーマです。ホームは PM との会話の場所にし、判断はその場で決められる形にします。</p>
                 <div class="set-row"><div class="grow"><div class="t">進み具合</div><div class="d2">配下の課題 4件 · 完了 2件 · 進行中 1件 · 判断待ち 1件（4件中 2件完了）</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:50%"></i></div></div><span class="badge b-wait">判断待ち</span></div>
-                <div class="set-row"><div class="grow"><div class="t">記録のもと</div><div class="d2">相談の会話から自動で記録されました。決めた内容（計画の承認など）もここに残ります。</div></div><button class="btn" type="button" data-nav="g-ask">相談で見る</button></div>
+                <div class="set-row"><div class="grow"><div class="t">記録のもと</div><div class="d2">ホームの会話から自動で記録されました。決めた内容（計画の承認など）もここに残ります。</div></div><button class="btn" type="button" data-openpage="start">ホームで見る</button></div>
               </div>
               <div class="set-group">
                 <h4>配下の課題</h4>
@@ -1536,7 +1507,7 @@
               <div class="set-group">
                 <h4>実行</h4>
                 <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">開始待ち — まだ誰も作業していません。</div></div><span class="badge b-queue">開始待ち</span></div>
-                <div class="set-row"><div class="grow"><div class="t">担当者とセッション</div><div class="d2">まだありません。空きが出たら、台帳の並び順で割り当てます。アカウントはプールから自動で決まります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">エージェントとセッション</div><div class="d2">まだありません。空きが出たら、台帳の並び順で割り当てます。アカウントはプールから自動で決まります。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">ありません。</div></div><span class="badge b-done">なし</span></div>
               </div>
               <div class="set-group">
@@ -1553,25 +1524,25 @@
 
             <div class="screen-pane" data-screen="g-works">
               <p class="h-big">作業</p>
-              <p class="h-sub">今 gwt で動いているセッションです。基本は「相談」の会話で進み、セッションの実物はいつでもターミナル表示で見られます。</p>
+              <p class="h-sub">今 gwt で動いているセッションです。基本はホームの会話で進み、セッションの実物はいつでもターミナル表示で見られます。</p>
               <div class="lrow">
-                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">Codex · 小田 洋平 · 42分実行中 · 最後の活動は2分前 · 実装が入ってレビュー待ち</div></div>
+                <span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">Codex · 小田 洋平 · 42分実行中 · 最後の活動は2分前 · 実装が入ってレビュー待ち</div></div>
                 <span class="badge b-wait">レビュー待ち</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">Claude Code · 姫野 大樹 · 1時間12分実行中 · 最後の活動はたった今</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:62%"></i></div></div>
+                <span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">Claude Code · 姫野 大樹 · 1時間12分実行中 · 最後の活動はたった今</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:62%"></i></div></div>
                 <span class="badge b-run">実行中</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">Codex · 小田 洋平 · チェック4件が失敗して停止中 · PM が見ています</div></div>
+                <span class="ava" style="background:#2563eb">小</span><div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">Codex · 小田 洋平 · チェック4件が失敗して停止中 · PM が見ています</div></div>
                 <span class="badge b-block">止まっている</span>
                 <button class="btn" type="button" data-nav="g-board">掲示板で見る</button>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
+                <span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
                 <span class="badge b-run">常駐</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
@@ -1599,9 +1570,9 @@
                 <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>承認して始める</b> — 残りのスライスはステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
                 <dl>
                   <dt>理由</dt><dd>土台のマージで前提が揃い、これ以上待っても計画は変わりません。遅れるほど他の画面との差分が広がります。</dd>
-                  <dt>影響範囲</dt><dd>gwt の全画面（開始画面・プロジェクト画面群・設定）。作業中のセッション 2件は影響を受けません。</dd>
+                  <dt>影響範囲</dt><dd>gwt の全画面（ホーム・プロジェクト画面群・設定）。作業中のセッション 2件は影響を受けません。</dd>
                 </dl>
-                <div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn" type="button">変更を求める</button><button class="btn ghost" type="button" data-nav="g-ask">相談で聞く</button></div>
+                <div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn" type="button">変更を求める</button><button class="btn ghost" type="button" data-openpage="start">ホームで聞く</button></div>
               </div>
               <div class="dcard">
                 <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">判断待ち</span><span class="rel">26分待ち</span></div>
@@ -1614,11 +1585,11 @@
                 </dl>
                 <div class="btnrow"><button class="btn amber" type="button">保存して送信する</button><button class="btn" type="button">あとで</button></div>
               </div>
-              <p class="rel">判断待ちは以上です。決めた内容は、開始画面の会話と「タスク」にも同じ結果が残ります。</p>
+              <p class="rel">判断待ちは以上です。決めた内容は、ホームの会話と「タスク」にも同じ結果が残ります。</p>
             </div>
 
             <div class="screen-pane" data-screen="g-agents">
-              <p class="h-big">担当者</p>
+              <p class="h-big">エージェント</p>
               <p class="h-sub">このプロジェクトで動いているエージェントと、その担当の履歴・予定です。台帳と並び順・特性は「エージェント台帳」にあります。</p>
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
@@ -1628,7 +1599,7 @@
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div>
                 </div>
                 <span class="badge b-wait">判断待ち 2件</span>
-                <button class="btn ghost" type="button" data-nav="g-ask">相談する</button>
+                <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
               </div>
               <div class="rowitem">
@@ -1664,9 +1635,9 @@
                 </div>
                 <span class="badge b-done">待機中</span>
               </div>
-              <p class="h-sec">担当履歴</p>
-              <table class="list" aria-label="担当履歴">
-                <thead><tr><th>担当者</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
+              <p class="h-sec">エージェント履歴</p>
+              <table class="list" aria-label="エージェント履歴">
+                <thead><tr><th>エージェント</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
                 <tbody>
                   <tr><td>秦泉寺 章夫（PM）</td><td>#7048 の進行管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-run">進行中</span></td></tr>
                   <tr><td>秦泉寺 章夫（PM）</td><td>#7541 の修正配信の管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-done">完了（マージ済み）</span></td></tr>
@@ -1806,7 +1777,7 @@
 
             <div class="screen-pane" data-screen="g-branches">
               <p class="h-big">ブランチ</p>
-              <p class="h-sub">gwt のブランチです。作業中のブランチは担当者と一緒に表示します。</p>
+              <p class="h-sub">gwt のブランチです。作業中のブランチはエージェントと一緒に表示します。</p>
               <div class="lrow">
                 <div class="grow"><div class="t">develop</div><div class="d">12:44に更新 · origin と一致</div></div>
                 <span class="badge b-done">現在</span>
@@ -1846,8 +1817,7 @@
               <div class="logline"><span class="sev info">INFO</span><span class="lt">13:52:44</span><span class="lm">monitor — チェック結果を取り込みました（#7048：成功 38件 / 失敗 0件）</span></div>
               <div class="logline"><span class="sev err">ERROR</span><span class="lt">13:41:20</span><span class="lm">terminal — ターミナルのサイズが古い可能性があります。ウィンドウを開き直すと直ります</span></div>
               <div class="logline"><span class="sev dbg">DEBUG</span><span class="lt">13:40:02</span><span class="lm">index — 健全性を取得（範囲 9種のうち 8種が準備完了）</span></div>
-              <p class="rel" style="margin-top:10px">エージェントの出力そのものは、ここではなく「作業」や「担当者」からターミナル表示で見ます。</p>
-              <div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナル表示を開く</button></div>
+              <p class="rel" style="margin-top:10px">エージェントの出力そのものは、ここではなく「作業」や「エージェント」からターミナル表示で見ます。</p>
             </div>
 
             <div class="screen-pane" data-screen="g-settings">
@@ -1856,7 +1826,7 @@
               <div class="set-group">
                 <div class="set-head">実行ポリシー</div>
                 <div class="set-row">
-                  <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトの担当者が終わるのを待ってから止めます。</div></div>
+                  <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトのエージェントが終わるのを待ってから止めます。</div></div>
                   <button class="btn ghost" type="button" data-nav="g-project-stop">このプロジェクトを止める</button>
                 </div>
               </div>
@@ -1871,7 +1841,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
-                <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。オフにすると、このプロジェクトには触りません。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まったエージェントを再起動します。オフにすると、このプロジェクトには触りません。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">起動候補（Candidates）</div><div class="d2">課題を始めるときの候補と、その起動条件（Session mode／Runtime など）です。</div></div><button class="btn" type="button" data-nav="g-candidates">候補を編集</button></div>
                 <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：bug、docs。</div></div><button class="btn" type="button" data-nav="g-labels">ラベルを編集</button></div>
               </div>
@@ -1893,7 +1863,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">閉じる</div>
-                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、gwt の担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="g-close-project">閉じる…</button></div>
+                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、gwt のエージェントが終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="g-close-project">閉じる…</button></div>
               </div>
             </div>
             <div class="screen-pane" data-screen="g-settings-tuning">
@@ -1966,13 +1936,13 @@
             </div>
 
             <div class="screen-pane" data-screen="g-agent-pause">
-              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-agents">&larr; 担当者へ戻る</button></div>
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-agents">&larr; エージェントへ戻る</button></div>
               <p class="h-big">一時停止の確認</p>
-              <p class="h-sub">担当者の自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
+              <p class="h-sub">エージェントの自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでの担当者の自動補充と再起動が止まります。他のプロジェクトと PM には影響しません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでのエージェントの自動補充と再起動が止まります。他のプロジェクトと PM には影響しません。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">実行中のセッション</div><div class="d2">いま動いているセッションは、区切りのよいところで止まります。未保存の出力は作業ツリーに残ります。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「担当者」の画面からいつでも再開できます。再開すると、待ち行列の先頭から自動で続きます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「エージェント」の画面からいつでも再開できます。再開すると、待ち行列の先頭から自動で続きます。</div></div></div>
               </div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-agents">一時停止する</button><button class="btn ghost" type="button" data-nav="g-agents">やめる</button></div>
             </div>
@@ -1982,9 +1952,9 @@
               <p class="h-big">このプロジェクトを止める</p>
               <p class="h-sub">gwt の再起動をまたいで動き続ける設定を止めます。ファイルや課題は消えません。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">実行中の担当者</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。止めるときは、担当者が終わるのを待ってから止めます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">実行中のエージェント</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。止めるときは、エージェントが終わるのを待ってから止めます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">PM の監視</div><div class="d2">このプロジェクトへの PM の監視も止まります。判断待ちは残り、再開時にそのまま出ます。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">開始画面のプロジェクト一覧から、いつでも再開できます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">プロジェクト画面の一覧から、いつでも再開できます。</div></div></div>
               </div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">止める</button><button class="btn ghost" type="button" data-nav="g-settings">やめる</button></div>
             </div>
@@ -2023,8 +1993,8 @@
               <p class="h-big">このプロジェクトを閉じる</p>
               <p class="h-sub">閉じると、この端末のプロジェクト一覧から外れます。リポジトリと課題は GitHub 側に残ります。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">閉じる範囲</div><div class="d2">この端末での監視・担当者・索引が止まります。他の端末の gwt には影響しません。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">実行中の担当者</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。閉じるときは、担当者が終わるのを待ってから閉じます（待たずに止める選択もできます）。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">閉じる範囲</div><div class="d2">この端末での監視・エージェント・索引が止まります。他の端末の gwt には影響しません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">実行中のエージェント</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。閉じるときは、エージェントが終わるのを待ってから閉じます（待たずに止める選択もできます）。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">結果の確認</div><div class="d2">閉じた結果が確認できないときは、状態の確認（Check status）から同じ選択でもう一度試せます。</div></div></div>
               </div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-openpage="start">閉じる</button><button class="btn ghost" type="button" data-nav="g-settings">キャンセル</button></div>
@@ -2051,7 +2021,7 @@
                 <div class="set-row"><div class="grow"><div class="t">2. レビュー用の候補</div><div class="d2">Session mode：再開 · Runtime：既定 · 権限スキップ：なし · Fast mode：あり · 優先：レビュー段階</div></div><button class="btn ghost" type="button">削除</button></div>
                 <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。並べ替えは行の順序で決まります。</div></div><button class="btn" type="button">追加</button></div>
               </div>
-              <div class="notice">候補はこのプロジェクトの設定です。エージェント（担当者）とは別で、誰が担当するかは起動時に決まります。</div>
+              <div class="notice">候補はこのプロジェクトの設定です。エージェントとは別で、誰が担当するかは起動時に決まります。</div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">保存する</button><button class="btn ghost" type="button" data-nav="g-settings">キャンセル</button></div>
             </div>
 
@@ -2074,14 +2044,14 @@
 
       <!-- ================= プロジェクト：KeibaDB ================= -->
       <div class="pagegroup" data-page="keibadb">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">このプロジェクトは独立したページです（URL: /p/keibadb）— ブラウザのタブで並べて開けます</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">このプロジェクトは独立したページです（URL: /p/keibadb）— ブラウザのタブで並べて開けます</span></div>
         <nav class="mtabs" aria-label="プロジェクト内メニュー（モバイル）">
-          <a href="#" data-nav="k-ask">相談</a>
+          <a href="#" data-openpage="start">相談（ホームで）</a>
           <a href="#" data-nav="k-tasks">タスク</a>
           <a href="#" data-nav="k-issues" class="on">課題</a>
           <a href="#" data-nav="k-works">作業</a>
           <a href="#" data-nav="k-decide">判断<span class="cnt">1</span></a>
-          <a href="#" data-nav="k-agents">担当者</a>
+          <a href="#" data-nav="k-agents">エージェント</a>
           <a href="#" data-nav="k-board">掲示板</a>
           <a href="#" data-nav="k-index">検索</a>
           <a href="#" data-nav="k-branches">ブランチ</a>
@@ -2094,12 +2064,12 @@
               <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span>
               <div class="sub">プロジェクトページ · ポリシー：実行中</div>
             </div>
-            <a href="#" data-nav="k-ask">相談</a>
+            <a href="#" data-openpage="start">相談（ホームで）</a>
             <a href="#" data-nav="k-tasks">タスク</a>
             <a href="#" data-nav="k-issues" class="on">課題</a>
             <a href="#" data-nav="k-works">作業</a>
             <a href="#" data-nav="k-decide">判断<span class="cnt">1</span></a>
-            <a href="#" data-nav="k-agents">担当者</a>
+            <a href="#" data-nav="k-agents">エージェント</a>
             <a href="#" data-nav="k-board">掲示板</a>
             <a href="#" data-nav="k-index">検索</a>
             <a href="#" data-nav="k-branches">ブランチ</a>
@@ -2109,34 +2079,11 @@
           </div>
           <div class="content">
 
-            <div class="screen-pane" data-screen="k-ask">
-              <p class="h-big">相談 — KeibaDB</p>
-              <p class="h-sub">このプロジェクトの PM との会話はここだけです。判断・報告・進捗は、それぞれの画面と掲示板が正本です。</p>
-              <div class="chat">
-                <div class="msg me"><div class="meta">あなた · たった今</div>取り込みが止まった理由は？</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>相手先の形式が変わり、対応表と食い違う行が 3件出ました。データ自体は壊れていません。対応表を直せば、そのまま続けられます。ここでも決められます。
-                  <br><span class="route">範囲：KeibaDB</span>
-                  <div class="dcard inchat">
-                    <div class="top"><span class="badge b-block">要対応</span><span class="rel">48分待ち</span></div>
-                    <div class="t">毎日の取り込みが停止 — 対応表を直して続けますか？</div>
-                    <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
-                    <dl>
-                      <dt>理由</dt><dd>3件とも項目名の対応づけの問題で、データ側の欠落ではありません。今朝の分は再開後にまとめて取り込めます。</dd>
-                      <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクトには影響しません。</dd>
-                    </dl>
-                    <div class="btnrow"><button class="btn primary" type="button">対応表を直して続ける</button><button class="btn ghost" type="button" data-nav="k-decide">判断待ちで見る</button></div>
-                  </div></div>
-              </div>
-              <div class="composer">
-                <div class="scope"><span>範囲：<b>KeibaDB</b></span><span class="rel">開始画面の会話と同じ PM です。文脈だけが違います。頼んだことは「タスク」に自動で記録されます。</span></div>
-                <textarea placeholder="KeibaDB のことを聞く…"></textarea>
-                <div class="send"><button class="btn primary" type="button">送る</button></div>
-              </div>
-            </div>
+            
 
             <div class="screen-pane" data-screen="k-tasks">
               <p class="h-big">タスク</p>
-              <p class="h-sub">複数の課題を束ねるテーマの単位です。タスクは、相談や開始画面の会話から PM が自動で記録します。</p>
+              <p class="h-sub">複数の課題を束ねるテーマの単位です。タスクは、ホームの会話から PM が自動で記録します。</p>
               <div class="stat-row">
                 <div class="stat"><div class="num">2</div><div class="lab">今日完了したタスク</div></div>
                 <div class="stat"><div class="num">1</div><div class="lab">進行中のタスク</div></div>
@@ -2147,19 +2094,19 @@
                 <span class="badge b-wait">判断待ち</span>
                 <button class="btn" type="button" data-nav="k-task">タスクを開く</button>
               </div>
-              <p class="rel" style="margin-top:12px">タスクの記録もと：相談の会話（自動）。手で作ることもできます。</p>
+              <p class="rel" style="margin-top:12px">タスクの記録もと：ホームの会話（自動）。手で作ることもできます。</p>
               <div class="btnrow"><button class="btn" type="button" data-nav="k-task-new">タスクを作る</button></div>
             </div>
 
             <div class="screen-pane" data-screen="k-task">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-tasks">&larr; タスク一覧へ</button></div>
               <p class="h-big">毎日の取り込みの維持（#121 ほか）</p>
-              <p class="h-sub">タスク · <b>KeibaDB</b> · 会話から自動で記録（今朝、相談で決定）· 配下の課題 3件</p>
+              <p class="h-sub">タスク · <b>KeibaDB</b> · 会話から自動で記録（今朝、ホームで決定）· 配下の課題 3件</p>
               <div class="set-group">
                 <h4>このタスクについて</h4>
                 <p class="d">毎日の取り込みを止めずに続けるためのテーマです。形式が変わったら止めて知らせ、判断が出ればそのまま再開します。</p>
                 <div class="set-row"><div class="grow"><div class="t">進み具合</div><div class="d2">配下の課題 3件 · 完了 1件 · 進行中 1件 · 判断待ち 1件（3件中 1件完了）</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:33%"></i></div></div><span class="badge b-wait">判断待ち</span></div>
-                <div class="set-row"><div class="grow"><div class="t">記録のもと</div><div class="d2">相談の会話から自動で記録されました。</div></div><button class="btn" type="button" data-nav="k-ask">相談で見る</button></div>
+                <div class="set-row"><div class="grow"><div class="t">記録のもと</div><div class="d2">ホームの会話から自動で記録されました。</div></div><button class="btn" type="button" data-openpage="start">ホームで見る</button></div>
               </div>
               <div class="set-group">
                 <h4>配下の課題</h4>
@@ -2217,27 +2164,27 @@
               </div>
               <div class="set-group">
                 <h4>実行</h4>
-                <div class="set-row"><span class="ava sm stuck" style="background:#0e7490">安</span><div class="grow"><div class="t">担当者とセッション</div><div class="d2">安藤 健二 · 停止中（安全に止まっています。データの破損はありません）。</div></div><span class="badge b-block">止まっている</span></div>
+                <div class="set-row"><span class="ava sm stuck" style="background:#0e7490">安</span><div class="grow"><div class="t">エージェントとセッション</div><div class="d2">安藤 健二 · 停止中（安全に止まっています。データの破損はありません）。</div></div><span class="badge b-block">止まっている</span></div>
                 <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">対応表の食い違い 3件 — あなたの判断待ち。</div></div><span class="badge b-wait">判断待ち</span></div>
               </div>
             </div>
 
             <div class="screen-pane" data-screen="k-works">
               <p class="h-big">作業</p>
-              <p class="h-sub">今 KeibaDB で動いているセッションです。基本は「相談」の会話で進み、セッションの実物はいつでもターミナル表示で見られます。</p>
+              <p class="h-sub">今 KeibaDB で動いているセッションです。基本はホームの会話で進み、セッションの実物はいつでもターミナル表示で見られます。</p>
               <div class="lrow">
-                <div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">Claude Code · 安藤 健二 · 25分実行中 · 夜の分まで完了</div></div>
+                <span class="ava working" style="background:#0e7490">安</span><div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">Claude Code · 安藤 健二 · 25分実行中 · 夜の分まで完了</div></div>
                 <span class="badge b-run">実行中</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">毎日の取り込み（#121）</div><div class="d">Claude Code · 安藤 健二 · 形式の変更で停止中 · 判断待ち</div></div>
+                <span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">毎日の取り込み（#121）</div><div class="d">Claude Code · 安藤 健二 · 形式の変更で停止中 · 判断待ち</div></div>
                 <span class="badge b-block">止まっている</span>
                 <button class="btn" type="button" data-nav="k-decide">判断へ</button>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
+                <span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
                 <span class="badge b-run">常駐</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
@@ -2260,20 +2207,20 @@
                   <dt>理由</dt><dd>3件とも項目名の対応づけの問題で、データ側の欠落ではありません。今朝の分は再開後にまとめて取り込めます。</dd>
                   <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクト・gwt の作業には影響しません。</dd>
                 </dl>
-                <div class="btnrow"><button class="btn primary" type="button">対応表を直して続ける</button><button class="btn" type="button">取り込みを止める</button><button class="btn ghost" type="button" data-nav="k-ask">相談で聞く</button></div>
+                <div class="btnrow"><button class="btn primary" type="button">対応表を直して続ける</button><button class="btn" type="button">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="start">ホームで聞く</button></div>
               </div>
-              <p class="rel">判断待ちは以上です。開始画面の会話からも、同じ判断をその場で決められます。</p>
+              <p class="rel">判断待ちは以上です。ホームの会話からも、同じ判断をその場で決められます。</p>
             </div>
 
             <div class="screen-pane" data-screen="k-agents">
-              <p class="h-big">担当者</p>
+              <p class="h-big">エージェント</p>
               <p class="h-sub">このプロジェクトで動いているエージェントと、その担当の履歴・予定です。台帳と並び順・特性は「エージェント台帳」にあります。</p>
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
                 <div class="grow"><div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div>
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div></div>
                 <span class="badge b-wait">判断待ち 1件</span>
-                <button class="btn ghost" type="button" data-nav="k-ask">相談する</button>
+                <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
               </div>
               <div class="rowitem">
@@ -2288,9 +2235,9 @@
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
                 <button class="btn ghost" type="button" data-nav="k-agent-pause">一時停止</button>
               </div>
-              <p class="h-sec">担当履歴</p>
-              <table class="list" aria-label="担当履歴">
-                <thead><tr><th>担当者</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
+              <p class="h-sec">エージェント履歴</p>
+              <table class="list" aria-label="エージェント履歴">
+                <thead><tr><th>エージェント</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
                 <tbody>
                   <tr><td>秦泉寺 章夫（PM）</td><td>#121 の判断の用意</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-wait">判断待ち</span></td></tr>
                   <tr><td>安藤 健二</td><td>#130 レース結果の取り込み</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-run">進行中</span></td></tr>
@@ -2415,8 +2362,7 @@
               <div class="logline"><span class="sev warn">WARN</span><span class="lt">06:00:41</span><span class="lm">import — 形式の不一致を検出（対応表と食い違う行 3件）。取り込みを安全に止めました</span></div>
               <div class="logline"><span class="sev info">INFO</span><span class="lt">06:00:05</span><span class="lm">import — 定期実行を開始しました（毎日 6:00）</span></div>
               <div class="logline"><span class="sev info">INFO</span><span class="lt">昨日 06:12</span><span class="lm">import — 取り込みが全件完了しました</span></div>
-              <p class="rel" style="margin-top:10px">エージェントの出力そのものは、ここではなく「作業」や「担当者」からターミナル表示で見ます。</p>
-              <div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナル表示を開く</button></div>
+              <p class="rel" style="margin-top:10px">エージェントの出力そのものは、ここではなく「作業」や「エージェント」からターミナル表示で見ます。</p>
             </div>
 
             <div class="screen-pane" data-screen="k-settings">
@@ -2434,7 +2380,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
-                <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まったエージェントを再起動します。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">取り込みは毎日 6:00</div><div class="d2">このプロジェクトだけの違いです（端末全体の設定とは別に持っています）。</div></div><button class="btn" type="button" data-nav="k-import-time">変える</button></div>
                 <div class="set-row"><div class="grow"><div class="t">起動候補（Candidates）</div><div class="d2">課題を始めるときの候補と、その起動条件（Session mode／Runtime など）です。</div></div><button class="btn" type="button" data-nav="k-candidates">候補を編集</button></div>
                 <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：import、bug。</div></div><button class="btn" type="button" data-nav="k-labels">ラベルを編集</button></div>
@@ -2451,7 +2397,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">閉じる</div>
-                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="k-close-project">閉じる…</button></div>
+                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、エージェントが終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="k-close-project">閉じる…</button></div>
               </div>
             </div>
             <div class="screen-pane" data-screen="k-settings-tuning">
@@ -2522,12 +2468,12 @@
             </div>
 
             <div class="screen-pane" data-screen="k-agent-pause">
-              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-agents">&larr; 担当者へ戻る</button></div>
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-agents">&larr; エージェントへ戻る</button></div>
               <p class="h-big">一時停止の確認</p>
-              <p class="h-sub">担当者の自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
+              <p class="h-sub">エージェントの自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでの担当者の自動補充と再起動が止まります。毎日の取り込みの予定そのものは残ります。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「担当者」の画面からいつでも再開できます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでのエージェントの自動補充と再起動が止まります。毎日の取り込みの予定そのものは残ります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「エージェント」の画面からいつでも再開できます。</div></div></div>
               </div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-agents">一時停止する</button><button class="btn ghost" type="button" data-nav="k-agents">やめる</button></div>
             </div>
@@ -2565,8 +2511,8 @@
               <p class="h-big">このプロジェクトを閉じる</p>
               <p class="h-sub">閉じると、この端末のプロジェクト一覧から外れます。リポジトリと課題は GitHub 側に残ります。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">閉じる範囲</div><div class="d2">この端末での監視・担当者・索引と、毎日の取り込みの自動実行が止まります。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">実行中の担当者</div><div class="d2">安藤 健二（#130）が動いています。閉じるときは、担当者が終わるのを待ってから閉じます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">閉じる範囲</div><div class="d2">この端末での監視・エージェント・索引と、毎日の取り込みの自動実行が止まります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">実行中のエージェント</div><div class="d2">安藤 健二（#130）が動いています。閉じるときは、エージェントが終わるのを待ってから閉じます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">結果の確認</div><div class="d2">閉じた結果が確認できないときは、状態の確認（Check status）から同じ選択でもう一度試せます。</div></div></div>
               </div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-openpage="start">閉じる</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
@@ -2604,7 +2550,7 @@
                 <div class="set-row"><div class="grow"><div class="t">2. 標準の候補</div><div class="d2">Session mode：新規 · Runtime：既定 · 権限スキップ：なし · Fast mode：なし · 優先：すべて</div></div><button class="btn ghost" type="button">削除</button></div>
                 <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。並べ替えは行の順序で決まります。</div></div><button class="btn" type="button">追加</button></div>
               </div>
-              <div class="notice">候補はこのプロジェクトの設定です。エージェント（担当者）とは別で、誰が担当するかは起動時に決まります。</div>
+              <div class="notice">候補はこのプロジェクトの設定です。エージェントとは別で、誰が担当するかは起動時に決まります。</div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
             </div>
 
@@ -2614,7 +2560,7 @@
 
       <!-- ================= プロファイル ================= -->
       <div class="pagegroup" data-page="profile">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">プロファイルは端末全体の画面です</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">プロファイルは端末全体の画面です</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="profile-main">
             <p class="h-big">プロファイル</p>
@@ -2785,16 +2731,13 @@
 
       <!-- ================= ターミナル表示 ================= -->
       <div class="pagegroup" data-page="terminal">
-        <div class="pagehead"><a class="plink" data-openpage="gwt" data-openscreen="g-works">&larr; 作業へ戻る</a><span class="rel">基本は「相談」の会話です。ここは実物の出力を見る場所です</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="gwt" data-openscreen="g-works">&larr; 作業へ戻る</a><span class="rel">基本はホームの会話です。ここは実物の出力を見る場所です</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="terminal-main">
             <p class="h-big">ターミナル表示</p>
-            <p class="h-sub">全エージェントのツール出力を、そのままの形で見られます。PM（秦泉寺 章夫）のセッションも同じように開けます。</p>
-            <div class="chips">
-              <span class="chip on">小田 洋平 · #7048（Codex）</span><span class="chip">姫野 大樹 · #7007（Claude Code）</span><span class="chip">秦泉寺 章夫 · PM（Claude Code）</span><span class="chip">安藤 健二 · #130（KeibaDB）</span>
-            </div>
+            <p class="h-sub">いま見ている作業のツール出力を、そのままの形で見られます。ターミナル表示は作業ごとに1つで、エージェントの切り替えはありません。別の作業の出力は、「作業」や「エージェント」の画面から、その作業を選んで開きます。PM（秦泉寺 章夫）のセッションも、作業の1つとして同じように開けます。</p>
             <div class="term">
-              <div class="term-head"><b>小田 洋平</b><span>Codex 1 · gpt-6.2-sol · 推論 xhigh · Ultrafast</span><span>~/Repos/gwt/work/issue-7048</span><span style="margin-left:auto">実行中 · 42分</span></div>
+              <div class="term-head"><b>小田 洋平</b><span>#7048 新しい画面の共有状態モデル</span><span>Codex 1 · gpt-6.2-sol · 推論 xhigh · Ultrafast</span><span>~/Repos/gwt/work/issue-7048</span><span style="margin-left:auto">実行中 · 42分</span></div>
               <div class="term-body"><span class="dim">$ codex — #7048 共有状態モデルの実装</span>
 <span class="hl">› 状態ストアの購読を画面単位から共有ストアへ移しています</span>
   crates/gwt/web/store.js を更新しました
@@ -2803,8 +2746,8 @@
 <span class="warn">⚠ 警告 2件：未使用の変数（従来からあるもの）</span>
 <span class="dim">— 出力はここまで。続きはライブで流れます —</span></div>
             </div>
-            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。指示は「相談」の会話から出します（会話の内容はタスクに自動で記録されます）。この表示の要件（大量の出力でも詰まらない描画、時間とともに劣化しないスクロール、残像・重なりなし、再接続時の再生、セッション消滅時の自動復帰）は、設計正本の項目58を正とします。</p>
-            <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-ask">相談へ戻る</button><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-agents">担当者で選ぶ</button></div>
+            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。指示はホームの会話から出します（会話の内容はタスクに自動で記録されます）。この表示の要件（大量の出力でも詰まらない描画、時間とともに劣化しないスクロール、残像・重なりなし、再接続時の再生、セッション消滅時の自動復帰）は、設計正本の項目58を正とします。</p>
+            <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">作業へ戻る</button><button class="btn ghost" type="button" data-openpage="start">ホームへ戻る</button></div>
           </div>
         </div>
       </div>
@@ -2832,7 +2775,7 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
   </footer>
 </div>
 
@@ -2840,18 +2783,18 @@
 
 <script>
 (function () {
-  var pageLabels = { start: "開始画面", firstrun: "初回セットアップ", projects: "プロジェクト", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
+  var pageLabels = { start: "ホーム", firstrun: "初回セットアップ", projects: "プロジェクト", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
     appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
-    "g-settings-tuning": "自律駆動の詳細設定", "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
+    "g-settings-tuning": "自律駆動の詳細設定", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "エージェント",
     "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "タスクを作る", "g-subissue-add": "子課題を追加", "g-session-picker": "セッションを選ぶ", "g-agent-pause": "一時停止の確認", "g-project-stop": "プロジェクトを止める", "g-labels": "ラベルを編集", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
-    "k-settings-tuning": "自律駆動の詳細設定", "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
+    "k-settings-tuning": "自律駆動の詳細設定", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "エージェント",
     "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "タスクを作る", "k-subissue-add": "子課題を追加", "k-session-picker": "セッションを選ぶ", "k-agent-pause": "一時停止の確認", "k-labels": "ラベルを編集", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
   };
   var current = { start: "start", firstrun: "setup-welcome", addproject: "add-github", notifications: "notifications-main", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
   var activePage = "start";
   function titleFor(p) {
-    if (p === "start") return "開始画面";
+    if (p === "start") return "ホーム";
     if (p === "gwt" || p === "keibadb") return pageLabels[p] + " — " + (screenTitles[current[p]] || "");
     return pageLabels[p] || p;
   }
