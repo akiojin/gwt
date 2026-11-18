@@ -12,6 +12,7 @@ use crate::{
     WindowProcessStatus,
 };
 use gwt_terminal::{pty::SpawnConfig, Pane, PtyHandle};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -94,6 +95,9 @@ impl Drop for WindowRuntime {
         self.pty.revoke_input_generation();
         if let Some(agent) = &self.agent {
             agent.current.store(false, Ordering::Release);
+        }
+        if self.pty.termination_disarmed() {
+            return;
         }
         if self.pty.tree_exit_confirmed()
             && self.output_thread.is_none()
@@ -351,7 +355,7 @@ pub(crate) struct AgentPrepared {
     result: Result<PreparedAgentLaunchSuccess, AgentLaunchError>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum CloseCause {
     ExplicitClose,
     ExplicitStop,
@@ -416,6 +420,125 @@ pub(crate) enum Retirement {
 pub(crate) enum StoppedOwnerWindowExit {
     CapturedPty(Arc<PtyHandle>),
     DiagnosticClosed(Box<gwt_agent::Session>),
+}
+
+#[derive(Deserialize, Serialize)]
+struct ShutdownRetirement {
+    id: String,
+    incarnation: u64,
+    kind: String,
+    session_id: Option<String>,
+    operation_id: Option<String>,
+    child_pid: Option<u32>,
+    child_started_at: Option<u64>,
+    tree_exit_confirmed: bool,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    observation: Option<&'static str>,
+}
+
+impl Retirement {
+    fn pty(&self) -> Option<&PtyHandle> {
+        match self {
+            Self::Runtime { runtime, .. } => Some(&runtime.pty),
+            Self::Pane { pane, .. } => Some(pane.pty()),
+            Self::Agent { success, .. } => Some(success.pane.pty()),
+            Self::SwitchStoppedWindow {
+                exit: StoppedOwnerWindowExit::CapturedPty(pty),
+                ..
+            } => Some(pty),
+            Self::StoppedWindow(_) | Self::SwitchStoppedWindow { .. } => None,
+        }
+    }
+
+    fn shutdown_record(&self, id: &str, incarnation: u64) -> ShutdownRetirement {
+        let (kind, session_id, operation_id, child_started_at) = match self {
+            Self::Runtime { runtime, cause } => (
+                format!("runtime_{cause:?}"),
+                runtime
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.snapshot.id.clone()),
+                None,
+                runtime.child_started_at,
+            ),
+            Self::StoppedWindow(capture) => (
+                "stopped_window".into(),
+                capture.cleanup.expected_session_id.clone(),
+                None,
+                None,
+            ),
+            Self::SwitchStoppedWindow { proof, .. } => (
+                "switch_source".into(),
+                Some(proof.session_id.clone()),
+                None,
+                Some(proof.child_started_at),
+            ),
+            Self::Pane { operation_id, .. } => ("pane".into(), None, operation_id.clone(), None),
+            Self::Agent {
+                success,
+                operation_id,
+                ..
+            } => (
+                "agent_launch".into(),
+                Some(success.active_session.session_id.clone()),
+                Some(operation_id.clone()),
+                None,
+            ),
+        };
+        let pty = self.pty();
+        ShutdownRetirement {
+            id: id.into(),
+            incarnation,
+            kind,
+            session_id,
+            operation_id,
+            child_pid: match self {
+                Self::SwitchStoppedWindow { proof, .. } => Some(proof.child_pid),
+                _ => pty.and_then(PtyHandle::process_id),
+            },
+            child_started_at,
+            tree_exit_confirmed: pty.is_some_and(PtyHandle::tree_exit_confirmed),
+            observation: None,
+        }
+    }
+}
+
+impl ShutdownRetirement {
+    fn observe(&self) -> &'static str {
+        if self.tree_exit_confirmed {
+            return "tree_exit_confirmed";
+        }
+        let (Some(pid), Some(birth)) = (self.child_pid, self.child_started_at) else {
+            return "unconfirmed";
+        };
+        if pid == 0 || birth == 0 {
+            return "unconfirmed";
+        }
+        // Only the leader is observed here. Keep the durable record and
+        // never infer process-tree exit or recreate stop authority from it.
+        match crate::process::host_process_start_time(pid) {
+            Some(current) if current == birth => "matching_child",
+            Some(_) => "child_identity_changed",
+            None if crate::process::host_process_liveness(pid) == Some(false) => "child_exited",
+            None => "unconfirmed",
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct OwnerShutdownRetirements {
+    host_instance_id: String,
+    host_pid: u32,
+    host_started_at: Option<u64>,
+    retirements: Vec<ShutdownRetirement>,
+}
+
+fn read_shutdown_retirements(path: &Path) -> std::io::Result<Vec<OwnerShutdownRetirements>> {
+    match std::fs::File::open(path) {
+        Ok(file) => Ok(serde_json::from_reader(std::io::BufReader::new(file))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) struct ShellRegistryPublication {
@@ -583,6 +706,8 @@ pub(crate) enum OwnerMessage {
         captured: Retirement,
         reply: oneshot::Sender<()>,
     },
+    #[cfg(all(test, unix))]
+    RetainExhaustedRetirement(oneshot::Sender<()>),
     #[cfg(test)]
     TickReconciliation {
         now: std::time::Instant,
@@ -922,6 +1047,14 @@ impl OwnerHandle {
             .await
             .map_err(|_| "owner stopped before reconciliation tick".to_string())
     }
+    #[cfg(all(test, unix))]
+    pub(crate) async fn test_retain_exhausted_retirement(&self) -> Result<(), String> {
+        let (reply, received) = oneshot::channel();
+        self.sender
+            .send(OwnerMessage::RetainExhaustedRetirement(reply))
+            .map_err(|_| "project owner unavailable".to_string())?;
+        received.await.map_err(|error| error.to_string())
+    }
     #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_check_monitor_deadlines(
         &self,
@@ -1219,6 +1352,7 @@ pub(crate) struct OwnerState {
     agent_operations: HashMap<String, AgentOperation>,
     retirements: HashMap<(String, u64), Option<Retirement>>,
     reconciliation: ReconciliationRecovery,
+    previous_shutdown_retirements: Vec<OwnerShutdownRetirements>,
     readiness: HashMap<String, ReadinessJob>,
     close_replies: HashMap<(String, u64), Vec<oneshot::Sender<OwnerReply>>>,
     pub(crate) continue_work_outcomes:
@@ -1320,6 +1454,7 @@ impl OwnerState {
                 ),
                 ..Default::default()
             },
+            previous_shutdown_retirements: Vec::new(),
             readiness: HashMap::new(),
             close_replies: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
@@ -1404,6 +1539,7 @@ impl OwnerState {
         self.gui_presence = GuiPresence::new(self.gui_presence.intent(), std::time::Instant::now());
     }
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
+        self.resume_shutdown_reconciliation();
         let mut continue_active = false;
         let mut next_project_policy_check = std::time::Instant::now();
         loop {
@@ -1770,6 +1906,34 @@ impl OwnerState {
                     reply,
                 } => {
                     self.retirements.insert((id, incarnation), Some(captured));
+                    let _ = reply.send(());
+                }
+                #[cfg(all(test, unix))]
+                OwnerMessage::RetainExhaustedRetirement(reply) => {
+                    let id = "retired-window".to_string();
+                    let cleanup = super::agent_dispatch::OwnedWindowRecordCleanup {
+                        registry: self.agent_registry.as_ref().unwrap().clone(),
+                        registry_path: crate::persistence::workspace_state_path(&self.root),
+                        root: self.root.clone(),
+                        project_key: self.project_key.clone(),
+                        canonical_id: id.clone(),
+                        expected_session_id: None,
+                    };
+                    self.retirements.insert(
+                        (id.clone(), 1),
+                        Some(Retirement::StoppedWindow(Box::new(
+                            super::agent_dispatch::StoppedWindowRetirement {
+                                sessions_dir: gwt_core::paths::gwt_sessions_dir(),
+                                expected: None,
+                                cleanup,
+                            },
+                        ))),
+                    );
+                    self.reconciliation.attempts.insert(
+                        ReconciliationTarget::Retirement(id, 1),
+                        ReconciliationAttempt::Attempted,
+                    );
+                    self.reconcile_failed_retirements(std::time::Instant::now());
                     let _ = reply.send(());
                 }
                 #[cfg(test)]
@@ -2406,7 +2570,7 @@ impl OwnerState {
         }
     }
     fn finish_shutdown_if_drained(&mut self) -> bool {
-        self.stopping
+        let drained = self.stopping
             && self.pending.is_empty()
             && self.closing.is_empty()
             && self.retiring == 0
@@ -2415,10 +2579,90 @@ impl OwnerState {
             && self.deferred_agent_frontend.is_empty()
             && self.pending_agent_self_closes.is_empty()
             && self.runtimes.is_empty()
-            && self.retirements.is_empty()
             && self.readiness.is_empty()
             && self.close_replies.is_empty()
-            && self.deferred_readiness_closes.is_empty()
+            && self.deferred_readiness_closes.is_empty();
+        if !drained || self.retirements.is_empty() {
+            return drained;
+        }
+        if self
+            .retirements
+            .iter()
+            .any(|((id, incarnation), captured)| {
+                captured.is_none()
+                    || !matches!(
+                        self.reconciliation
+                            .attempts
+                            .get(&ReconciliationTarget::Retirement(id.clone(), *incarnation)),
+                        Some(ReconciliationAttempt::NeedsHuman)
+                    )
+            })
+        {
+            return false;
+        }
+        match self.handoff_shutdown_retirements() {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key, %error,
+                    "shutdown cannot relinquish unresolved exact retirements");
+                false
+            }
+        }
+    }
+
+    fn shutdown_retirements_path(&self) -> std::io::Result<PathBuf> {
+        let project_key = gwt_core::repo_hash::RepoHash::parse(&self.project_key)
+            .map_err(std::io::Error::other)?;
+        Ok(gwt_core::paths::gwt_project_dir(&project_key).join("owner-shutdown-retirements.json"))
+    }
+
+    fn handoff_shutdown_retirements(&self) -> std::io::Result<()> {
+        let path = self.shutdown_retirements_path()?;
+        let mut batches = read_shutdown_retirements(&path)?;
+        batches.retain(|batch| batch.host_instance_id != self.host_instance_id);
+        batches.push(OwnerShutdownRetirements {
+            host_instance_id: self.host_instance_id.clone(),
+            host_pid: std::process::id(),
+            host_started_at: crate::process::host_process_start_time(std::process::id()),
+            retirements: self
+                .retirements
+                .iter()
+                .filter_map(|((id, incarnation), captured)| {
+                    Some(captured.as_ref()?.shutdown_record(id, *incarnation))
+                })
+                .collect(),
+        });
+        std::fs::create_dir_all(path.parent().expect("project data directory"))?;
+        crate::persistence::write_durable_bytes(&path, &serde_json::to_vec(&batches)?)?;
+
+        // Dropping a live PTY normally kills it. Relinquish the in-memory
+        // stop authority only after its unresolved retirement is durable.
+        for pty in self
+            .retirements
+            .values()
+            .filter_map(|captured| captured.as_ref()?.pty())
+        {
+            pty.disarm_termination().map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+
+    fn resume_shutdown_reconciliation(&mut self) {
+        match self
+            .shutdown_retirements_path()
+            .and_then(|path| read_shutdown_retirements(&path))
+        {
+            Ok(mut batches) => {
+                for retirement in batches.iter_mut().flat_map(|batch| &mut batch.retirements) {
+                    retirement.observation = Some(retirement.observe());
+                }
+                self.previous_shutdown_retirements = batches;
+            }
+            Err(error) => {
+                tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key, %error,
+                "could not read previous owner shutdown retirements")
+            }
+        }
     }
 
     fn reconcile_failed_retirements(&mut self, now: std::time::Instant) {
@@ -3919,7 +4163,7 @@ impl OwnerState {
                     .shared_registry_initialization
                     .as_ref()
                     .and_then(|result| result.as_ref().err());
-                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_retry_pending":self.reconciliation.retry_at.is_some(),"reconciliation_needs_human":self.reconciliation.needs_human,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
+                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_retry_pending":self.reconciliation.retry_at.is_some(),"reconciliation_needs_human":self.reconciliation.needs_human,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>(),"previous_shutdown_retirements":self.previous_shutdown_retirements});
                 #[cfg(any(test, feature = "test-gh-guard"))]
                 let health = {
                     let mut health = health;
@@ -12894,6 +13138,7 @@ fn owner_fixture(
         agent_operations: HashMap::new(),
         retirements: HashMap::new(),
         reconciliation: ReconciliationRecovery::default(),
+        previous_shutdown_retirements: Vec::new(),
         readiness: HashMap::new(),
         close_replies: HashMap::new(),
         continue_work_outcomes: HashMap::new(),
@@ -14931,6 +15176,84 @@ mod tests {
         assert!(!issuer.authenticates_token(&token));
     }
     #[tokio::test]
+    async fn issue7619_shutdown_preserves_live_child_and_restarts_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path().join("home"));
+        let (_, pane) = unbound_fixture(root.path());
+        let pty = pane.shared_pty();
+        let pid = pty.process_id().unwrap();
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        state
+            .install_pane("pane".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let mut runtime = state.runtimes.remove("pane").unwrap();
+        let started_at = runtime.child_started_at.unwrap();
+        // On startup, this recorded birth names a different process than the live PID.
+        let recorded_birth = started_at + 1;
+        runtime.child_started_at = Some(recorded_birth);
+        state.retirements.insert(
+            ("pane".into(), 1),
+            Some(Retirement::Runtime {
+                runtime: Box::new(runtime),
+                cause: CloseCause::ExplicitClose,
+            }),
+        );
+        state.reconciliation.attempts.insert(
+            ReconciliationTarget::Retirement("pane".into(), 1),
+            ReconciliationAttempt::Attempted,
+        );
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        let health = handle.request(request(OwnerCommand::Health)).await.unwrap();
+        assert_eq!(health["reconciliation_needs_human"], true);
+        let guard = std::time::Duration::from_secs(10);
+        // test-hygiene: allow-wall-clock-deadline Hang guard for an exhausted owner that previously never completed shutdown.
+        let shutdown = tokio::time::timeout(guard, handle.shutdown()).await;
+        if shutdown.is_err() {
+            let _ = crate::session_finalizer::kill_and_reap(&pty, "pane");
+            let _ = handle
+                .request(request(OwnerCommand::Close {
+                    id: "pane".into(),
+                    incarnation: 1,
+                }))
+                .await;
+        }
+        shutdown.expect("exhausted retirement must acknowledge shutdown");
+        owner.join().unwrap();
+
+        let (mut state, receiver, restarted) = owner_fixture(root.path());
+        state.host_instance_id = "replacement-host".into();
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        let health = restarted
+            .request(request(OwnerCommand::Health))
+            .await
+            .unwrap();
+        restarted.shutdown().await;
+        owner.join().unwrap();
+        let alive = crate::process::host_process_start_time(pid) == Some(started_at)
+            && pty.try_wait().unwrap().is_none();
+        if alive && pty.termination_disarmed() {
+            // SAFETY: this is the test's live PTY child and its exact birth matches.
+            assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+            pty.wait().unwrap();
+        } else {
+            let _ = crate::session_finalizer::kill_and_reap(&pty, "pane");
+        }
+        assert!(
+            alive,
+            "retirement handoff and reconciliation must leave the fixture child unsignaled"
+        );
+        assert!(pty.termination_disarmed());
+        let batch = &health["previous_shutdown_retirements"][0];
+        assert_eq!(batch["host_instance_id"], "host");
+        let record = &batch["retirements"][0];
+        assert_eq!(record["id"], "pane");
+        assert_eq!(record["incarnation"], 1);
+        assert_eq!(record["child_pid"], pid);
+        assert_eq!(record["child_started_at"], recorded_birth);
+        assert_eq!(record["observation"], "child_identity_changed");
+    }
+
+    #[tokio::test]
     async fn shutdown_waits_for_an_already_running_close_finalizer() {
         let root = tempfile::tempdir().unwrap();
         let capabilities = AgentCapabilityRegistry::default();
@@ -15050,6 +15373,7 @@ mod tests {
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),
             reconciliation: ReconciliationRecovery::default(),
+            previous_shutdown_retirements: Vec::new(),
             readiness: HashMap::new(),
             close_replies: HashMap::new(),
             continue_work_outcomes: HashMap::new(),

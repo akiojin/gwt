@@ -682,6 +682,8 @@ pub struct PtyHandle {
     grok_prompt_readiness: AtomicU8,
     /// Published only after bounded confirmation that the captured tree exited.
     tree_exit_confirmed: AtomicBool,
+    /// Set under the process group lock after relinquishing termination authority.
+    termination_disarmed: AtomicBool,
     #[cfg(target_os = "macos")]
     reap_requested: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -982,6 +984,7 @@ impl PtyHandle {
             transcript_overlay: AtomicBool::new(false),
             grok_prompt_readiness: AtomicU8::new(GrokPromptReadiness::Unknown as u8),
             tree_exit_confirmed: AtomicBool::new(false),
+            termination_disarmed: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
@@ -1603,12 +1606,14 @@ impl PtyHandle {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        self.ensure_termination_armed()?;
         let group_result = group
             .terminate()
             .map_err(|details| TerminalError::PtyIoError { details });
+        let child_result = self.child.kill();
         drop(group);
 
-        if self.child.kill()? {
+        if child_result? {
             return group_result;
         }
         #[cfg(target_os = "macos")]
@@ -1639,6 +1644,7 @@ impl PtyHandle {
             Ok(group) => group,
             Err(poisoned) => poisoned.into_inner(),
         };
+        self.ensure_termination_armed()?;
         let exited = group
             .terminate_and_wait(timeout)
             .map_err(|details| TerminalError::PtyIoError { details })?;
@@ -1648,6 +1654,37 @@ impl PtyHandle {
             kill_result?;
         }
         Ok(exited)
+    }
+
+    /// Relinquish the ability to signal the captured tree during owner shutdown.
+    /// The caller retains any existing exit proof and PTY descriptors.
+    pub fn disarm_termination(&self) -> Result<(), TerminalError> {
+        let mut group = self
+            .process_group
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(windows)]
+        group
+            .disarm_termination()
+            .map_err(|details| TerminalError::PtyIoError { details })?;
+        #[cfg(unix)]
+        group.disarm_termination();
+        self.termination_disarmed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether this handle has relinquished process termination authority.
+    pub fn termination_disarmed(&self) -> bool {
+        self.termination_disarmed.load(Ordering::Acquire)
+    }
+
+    fn ensure_termination_armed(&self) -> Result<(), TerminalError> {
+        if self.termination_disarmed() {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY process termination was disarmed".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Whether the captured tree's exit has been confirmed, beyond leader reap.
