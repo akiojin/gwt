@@ -1042,6 +1042,12 @@ jobs:
       - name: Run Windows PTY resolver adapter tests
         run: node scripts/ci-windows-tests.mjs run-lib gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1
         timeout-minutes: 15
+      - name: Run raw monitor input ConPTY regressions
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::hook::runtime_state::tests::raw_monitor_input_ -- --nocapture | tee "$RUNNER_TEMP/raw-monitor-hook.log"
+          grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/raw-monitor-hook.log"
+        timeout-minutes: 5
       - name: Run inherited Claude session environment regressions
         run: node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1
         timeout-minutes: 15
