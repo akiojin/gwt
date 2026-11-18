@@ -304,6 +304,48 @@ impl NamedFileLock {
         Self::acquire_with_observer(path, operation, false, || {})
     }
 
+    /// Acquire with the caller's wait limit. Probe once even when the limit
+    /// has elapsed, and return `WouldBlock` only after actual contention.
+    pub fn acquire_until(
+        path: &Path,
+        operation: &str,
+        deadline: Option<Instant>,
+    ) -> io::Result<Self> {
+        let file = open_named_lock(path)?;
+        let holder_path = named_lock_holder_path(path);
+        if let Some(deadline) = deadline {
+            #[cfg(any(test, feature = "test-support"))]
+            let mut observed = false;
+            loop {
+                match file.try_lock_exclusive() {
+                    Ok(()) => break,
+                    Err(error) if is_lock_contended(&error) => {
+                        #[cfg(any(test, feature = "test-support"))]
+                        if !observed {
+                            observed = true;
+                            notify_named_lock_contention(path);
+                        }
+                        let now = now();
+                        if now >= deadline {
+                            return Err(named_lock_error(
+                                &holder_path,
+                                operation,
+                                io::Error::new(io::ErrorKind::WouldBlock, error),
+                            ));
+                        }
+                        std::thread::sleep(
+                            LOCK_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            FileExt::lock_exclusive(&file)?;
+        }
+        Ok(Self::record(file, holder_path, operation))
+    }
+
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.
     pub fn try_acquire(path: &Path, operation: &str) -> io::Result<Self> {
         let file = open_named_lock(path)?;
