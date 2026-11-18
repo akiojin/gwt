@@ -2523,7 +2523,7 @@
               </tbody>
             </table>
             <p class="rel" style="margin-top:8px">扱いは「OS のまま／上書き／無効」から選びます。実効値は、この端末で実際に渡る値です。</p>
-            <div class="btnrow" style="margin-top:10px"><button class="btn" type="button">+ 変数を追加</button><button class="btn ghost" type="button" data-nav="profile-main">一覧へ戻る</button></div>
+            <div class="btnrow" style="margin-top:10px"><button class="btn" type="button" id="envAdd">+ 変数を追加</button><button class="btn ghost" type="button" data-nav="profile-main">一覧へ戻る</button></div>
           </div>
           <div class="screen-pane" data-screen="profile-delete">
             <div class="dlg">
@@ -2782,6 +2782,29 @@
       });
     });
   });
+  /* profile edit: environment variable rows (add / delete) */
+  var envPane = document.querySelector('.screen-pane[data-screen="profile-edit"]');
+  if (envPane) {
+    var envBody = envPane.querySelector("table.list tbody");
+    if (envBody) {
+      envBody.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("button");
+        if (!btn || btn.textContent.trim() !== "削除") return;
+        var tr = btn.closest("tr");
+        if (tr) tr.remove();
+      });
+      var envAdd = document.getElementById("envAdd");
+      if (envAdd) {
+        envAdd.addEventListener("click", function () {
+          var tr = document.createElement("tr");
+          tr.innerHTML = '<td><input class="field" type="text" value="" placeholder="キー" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button">上書き ▾</button></td><td><input class="field" type="text" value="" placeholder="値" aria-label="値" style="width:120px"></td><td class="num"></td><td><button class="btn ghost" type="button">削除</button></td>';
+          envBody.appendChild(tr);
+          var keyInput = tr.querySelector("input");
+          if (keyInput) keyInput.focus();
+        });
+      }
+    }
+  }
   /* chat: quick replies + composer on the start screen */
   function appendMsg(chat, cls, metaHTML, text) {
     var d = document.createElement("div");
