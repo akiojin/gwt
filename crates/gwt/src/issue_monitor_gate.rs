@@ -183,23 +183,33 @@ impl AcceptanceSnapshot {
 }
 
 /// Heading lines (case-insensitive, trimmed of leading `#`/spaces) that open the
-/// structured acceptance-criteria block.
+/// structured acceptance-criteria block. Japanese entries are stored in the
+/// okurigana-less spelling `heading_text` normalizes to.
 const ACCEPTANCE_HEADINGS: &[&str] = &[
     "acceptance criteria",
-    "受け入れ基準",
-    "受け入れ条件",
-    "受け入れシナリオ",
+    "受入基準",
+    "受入条件",
+    "受入シナリオ",
 ];
 
 /// The heading text without its `#` markers: lower-cased for matching and as
 /// written for messages. `None` for a non-heading line.
+///
+/// Issue #7359: the matching form folds the okurigana variants of 受け入れ
+/// (`受け入れ` / `受入れ` / `受け入` / `受入`) into `受入`, so `## 受入条件`
+/// opens the block exactly like `## 受け入れ条件`.
 fn heading_text(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('#') {
         return None;
     }
     let written = trimmed.trim_start_matches('#').trim();
-    Some((written.to_ascii_lowercase(), written.to_string()))
+    let matching = written
+        .to_ascii_lowercase()
+        .replace("受け入れ", "受入")
+        .replace("受入れ", "受入")
+        .replace("受け入", "受入");
+    Some((matching, written.to_string()))
 }
 
 /// Split an item's text into its explicit `AC-<id>` (when the item starts with
@@ -765,6 +775,26 @@ mod tests {
         let c = classify_acceptance_criteria(body);
         assert!(c.machine_checkable, "受け入れ条件 must open the block");
         assert_eq!(c.ids, vec!["AC-1"]);
+    }
+
+    #[test]
+    fn japanese_headings_without_okurigana_are_recognized() {
+        // Issue #7359 (feedback #6565): an ordinary Issue wrote its three
+        // Japanese checkbox criteria under `## 受入条件`. The okurigana-less
+        // spelling opened no block, so the independent review was dispatched
+        // with zero required criteria and parked the Issue as needs_human.
+        for heading in ["受入条件", "受入基準", "受入れ条件", "受け入れ条件"] {
+            let body = format!(
+                "## {heading}\n\
+                 - [ ] 設定が保存される\n\
+                 - [ ] 一覧が更新される\n\
+                 - [ ] エラーが表示されない\n"
+            );
+            let c = classify_acceptance_criteria(&body);
+            assert!(c.machine_checkable, "`## {heading}` must open the block");
+            assert_eq!(c.ids, vec!["AC-1", "AC-2", "AC-3"], "{heading}");
+            assert_eq!(c.rejection_reason(), None, "{heading}");
+        }
     }
 
     #[test]
