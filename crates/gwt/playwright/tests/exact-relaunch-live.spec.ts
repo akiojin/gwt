@@ -1893,6 +1893,8 @@ const at = new Date().toISOString();`);
       const journalPath = path.join(path.dirname(path.dirname(path.dirname(runtimePath))),
         'hook-live',path.basename(path.dirname(runtimePath)),path.basename(runtimePath));
       const completedBefore = JSON.parse(fs.readFileSync(runtimePath,'utf8')).last_completed_hook_event_at;
+      const profilePath = process.env.GWT_HOOK_PROFILE_PATH;
+      const profileBefore = fs.existsSync(profilePath) ? fs.statSync(profilePath).size : 0;
       const payload = JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()});
       const invoke = (args, env = process.env, input = payload) => require('node:child_process').spawnSync(
         process.env.GWT_BIN_PATH,args,{cwd:process.cwd(),env,encoding:'utf8',timeout:30000,input});
@@ -1904,9 +1906,20 @@ const at = new Date().toISOString();`);
         throw new Error('managed hook rejected');
       phase = 'native-completion';
       const nativeRuntime = JSON.parse(fs.readFileSync(runtimePath,'utf8'));
+      let degraded;
       if (nativeRuntime.status !== (event === 'Stop' ? 'Idle' : 'Running') || nativeRuntime.source_event !== event
         || !nativeRuntime.last_completed_hook_event_at || nativeRuntime.last_completed_hook_event_at === completedBefore
-        || nativeRuntime.last_completed_hook_outcome !== 'normal') throw new Error('native event did not complete normally');
+        || nativeRuntime.last_completed_hook_outcome !== 'normal') {
+        // Issue #7270: UserPromptSubmit keeps its 200 ms deadline and skips the
+        // Running publication once that deadline is spent; the follow-up tool
+        // hook publishes Running, which the ack-state phase still proves.
+        const profiled = fs.readFileSync(profilePath).subarray(profileBefore).toString('utf8')
+          .split(/\\r?\\n/).filter(Boolean).map(entry => JSON.parse(entry));
+        const publish = profiled.find(entry => entry.event === event && entry.handler === 'runtime-state/completion-publish');
+        if (event !== 'UserPromptSubmit' || publish?.remaining_budget_ms !== 0)
+          throw new Error('native event did not complete normally');
+        degraded = 'prompt-deadline';
+      }
       if (missed) {
         phase = 'pending-proof';
         const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
@@ -1946,7 +1959,7 @@ const at = new Date().toISOString();`);
             next_trigger:'Agent update'}})});
         if (result.error || result.status !== 0 || !JSON.parse(result.stdout).ok) throw new Error('PM status failed');
       }
-      receipt('ack');
+      receipt('ack', degraded ? {degraded} : {});
       console.log('WORKS_STATE ' + event);
     } catch {
       receipt('failed',{phase});
