@@ -297,16 +297,6 @@
   .logline .lm{flex:1;min-width:200px}
   .sev{font-size:11px;font-weight:800;padding:1px 8px;border-radius:999px;white-space:nowrap}
   .sev.info{background:var(--blue-soft);color:var(--blue)} .sev.warn{background:var(--amber-soft);color:var(--amber)} .sev.err{background:var(--red-soft);color:var(--red)} .sev.dbg{background:var(--gray-soft);color:var(--ink2)}
-  /* command palette */
-  .palette{max-width:620px;margin:34px auto;border:1px solid var(--line2);border-radius:14px;box-shadow:var(--shadow);background:var(--panel);overflow:hidden}
-  .palette .psearch{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line)}
-  .palette .psearch input{flex:1;border:0;outline:none;font:inherit;font-size:15px;background:transparent;color:var(--ink)}
-  .palette .pgroup{padding:8px 10px 4px}
-  .palette .pgroup .gk{font-size:11px;font-weight:800;letter-spacing:.09em;color:var(--ink3);padding:4px 8px}
-  .palette .pcmd{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;font-size:13.8px;font-weight:600;cursor:pointer}
-  .palette .pcmd:hover,.palette .pcmd.sel{background:var(--gray-soft)}
-  .palette .pcmd .kbd{margin-left:auto}
-  .kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel2);border:1px solid var(--line2);border-bottom-width:2px;border-radius:6px;padding:1px 7px;color:var(--ink2);white-space:nowrap}
   /* wizard */
   .wiz{display:flex;gap:0;min-height:200px}
   .wiz-rail{width:210px;flex:none;border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:4px}
@@ -335,7 +325,6 @@
       <a data-openpage="tools">ツール</a>
       <a data-openpage="settings">アプリ設定</a>
       <a data-openpage="profile">プロファイル</a>
-      <a data-openpage="palette">コマンドパレット</a>
       <span class="sep">gwt：</span>
       <a data-openpage="gwt" data-openscreen="g-ask">相談</a>
       <a data-openpage="gwt" data-openscreen="g-tasks">タスク</a>
@@ -1735,46 +1724,6 @@
         </div>
       </div>
 
-      <!-- ================= コマンドパレット ================= -->
-      <div class="pagegroup" data-page="palette">
-        <div class="content">
-          <div class="screen-pane on" data-screen="palette-main">
-            <div class="palette" role="dialog" aria-label="コマンドパレット">
-              <div class="psearch"><span aria-hidden="true">⌘</span><input type="text" placeholder="コマンドを探す…" aria-label="コマンドを探す"><span class="kbd">Esc で閉じる</span></div>
-              <div class="pgroup">
-                <div class="gk">移動</div>
-                <div class="pcmd sel">開始画面へ（ツムギと話す）<span class="kbd">⌘0</span></div>
-                <div class="pcmd">掲示板を開く<span class="kbd">⌘B</span></div>
-                <div class="pcmd">作業を開く<span class="kbd">⌘G</span></div>
-                <div class="pcmd">タスクを開く</div>
-                <div class="pcmd">ログを開く<span class="kbd">⌘L</span></div>
-                <div class="pcmd">判断待ちを開く</div>
-              </div>
-              <div class="pgroup">
-                <div class="gk">端末全体</div>
-                <div class="pcmd">エージェントを開く</div>
-                <div class="pcmd">ツールを開く（使用量と制限）</div>
-                <div class="pcmd">プロファイルを開く</div>
-                <div class="pcmd">PM の設定 — 自動で始める</div>
-              </div>
-              <div class="pgroup">
-                <div class="gk">始める</div>
-                <div class="pcmd">エージェントを起動する（起動ウィザード）</div>
-                <div class="pcmd">シェルのウィンドウを開く</div>
-                <div class="pcmd">課題を開く — 課題と作業の一覧</div>
-                <div class="pcmd">検索を開く</div>
-              </div>
-              <div class="pgroup">
-                <div class="gk">表示</div>
-                <div class="pcmd">テーマを切り替える（自動 → 暗い → 明るい）</div>
-                <div class="pcmd">キーの割り当てを見る<span class="kbd">⌘?</span></div>
-              </div>
-            </div>
-            <p class="rel" style="text-align:center">どの画面からでも ⌘K で開けます。</p>
-          </div>
-        </div>
-      </div>
-
       <!-- ================= 起動ウィザード ================= -->
       <div class="pagegroup" data-page="wizard">
         <div class="pagehead"><a class="plink" data-openpage="gwt" data-openscreen="g-works">&larr; 作業へ戻る</a><span class="rel">エージェントの起動 — gwt · 課題 #5561</span></div>
@@ -1856,21 +1805,21 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定では割り当てのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、コマンドパレット、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定では割り当てのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
 <script>
 (function () {
-  var pageLabels = { start: "開始画面", settings: "設定", agents: "エージェント", tools: "ツール", profile: "プロファイル", palette: "コマンドパレット", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
+  var pageLabels = { start: "開始画面", settings: "設定", agents: "エージェント", tools: "ツール", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
-    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-tsumugi": "エージェント設定 — ツムギ", "agent-edit-haruto": "エージェント設定 — Haruto", "agent-edit-yui": "エージェント設定 — Yui", "agent-edit-sora": "エージェント設定 — Sora", "agent-new": "エージェントを追加", "tools-pool": "ツール", "profile-main": "プロファイル", "palette-main": "コマンドパレット", "terminal-main": "ターミナル表示",
+    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-tsumugi": "エージェント設定 — ツムギ", "agent-edit-haruto": "エージェント設定 — Haruto", "agent-edit-yui": "エージェント設定 — Yui", "agent-edit-sora": "エージェント設定 — Sora", "agent-new": "エージェントを追加", "tools-pool": "ツール", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
     "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
     "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定",
     "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
     "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定"
   };
-  var current = { start: "start", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", palette: "palette-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
+  var current = { start: "start", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
   var activePage = "start";
   function titleFor(p) {
     if (p === "start") return "開始画面";
