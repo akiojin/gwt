@@ -5895,6 +5895,21 @@ fn issue_monitor_candidate_exclusion(
     None
 }
 
+/// The refusal an owner returns when its own source admission excludes the
+/// Issue. The Monitor recognizes the same text in the reported failure.
+pub fn source_admission_refusal_message(issue_number: u64, reason: &str) -> String {
+    format!("Issues source admission refused Issue #{issue_number}: {reason}")
+}
+
+/// Whether `message` reports a source refusal only PM triage can lift. A
+/// provenance gap that a refresh repairs keeps the ordinary retry path.
+fn is_source_triage_refusal(issue_number: u64, message: &str) -> bool {
+    message.starts_with(&source_admission_refusal_message(issue_number, ""))
+        && message.contains(SOURCE_TRIAGE_REQUIRED)
+}
+
+const SOURCE_TRIAGE_REQUIRED: &str = "PM triage required";
+
 fn issue_monitor_source_exclusion(
     issue: &IssueMonitorIssue,
     source_repository: IssueMonitorSourceRepository,
@@ -18198,8 +18213,18 @@ impl IssueMonitorState {
         self.close_review_window(issue_number, IssueMonitorIdleKind::ReviewVerdictPublished);
         // A close worker may already be doing remote readback. Preserve the
         // veto now instead of waiting for its settlement to mark work done.
-        if !passed
-            && self.pending_effects.iter().any(|effect| {
+        if !passed {
+            // Issue #7303 / #6052: CI can already be green, and the
+            // implementation agent can already have requested auto-merge,
+            // before this FAIL is accepted. Drop a prepared arm of this PR
+            // and queue a disarm so that SHA cannot land after rejection.
+            if let Some(pr_number) = self
+                .autonomous_record(issue_number)
+                .and_then(|record| record.pr_number)
+            {
+                self.disarm_auto_merge_after_rejected_review(issue_number, pr_number);
+            }
+            if self.pending_effects.iter().any(|effect| {
                 matches!(
                     &effect.payload,
                     IssueMonitorEffectPayload::SettleMergedIssue {
@@ -18208,10 +18233,35 @@ impl IssueMonitorState {
                         ..
                     } if *owner == issue_number
                 )
-            })
-        {
-            self.hold_failed_merged_review(issue_number);
+            }) {
+                self.hold_failed_merged_review(issue_number);
+            }
         }
+    }
+
+    /// Queue one disarm for a SHA whose independent review was accepted as FAIL.
+    /// An in-flight arm stays in the journal; the disarm is the safety effect
+    /// that must run against it. A prepared arm is not in flight and is dropped
+    /// so it cannot re-enable auto-merge after the disarm.
+    fn disarm_auto_merge_after_rejected_review(&mut self, issue_number: u64, pr_number: u64) {
+        self.pending_effects.retain(|effect| {
+            effect.state != IssueMonitorEffectState::Prepared
+                || !matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ArmAutoMerge {
+                        issue_number: pending_issue,
+                        pr_number: pending_pr,
+                        ..
+                    } if pending_issue == issue_number && pending_pr == pr_number
+                )
+        });
+        ensure_auto_merge_disarm_effect(
+            &mut self.pending_effects,
+            self.effect_authority_epoch,
+            &format!("review-fail:{issue_number}:{pr_number}"),
+            issue_number,
+            pr_number,
+        );
     }
 
     /// Issue #4117: live independent review windows, ordered by Issue.
@@ -22027,6 +22077,15 @@ impl IssueMonitorState {
             self.record_duplicate_launch_refusal(issue_number, message, window_id, now);
             return;
         }
+        // Issue #7632: no retry can change who wrote the Issue. Park it for
+        // the PM on the first refusal instead of spending the retry ladder.
+        if is_source_triage_refusal(issue_number, &message) {
+            self.release_confirmed_claim_for_issue(issue_number);
+            self.revoke_launch_binding(issue_number);
+            self.clear_active_tracking(issue_number);
+            self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, message);
+            return;
+        }
         self.record_failed_issue_at(issue_number, message, MonitorInboxState::LaunchFailed, now);
     }
 
@@ -22086,25 +22145,37 @@ impl IssueMonitorState {
         {
             return false;
         }
+        let message = message.into();
+        // Issue #7632: the owner refuses an untrusted source before it claims
+        // the delivery, so the report has no recorded materializer to match.
+        let triage_refusal = is_source_triage_refusal(issue_number, &message);
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
-                    if materializer_id.is_none()
-                        || self.pending_launch_deliveries[index]
-                            .materializer_id
-                            .as_deref()
-                            != materializer_id
+                    if !triage_refusal
+                        && (materializer_id.is_none()
+                            || self.pending_launch_deliveries[index]
+                                .materializer_id
+                                .as_deref()
+                                != materializer_id)
                     {
                         return false;
                     }
                     self.pending_launch_deliveries.remove(index);
                 }
+                // The reporter repeats a refusal until it reads the hold back.
+                PendingLaunchDeliveryMatch::Missing
+                    if triage_refusal
+                        && self
+                            .failed_issues
+                            .get(&issue_number)
+                            .is_some_and(|held| is_source_triage_refusal(issue_number, held)) => {}
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
                     return false
                 }
             }
         }
-        if retryable {
+        if retryable || triage_refusal {
             self.record_launch_failed_at(issue_number, message, now);
         } else {
             self.release_confirmed_claim_for_issue(issue_number);
@@ -22116,7 +22187,7 @@ impl IssueMonitorState {
             }
             self.record_terminal_failed_issue(
                 issue_number,
-                message.into(),
+                message,
                 MonitorInboxState::LaunchFailed,
             );
         }
@@ -29207,6 +29278,39 @@ mod tests {
                 42
             );
         }
+    }
+
+    /// Issue #7632 AC-3: source admission is decided before the remaining-work
+    /// relaunch, so a merged delivery never requeues an Issue it would refuse.
+    #[test]
+    fn merged_delivery_with_remaining_work_does_not_requeue_an_untrusted_source() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
+        monitor.set_gui_connected(true);
+        let mut candidate = issue(42);
+        candidate.author_login = Some("github-actions[bot]".into());
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining\n".into());
+        monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+        monitor.record_candidate(candidate.clone());
+        assert_eq!(
+            monitor.next_launch_request(IDLE_NOW).unwrap().issue_number,
+            42
+        );
+        // A later read reports an author the trust list does not name.
+        candidate.author_login = Some("external-reporter".into());
+        monitor.record_candidate(candidate);
+
+        monitor.record_merged(42);
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::SourceExcluded)
+        );
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
     }
 
     #[test]
@@ -45226,6 +45330,81 @@ mod tests {
         );
     }
 
+    /// Issue #7632 AC-1: the owner refuses an untrusted source before it claims
+    /// the delivery, so the report names no materializer the Monitor recorded.
+    /// One refusal parks the Issue for the PM and frees its slot.
+    #[test]
+    fn source_triage_refusal_holds_after_one_refusal_and_frees_the_slot() {
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        let delivery_id = monitor.prefs().pending_launch_deliveries[0]
+            .delivery_id
+            .clone();
+        assert_eq!(monitor.occupied_slot_count(), 1);
+        let refusal = source_admission_refusal_message(
+            42,
+            "untrusted external Issue; PM triage required; use a separate curated execution owner",
+        );
+
+        assert!(monitor.record_launch_failed_delivery_at(
+            42,
+            refusal.clone(),
+            Some(&delivery_id),
+            Some("gui-materializer"),
+            true,
+            "2026-07-28T00:00:05Z",
+        ));
+
+        let held = |monitor: &IssueMonitorState, reason: &str| {
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::NeedsHuman)
+            );
+            assert_eq!(monitor.prefs().failed_issues[0].message, reason);
+            assert_eq!(monitor.occupied_slot_count(), 0);
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+            assert_eq!(monitor.attempt_count(42), 0, "a hold is not a retry");
+        };
+        held(&monitor, &refusal);
+        assert!(monitor
+            .next_launch_request("2026-07-28T01:00:00Z")
+            .is_none());
+
+        // The GUI re-reports the same refusal with its cleanup detail until
+        // the Monitor confirms it; that must settle, not start another attempt.
+        let repeated = format!("{refusal}; exact owner cleanup remains pending: I/O failure");
+        assert!(monitor.record_launch_failed_delivery_at(
+            42,
+            repeated.clone(),
+            Some(&delivery_id),
+            Some("gui-materializer"),
+            true,
+            "2026-07-28T00:00:10Z",
+        ));
+        held(&monitor, &repeated);
+    }
+
     /// SPEC #3165 FR-100/FR-101 / T-224: a generic AgentFailed autonomous
     /// retry still uses the existing attempt/backoff ladder, but its successor
     /// delivery must be fresh and must retain that strategy across restart and
@@ -52448,6 +52627,91 @@ mod tests {
             monitor.autonomous_record(7).unwrap().review_passed,
             Some(false)
         );
+    }
+
+    /// Issue #7303 / #6052: CI is already green and auto-merge is already
+    /// requested when the daemon accepts an overall FAIL for that SHA.
+    /// Acceptance must queue a disarm and must not leave a prepared arm that
+    /// can still land the rejected head.
+    #[test]
+    fn issue_7303_accepted_review_fail_disarms_the_same_sha() {
+        use crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA;
+
+        let fail_raw = format!(
+            r#"{{"schema":"{REVIEW_VERDICT_SCHEMA}","overall":"fail","criteria":[{{"id":"AC-5","verdict":"fail"}}]}}"#
+        );
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        let epoch = monitor.effect_authority_epoch();
+        assert!(monitor.prepare_effect(PendingIssueMonitorEffect::prepared(
+            format!("arm:7:99:abc123:{epoch}"),
+            epoch,
+            IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number: 7,
+                pr_number: 99,
+                reviewed_sha: "abc123".to_string(),
+            },
+        )));
+
+        assert_eq!(
+            monitor.apply_review_verdict(7, "abc123", &fail_raw),
+            Some(false),
+            "an overall FAIL for the reviewed SHA is accepted"
+        );
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().review_passed,
+            Some(false)
+        );
+        assert_eq!(
+            review_fail_disarms(&monitor),
+            1,
+            "accepted FAIL disarms auto-merge for that PR"
+        );
+        assert!(
+            monitor.pending_effects().iter().all(|effect| !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::ArmAutoMerge {
+                    issue_number: 7,
+                    pr_number: 99,
+                    ..
+                }
+            )),
+            "accepted FAIL drops a prepared arm of the same SHA"
+        );
+
+        monitor.record_review_verdict(7, false);
+        assert_eq!(
+            review_fail_disarms(&monitor),
+            1,
+            "a repeated FAIL does not stack another disarm"
+        );
+
+        let mut passed = autonomous_state();
+        passed.begin_review(7, 99, "abc123");
+        passed.record_review_verdict(7, true);
+        assert_eq!(review_fail_disarms(&passed), 0);
+
+        let mut stale = autonomous_state();
+        stale.begin_review(7, 99, "abc123");
+        assert_eq!(stale.apply_review_verdict(7, "other", &fail_raw), None);
+        assert_eq!(review_fail_disarms(&stale), 0);
+    }
+
+    fn review_fail_disarms(monitor: &IssueMonitorState) -> usize {
+        monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        issue_number: 7,
+                        pr_number: 99,
+                        ..
+                    }
+                )
+            })
+            .count()
     }
 
     #[test]

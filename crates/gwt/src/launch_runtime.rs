@@ -346,19 +346,6 @@ fn resolve_launch_worktree_request_locked(
         return Ok(());
     }
 
-    if !has_local_branch && !has_remote_branch {
-        manager
-            .create_remote_branch_from_base(&remote_base_ref, branch_name)
-            .map_err(|err| {
-                format!(
-                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
-                )
-            })?;
-        manager
-            .fetch_origin()
-            .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
-    }
-
     let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
         .ok_or_else(|| {
             format!("failed to resolve available worktree path for branch {branch_name}")
@@ -367,6 +354,18 @@ fn resolve_launch_worktree_request_locked(
         manager
             .create(branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
+    } else if !has_remote_branch {
+        // Issue #7670: creating the remote branch first cost 106 seconds of a
+        // 120-second launch deadline. The worktree needs only the fetched base;
+        // the remote branch is published after the launch, outside its deadline.
+        manager
+            .create_from_base_tracking_unpublished_remote(
+                &remote_base_ref,
+                branch_name,
+                &worktree_path,
+            )
+            .map_err(|err| err.to_string())?;
+        manager.publish_remote_branch_in_background(&remote_base_ref, branch_name);
     } else {
         manager
             .create_from_remote(&remote_branch_ref, branch_name, &worktree_path)
@@ -1694,6 +1693,120 @@ mod tests {
                 "{agent_id:?}"
             );
         }
+    }
+
+    /// Issue #7670: creating the remote work branch took 106 seconds on a
+    /// loaded host and spent the whole launch deadline. The launch must
+    /// materialize its worktree without waiting for that push.
+    #[test]
+    fn new_work_branch_launch_does_not_wait_for_slow_remote_branch_push() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let origin = temp.path().join("origin.git");
+        let markers = temp.path().join("push-markers");
+        fs::create_dir_all(&markers).expect("marker dir");
+        // The fake slow push: git runs pre-push before contacting the remote.
+        // It holds the push until the test releases it, and fails on its own
+        // after ~20s so a launch that waits for it reports RED instead of hanging.
+        let hook = repo.join(".git").join("hooks").join("pre-push");
+        fs::create_dir_all(hook.parent().unwrap()).expect("hooks dir");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ndir='{}'\n: > \"$dir/started\"\ni=0\nwhile [ ! -f \"$dir/release\" ]; do\n  i=$((i+1))\n  if [ $i -gt 200 ]; then : > \"$dir/finished\"; exit 1; fi\n  sleep 0.1\ndone\n: > \"$dir/finished\"\nexit 0\n",
+                markers.display().to_string().replace('\\', "/")
+            ),
+        )
+        .expect("write pre-push hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+        }
+        let branch = "work/issue-7670";
+        let remote_branch_exists = || {
+            gwt_core::process::hidden_command("git")
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/work/issue-7670",
+                ])
+                .current_dir(&origin)
+                .status()
+                .expect("show-ref on origin")
+                .success()
+        };
+        let git_stdout = |cwd: &Path, args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("launch must not depend on the remote branch push");
+
+        let worktree = working_dir.expect("materialized worktree");
+        assert!(
+            !markers.join("finished").exists(),
+            "the launch returned only after the remote branch push finished"
+        );
+        assert!(
+            !remote_branch_exists(),
+            "the push is still held by the fake"
+        );
+        assert_eq!(git_stdout(&worktree, &["branch", "--show-current"]), branch);
+        assert_eq!(
+            git_stdout(&worktree, &["rev-parse", "HEAD"]),
+            git_stdout(&repo, &["rev-parse", "origin/develop"])
+        );
+        // The branch already targets its own remote name, so the agent's first
+        // push publishes it even if the background publication is lost.
+        assert_eq!(
+            git_stdout(&repo, &["config", "--get", "branch.work/issue-7670.remote"]),
+            "origin"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["config", "--get", "branch.work/issue-7670.merge"]),
+            "refs/heads/work/issue-7670"
+        );
+
+        fs::write(markers.join("release"), "").expect("release the push");
+        gwt_git::worktree::wait_for_remote_branch_publications();
+        assert!(
+            markers.join("started").exists(),
+            "the push ran after launch"
+        );
+        assert!(
+            remote_branch_exists(),
+            "the remote branch is published later"
+        );
+        assert_eq!(
+            git_stdout(
+                &worktree,
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}"
+                ]
+            ),
+            "origin/work/issue-7670"
+        );
     }
 
     #[test]
