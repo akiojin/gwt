@@ -383,7 +383,7 @@
   <header class="doc">
     <div class="doc-kicker">gwt — Issue #7007</div>
     <h1>全画面刷新モック v3</h1>
-    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>ホーム</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。ホームはチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（状態などの目安つきの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
+    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>ホーム</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。ホームはチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（状態などの目安つきの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
     <p style="margin-top:14px"><button class="btn primary" type="button" id="fullEnter">全画面で見る</button> <span class="rel">アプリ画面だけを画面いっぱいに表示します（このページの説明・目次・フッターは隠れます）。URL に <b>?full=1</b> を付けても、最初から全画面で開けます。モバイル幅の確認にも使えます。</span></p>
   </header>
 
@@ -753,12 +753,12 @@
         </div>
       </div>
 
-      <!-- ================= エージェント台帳 ================= -->
+      <!-- ================= エージェント ================= -->
       <div class="pagegroup" data-page="agents">
         <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">台帳は端末全体の画面です（ヘッダーから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="agents-ledger">
-            <p class="h-big">エージェント台帳</p>
+            <p class="h-big">エージェント</p>
             <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持ちます（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータです（実際に割り当てられたツールでは、その幅に最も近い段階が使われます）。性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM のエージェントは入れ替わりません。アカウントの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
             <div class="set-group">
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
@@ -1110,7 +1110,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="tools-pool">
             <p class="h-big">アカウント</p>
-            <p class="h-sub">アカウントは、ツール（本体＝CLI）に登録されたアカウントの集まりです。プールには、本体がインストール済みで、アカウント登録ができているものだけを並べます。使用率・リセット時刻・制限状態と、プロバイダの使用量はここで見ます。エージェントへの割り当ては、セッション開始時に空いているアカウントから自動で行われます。本体（CLI）のインストールと更新は「ツール管理」で行います。</p>
+            <p class="h-sub">アカウントは、ツール（本体＝CLI）に登録されたアカウントの集まりです。プールには、本体がインストール済みで、アカウント登録ができているものだけを並べます。使用率・リセット時刻・制限状態と、プロバイダの使用量はここで見ます。エージェントへの割り当ては、セッション開始時に空いているアカウントから自動で行われます。フロントエンド型（Hermes Agent／OpenCode／OpenClaw）は、バックエンド（プロバイダ／モデル）の設定をツール自身が持つため、ここでは現在の設定を読み取って表示だけをします。本体（CLI）のインストールと更新は「ツール管理」で行います。</p>
             <div class="set-group">
               <h4>Claude Code</h4>
               <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div></div>
@@ -1125,6 +1125,21 @@
             <div class="set-group">
               <h4>Grok Build</h4>
               <div class="set-row"><div class="grow"><div class="t">Grok Build 1</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:2%"></i></div><span>週間2%使用</span></div></div></div>
+            </div>
+            <div class="set-group">
+              <h4>Hermes Agent（フロントエンド型）</h4>
+              <div class="set-row"><div class="grow"><div class="t">表示の見方</div><div class="d2">フロントエンド型は、現在の設定（プロバイダ／モデル・サインイン状態・推論）を読み取って表示だけをします。変更は各行の「設定を開く」から、ツール自身の設定画面で行います。Hermes Agent と OpenClaw はプロジェクトごとの起動ホームで動くため、アカウントはプロジェクトごとに分かれます。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Hermes Agent（gwt）</div><div class="d2">プロバイダ：Z.AI / GLM · モデル：GLM-4.6 · サインイン済み（API キー） · 推論：high · Fast mode：オフ</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">Hermes Agent（KeibaDB）</div><div class="d2">プロバイダ：Anthropic · モデル：Claude Sonnet 4.5 · サインイン済み（サブスクリプション） · 推論：medium · Fast mode：オフ</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+            </div>
+            <div class="set-group">
+              <h4>OpenCode（フロントエンド型）</h4>
+              <div class="set-row"><div class="grow"><div class="t">OpenCode 1</div><div class="d2">現在のモデル：anthropic/claude-sonnet-4-5 · サインイン済み · 推論はモデルごとの variant で切り替えます（ツール側の設定）</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+            </div>
+            <div class="set-group">
+              <h4>OpenClaw（フロントエンド型）</h4>
+              <div class="set-row"><div class="grow"><div class="t">OpenClaw（gwt）</div><div class="d2">プロバイダ：Z.AI（Coding Plan） · モデル：GLM-4.6 · サインイン済み · 推論：high · Fast mode：オン</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">OpenClaw（KeibaDB）</div><div class="d2">まだ設定されていません — ツール自身のセットアップで設定します</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
             </div>
             <div class="set-group">
               <h4>追加と管理</h4>
@@ -1169,10 +1184,11 @@
           <div class="screen-pane" data-screen="tool-add-backend">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
             <p class="h-big">アカウントを追加する — バックエンド設定</p>
-            <p class="h-sub">フロントエンド型のツール（OpenCode／OpenClaw／Hermes Agent）を選んだ場合のステップ3です。サインインの代わりに、接続先（バックエンド）を設定します。</p>
+            <p class="h-sub">フロントエンド型のツール（OpenCode／OpenClaw／Hermes Agent）を選んだ場合のステップ3です。バックエンド（プロバイダ／モデル）の設定はツール自身が行うため、gwt はフォームを作らず、ツールのセットアップをそのまま開きます。終わると、読み取った現在の設定がここに出ます。</p>
             <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st done">2. 本体の確認</span><span>→</span><span class="st on">3. バックエンド設定</span><span>→</span><span class="st">4. 完了</span></div>
             <div class="set-group">
-              <div class="set-row"><div class="grow"><div class="t">バックエンド設定を選ぶ</div><div class="d2">（置き場のみ）バックエンドの扱いは現在決定待ちのため、確定形はまだ示しません。決まり次第、このステップの中身として示します。</div></div><button class="btn" type="button">バックエンド設定を選ぶ…</button></div>
+              <div class="set-row"><div class="grow"><div class="t">ツールのセットアップを開く</div><div class="d2">選んだツールのセットアップ（Hermes Agent なら hermes setup、OpenCode なら接続設定、OpenClaw ならオンボーディング）をターミナル表示で開きます。プロバイダの選択とサインインは、ツール側で完結します。</div></div><button class="btn primary" type="button" data-openpage="terminal">セットアップを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">いまの設定（読み取り）</div><div class="d2">セットアップが終わると、ツールの設定ファイルから読み取った現在のプロバイダ／モデルとサインイン状態がここに出ます。</div></div><span class="badge b-done">未設定</span></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tool-add-body">戻る</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tool-add-signin">アカウント型のステップ3を見る</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
           </div>
@@ -1186,7 +1202,7 @@
               <div class="set-row"><div class="grow"><div class="t">種類</div><div class="d2">Claude Code</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">本体</div><div class="d2">導入済み（この端末に入っています）</div></div><span class="badge b-run">導入済み</span></div>
               <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">会社メールでサインイン済みです</div></div><span class="badge b-run">サインイン済み</span></div>
-              <div class="set-row"><div class="grow"><div class="t">バックエンド</div><div class="d2">フロントエンド型を選んだ場合のみ、ここに選んだバックエンドが出ます。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">バックエンド</div><div class="d2">フロントエンド型を選んだ場合のみ、ツールの設定から読み取った現在のプロバイダ／モデルがここに出ます。</div></div></div>
             </div>
             <div class="set-group">
               <h4>表示名</h4>
@@ -1242,7 +1258,7 @@
                 <tr><td>Grok Build</td><td><span class="badge b-run">導入済み</span></td><td class="num">1.2.0</td><td class="num">1.2.0（最新）</td><td></td></tr>
                 <tr><td>Antigravity CLI</td><td><span class="badge b-run">導入済み</span></td><td class="num">1.4.0</td><td class="num">1.4.0（最新）</td><td></td></tr>
                 <tr><td>OpenCode</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.9.2</td><td class="num">1.0.0</td><td><button class="btn" type="button" data-nav="tool-update">更新</button></td></tr>
-                <tr><td>OpenClaw</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">0.5.1</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
+                <tr><td>OpenClaw</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.5.1</td><td class="num">0.5.1（最新）</td><td></td></tr>
                 <tr><td>Hermes Agent</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.7.3</td><td class="num">0.7.3（最新）</td><td></td></tr>
                 <tr><td>GitHub Copilot</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">1.2.0</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
               </tbody>
@@ -1261,14 +1277,14 @@
         <div class="content">
           <div class="screen-pane on" data-screen="appsettings">
             <p class="h-big">設定</p>
-            <p class="h-sub">この端末全体の設定です。エージェント台帳とアカウントは独立した画面にあります。プロジェクトごとの設定は、各プロジェクトページの「設定」にあります。</p>
+            <p class="h-sub">この端末全体の設定です。エージェントとアカウントは独立した画面にあります。プロジェクトごとの設定は、各プロジェクトページの「設定」にあります。</p>
             <div class="chips" role="group" aria-label="設定のタブ"><button class="chip on" type="button" data-tab="yourpm">あなたの PM</button><button class="chip" type="button" data-tab="projects">プロジェクト</button></div>
 
             <div class="set-pane on" data-pane="yourpm">
               <div class="set-group">
                 <h4>あなたの PM — この端末</h4>
-                <p class="d">PM を務めるエージェントの振る舞いの設定です。誰が PM を務めるかは、「エージェント台帳」で決めます。</p>
-                <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">PM の名前とアバター</div><div class="d2">いまはこの顔と名前（秦泉寺 章夫）です。アバターはエージェント台帳の各エージェント設定から変えます。</div></div><button class="btn" type="button" data-openpage="agents">台帳で変える</button></div>
+                <p class="d">PM を務めるエージェントの振る舞いの設定です。誰が PM を務めるかは、「エージェント」で決めます。</p>
+                <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">PM の名前とアバター</div><div class="d2">いまはこの顔と名前（秦泉寺 章夫）です。アバターはエージェントの各エージェント設定から変えます。</div></div><button class="btn" type="button" data-openpage="agents">台帳で変える</button></div>
                 <div class="set-row"><div class="grow"><div class="t">判断は、出てきた時点で知らせる</div><div class="d2">オフにすると、判断は朝と夜の報告にまとめられます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">止まった作業は、理由と次の手つきで知らせる</div><div class="d2">「止まりました」だけで終わらせず、原因の見立てと PM が次にやることを添えます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">23:00〜7:00 は、止まった作業と判断だけを知らせます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
@@ -1590,7 +1606,7 @@
 
             <div class="screen-pane" data-screen="g-agents">
               <p class="h-big">エージェント</p>
-              <p class="h-sub">このプロジェクトで動いているエージェントと、その担当の履歴・予定です。台帳と並び順・特性は「エージェント台帳」にあります。</p>
+              <p class="h-sub">このプロジェクトで動いているエージェントと、その担当の履歴・予定です。台帳と並び順・特性は「エージェント」にあります。</p>
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
                 <div class="grow">
@@ -1847,7 +1863,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
-                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性（推論・速度・性格）と並び順はエージェント台帳に、使用量はアカウントの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性（推論・速度・性格）と並び順はエージェントに、使用量はアカウントの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
                 <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">このプロジェクトの状態が変わったときにスクリプトを動かします — 開始、終了、停止など。</div></div><button class="btn" type="button" data-nav="g-hooks">開く</button></div>
               </div>
               <div class="set-group">
@@ -2214,7 +2230,7 @@
 
             <div class="screen-pane" data-screen="k-agents">
               <p class="h-big">エージェント</p>
-              <p class="h-sub">このプロジェクトで動いているエージェントと、その担当の履歴・予定です。台帳と並び順・特性は「エージェント台帳」にあります。</p>
+              <p class="h-sub">このプロジェクトで動いているエージェントと、その担当の履歴・予定です。台帳と並び順・特性は「エージェント」にあります。</p>
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
                 <div class="grow"><div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div>
@@ -2387,7 +2403,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
-                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性と並び順はエージェント台帳に、使用量はアカウントの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性と並び順はエージェントに、使用量はアカウントの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
                 <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">取り込みの開始・終了・停止でスクリプトを動かします。</div></div><button class="btn" type="button" data-nav="k-hooks">開く</button></div>
               </div>
               <div class="set-group">
@@ -2775,7 +2791,7 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェントとアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
   </footer>
 </div>
 
