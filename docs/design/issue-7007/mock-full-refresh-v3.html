@@ -330,7 +330,7 @@
   <nav class="screens" aria-label="画面一覧">
     <div class="row">
       <a data-openpage="start">開始画面</a>
-      <a data-openpage="agents">エージェント台帳</a>
+      <a data-openpage="agents">エージェント</a>
       <a data-openpage="tools">ツール</a>
       <a data-openpage="settings">アプリ設定</a>
       <a data-openpage="profile">プロファイル</a>
@@ -367,7 +367,7 @@
       <span class="proj" id="appProj" hidden></span>
       <div class="hnav">
         <button class="hpm" type="button" data-openpage="start"><span class="pm-face sm"><span class="dot wait"></span></span><span class="hname">ツムギ</span><span class="badge b-wait">判断待ち 5件</span></button>
-        <button class="btn ghost" type="button" data-openpage="agents">エージェント台帳</button>
+        <button class="btn ghost" type="button" data-openpage="agents">エージェント</button>
         <button class="btn ghost" type="button" data-openpage="tools">ツール</button>
         <button class="btn ghost" type="button" data-openpage="settings">設定</button>
       </div>
@@ -1572,7 +1572,7 @@
               </div>
               <div class="pgroup">
                 <div class="gk">端末全体</div>
-                <div class="pcmd">エージェント台帳を開く</div>
+                <div class="pcmd">エージェントを開く</div>
                 <div class="pcmd">ツールを開く（使用量と制限）</div>
                 <div class="pcmd">プロファイルを開く</div>
                 <div class="pcmd">PM の設定 — 自動で始める</div>
@@ -1682,9 +1682,9 @@
 
 <script>
 (function () {
-  var pageLabels = { start: "開始画面", settings: "設定", agents: "エージェント台帳", tools: "ツール", profile: "プロファイル", palette: "コマンドパレット", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
+  var pageLabels = { start: "開始画面", settings: "設定", agents: "エージェント", tools: "ツール", profile: "プロファイル", palette: "コマンドパレット", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
-    appsettings: "設定", "agents-ledger": "エージェント台帳", "tools-pool": "ツール", "profile-main": "プロファイル", "palette-main": "コマンドパレット", "terminal-main": "ターミナル表示",
+    appsettings: "設定", "agents-ledger": "エージェント", "tools-pool": "ツール", "profile-main": "プロファイル", "palette-main": "コマンドパレット", "terminal-main": "ターミナル表示",
     "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
     "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定",
     "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
