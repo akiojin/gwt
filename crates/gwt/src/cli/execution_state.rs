@@ -13374,7 +13374,7 @@ fn live_settlement_diagnosis(
             warnings: Vec::new(),
         };
     }
-    match crate::cli::verification_record::work_event_dirty_paths(worktree) {
+    match crate::cli::verification_record::work_event_dirty_paths_for_diagnosis(worktree) {
         Ok(dirty_paths) if dirty_paths.is_empty() => LiveSettlementDiagnosis {
             status: None,
             severity: "unknown".to_string(),
