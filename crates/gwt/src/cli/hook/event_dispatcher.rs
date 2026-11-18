@@ -1300,6 +1300,45 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_submit_keeps_board_context_when_runtime_writer_deadline_expires() {
+        use gwt_agent::session::{runtime_writer_lease, HookCompletionOutcome};
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
+        super::super::health::browser_preflight_tests::with_source(|input, _, runtime_path, _| {
+            let worktree = &input.worktree_root;
+            let _forward = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+                Rc::new(gwt_core::coordination::LocalProvider),
+            );
+            let event = "UserPromptSubmit";
+            let completion = super::super::runtime_state::begin_hook_event(worktree, event, "{}")
+                .expect("capture the pending prompt");
+            let state = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+            assert_eq!(state.current_hook_event.unwrap().event, event);
+            let pending = std::fs::read(runtime_path).unwrap();
+            let writer = runtime_writer_lease(runtime_path).unwrap();
+            let output = {
+                // Advance the operation clock to the aggregate deadline
+                // while another writer holds the sidecar lease.
+                let deadline = Instant::now();
+                let _clock = ScopedOperationClock::set(deadline);
+                let _deadline = ScopedOperationDeadline::enter(deadline);
+                handle_user_prompt_submit(event, "{}", worktree, false, Some(&completion))
+            };
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+            assert!(!completion.runtime_was_published());
+
+            drop(writer);
+            let result = output.expect("runtime writer deadline must leave the prompt usable");
+            assert!(matches!(result, HookOutput::HookSpecificAdditionalContext {
+                    event: IntentBoundaryEvent::UserPromptSubmit, text
+                } if text.contains("# Board Post Reminder")));
+            completion.record(HookCompletionOutcome::Normal);
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+        });
+    }
+
+    #[test]
     fn only_user_prompt_submit_enters_the_aggregate_deadline() {
         assert!(gwt_core::operation_deadline::current().is_none());
         let started = Instant::now();
