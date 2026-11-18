@@ -624,7 +624,7 @@
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">アカウントはまだ登録されていません。登録とサインインが済むと、ここが「完了」になり、次へ進めるようになります。</div></div><span class="badge b-block">未完了</span></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="setup-welcome">戻る</button><button class="btn primary" type="button">次へ — エージェントと PM</button></div>
-            <p class="rel" style="margin-top:8px">「次へ」は、アカウントの登録とサインインが済むと押せるようになります（このモックでは未完了の状態を示しています）。</p>
+            <p class="rel" style="margin-top:8px">「次へ」は、アカウントの登録とサインインが済むと押せるようになります。</p>
           </div>
           <div class="screen-pane" data-screen="setup-agent">
             <p class="h-big">最初のエージェントを作る</p>
@@ -852,7 +852,6 @@
               <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hamada">編集</button></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button" data-nav="agent-new">追加</button></div>
             </div>
-            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのアカウントで動くかは、セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。担当の履歴と予定、いま何をしているか（現在の作業状態）は台帳には置かず、各プロジェクトの「エージェント」と「作業」で見ます。エージェントは特定のプロジェクトに所属せず、全プロジェクト共通のマスタです。</div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-jinsenji">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
@@ -1190,7 +1189,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="tools-pool">
             <p class="h-big">アカウント</p>
-            <p class="h-sub">アカウントは、ツール（本体＝CLI）に登録されたアカウントの集まりです。プールには、本体がインストール済みで、アカウント登録ができているものだけを並べます。使用率・リセット時刻・制限状態と、プロバイダの使用量はここで見ます。エージェントへの割り当ては、セッション開始時に空いているアカウントから自動で行われます。フロントエンド型（Hermes Agent／OpenCode／OpenClaw）は、バックエンド（プロバイダ／モデル）の設定をツール自身が持つため、ここでは現在の設定を読み取って表示だけをします。本体（CLI）のインストールと更新は「ツール管理」で行います。</p>
+            <p class="h-sub">アカウントは、プロバイダー単位の箱です。使用率・リセット時刻・制限状態はここで見ます。エージェントへの割り当ては、セッション開始時に「使用するアカウント」を第一に決め、ツールはそのアカウントを使えるものが従います。本体（CLI）のインストールと更新は「ツール管理」で行います。Hermes Agent／OpenCode／OpenClaw は固有のアカウントを持たず、プロバイダーのアカウントを使って動くため、「使っているアカウント」への参照として並べます。</p>
             <div class="set-group">
               <h4>Claude Code</h4>
               <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div></div>
@@ -1207,19 +1206,22 @@
               <div class="set-row"><div class="grow"><div class="t">Grok Build 1</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:2%"></i></div><span>週間2%使用</span></div></div></div>
             </div>
             <div class="set-group">
-              <h4>Hermes Agent（フロントエンド型）</h4>
-              <div class="set-row"><div class="grow"><div class="t">表示の見方</div><div class="d2">フロントエンド型は、現在の設定（プロバイダ／モデル・サインイン状態・推論）を読み取って表示だけをします。変更は各行の「設定を開く」から、ツール自身の設定画面で行います。Hermes Agent と OpenClaw はプロジェクトごとの起動ホームで動くため、アカウントはプロジェクトごとに分かれます。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">Hermes Agent（gwt）</div><div class="d2">プロバイダ：Z.AI / GLM · モデル：GLM-4.6 · サインイン済み（API キー） · 推論：high · Fast mode：オフ</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
-              <div class="set-row"><div class="grow"><div class="t">Hermes Agent（KeibaDB）</div><div class="d2">プロバイダ：Anthropic · モデル：Claude Sonnet 4.5 · サインイン済み（サブスクリプション） · 推論：medium · Fast mode：オフ</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+              <h4>Z.ai</h4>
+              <div class="set-row"><div class="grow"><div class="t">Z.ai 1</div><div class="d2">サインイン済み（API キー）</div><div class="use"><div class="bar"><i style="width:35%"></i></div><span>週間35%使用 · 日曜 9:00にリセット</span></div></div></div>
             </div>
             <div class="set-group">
-              <h4>OpenCode（フロントエンド型）</h4>
-              <div class="set-row"><div class="grow"><div class="t">OpenCode 1</div><div class="d2">現在のモデル：anthropic/claude-sonnet-4-5 · サインイン済み · 推論はモデルごとの variant で切り替えます（ツール側の設定）</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+              <h4>Hermes Agent</h4>
+              <div class="set-row"><div class="grow"><div class="t">Hermes Agent</div><div class="d2">使っているアカウント：Z.ai 1（プロバイダー：Z.AI） · サインイン済み（API キー）</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">Hermes Agent</div><div class="d2">使っているアカウント：Claude Code 2（プロバイダー：Anthropic） · サインイン済み（サブスクリプション）</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
             </div>
             <div class="set-group">
-              <h4>OpenClaw（フロントエンド型）</h4>
-              <div class="set-row"><div class="grow"><div class="t">OpenClaw（gwt）</div><div class="d2">プロバイダ：Z.AI（Coding Plan） · モデル：GLM-4.6 · サインイン済み · 推論：high · Fast mode：オン</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
-              <div class="set-row"><div class="grow"><div class="t">OpenClaw（KeibaDB）</div><div class="d2">まだ設定されていません — ツール自身のセットアップで設定します</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+              <h4>OpenCode</h4>
+              <div class="set-row"><div class="grow"><div class="t">OpenCode</div><div class="d2">使っているアカウント：Claude Code 1（プロバイダー：Anthropic） · サインイン済み</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+            </div>
+            <div class="set-group">
+              <h4>OpenClaw</h4>
+              <div class="set-row"><div class="grow"><div class="t">OpenClaw</div><div class="d2">使っているアカウント：Z.ai 1（プロバイダー：Z.AI） · サインイン済み</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">OpenClaw</div><div class="d2">使っているアカウント：未設定（ツール自身のセットアップで設定）</div></div><button class="btn" type="button" data-openpage="terminal">設定を開く</button></div>
             </div>
             <div class="set-group">
               <h4>追加と管理</h4>
@@ -2820,7 +2822,7 @@
 <span class="warn">⚠ 警告 2件：未使用の変数（従来からあるもの）</span>
 <span class="dim">— 出力はここまで。続きはライブで流れます —</span></div>
             </div>
-            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。指示はホームの会話から出します（会話の内容はタスクに自動で記録されます）。この表示の要件（大量の出力でも詰まらない描画、時間とともに劣化しないスクロール、残像・重なりなし、再接続時の再生、セッション消滅時の自動復帰）は、設計正本の項目58を正とします。</p>
+            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。指示はホームの会話から出します（会話の内容はタスクに自動で記録されます）。</p>
             <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">作業へ戻る</button><button class="btn ghost" type="button" data-openpage="start">ホームへ戻る</button></div>
           </div>
           <div class="screen-pane" data-screen="terminal-pm">
@@ -2865,6 +2867,7 @@
   <footer class="doc">
     <h3>このモックについて</h3>
     <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェントとアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
+    <p>画面の外に置いた説明（モックを読む人向け）：アカウント画面の Hermes Agent／OpenCode／OpenClaw の行は、各ツールが現在使っているプロバイダーのアカウントへの参照です。Hermes Agent と OpenClaw はプロジェクトごとの起動ホームで動くため、参照先のアカウントはプロジェクトごとに変わります。エージェント（台帳）には「使えるツール種別」の項目はなく、担当の履歴と予定・現在の作業状態も台帳には置かず、各プロジェクトの「エージェント」と「作業」で見ます。エージェントは特定のプロジェクトに所属しない、全プロジェクト共通のマスタです。ターミナル表示の要件（大量の出力でも詰まらない描画、時間とともに劣化しないスクロール、残像・重なりなし、再接続時の再生、セッション消滅時の自動復帰）は設計正本の項目58を正とします。</p>
   </footer>
 </div>
 
