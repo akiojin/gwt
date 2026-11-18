@@ -4891,6 +4891,16 @@ impl AppRuntime {
         ]
     }
 
+    /// Remember a failed launch and tell the operator; never report it to the
+    /// Monitor from here.
+    ///
+    /// The owner that ran the launch holds the delivery and its cleanup, so it
+    /// alone settles the failure. A report from the GUI for a redelivered
+    /// delivery would release the row while that cleanup is still open.
+    /// When the owner's own record fails (Issue #7670), the Monitor's
+    /// windowless timeout is the safety net: `expire_stale_unbound_launches`
+    /// releases a delivery that has no window after 120 seconds, and since
+    /// Issue #7679 an unproven process hold no longer stops it.
     pub(super) fn schedule_issue_monitor_launch_failure(
         &mut self,
         context: super::ProjectContext,

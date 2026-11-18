@@ -1027,6 +1027,7 @@ pub(crate) fn read_execution_observations_from_inventory(
                         settlement: IssueMonitorExecutionSettlement::Unknown,
                         reaped_at: None,
                         process_held: true,
+                        process_hold_proven: false,
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
@@ -1061,10 +1062,12 @@ pub(crate) fn read_execution_observations_from_inventory(
                     normalized(target) == normalized(path)
                 })
             };
-            let process_held = inventory
+            let process_hold_proven = inventory
                 .sessions
                 .iter()
                 .any(|session| belongs_here(&session.worktree_path, session.issue_number))
+                || diagnosis.holder_runtime.as_deref() == Some("live");
+            let process_held = process_hold_proven
                 || inventory.uncertainties.iter().any(|uncertainty| {
                     uncertainty
                         .session_id
@@ -1141,6 +1144,7 @@ pub(crate) fn read_execution_observations_from_inventory(
                     settlement,
                     reaped_at: diagnosis.reaped_at,
                     process_held,
+                    process_hold_proven,
                     // A terminal sidecar can outlive its GUI host. Its exact
                     // PID/start-time death remains independent runtime evidence.
                     holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead")
@@ -1180,13 +1184,27 @@ pub fn refresh_issue_monitor_execution_observations(
 ) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     let settlements =
         read_execution_observations(project_root, &monitor.execution_settlement_issue_numbers());
-    monitor.set_process_held_issues(
-        settlements
-            .iter()
-            .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
-            .collect(),
-    );
+    apply_process_holds(monitor, &settlements);
     settlements
+}
+
+/// Publish which Issues a process holds, and which of those holds no live
+/// Session proves.
+pub(crate) fn apply_process_holds(
+    monitor: &mut IssueMonitorState,
+    observations: &BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation>,
+) {
+    let held = |proven: Option<bool>| {
+        observations
+            .iter()
+            .filter(|(_, observation)| {
+                observation.process_held
+                    && proven.is_none_or(|proven| observation.process_hold_proven == proven)
+            })
+            .map(|(issue, _)| *issue)
+            .collect()
+    };
+    monitor.set_process_holds(held(None), held(Some(false)));
 }
 
 /// Issue #4783 AC-R5: prove the producing Session, owner and canonical worktree
@@ -1561,12 +1579,7 @@ pub fn reconcile_issue_monitor_windows_with_observations(
     now: &str,
     terminal: crate::IssueMonitorIdleReconciliation,
 ) -> crate::IssueMonitorIdleReconciliation {
-    monitor.set_process_held_issues(
-        settlements
-            .iter()
-            .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
-            .collect(),
-    );
+    apply_process_holds(monitor, settlements);
     monitor.reconcile_observed_launch_bindings(live_launch_owners, observed_at, now);
     monitor.reconcile_cancelled_claim_phases(settlements, now);
     monitor.recover_stuck_autonomous(now);
