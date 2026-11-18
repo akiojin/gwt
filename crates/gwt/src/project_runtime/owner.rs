@@ -15205,9 +15205,9 @@ mod tests {
         let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
         let health = handle.request(request(OwnerCommand::Health)).await.unwrap();
         assert_eq!(health["reconciliation_needs_human"], true);
+        let guard = std::time::Duration::from_secs(10);
         // test-hygiene: allow-wall-clock-deadline Hang guard for an exhausted owner that previously never completed shutdown.
-        let shutdown =
-            tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown()).await;
+        let shutdown = tokio::time::timeout(guard, handle.shutdown()).await;
         if shutdown.is_err() {
             let _ = crate::session_finalizer::kill_and_reap(&pty, "pane");
             let _ = handle
