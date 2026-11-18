@@ -205,8 +205,8 @@ vt100 = "0.16"
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [package.metadata.cargo-machete]
-# Windows build.rs embeds the icon and application manifest with this build dependency.
-ignored = ["winresource"]
+# Platform-specific build.rs dependencies for the macOS process census and Windows resources.
+ignored = ["cc", "winresource"]
 
 [package.metadata.bundle]
 name = "GWT"
