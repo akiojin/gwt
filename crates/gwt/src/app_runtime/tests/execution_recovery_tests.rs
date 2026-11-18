@@ -2804,6 +2804,41 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
         owner_monitor_fixture(temp.path(), 42, false, &["pane-contract-fixture"]);
     let pane = owner_monitor_launch(&root, &owner, 42, "agent", delivery_id);
     assert_eq!(owner_monitor_read(&root, 42).status_view().active_count, 1);
+    // Issue #7676: the host census is published on its own pass, up to 5s after
+    // the child is still alive. Coverage lets that pass land before close. A
+    // logical requeue does not drop the stale physical count, so active_count
+    // stays 1 until a later census observes the reap. Establish that census
+    // first, then require close's ACK to free the slot without another wait.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
+    let host_key = format!("{host_pid}:{host_started_at}");
+    let pane_id = pane.id.clone();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the live host census before close; elapsed time is not the slot-release proof.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs
+                    .monitor_runtime_counts
+                    .get(&host_key)
+                    .is_some_and(|census| {
+                        census.counts.get(&42) == Some(&1)
+                            && census.windows.get(&pane_id) == Some(&42)
+                    })
+                {
+                    break;
+                }
+                owner
+                    .command(gwt::project_runtime::events::OwnerCommand::Health)
+                    .await
+                    .unwrap();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the launched pane must enter the host census before close");
+    });
     super::pane_control_tests::control_close(&owner, &pane);
     assert!(
         pane.pty.try_wait().unwrap().is_some(),

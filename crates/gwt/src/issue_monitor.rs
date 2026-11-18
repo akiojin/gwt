@@ -1901,6 +1901,15 @@ pub enum IssueMonitorClaimHealth {
     Released,
 }
 
+/// The owner's admission refusals that hold a spawn without failing it: slot
+/// exhaustion, and (Issue #7665) the named non-capacity holds.
+pub(crate) const MONITOR_SPAWN_HOLD_PREFIX: &str = "Issues launch hold before launching Issue #";
+
+pub(crate) fn is_monitor_spawn_hold_refusal(message: &str) -> bool {
+    message.starts_with("Issues max_active reached (")
+        || message.starts_with(MONITOR_SPAWN_HOLD_PREFIX)
+}
+
 /// Last attempt, last successful readback, and last failure remain inspectable
 /// after a restart. Foreign claims are evidence, never an arbitration decision.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3396,6 +3405,9 @@ pub struct IssueMonitorExecutionObservation {
     pub reaped_at: Option<gwt_core::timestamp::UtcTimestamp>,
     /// A live worktree agent or ambiguous runtime evidence vetoes recovery.
     pub process_held: bool,
+    /// The hold rests on a Session observed live, not on evidence that could
+    /// not be read or attributed (Issue #7679).
+    pub process_hold_proven: bool,
     /// Exact holder runtime evidence proves its previous GUI host has exited.
     pub holder_host_dead: bool,
     /// Exact dead holder host incarnations, observed outside the prefs lock.
@@ -5466,6 +5478,9 @@ pub struct IssueMonitorState {
     /// Live worktree Sessions (including uncertain inventory); never persisted.
     #[serde(skip)]
     process_held_issues: BTreeSet<u64>,
+    /// The held Issues whose hold no live Session proves; never persisted.
+    #[serde(skip)]
+    process_hold_unproven_issues: BTreeSet<u64>,
     pub gui_connected: bool,
     /// Live observation that a project window subscriber is attached, or
     /// dropped inside the reconnect grace. Never persisted.
@@ -5894,6 +5909,21 @@ fn issue_monitor_candidate_exclusion(
     }
     None
 }
+
+/// The refusal an owner returns when its own source admission excludes the
+/// Issue. The Monitor recognizes the same text in the reported failure.
+pub fn source_admission_refusal_message(issue_number: u64, reason: &str) -> String {
+    format!("Issues source admission refused Issue #{issue_number}: {reason}")
+}
+
+/// Whether `message` reports a source refusal only PM triage can lift. A
+/// provenance gap that a refresh repairs keeps the ordinary retry path.
+fn is_source_triage_refusal(issue_number: u64, message: &str) -> bool {
+    message.starts_with(&source_admission_refusal_message(issue_number, ""))
+        && message.contains(SOURCE_TRIAGE_REQUIRED)
+}
+
+const SOURCE_TRIAGE_REQUIRED: &str = "PM triage required";
 
 fn issue_monitor_source_exclusion(
     issue: &IssueMonitorIssue,
@@ -8836,6 +8866,7 @@ impl IssueMonitorState {
             monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
             process_held_issues: BTreeSet::new(),
+            process_hold_unproven_issues: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
             terminal_queue_retirements: BTreeMap::new(),
@@ -11962,8 +11993,30 @@ impl IssueMonitorState {
         self.apply_agent_capacity_limit();
     }
 
+    /// Every hold set here counts as proven by a live Session.
+    #[cfg(test)]
     pub(crate) fn set_process_held_issues(&mut self, issues: BTreeSet<u64>) {
-        self.process_held_issues = issues;
+        self.set_process_holds(issues, BTreeSet::new());
+    }
+
+    /// `unproven` names the held Issues whose hold is only evidence that could
+    /// not be read or attributed.
+    pub(crate) fn set_process_holds(&mut self, held: BTreeSet<u64>, unproven: BTreeSet<u64>) {
+        self.process_hold_unproven_issues = unproven.intersection(&held).copied().collect();
+        self.process_held_issues = held;
+    }
+
+    pub(crate) fn process_hold_unproven_issues(&self) -> &BTreeSet<u64> {
+        &self.process_hold_unproven_issues
+    }
+
+    /// Issue #7679: a launch that never produced a window is not kept by a
+    /// hold nobody can prove. What a failed launch leaves behind can make the
+    /// Session census uncertain, and that used to veto the launch's own
+    /// windowless timeout for as long as the leftover stayed.
+    fn process_hold_vetoes_windowless_timeout(&self, issue_number: u64) -> bool {
+        self.process_held_issues.contains(&issue_number)
+            && !self.process_hold_unproven_issues.contains(&issue_number)
     }
 
     pub(crate) fn process_held_issues(&self) -> &BTreeSet<u64> {
@@ -14714,7 +14767,11 @@ impl IssueMonitorState {
         let launches = self.active_launches.clone();
         let mut expired = Vec::new();
         for issue_number in launches {
-            if self.process_held_issues.contains(&issue_number) {
+            let held = self.process_held_issues.contains(&issue_number);
+            if held
+                && (self.launched_windows.contains_key(&issue_number)
+                    || self.process_hold_vetoes_windowless_timeout(issue_number))
+            {
                 continue;
             }
             if self.launched_windows.contains_key(&issue_number) {
@@ -14752,6 +14809,10 @@ impl IssueMonitorState {
                     now,
                 );
                 expired.push(issue_number);
+                continue;
+            }
+            if held {
+                // An unproven hold yields to the windowless deadline only.
                 continue;
             }
             if let Some(delivery) = self
@@ -15237,7 +15298,7 @@ impl IssueMonitorState {
                     || delivery.workspace_durable_window_id.is_some()
             })
             || self.launched_windows.contains_key(&issue_number)
-            || self.process_held_issues.contains(&issue_number)
+            || self.process_hold_vetoes_windowless_timeout(issue_number)
             || self.has_monitor_runtime_census(issue_number)
             || self.observed_live_issue_pane(issue_number, now).is_some()
         {
@@ -16229,6 +16290,7 @@ impl IssueMonitorState {
                             let mut reasons =
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
                             reasons.extend(self.claim_candidate_exclusions(item.issue.number));
+                            reasons.extend(self.claim_project_policy_hold(item.issue.number));
                             // Issue #7266 AC-2 / AC-3: only the Issue whose own
                             // floor holds it reads `retry_backoff`, with when it lifts.
                             if !self.retry_ready_for_saved_profile(item.issue.number, now)
@@ -18198,8 +18260,18 @@ impl IssueMonitorState {
         self.close_review_window(issue_number, IssueMonitorIdleKind::ReviewVerdictPublished);
         // A close worker may already be doing remote readback. Preserve the
         // veto now instead of waiting for its settlement to mark work done.
-        if !passed
-            && self.pending_effects.iter().any(|effect| {
+        if !passed {
+            // Issue #7303 / #6052: CI can already be green, and the
+            // implementation agent can already have requested auto-merge,
+            // before this FAIL is accepted. Drop a prepared arm of this PR
+            // and queue a disarm so that SHA cannot land after rejection.
+            if let Some(pr_number) = self
+                .autonomous_record(issue_number)
+                .and_then(|record| record.pr_number)
+            {
+                self.disarm_auto_merge_after_rejected_review(issue_number, pr_number);
+            }
+            if self.pending_effects.iter().any(|effect| {
                 matches!(
                     &effect.payload,
                     IssueMonitorEffectPayload::SettleMergedIssue {
@@ -18208,10 +18280,35 @@ impl IssueMonitorState {
                         ..
                     } if *owner == issue_number
                 )
-            })
-        {
-            self.hold_failed_merged_review(issue_number);
+            }) {
+                self.hold_failed_merged_review(issue_number);
+            }
         }
+    }
+
+    /// Queue one disarm for a SHA whose independent review was accepted as FAIL.
+    /// An in-flight arm stays in the journal; the disarm is the safety effect
+    /// that must run against it. A prepared arm is not in flight and is dropped
+    /// so it cannot re-enable auto-merge after the disarm.
+    fn disarm_auto_merge_after_rejected_review(&mut self, issue_number: u64, pr_number: u64) {
+        self.pending_effects.retain(|effect| {
+            effect.state != IssueMonitorEffectState::Prepared
+                || !matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ArmAutoMerge {
+                        issue_number: pending_issue,
+                        pr_number: pending_pr,
+                        ..
+                    } if pending_issue == issue_number && pending_pr == pr_number
+                )
+        });
+        ensure_auto_merge_disarm_effect(
+            &mut self.pending_effects,
+            self.effect_authority_epoch,
+            &format!("review-fail:{issue_number}:{pr_number}"),
+            issue_number,
+            pr_number,
+        );
     }
 
     /// Issue #4117: live independent review windows, ordered by Issue.
@@ -18284,6 +18381,27 @@ impl IssueMonitorState {
 
     /// Check the current cap at the final boundary before adding a pane.
     /// Only a reservation that has not become a pane supplies its own slot.
+    /// Issue #7665: `has_capacity_for_monitor_spawn` also refuses for holds
+    /// that are not slot exhaustion. Callers name them, so a refusal never
+    /// reads `max_active reached (0/8)` while no slot is occupied.
+    pub fn monitor_spawn_hold_reason(
+        &self,
+        issue_number: u64,
+        review_dispatch: bool,
+    ) -> Option<String> {
+        if let Some(drain) = self.update_drain() {
+            return Some(format!(
+                "update_drain for v{} holds new launches; use {UPDATE_DRAIN_RELEASE_OPERATION}",
+                drain.version
+            ));
+        }
+        if review_dispatch {
+            return self.review_dispatch_exclusion_reason(issue_number);
+        }
+        self.agent_schedule_launch_exclusion(issue_number)
+            .map(|reason| format!("schedule admission: {reason}"))
+    }
+
     pub fn has_capacity_for_monitor_spawn(&self, issue_number: u64, review_dispatch: bool) -> bool {
         if self.launch_source_exclusion(issue_number).is_some() || self.update_drain().is_some() {
             return false;
@@ -20481,6 +20599,30 @@ impl IssueMonitorState {
         }
     }
 
+    /// Issue #7665 AC-5: the effect executor does not submit a Prepared claim
+    /// that the Project execution policy refuses. This names that hold for the
+    /// row, `issue.monitor.launch_now` and the log; it is one `; `-free entry.
+    pub(crate) fn claim_project_policy_hold(&self, issue_number: u64) -> Option<String> {
+        let root = self.wait_project_root.as_deref()?;
+        self.pending_effects
+            .iter()
+            .any(|effect| {
+                effect.state == IssueMonitorEffectState::Prepared
+                    && matches!(effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number: owner, .. } if owner == issue_number)
+            })
+            .then(|| {
+                crate::project_execution_policy::admission(root, &[format!("issue:{issue_number}")])
+                    .err()
+            })
+            .flatten()
+            .map(|reason| {
+                format!(
+                    "claim_withheld_by_project_policy: {}",
+                    reason.replace("; ", ", ")
+                )
+            })
+    }
+
     fn pending_claim_issue_numbers(&self) -> BTreeSet<u64> {
         self.pending_effects
             .iter()
@@ -22027,6 +22169,15 @@ impl IssueMonitorState {
             self.record_duplicate_launch_refusal(issue_number, message, window_id, now);
             return;
         }
+        // Issue #7632: no retry can change who wrote the Issue. Park it for
+        // the PM on the first refusal instead of spending the retry ladder.
+        if is_source_triage_refusal(issue_number, &message) {
+            self.release_confirmed_claim_for_issue(issue_number);
+            self.revoke_launch_binding(issue_number);
+            self.clear_active_tracking(issue_number);
+            self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, message);
+            return;
+        }
         self.record_failed_issue_at(issue_number, message, MonitorInboxState::LaunchFailed, now);
     }
 
@@ -22086,25 +22237,37 @@ impl IssueMonitorState {
         {
             return false;
         }
+        let message = message.into();
+        // Issue #7632: the owner refuses an untrusted source before it claims
+        // the delivery, so the report has no recorded materializer to match.
+        let triage_refusal = is_source_triage_refusal(issue_number, &message);
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
-                    if materializer_id.is_none()
-                        || self.pending_launch_deliveries[index]
-                            .materializer_id
-                            .as_deref()
-                            != materializer_id
+                    if !triage_refusal
+                        && (materializer_id.is_none()
+                            || self.pending_launch_deliveries[index]
+                                .materializer_id
+                                .as_deref()
+                                != materializer_id)
                     {
                         return false;
                     }
                     self.pending_launch_deliveries.remove(index);
                 }
+                // The reporter repeats a refusal until it reads the hold back.
+                PendingLaunchDeliveryMatch::Missing
+                    if triage_refusal
+                        && self
+                            .failed_issues
+                            .get(&issue_number)
+                            .is_some_and(|held| is_source_triage_refusal(issue_number, held)) => {}
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
                     return false
                 }
             }
         }
-        if retryable {
+        if retryable || triage_refusal {
             self.record_launch_failed_at(issue_number, message, now);
         } else {
             self.release_confirmed_claim_for_issue(issue_number);
@@ -22116,7 +22279,7 @@ impl IssueMonitorState {
             }
             self.record_terminal_failed_issue(
                 issue_number,
-                message.into(),
+                message,
                 MonitorInboxState::LaunchFailed,
             );
         }
@@ -27511,7 +27674,7 @@ impl IssueMonitorState {
         // Keep them queued behind the existing transient infrastructure backoff.
         if gwt_agent::is_transient_launch_failure(&message)
             || (state == MonitorInboxState::LaunchFailed
-                && message.starts_with("Issues max_active reached (")
+                && is_monitor_spawn_hold_refusal(&message)
                 && !self.review_failure_applies(issue_number, state, now))
         {
             self.record_transient_launch_retry(issue_number, message, now);
@@ -29209,6 +29372,39 @@ mod tests {
         }
     }
 
+    /// Issue #7632 AC-3: source admission is decided before the remaining-work
+    /// relaunch, so a merged delivery never requeues an Issue it would refuse.
+    #[test]
+    fn merged_delivery_with_remaining_work_does_not_requeue_an_untrusted_source() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
+        monitor.set_gui_connected(true);
+        let mut candidate = issue(42);
+        candidate.author_login = Some("github-actions[bot]".into());
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining\n".into());
+        monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+        monitor.record_candidate(candidate.clone());
+        assert_eq!(
+            monitor.next_launch_request(IDLE_NOW).unwrap().issue_number,
+            42
+        );
+        // A later read reports an author the trust list does not name.
+        candidate.author_login = Some("external-reporter".into());
+        monitor.record_candidate(candidate);
+
+        monitor.record_merged(42);
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::SourceExcluded)
+        );
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+    }
+
     #[test]
     fn upstream_restored_work_requires_trust_before_acquisition_and_materialization() {
         fn selected(author: Option<&str>) -> IssueMonitorState {
@@ -30430,6 +30626,153 @@ mod tests {
                 .error_message
                 .is_none());
         }
+    }
+
+    /// Issue #7679: the owner could not record its launch failure, and what
+    /// the failed launch left behind made the Session census uncertain. That
+    /// uncertainty counted as a held process and skipped the windowless
+    /// timeout, so the row stayed `launching` until someone requeued it.
+    #[test]
+    fn issue_7679_unrecorded_launch_failure_does_not_leave_the_row_launching() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-02T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+
+        // The fake: the launch spent its deadline, so the owner's failure
+        // record cannot even read the Monitor.
+        let mut session = gwt_agent::Session::new(&root, "work", gwt_agent::AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions_dir).unwrap();
+        let launch = crate::project_runtime::monitor::MonitorLaunch {
+            root: root.clone(),
+            id: "tab-1::agent-42".into(),
+            incarnation: 1,
+            session_id: session.id.clone(),
+            agent_id: "codex".into(),
+            materializer_id: "gui-a".into(),
+            feedback: serde_json::from_value(serde_json::json!({
+                "client_id": "client", "title": "Start Work",
+                "issue_monitor_issue_number": 42,
+                "issue_monitor_delivery_id": "launch:effect-42",
+                "issue_monitor_project_root": null,
+                "issue_monitor_session_mode": null,
+                "issue_monitor_review_dispatch": false,
+            }))
+            .unwrap(),
+            current: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            source: None,
+        };
+        {
+            let spent = std::time::Instant::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(spent);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(spent);
+            launch
+                .commit_unspawned_failure("worktree add: process deadline expired", true, None)
+                .expect_err("the failure record itself fails");
+        }
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        monitor.record_candidate(issue(42));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launching,
+            "nothing recorded the failure"
+        );
+
+        // The failed launch's leftover runtime is all the census has: no live
+        // Session, only an observation it cannot attribute.
+        let uncertain = crate::session_inventory::SessionInventory {
+            uncertainties: vec![crate::session_inventory::SessionObservationUncertainty {
+                runtime_path: gwt_agent::runtime_state_path(&sessions_dir, &session.id),
+                session_id: Some(session.id.clone()),
+                reason: "child_identity_missing".into(),
+            }],
+            ..Default::default()
+        };
+        let observations = crate::issue_monitor_worker::read_execution_observations_from_inventory(
+            &root,
+            &[42],
+            &uncertain,
+        );
+        assert!(observations[&42].process_held);
+        crate::issue_monitor_worker::apply_process_holds(&mut monitor, &observations);
+
+        assert!(monitor
+            .expire_stale_unbound_launches_with("2026-07-02T00:01:59Z", |_| true)
+            .is_empty());
+        assert_eq!(
+            monitor.expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true),
+            vec![42],
+            "an unproven hold must not keep a windowless launch forever"
+        );
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::LaunchFailed
+        );
+
+        // A Session proven live in the Issue's worktree still vetoes it.
+        let mut held = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut held, &[issue(42)], "2026-07-02T00:00:00Z");
+        assert!(held.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-02T00:00:00Z",
+        ));
+        let live = crate::session_inventory::SessionInventory {
+            sessions: vec![crate::session_inventory::SessionObservation {
+                session_id: session.id.clone(),
+                issue_number: Some(42),
+                execution_binding_missing: false,
+                agent_id: "codex".to_string(),
+                worktree_path: root.clone(),
+                worktree_exists: true,
+                host_pid: 1,
+                child_pid: 2,
+                child_started_at: 1,
+                started_at: "2026-07-02T00:00:00Z".to_string(),
+                launch_origin: gwt_agent::SessionLaunchOrigin::Launch,
+                launch_entrypoint: None,
+                restore_source_session_id: None,
+            }],
+            ..Default::default()
+        };
+        let observations = crate::issue_monitor_worker::read_execution_observations_from_inventory(
+            &root,
+            &[42],
+            &live,
+        );
+        crate::issue_monitor_worker::apply_process_holds(&mut held, &observations);
+        assert!(held
+            .expire_stale_unbound_launches_with("2026-07-02T00:03:00Z", |_| true)
+            .is_empty());
+        assert_eq!(held.active_count(), 1);
     }
 
     #[test]
@@ -44419,6 +44762,71 @@ mod tests {
         assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 42);
     }
 
+    /// Issue #7665 AC-5 / AC-6: no Project view is registered and the saved
+    /// Continue choice does not list this Issue, so its claim is withheld.
+    /// The row must say so instead of a bare `claim_pending`.
+    #[test]
+    fn issue7665_claim_withheld_by_project_policy_names_its_reason_on_the_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        gwt_core::project_execution_policy::choose(
+            temp.path(),
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "human-continue".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:42".into()],
+            },
+        )
+        .unwrap();
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_wait_project_root(temp.path());
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-27T00:00:00Z",
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-27T00:00:01Z",
+                2,
+                |_| false,
+            ),
+            2
+        );
+        let status = monitor.agent_status_at("2026-07-27T00:00:02Z");
+        let reason = |number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .and_then(|row| row.exclusion_reason.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            reason(43).contains("claim_withheld_by_project_policy: lineage_not_admitted"),
+            "{}",
+            reason(43)
+        );
+        assert!(
+            !reason(43)
+                .split("; ")
+                .any(|part| part == "use project.execution.status"),
+            "the reason stays one entry for launch_now's `; ` split: {}",
+            reason(43)
+        );
+        assert!(!reason(42).contains("claim_withheld_by_project_policy"));
+    }
+
     #[test]
     fn scan_claim_planning_is_side_effect_free_and_deduplicated() {
         // Phase 7 T-140: the cloned scan may select candidates, but GitHub
@@ -45224,6 +45632,81 @@ mod tests {
             monitor.prefs().pending_launch_deliveries.is_empty(),
             "a retryable issue cannot also replay its previous durable delivery"
         );
+    }
+
+    /// Issue #7632 AC-1: the owner refuses an untrusted source before it claims
+    /// the delivery, so the report names no materializer the Monitor recorded.
+    /// One refusal parks the Issue for the PM and frees its slot.
+    #[test]
+    fn source_triage_refusal_holds_after_one_refusal_and_frees_the_slot() {
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        let delivery_id = monitor.prefs().pending_launch_deliveries[0]
+            .delivery_id
+            .clone();
+        assert_eq!(monitor.occupied_slot_count(), 1);
+        let refusal = source_admission_refusal_message(
+            42,
+            "untrusted external Issue; PM triage required; use a separate curated execution owner",
+        );
+
+        assert!(monitor.record_launch_failed_delivery_at(
+            42,
+            refusal.clone(),
+            Some(&delivery_id),
+            Some("gui-materializer"),
+            true,
+            "2026-07-28T00:00:05Z",
+        ));
+
+        let held = |monitor: &IssueMonitorState, reason: &str| {
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::NeedsHuman)
+            );
+            assert_eq!(monitor.prefs().failed_issues[0].message, reason);
+            assert_eq!(monitor.occupied_slot_count(), 0);
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+            assert_eq!(monitor.attempt_count(42), 0, "a hold is not a retry");
+        };
+        held(&monitor, &refusal);
+        assert!(monitor
+            .next_launch_request("2026-07-28T01:00:00Z")
+            .is_none());
+
+        // The GUI re-reports the same refusal with its cleanup detail until
+        // the Monitor confirms it; that must settle, not start another attempt.
+        let repeated = format!("{refusal}; exact owner cleanup remains pending: I/O failure");
+        assert!(monitor.record_launch_failed_delivery_at(
+            42,
+            repeated.clone(),
+            Some(&delivery_id),
+            Some("gui-materializer"),
+            true,
+            "2026-07-28T00:00:10Z",
+        ));
+        held(&monitor, &repeated);
     }
 
     /// SPEC #3165 FR-100/FR-101 / T-224: a generic AgentFailed autonomous
@@ -52450,6 +52933,91 @@ mod tests {
         );
     }
 
+    /// Issue #7303 / #6052: CI is already green and auto-merge is already
+    /// requested when the daemon accepts an overall FAIL for that SHA.
+    /// Acceptance must queue a disarm and must not leave a prepared arm that
+    /// can still land the rejected head.
+    #[test]
+    fn issue_7303_accepted_review_fail_disarms_the_same_sha() {
+        use crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA;
+
+        let fail_raw = format!(
+            r#"{{"schema":"{REVIEW_VERDICT_SCHEMA}","overall":"fail","criteria":[{{"id":"AC-5","verdict":"fail"}}]}}"#
+        );
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        let epoch = monitor.effect_authority_epoch();
+        assert!(monitor.prepare_effect(PendingIssueMonitorEffect::prepared(
+            format!("arm:7:99:abc123:{epoch}"),
+            epoch,
+            IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number: 7,
+                pr_number: 99,
+                reviewed_sha: "abc123".to_string(),
+            },
+        )));
+
+        assert_eq!(
+            monitor.apply_review_verdict(7, "abc123", &fail_raw),
+            Some(false),
+            "an overall FAIL for the reviewed SHA is accepted"
+        );
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().review_passed,
+            Some(false)
+        );
+        assert_eq!(
+            review_fail_disarms(&monitor),
+            1,
+            "accepted FAIL disarms auto-merge for that PR"
+        );
+        assert!(
+            monitor.pending_effects().iter().all(|effect| !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::ArmAutoMerge {
+                    issue_number: 7,
+                    pr_number: 99,
+                    ..
+                }
+            )),
+            "accepted FAIL drops a prepared arm of the same SHA"
+        );
+
+        monitor.record_review_verdict(7, false);
+        assert_eq!(
+            review_fail_disarms(&monitor),
+            1,
+            "a repeated FAIL does not stack another disarm"
+        );
+
+        let mut passed = autonomous_state();
+        passed.begin_review(7, 99, "abc123");
+        passed.record_review_verdict(7, true);
+        assert_eq!(review_fail_disarms(&passed), 0);
+
+        let mut stale = autonomous_state();
+        stale.begin_review(7, 99, "abc123");
+        assert_eq!(stale.apply_review_verdict(7, "other", &fail_raw), None);
+        assert_eq!(review_fail_disarms(&stale), 0);
+    }
+
+    fn review_fail_disarms(monitor: &IssueMonitorState) -> usize {
+        monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        issue_number: 7,
+                        pr_number: 99,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
     #[test]
     fn autonomous_loop_fields_survive_prefs_roundtrip() {
         let mut monitor = autonomous_state();
@@ -55116,6 +55684,39 @@ mod tests {
         );
     }
 
+    /// Issue #7665: an update drain refuses a spawn through the capacity
+    /// predicate while no slot is occupied. The refusal used to read
+    /// `max_active reached (0/8)`; it must name the hold and stay a retry.
+    #[test]
+    fn issue7665_non_capacity_spawn_hold_names_its_reason_and_requeues() {
+        let now = "2026-11-18T08:19:24Z";
+        let mut monitor = autonomous_state();
+        scan_queued_candidates(
+            &mut monitor,
+            &[auto_issue(8, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            now,
+        );
+        assert_eq!(monitor.monitor_spawn_hold_reason(8, false), None);
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.171.0", now);
+        assert!(!monitor.has_capacity_for_monitor_spawn(8, false));
+        assert_eq!(monitor.active_count(), 0, "no slot is occupied");
+        let reason = monitor
+            .monitor_spawn_hold_reason(8, false)
+            .expect("the drain is the refusal");
+        assert!(reason.starts_with("update_drain for v9.171.0"), "{reason}");
+
+        let message = format!("Issues launch hold before launching Issue #8: {reason}");
+        monitor.complete_active_launch(8, "tab-1::preparing-8");
+        monitor.set_autonomous_phase(8, AutonomousPhase::Implementing);
+        monitor.record_launch_failed_at(8, &message, now);
+        assert_eq!(
+            monitor.inbox_item(8).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.attempt_count(8), 0, "a hold is not an attempt");
+        assert!(!monitor.failed_issues.contains_key(&8));
+    }
+
     #[test]
     fn transient_launch_failure_requeues_without_consuming_an_attempt() {
         // A concurrent fetch ref race is not an agent failure.
@@ -55577,6 +56178,7 @@ mod tests {
                     settlement,
                     reaped_at: None,
                     process_held,
+                    process_hold_proven: process_held,
                     holder_host_dead,
                     dead_holder_hosts: Default::default(),
                     held_holder_session_id: None,
@@ -55643,6 +56245,7 @@ mod tests {
                         settlement: *settlement,
                         reaped_at: None,
                         process_held: false,
+                        process_hold_proven: false,
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
@@ -55804,6 +56407,7 @@ mod tests {
                 settlement: IssueMonitorExecutionSettlement::Completed,
                 reaped_at: None,
                 process_held: true,
+                process_hold_proven: true,
                 holder_host_dead: false,
                 dead_holder_hosts: Default::default(),
                 held_holder_session_id: None,

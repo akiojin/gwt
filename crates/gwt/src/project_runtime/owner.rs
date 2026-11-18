@@ -25,6 +25,25 @@ use std::{
 };
 use tokio::sync::{broadcast, oneshot};
 
+/// Budget for cleaning up and reporting a failed launch (Issue #7670).
+const FAILED_LAUNCH_SETTLEMENT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// End the launch deadline and give the failure settlement its own budget.
+///
+/// A launch that fails *because* its deadline ran out used to settle under the
+/// same, already expired deadline: the Monitor readback timed out at once, the
+/// failure was never recorded, and the row stayed `launching` until someone
+/// requeued it by hand. Nested deadlines only ever shorten, so the launch
+/// deadline has to be released before the settlement one is entered.
+fn enter_failed_launch_settlement_deadline(
+    launch_deadline: &mut Option<gwt_core::operation_deadline::ScopedOperationDeadline>,
+) -> gwt_core::operation_deadline::ScopedOperationDeadline {
+    drop(launch_deadline.take());
+    gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + FAILED_LAUNCH_SETTLEMENT_BUDGET,
+    )
+}
+
 fn spawn_owner_worker<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> thread::JoinHandle<T> {
@@ -1330,6 +1349,8 @@ pub(crate) struct OwnerState {
     shared_registry_initialization: Option<Result<(), String>>,
     registry_projection: crate::persistence::PersistedWindowRegistry,
     pty_writers: super::agent_dispatch::PtyWriterRegistry,
+    monitor_runtime_scan:
+        Arc<std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>>,
     agent_dispatch_jobs: usize,
     deferred_agent_frontend: HashMap<(String, u64), Vec<DeferredAgentFrontend>>,
     pending_agent_self_closes: HashMap<String, super::agent_dispatch::PendingAgentSelfClose>,
@@ -1416,6 +1437,7 @@ impl OwnerState {
             shared_registry_initialization: None,
             registry_projection,
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            monitor_runtime_scan: Arc::clone(&monitor_runtime_scan),
             agent_dispatch_jobs: 0,
             deferred_agent_frontend: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -6233,8 +6255,10 @@ impl OwnerState {
             tracing::info!(target: "gwt.launch.timing", phase = "owner_dispatch", state = "finished",
                 elapsed_ms = launch_requested.elapsed().as_secs_f64() * 1000.0, "Issues owner launch phase");
             let owner_phase = super::launch::LaunchPhaseTimer::start("owner_materialization");
-            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+            let mut launch_deadline = Some(
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+                ),
             );
             let sessions_dir = gwt_core::paths::gwt_sessions_dir();
             let expected_registry_row: Result<
@@ -6776,6 +6800,9 @@ impl OwnerState {
                     }
                     success
                 });
+            let _settlement_deadline = result
+                .is_err()
+                .then(|| enter_failed_launch_settlement_deadline(&mut launch_deadline));
             let mut unspawned_runtime_retired = false;
             if result.is_err()
                 && !input.physical_spawn_started
@@ -8090,10 +8117,16 @@ impl OwnerState {
         let incarnation = runtime.incarnation;
         let sender = self.sender.clone();
         let writers = self.pty_writers.clone();
+        let monitor_runtime_scan = Arc::clone(&self.monitor_runtime_scan);
         spawn_owner_worker(move || {
             let registry_result =
                 super::agent_dispatch::forget_owner_writer(&writers, &id, &runtime.current);
-            let result = close_runtime(&id, &mut runtime, cause).and(registry_result);
+            // Issue #7676: logical requeue does not clear a census published
+            // while this child was alive. Publish that absence before the ACK,
+            // or active_count keeps the stale physical slot.
+            let result = close_runtime(&id, &mut runtime, cause)
+                .and(registry_result)
+                .and_then(|()| publish_closed_monitor_census(&monitor_runtime_scan, &runtime));
             let _ = sender.send(OwnerMessage::Closed {
                 id,
                 incarnation,
@@ -12227,33 +12260,8 @@ pub(super) fn retire_unspawned_launch_runtime(
         |current, expected| Ok(serde_json::to_value(current)? == serde_json::to_value(expected)?),
         |current| {
             let path = gwt_agent::runtime_state_path(sessions_dir, &current.id);
-            let _writer = gwt_agent::session::runtime_writer_lease(&path)?;
-            let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
             match captured_runtime {
-                Some(Ok(Some(expected))) => {
-                    let captured: gwt_agent::SessionRuntimeState =
-                        serde_json::from_slice(expected)?;
-                    if captured.execution_identity.is_some()
-                        || captured.runtime_incarnation.is_some()
-                        || captured.host_started_at.is_some()
-                        || captured.child_pid.is_some()
-                        || captured.child_started_at.is_some()
-                        || captured.source_event.is_some()
-                        || captured.active_tool_calls.is_some()
-                        || captured.last_completed_hook_event_at.is_some()
-                        || captured.last_completed_hook_outcome.is_some()
-                        || captured.current_hook_event.is_some()
-                        || captured.pending_discussion.is_some()
-                        || std::fs::read(&path)? != *expected
-                    {
-                        return Err(std::io::Error::other(
-                            "failed launch runtime changed or carries physical evidence",
-                        ));
-                    }
-                    std::fs::remove_file(&path)?;
-                    #[cfg(unix)]
-                    std::fs::File::open(path.parent().expect("runtime namespace"))?.sync_all()?;
-                }
+                Some(Ok(Some(expected))) => remove_unspawned_provisional_runtime(&path, expected)?,
                 Some(Ok(None)) if !path.try_exists()? => {}
                 _ => {
                     return Err(std::io::Error::other(
@@ -12268,8 +12276,52 @@ pub(super) fn retire_unspawned_launch_runtime(
     .map_err(|error| error.to_string())?;
     match outcome {
         gwt_agent::SessionSnapshotUpdateOutcome::Updated(stopped) => Ok(stopped),
-        _ => Err("failed launch Session changed before provisional runtime retirement".into()),
+        _ => {
+            // Issue #7665: the Session moved on, so it is not rewritten here.
+            // This launch never spawned a child, though: its own unchanged
+            // provisional runtime must not stay `Running` under the live host,
+            // where it makes the machine Agent census uncertain for everyone.
+            if let Some(Ok(Some(captured))) = captured_runtime {
+                let path = gwt_agent::runtime_state_path(sessions_dir, &expected.id);
+                if let Err(error) = remove_unspawned_provisional_runtime(&path, captured) {
+                    tracing::warn!(%error, session_id = %expected.id, "failed launch provisional runtime remains");
+                }
+            }
+            Err("failed launch Session changed before provisional runtime retirement".into())
+        }
     }
+}
+
+/// Removes exactly the provisional runtime this launch wrote: the captured
+/// bytes, unchanged on disk, carrying no physical child or hook evidence.
+fn remove_unspawned_provisional_runtime(
+    path: &std::path::Path,
+    expected: &[u8],
+) -> std::io::Result<()> {
+    let _writer = gwt_agent::session::runtime_writer_lease(path)?;
+    let _publication = gwt_agent::session::runtime_publication_lease(path)?;
+    let captured: gwt_agent::SessionRuntimeState = serde_json::from_slice(expected)?;
+    if captured.execution_identity.is_some()
+        || captured.runtime_incarnation.is_some()
+        || captured.host_started_at.is_some()
+        || captured.child_pid.is_some()
+        || captured.child_started_at.is_some()
+        || captured.source_event.is_some()
+        || captured.active_tool_calls.is_some()
+        || captured.last_completed_hook_event_at.is_some()
+        || captured.last_completed_hook_outcome.is_some()
+        || captured.current_hook_event.is_some()
+        || captured.pending_discussion.is_some()
+        || std::fs::read(path)? != *expected
+    {
+        return Err(std::io::Error::other(
+            "failed launch runtime changed or carries physical evidence",
+        ));
+    }
+    std::fs::remove_file(path)?;
+    #[cfg(unix)]
+    std::fs::File::open(path.parent().expect("runtime namespace"))?.sync_all()?;
+    Ok(())
 }
 
 fn finish_agent_session(
@@ -12380,6 +12432,31 @@ fn finish_agent_session(
         }
     }
     Ok(())
+}
+
+/// Issue #7676: a close ACK is the slot-release receipt. The census worker
+/// only republishes on its 5s wake, so a count taken while the child was
+/// alive still occupies `active_count` after the logical launch is gone.
+fn publish_closed_monitor_census(
+    scan: &std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>,
+    runtime: &WindowRuntime,
+) -> Result<(), String> {
+    let monitor_backed = runtime.agent.as_ref().is_some_and(|agent| {
+        agent.feedback.as_ref().is_some_and(|feedback| {
+            !feedback.issue_monitor_review_dispatch
+                && feedback
+                    .issue_monitor_launch_binding_issue_number()
+                    .is_some()
+        })
+    });
+    if !monitor_backed {
+        return Ok(());
+    }
+    let Some(scan) = scan.get() else {
+        return Ok(());
+    };
+    scan.publish_current_census()
+        .map_err(|error| format!("Monitor census did not release the closed slot: {error}"))
 }
 
 fn monitor_launch_for_agent(
@@ -13025,7 +13102,7 @@ fn retry_unclaimed_monitor_capacity(
     detail: &str,
 ) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
-        (detail.starts_with("Issues max_active reached (")
+        (crate::issue_monitor::is_monitor_spawn_hold_refusal(detail)
             || detail.starts_with("Machine Agent capacity is occupied;")
             || detail.starts_with("Machine Agent capacity observation is unavailable;")
             || detail.starts_with("Machine Agent census is uncertain;"))
@@ -13113,6 +13190,7 @@ fn owner_fixture(
         shared_registry_initialization: None,
         registry_projection: crate::persistence::empty_workspace_state(),
         pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        monitor_runtime_scan: Default::default(),
         agent_dispatch_jobs: 0,
         deferred_agent_frontend: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
@@ -13422,6 +13500,47 @@ mod worker_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Issue #7665: a failed launch whose Session moved on left its
+    /// provisional `Running` runtime under the live host. One such file makes
+    /// the machine Agent census uncertain and refuses every launch.
+    #[test]
+    fn issue7665_failed_launch_removes_its_unchanged_provisional_runtime_when_the_session_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let provisional = |evidence: bool| {
+            let mut session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+            session.save(&sessions).unwrap();
+            let captured_session = session.clone();
+            let path = gwt_agent::runtime_state_path(&sessions, &session.id);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+            if evidence {
+                runtime.child_pid = Some(std::process::id());
+            }
+            let bytes = serde_json::to_vec(&runtime).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            // The Session changes after the launch captured its snapshot.
+            session.agent_session_id = Some("moved-on".into());
+            session.save(&sessions).unwrap();
+            (captured_session, path, Ok(Some(bytes)))
+        };
+
+        let (captured, path, runtime) = provisional(false);
+        let refusal = retire_unspawned_launch_runtime(&sessions, &captured, Some(&runtime));
+        assert!(refusal.is_err(), "the moved Session is never rewritten");
+        assert!(
+            !path.exists(),
+            "this launch's own unchanged provisional runtime is retired"
+        );
+
+        let (captured, path, runtime) = provisional(true);
+        assert!(retire_unspawned_launch_runtime(&sessions, &captured, Some(&runtime)).is_err());
+        assert!(path.exists(), "physical child evidence is never removed");
+    }
     use crate::agent_capability::AgentCapabilityRegistry;
 
     fn run_fixture_owner(state: OwnerState, receiver: mpsc::Receiver<OwnerMessage>) {
@@ -15348,6 +15467,7 @@ mod tests {
             shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            monitor_runtime_scan: Default::default(),
             agent_dispatch_jobs: 0,
             deferred_agent_frontend: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -16263,6 +16383,27 @@ mod tests {
 mod drop_tests {
     use super::*;
     use std::time::Duration;
+
+    /// Issue #7670: a launch that spent its whole deadline still has to
+    /// report the failure to the Monitor, which reads under the deadline.
+    #[test]
+    fn failed_launch_settlement_gets_a_budget_after_the_launch_deadline_expired() {
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let mut launch_deadline =
+            Some(gwt_core::operation_deadline::ScopedOperationDeadline::enter(now));
+        gwt_core::operation_deadline::ensure_remaining("launch")
+            .expect_err("the launch deadline is spent");
+
+        let _settlement = enter_failed_launch_settlement_deadline(&mut launch_deadline);
+
+        assert!(launch_deadline.is_none());
+        assert_eq!(
+            gwt_core::operation_deadline::ensure_remaining("settlement")
+                .expect("failure settlement must not inherit the spent launch deadline"),
+            Some(now + FAILED_LAUNCH_SETTLEMENT_BUDGET)
+        );
+    }
 
     #[test]
     fn later_failed_cleanup_gets_its_own_recovery_budget() {

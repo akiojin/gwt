@@ -292,6 +292,16 @@ impl MonitorRuntimeScan {
         if !has_closed_slot {
             return Ok(false);
         }
+        self.publish_current_census()?;
+        Ok(true)
+    }
+
+    /// Publish the host census now and wait until that pass commits.
+    ///
+    /// The worker otherwise wakes on a 5s timeout. A close that has already
+    /// reaped its child still occupies an active slot until the next pass,
+    /// because a stale physical count remains after the logical launch is gone.
+    pub(crate) fn publish_current_census(&self) -> io::Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let deadline =
             gwt_core::operation_deadline::current().map_or(deadline, |at| at.min(deadline));
@@ -312,7 +322,7 @@ impl MonitorRuntimeScan {
                 "Monitor runtime reconciliation did not finish before the scan",
             )
         })?;
-        Ok(true)
+        Ok(())
     }
 }
 

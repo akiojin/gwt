@@ -2063,6 +2063,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
+          projectViewReadiness.closed();
           closeSocketInputHandoff();
           if (reconnectTimer) clearTimeout(reconnectTimer);
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);

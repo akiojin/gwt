@@ -128,17 +128,24 @@ function findFileRecursive(root, fileName) {
   return null;
 }
 
+function powershellSingleQuoted(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
 function extractArchive(archivePath, extractDir, asset) {
   if (asset.endsWith(".zip")) {
-    execFileSync(
-      "powershell.exe",
+    // Issue #7682: Expand-Archive follows the inherited PSModulePath into
+    // PowerShell 7's Archive module, whose 3-arg ExtractToDirectory is absent
+    // from .NET Framework. Call the 2-arg overload directly.
+    execFileSync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
       [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `Expand-Archive -LiteralPath '${archivePath.replace(/'/g, "''")}' -DestinationPath '${extractDir.replace(/'/g, "''")}' -Force`,
-      ]
-    );
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+        `[System.IO.Compression.ZipFile]::ExtractToDirectory(${powershellSingleQuoted(archivePath)}, ${powershellSingleQuoted(extractDir)})`,
+      ].join("; "),
+    ]);
     return;
   }
 

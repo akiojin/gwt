@@ -3154,8 +3154,9 @@ pub(crate) fn prepare_owner_agent_admission(
             ));
         }
         if let Some(reason) = monitor.launch_source_exclusion(issue_number) {
-            return Err(format!(
-                "Issues source admission refused Issue #{issue_number}: {reason}"
+            return Err(crate::issue_monitor::source_admission_refusal_message(
+                issue_number,
+                &reason,
             ));
         }
         if !review_dispatch {
@@ -3164,6 +3165,12 @@ pub(crate) fn prepare_owner_agent_admission(
                     "Issues dependency admission refused Issue #{issue_number}: {reason}"
                 ));
             }
+        }
+        if let Some(reason) = monitor.monitor_spawn_hold_reason(issue_number, review_dispatch) {
+            return Err(format!(
+                "{}{issue_number}: {reason}",
+                crate::issue_monitor::MONITOR_SPAWN_HOLD_PREFIX
+            ));
         }
         if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
             let status = monitor.agent_status_at(&now);
