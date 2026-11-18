@@ -19086,7 +19086,7 @@ impl IssueMonitorState {
     }
 
     /// Issue #7688: release review reservations whose window never appeared,
-    /// on the scan's clock. [`Self::reconcile_review_windows`] runs only when
+    /// on the scan's clock. `reconcile_review_windows` runs only when
     /// a canvas arrives, and a canvas is not guaranteed to arrive: with a
     /// native owner the GUI publishes none. A reservation must not wait for
     /// one to give its slot back.
