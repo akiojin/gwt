@@ -1,6 +1,38 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.171.0] - 2026-11-18
+
+### Bug Fixes
+
+- **monitor:** 送り仮名なしの受入条件見出しを受け入れ基準として認識する
+- **verify:** Report cleanup after admission deadline
+- **test:** Reap interrupted exact relaunch fixtures
+- **monitor:** Unblock agent switches on non-root macos
+- **build:** Preserve standalone build stamp tests on macos
+- **verify:** Pre-PR 導出が T94418 の Linux step を委譲対象として受け入れる
+- **issue-monitor:** Recover slots after native update restart
+- **issue-monitor:** Require host exit for immediate restart recovery
+
+### Features
+
+- **pm:** Expose shared agent member registration
+
+### Miscellaneous Tasks
+
+- **build:** Document macos-only cc use for cargo machete
+- **work:** Issue #7610 の PR 作成イベントを記録する
+
+### Testing
+
+- **monitor:** Count only clear switch cwd observations
+- **issue-monitor:** Initialize restart observation fixture
+
+### Ci
+
+- **test:** T94418 を必須の Linux テスト shard で実行する
+- **test:** T94418 の step 名を Issues の表記に合わせる
+
 ## [9.170.0] - 2026-11-18
 
 ### Bug Fixes
