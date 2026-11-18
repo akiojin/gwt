@@ -1317,6 +1317,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "block2",
+ "cc",
  "ctor",
  "dirs 7.0.0",
  "dispatch2",

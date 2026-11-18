@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// One process census; missing cwd information never establishes quiescence.
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// One process census. An in-scope process with missing cwd information blocks quiescence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSwitchCwdObservation {
     pub matching_pids: Vec<u32>,
@@ -66,7 +69,14 @@ pub fn observe_agent_switch_checkpoint_cwd(
     source_pid: u32,
     source_started_at: u64,
 ) -> AgentSwitchCwdObservation {
-    observe_cwd(worktree, Some((source_pid, source_started_at)))
+    #[cfg(target_os = "macos")]
+    {
+        macos::observe_checkpoint(worktree, source_pid, source_started_at)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        observe_cwd(worktree, Some((source_pid, source_started_at)))
+    }
 }
 
 fn observe_cwd(worktree: &Path, source: Option<(u32, u64)>) -> AgentSwitchCwdObservation {

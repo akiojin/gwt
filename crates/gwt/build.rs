@@ -1,6 +1,15 @@
 fn main() {
     emit_build_stamp();
 
+    #[cfg(target_os = "macos")]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let source = "src/issue_monitor/switch_checkpoint/process_info.c";
+        println!("cargo:rerun-if-changed={source}");
+        cc::Build::new()
+            .file(source)
+            .compile("gwt_switch_process_info");
+    }
+
     #[cfg(all(target_os = "windows", not(test)))]
     embed_windows_resources();
 }
