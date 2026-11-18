@@ -547,7 +547,7 @@
           <div class="screen-pane" data-screen="agent-edit-tsumugi">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — ツムギ</p>
-            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="ツムギ" aria-label="名前" style="width:200px"></div>
@@ -576,8 +576,8 @@
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip on" type="button">default（端末の既定）</button><button class="chip" type="button">専用の上書き</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書き 0件 — 端末のプロファイルをそのまま使います。上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -585,7 +585,7 @@
           <div class="screen-pane" data-screen="agent-edit-haruto">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — Haruto</p>
-            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Haruto" aria-label="名前" style="width:200px"></div>
@@ -613,14 +613,8 @@
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip" type="button">default（端末の既定）</button><button class="chip on" type="button">専用の上書き</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
-              <table class="list" aria-label="Haruto の環境変数の上書き">
-                <thead><tr><th>キー</th><th>扱い</th><th>値</th></tr></thead>
-                <tbody>
-                  <tr><td class="num">RUST_BACKTRACE</td><td>上書き</td><td class="num">1</td></tr>
-                </tbody>
-              </table>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip" type="button">default</button><button class="chip on" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -628,7 +622,7 @@
           <div class="screen-pane" data-screen="agent-edit-yui">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — Yui</p>
-            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#c2410c">Y</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Yui" aria-label="名前" style="width:200px"></div>
@@ -656,8 +650,8 @@
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip on" type="button">default（端末の既定）</button><button class="chip" type="button">専用の上書き</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書き 0件 — 端末のプロファイルをそのまま使います。上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -665,7 +659,7 @@
           <div class="screen-pane" data-screen="agent-edit-sora">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — Sora</p>
-            <p class="h-sub">このエージェントの属性・特性・プロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Sora" aria-label="名前" style="width:200px"></div>
@@ -693,14 +687,8 @@
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip" type="button">default（端末の既定）</button><button class="chip on" type="button">専用の上書き</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
-              <table class="list" aria-label="Sora の環境変数の上書き">
-                <thead><tr><th>キー</th><th>扱い</th><th>値</th></tr></thead>
-                <tbody>
-                  <tr><td class="num">TZ</td><td>上書き</td><td class="num">Asia/Tokyo</td></tr>
-                </tbody>
-              </table>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip on" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -708,7 +696,7 @@
           <div class="screen-pane" data-screen="agent-new">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェントを追加</p>
-            <p class="h-sub">新しいエージェントの属性・特性・プロファイルを決めます。追加したエージェントは台帳の末尾に入り、並び順がそのまま利用優先度になります。</p>
+            <p class="h-sub">新しいエージェントの属性・特性と、割り当てるプロファイルを決めます。追加したエージェントは台帳の末尾に入り、並び順がそのまま利用優先度になります。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前（例：Ren）" aria-label="名前" style="width:200px"></div>
@@ -736,8 +724,8 @@
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">使うプロファイル</div><div class="d2">このエージェントのセッションは、このプロファイルの環境で始まります。端末全体のプロファイル（default）をそのまま使うか、このエージェント専用の上書きを持てます。</div></div><div class="chips" role="group" aria-label="使うプロファイル"><button class="chip on" type="button">default（端末の既定）</button><button class="chip" type="button">専用の上書き</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">環境変数の上書き</div><div class="d2">上書きはこのエージェントのセッションにだけ効き、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div><button class="btn" type="button">変数を追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">追加する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -805,7 +793,7 @@
                 <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">担当者のプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button">バランス ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">ログイン時に gwt を起動する</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">作業の出力行数</div><div class="d2">作業セッションで表示する出力の行数です（3〜10）。</div></div><button class="btn" type="button">6 ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">端末のプロファイル</div><div class="d2">環境変数の上書きを持つプロファイルの切り替えは、プロファイルの画面で行います。</div></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+                <div class="set-row"><div class="grow"><div class="t">端末のプロファイル</div><div class="d2">プロファイルは端末で定義し、エージェントに割り当てます。定義の管理はプロファイルの画面、割り当ては各エージェント設定で行います。</div></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
               </div>
             </div>
 
@@ -1720,26 +1708,29 @@
         <div class="content">
           <div class="screen-pane on" data-screen="profile-main">
             <p class="h-big">プロファイル</p>
-            <p class="h-sub">gwt を動かす環境のプロファイルです。有効なプロファイル 1件（default）。環境変数の上書きはここで管理します。</p>
+            <p class="h-sub">プロファイルは端末で定義し、エージェントに割り当てます。ここでは定義（環境変数などの中身）の一覧・追加・編集を管理します。どのエージェントに割り当てるかは、各エージェント設定で変えます。</p>
             <div class="btnrow" style="margin-bottom:14px"><button class="btn primary" type="button">新しいプロファイル</button><button class="btn" type="button">一覧を更新</button></div>
             <div class="set-group">
-              <div class="set-row"><div class="grow"><div class="t">default</div><div class="d2">有効 · 既定のプロファイル · 環境変数の上書き 0件</div></div><span class="badge b-run">有効</span><button class="btn" type="button">有効にする</button><button class="btn ghost" type="button">削除</button></div>
+              <div class="set-row"><div class="grow"><div class="t">default</div><div class="d2">既定のプロファイル · 環境変数の上書き 0件 · 割り当て：ツムギ、Yui</div></div><button class="btn" type="button">編集</button><button class="btn ghost" type="button">削除</button></div>
+              <div class="set-row"><div class="grow"><div class="t">rust-dev</div><div class="d2">Rust 開発用 · 環境変数の上書き 2件 · 割り当て：Haruto</div></div><button class="btn" type="button">編集</button><button class="btn ghost" type="button">削除</button></div>
+              <div class="set-row"><div class="grow"><div class="t">data-import</div><div class="d2">データ取り込み用 · 環境変数の上書き 1件 · 割り当て：Sora</div></div><button class="btn" type="button">編集</button><button class="btn ghost" type="button">削除</button></div>
             </div>
             <div class="set-group">
-              <div class="set-head">プロファイルの内容（default）</div>
-              <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">default</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">説明</div><div class="d2">Default profile</div></div></div>
+              <div class="set-head">プロファイルの内容（rust-dev）</div>
+              <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">rust-dev</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">説明</div><div class="d2">Rust 開発用 — バックトレースと色出力を有効にします</div></div></div>
             </div>
-            <p class="h-sec">環境変数</p>
-            <table class="list" aria-label="環境変数">
+            <p class="h-sec">環境変数（rust-dev）</p>
+            <table class="list" aria-label="rust-dev の環境変数">
               <thead><tr><th>キー</th><th>OS</th><th>扱い</th><th>値</th></tr></thead>
               <tbody>
-                <tr><td class="num">/usr/bin/open</td><td>macOS</td><td>OS に任せる</td><td class="num">—</td></tr>
-                <tr><td class="num">__CFBundleIdentifier</td><td>macOS</td><td>そのまま</td><td class="num">io.github.akiojin.gwt</td></tr>
+                <tr><td class="num">RUST_BACKTRACE</td><td>すべて</td><td>上書き</td><td class="num">1</td></tr>
+                <tr><td class="num">CARGO_TERM_COLOR</td><td>すべて</td><td>上書き</td><td class="num">always</td></tr>
                 <tr><td class="num">COMMAND_MODE</td><td>macOS</td><td>そのまま</td><td class="num">unix2003</td></tr>
               </tbody>
             </table>
-            <p class="rel" style="margin-top:10px">プロファイルを切り替えると、次に始まるセッションから新しい環境で動きます。動いているセッションは影響を受けません。</p>
+            <div class="btnrow" style="margin-top:10px"><button class="btn" type="button">変数を追加</button></div>
+            <p class="rel" style="margin-top:10px">定義を変えると、そのプロファイルを割り当てたエージェントの、次に始まるセッションから新しい環境で動きます。動いているセッションは影響を受けません。</p>
           </div>
         </div>
       </div>
@@ -1865,7 +1856,7 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。プロファイルはエージェント単位で設定し、そのエージェントのセッションに効く環境変数・起動まわりを設定画面で持つ。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、コマンドパレット、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定では割り当てのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、コマンドパレット、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
