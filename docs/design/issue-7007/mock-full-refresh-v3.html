@@ -307,6 +307,19 @@
   .wiz-step.on .n{border-color:var(--accent);background:var(--accent);color:#fff}
   .wiz-step.done .n{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-ink)}
   .wiz-body{flex:1;padding:18px 20px;min-width:0}
+  /* dialogs & flows (dead-end additions) */
+  .dlg{max-width:600px;margin:22px auto;border:1px solid var(--line2);border-radius:12px;box-shadow:var(--shadow);padding:18px 20px;background:var(--panel)}
+  .dlg .h-big{font-size:17.5px}
+  .steps{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:14px;font-size:12.5px;color:var(--ink2);font-weight:700}
+  .steps .st{border:1px solid var(--line2);border-radius:999px;padding:4px 11px;background:var(--panel)}
+  .steps .st.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+  .steps .st.done{background:var(--accent-soft);color:var(--accent-ink);border-color:var(--accent)}
+  .checkrow{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+  .checkrow:first-of-type{border-top:none}
+  .checkrow .grow{flex:1;min-width:200px}
+  .checkrow .t{font-weight:700;font-size:13.5px}
+  .checkrow .d2{font-size:12.3px;color:var(--ink2)}
+  .belldot{display:inline-flex;align-items:center;justify-content:center;background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px;margin-left:5px}
 </style>
 </head>
 <body>
@@ -321,10 +334,14 @@
     <div class="row">
       <a data-openpage="start">開始画面</a>
       <a data-openpage="agents">エージェント</a>
-      <a data-openpage="agents" data-openscreen="agent-edit-tsumugi">エージェント設定</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-jinsenji">エージェント設定</a>
       <a data-openpage="tools">ツール</a>
+      <a data-openpage="tools" data-openscreen="tool-add">ツールを追加</a>
+      <a data-openpage="tools" data-openscreen="tools-supported">サポートツール</a>
       <a data-openpage="settings">アプリ設定</a>
       <a data-openpage="profile">プロファイル</a>
+      <a data-openpage="notifications">通知</a>
+      <a data-openpage="addproject">プロジェクトを追加</a>
       <span class="sep">gwt：</span>
       <a data-openpage="gwt" data-openscreen="g-ask">相談</a>
       <a data-openpage="gwt" data-openscreen="g-tasks">タスク</a>
@@ -356,7 +373,8 @@
       <span class="brand">gwt</span>
       <span class="proj" id="appProj" hidden></span>
       <div class="hnav">
-        <button class="hpm" type="button" data-openpage="start"><span class="pm-face sm"><span class="dot wait"></span></span><span class="hname">ツムギ</span><span class="badge b-wait">判断待ち 5件</span></button>
+        <button class="hpm" type="button" data-openpage="start"><span class="pm-face sm"><span class="dot wait"></span></span><span class="hname">秦泉寺 章夫</span><span class="badge b-wait">判断待ち 5件</span></button>
+        <button class="btn ghost" type="button" data-openpage="notifications">通知<span class="belldot">3</span></button>
         <button class="btn ghost" type="button" data-openpage="agents">エージェント</button>
         <button class="btn ghost" type="button" data-openpage="tools">ツール</button>
         <button class="btn ghost" type="button" data-openpage="settings">設定</button>
@@ -390,39 +408,39 @@
                 <div class="chat-head">
                   <span class="pm-face"><span class="dot wait"></span></span>
                   <div>
-                    <div class="nm">ツムギ</div>
+                    <div class="nm">秦泉寺 章夫</div>
                     <div class="sub">あなたの PM · 判断待ち 5件</div>
                   </div>
                 </div>
                 <div class="chat" id="startChat">
-                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。昨夜の作業はすべて終わっています。いまお渡しする判断は 2件です。プロジェクトの中身は、ここには出しません — 詳しくは各プロジェクトのページで見てください。</div>
-                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。昨夜の作業はすべて終わっています。いまお渡しする判断は 2件です。プロジェクトの中身は、ここには出しません — 詳しくは各プロジェクトのページで見てください。</div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。
                     <div class="dcard inchat">
                       <div class="top"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="badge b-block">要対応</span><span class="rel">48分待ち</span></div>
                       <div class="t">毎日の取り込みが停止 — 対応表を直して続けますか？</div>
-                      <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
+                      <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
                       <dl>
                         <dt>理由</dt><dd>3件とも項目名の対応づけの問題で、データの欠落ではありません。今朝の分は再開後にまとめて取り込めます。</dd>
                         <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクトには影響しません。</dd>
                       </dl>
                       <div class="btnrow"><button class="btn primary" type="button" data-say="対応表を直して、取り込みを続けて" data-reply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直して続ける</button><button class="btn" type="button" data-say="取り込みを止めて" data-reply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div>
                     </div></div>
-                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断があります。「全画面刷新」（#7007）の計画の承認です。
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断があります。「全画面刷新」（#7007）の計画の承認です。
                     <div class="dcard inchat">
                       <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">判断待ち</span><span class="rel">1時間待ち</span></div>
                       <div class="t">「全画面刷新のホームと判断の画面」（#7007）の計画を承認しますか？</div>
-                      <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>承認して始める</b> — 残りの作業はステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
+                      <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>承認して始める</b> — 残りの作業はステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
                       <dl>
                         <dt>理由</dt><dd>土台のマージで前提が揃い、これ以上待っても計画は変わりません。</dd>
                         <dt>影響範囲</dt><dd>gwt の全画面。作業中のセッションは影響を受けません。</dd>
                       </dl>
-                      <div class="btnrow"><button class="btn primary" type="button" data-say="#7007 の計画を承認して" data-reply="かしこまりました。承認を記録しました。担当の Yui がそのまま再開します。">承認して始める</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断で決める</button></div>
+                      <div class="btnrow"><button class="btn primary" type="button" data-say="#7007 の計画を承認して" data-reply="かしこまりました。承認を記録しました。担当の 姫野 大樹 がそのまま再開します。">承認して始める</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断で決める</button></div>
                     </div></div>
-                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>頼まれたことと決まったことは、会話から自動で各プロジェクトの「タスク」に記録します。あとからタスクの画面でまとめて見られます。
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫</div>頼まれたことと決まったことは、会話から自動で各プロジェクトの「タスク」に記録します。あとからタスクの画面でまとめて見られます。
                     <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-tasks">gwt のタスクを見る</button></div></div>
                 </div>
                 <div class="composer">
-                  <textarea id="startInput" placeholder="ツムギに話しかける…"></textarea>
+                  <textarea id="startInput" placeholder="秦泉寺 章夫に話しかける…"></textarea>
                   <div class="send"><button class="btn primary" type="button" id="startSend">送る</button></div>
                 </div>
               </div>
@@ -434,8 +452,8 @@
                   <div class="mrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><button class="btn" type="button">開く</button></div>
                 </div>
                 <div class="btnrow" style="margin-top:12px">
-                  <button class="btn ghost" type="button">フォルダを開く…</button>
-                  <button class="btn ghost" type="button">GitHub から取り込む…</button>
+                  <button class="btn ghost" type="button" data-openpage="addproject" data-openscreen="add-folder">フォルダを開く…</button>
+                  <button class="btn ghost" type="button" data-openpage="addproject" data-openscreen="add-github">GitHub から取り込む…</button>
                 </div>
                 <p class="rel" style="margin-top:8px">一覧は名前だけの導線です。作業状況・タスク数・Issue 数などの内容は、各プロジェクトのページで見ます。プロジェクトは新しいブラウザタブで開きます。</p>
               </div>
@@ -451,16 +469,16 @@
               <div class="chat-head">
                 <span class="pm-face"><span class="dot"></span></span>
                 <div>
-                  <div class="nm">ツムギ</div>
+                  <div class="nm">秦泉寺 章夫</div>
                   <div class="sub">あなたの PM</div>
                 </div>
               </div>
               <div class="chat">
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>はじめまして、ツムギです。まだプロジェクトがありません。最初のプロジェクトを開くと、ここで様子をお知らせできるようになります。</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫</div>はじめまして、秦泉寺 章夫です。まだプロジェクトがありません。最初のプロジェクトを開くと、ここで様子をお知らせできるようになります。</div>
               </div>
-              <button class="opt primary" type="button">GitHub から取り込む<small>リポジトリを選ぶと、そのままプロジェクトになります</small></button>
-              <button class="opt" type="button">フォルダを開く<small>この端末にあるフォルダをプロジェクトにします</small></button>
-              <button class="opt" type="button">URL から複製する<small>Git の URL を貼ると、複製してから開きます</small></button>
+              <button class="opt primary" type="button" data-openpage="addproject" data-openscreen="add-github">GitHub から取り込む<small>リポジトリを選ぶと、そのままプロジェクトになります</small></button>
+              <button class="opt" type="button" data-openpage="addproject" data-openscreen="add-folder">フォルダを開く<small>この端末にあるフォルダをプロジェクトにします</small></button>
+              <button class="opt" type="button" data-openpage="addproject" data-openscreen="add-clone">URL から複製する<small>Git の URL を貼ると、複製してから開きます</small></button>
             </div>
           </div>
 
@@ -482,16 +500,16 @@
                 <div class="chat-head">
                   <span class="pm-face"><span class="dot wait"></span></span>
                   <div>
-                    <div class="nm">ツムギ</div>
+                    <div class="nm">秦泉寺 章夫</div>
                     <div class="sub">あなたの PM · 判断待ち 5件</div>
                   </div>
                 </div>
                 <div class="chat">
-                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>プロジェクトが多くても、ここに出すのは判断だけです。gwt と KeibaDB に判断があります — 上の会話のカードから、その場で決められます。
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400"> · 今朝 7:02</span></div>プロジェクトが多くても、ここに出すのは判断だけです。gwt と KeibaDB に判断があります — 上の会話のカードから、その場で決められます。
                     <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button><button class="btn" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断へ</button></div></div>
                 </div>
                 <div class="composer">
-                  <textarea placeholder="ツムギに話しかける…"></textarea>
+                  <textarea placeholder="秦泉寺 章夫に話しかける…"></textarea>
                   <div class="send"><button class="btn primary" type="button">送る</button></div>
                 </div>
               </div>
@@ -515,33 +533,158 @@
         </div>
       </div>
 
+      <!-- ================= プロジェクトを追加 ================= -->
+      <div class="pagegroup" data-page="addproject">
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">プロジェクトの追加は端末全体の流れです</span></div>
+        <div class="content">
+          <div class="screen-pane on" data-screen="add-github">
+            <p class="h-big">GitHub から取り込む</p>
+            <p class="h-sub">リポジトリを探して選ぶと、この端末に複製してプロジェクトになります。</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+              <input class="field" style="flex:1;min-width:220px" type="text" placeholder="リポジトリを探す…" aria-label="リポジトリを探す">
+              <button class="btn primary" type="button">検索</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">akiojin/keiba-db</div><div class="d">競馬データの取り込みと蓄積 · 更新は昨日</div></div>
+              <span class="badge b-done">未追加</span>
+              <button class="btn primary" type="button">取り込む</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">akiojin/unity-cli</div><div class="d">Unity Editor をコマンドラインから操作する道具 · この端末ではプロジェクトとして開いています</div></div>
+              <span class="badge b-run">追加済み</span>
+              <button class="btn" type="button" data-openpage="gwt">プロジェクトを開く</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">akiojin/vr-cabin-exposure</div><div class="d">VR 曝露アプリ · 更新は3日前</div></div>
+              <span class="badge b-done">未追加</span>
+              <button class="btn primary" type="button">取り込む</button>
+            </div>
+            <div class="set-group" style="margin-top:14px">
+              <div class="set-head">取り込みの進み具合</div>
+              <div class="set-row"><div class="grow"><div class="t">akiojin/keiba-db を複製しています</div><div class="d2">保存先：~/Repos/keiba-db · 終わるとプロジェクトとして開けます</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:72%"></i></div></div><span class="badge b-run">複製中 72%</span></div>
+              <div class="set-row"><div class="grow"><div class="t">失敗したとき</div><div class="d2">理由（認証・空き容量・URL の誤りなど）をこの場に出し、やり直せる形にします。途中で止まった複製は残しません。</div></div></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-openpage="start">開始画面へ戻る</button><button class="btn ghost" type="button" data-nav="add-folder">フォルダから開く</button><button class="btn ghost" type="button" data-nav="add-clone">URL から複製する</button></div>
+          </div>
+          <div class="screen-pane" data-screen="add-folder">
+            <p class="h-big">フォルダを開く</p>
+            <p class="h-sub">この端末にあるフォルダを、そのままプロジェクトにします。</p>
+            <label class="f-label" for="folderPath">フォルダの場所</label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+              <input class="field" id="folderPath" style="flex:1;min-width:220px" type="text" value="~/Repos/gwt" aria-label="フォルダの場所">
+              <button class="btn" type="button">フォルダを選ぶ…</button>
+              <button class="btn primary" type="button" data-openpage="gwt">開く</button>
+            </div>
+            <p class="h-sec">最近開いたフォルダ</p>
+            <div class="lrow">
+              <div class="grow"><div class="t">~/Repos/gwt</div><div class="d">Git リポジトリ · プロジェクトとして開いています</div></div>
+              <span class="badge b-run">追加済み</span>
+              <button class="btn" type="button" data-openpage="gwt">プロジェクトを開く</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">~/Repos/keibadb-import</div><div class="d">Git リポジトリ · ブランチは main</div></div>
+              <span class="badge b-done">未追加</span>
+              <button class="btn primary" type="button" data-openpage="keibadb">開く</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">~/Documents/notes</div><div class="d">Git 管理されていないフォルダ — 開くときに理由と始め方（そのまま開く／Git 化する）を案内します</div></div>
+              <span class="badge b-wait">未 Git 化</span>
+              <button class="btn" type="button">開く</button>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-openpage="start">開始画面へ戻る</button><button class="btn ghost" type="button" data-nav="add-github">GitHub から取り込む</button><button class="btn ghost" type="button" data-nav="add-clone">URL から複製する</button></div>
+          </div>
+          <div class="screen-pane" data-screen="add-clone">
+            <p class="h-big">URL から複製する</p>
+            <p class="h-sub">Git の URL を貼ると、この端末に複製してからプロジェクトとして開きます。</p>
+            <label class="f-label" for="cloneUrl">リポジトリの URL</label>
+            <input class="field" id="cloneUrl" style="width:100%;margin-bottom:12px" type="text" placeholder="https://github.com/owner/repo.git" aria-label="リポジトリの URL">
+            <label class="f-label" for="cloneDest">保存先</label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+              <input class="field" id="cloneDest" style="flex:1;min-width:220px" type="text" value="~/Repos/" aria-label="保存先">
+              <button class="btn" type="button">保存先を選ぶ…</button>
+            </div>
+            <div class="set-group">
+              <div class="set-head">複製の進み具合</div>
+              <div class="set-row"><div class="grow"><div class="t">まだ始めていません</div><div class="d2">「複製する」を押すと、ここに進み具合と結果が出ます。同じ場所にプロジェクトがあるときは、複製せずにそのプロジェクトを開く案内を出します。</div></div></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">複製する</button><button class="btn" type="button" data-openpage="start">開始画面へ戻る</button><button class="btn ghost" type="button" data-nav="add-github">GitHub から取り込む</button><button class="btn ghost" type="button" data-nav="add-folder">フォルダから開く</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 通知 ================= -->
+      <div class="pagegroup" data-page="notifications">
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">通知は端末全体の画面です（ヘッダーのベルから開きます）</span></div>
+        <div class="content">
+          <div class="screen-pane on" data-screen="notifications-main">
+            <p class="h-big">通知</p>
+            <p class="h-sub">止まった作業・判断・更新などをここに残します。履歴は最大100件です。行の「開く」で、関係する画面へそのまま移れます。</p>
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button">すべて消す</button></div>
+            <div class="lrow">
+              <div class="grow"><div class="t">判断待ちが 5件あります</div><div class="d">秦泉寺 章夫 · gwt 2件・KeibaDB 1件・ほか 2件 · 12:20</div></div>
+              <span class="badge b-wait">未読</span>
+              <button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">開く</button>
+              <button class="btn ghost" type="button">消す</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">作業が止まりました — #7047（チェック4件が失敗）</div><div class="d">gwt · 小田 洋平 のセッション · PM が見ています · 12:03</div></div>
+              <span class="badge b-block">未読</span>
+              <button class="btn" type="button" data-openpage="gwt" data-openscreen="g-board">開く</button>
+              <button class="btn ghost" type="button">消す</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">毎日の取り込みが止まりました — 形式の変更（#121）</div><div class="d">KeibaDB · あなたの判断待ちです · 06:00</div></div>
+              <span class="badge b-block">未読</span>
+              <button class="btn" type="button" data-openpage="keibadb" data-openscreen="k-decide">開く</button>
+              <button class="btn ghost" type="button">消す</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">gwt の更新の準備ができました（9.171.0）</div><div class="d">アプリの更新 · 再起動の前に、止まる作業の確認ができます · 昨日 21:14</div></div>
+              <span class="badge b-plan">既読</span>
+              <button class="btn" type="button" data-openpage="settings" data-openscreen="update-flow">開く</button>
+              <button class="btn ghost" type="button">消す</button>
+            </div>
+            <div class="lrow">
+              <div class="grow"><div class="t">報告：#7541 の修正がマージされました</div><div class="d">gwt · 秦泉寺 章夫の報告は掲示板にも残っています · 昨日 18:40</div></div>
+              <span class="badge b-done">既読</span>
+              <button class="btn" type="button" data-openpage="gwt" data-openscreen="g-board">開く</button>
+              <button class="btn ghost" type="button">消す</button>
+            </div>
+            <p class="rel" style="margin-top:12px">画面を開いている間の通知は、ここに静かに溜まります（フローティング表示とデスクトップ通知の要否はアプリ設定の「あなたの PM」で決めます）。</p>
+          </div>
+        </div>
+      </div>
+
       <!-- ================= エージェント台帳 ================= -->
       <div class="pagegroup" data-page="agents">
         <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">台帳は端末全体の画面です（ヘッダーから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="agents-ledger">
             <p class="h-big">エージェント台帳</p>
-            <p class="h-sub">並び順が利用優先度です。エージェントは名前・役割・アバターと「特性」を持つ担当者です。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。</p>
+            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバター・PM 適格と「特性」を持つ担当者です（属性に「役割」は持ちません。担当の傾向は特性の「性格」で表します）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。誰が PM を務めるかはエージェントの層で決まります（「PM を務める」が付いた人の中で並び順の最上位。一覧の「PM に割り当てる」で優先指定もでき、指定した人が PM を務めます）。レート制限で PM の担当者は入れ替わりません。ツールの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
             <div class="set-group">
-              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. ツムギ — PM</div><div class="d2">いま、この端末の PM を務めています</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-tsumugi">編集</button></div>
+              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
             </div>
             <div class="set-group">
-              <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">2. Haruto — 実装</div><div class="d2">いま作業中（gwt）</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-haruto">編集</button></div>
-              <div class="set-row"><span class="ava working" style="background:#c2410c">Y</span><div class="grow"><div class="t">3. Yui — 実装</div><div class="d2">いま作業中（gwt）</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に。実機で見て確かめる</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-yui">編集</button></div>
-              <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">4. Sora — データ取り込み</div><div class="d2">いま作業中（KeibaDB）</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-sora">編集</button></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">2. 小田 洋平</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-oda">編集</button></div>
+              <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">3. 姫野 大樹</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に。実機で見て確かめる</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-himeno">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">4. 安藤 健二</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-ando">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">5. 原 和正</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>ビルドと検証を重点に。失敗は切り分けてから直す</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hara">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">6. 鈴木 和斗</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>調査と整理を重点に。根拠を並べてから提案する</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-suzuki">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hamada">編集</button></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button" data-nav="agent-new">追加</button></div>
             </div>
-            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのツール（アカウント）で動くかは、セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。担当の履歴と予定は台帳には置かず、各プロジェクトの「担当者」で見ます。</div>
+            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのツール（アカウント）で動くかは、セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。担当の履歴と予定、いま何をしているか（現在の作業状態）は台帳には置かず、各プロジェクトの「担当者」と「作業」で見ます。エージェントは特定のプロジェクトに所属せず、全プロジェクト共通のマスタです。</div>
           </div>
-          <div class="screen-pane" data-screen="agent-edit-tsumugi">
+          <div class="screen-pane" data-screen="agent-edit-jinsenji">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
-            <p class="h-big">エージェント設定 — ツムギ</p>
+            <p class="h-big">エージェント設定 — 秦泉寺 章夫</p>
             <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
-              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="ツムギ" aria-label="名前" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="PM" aria-label="役割" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" checked aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="秦泉寺 章夫" aria-label="名前" style="width:200px"></div>
+              
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" checked aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">優先指定されています。この人が PM を務めます。担当者はエージェントの層で決まるため、レート制限では入れ替わりません。ツールの割り当ては別の層で、PM のセッションはプールから優先的に割り当てられ、使える間は同じインスタンスに sticky です。インスタンスが枯渇したときだけ gwtd が別のインスタンスへ切り替えます（担当者は変わりません）。</div></div><button class="btn" type="button">優先指定を外す</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">この端末の PM を務めています。PM の振る舞い（知らせ方など）は、設定の「あなたの PM」で変えます。</div></div><button class="btn" type="button" data-openpage="settings">あなたの PM を開く</button></div>
             </div>
             <div class="set-group">
@@ -571,25 +714,25 @@
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
-          <div class="screen-pane" data-screen="agent-edit-haruto">
+          <div class="screen-pane" data-screen="agent-edit-oda">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
-            <p class="h-big">エージェント設定 — Haruto</p>
+            <p class="h-big">エージェント設定 — 小田 洋平</p>
             <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
-              <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Haruto" aria-label="名前" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="実装" aria-label="役割" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="小田 洋平" aria-label="名前" style="width:200px"></div>
+              
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
               <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
-                <span class="ava sel" style="background:#2563eb">H</span>
-                <span class="ava" style="background:#0f766e">H</span>
-                <span class="ava" style="background:#be123c">H</span>
-                <span class="ava" style="background:#a16207">H</span>
-                <span class="ava" style="background:#6d28d9">H</span>
+                <span class="ava sel" style="background:#2563eb">小</span>
+                <span class="ava" style="background:#0f766e">小</span>
+                <span class="ava" style="background:#be123c">小</span>
+                <span class="ava" style="background:#a16207">小</span>
+                <span class="ava" style="background:#6d28d9">小</span>
               </div><button class="btn" type="button">画像をアップロード</button></div>
               <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
             </div>
@@ -608,25 +751,25 @@
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
-          <div class="screen-pane" data-screen="agent-edit-yui">
+          <div class="screen-pane" data-screen="agent-edit-himeno">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
-            <p class="h-big">エージェント設定 — Yui</p>
+            <p class="h-big">エージェント設定 — 姫野 大樹</p>
             <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
-              <div class="set-row"><span class="ava working" style="background:#c2410c">Y</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Yui" aria-label="名前" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="実装" aria-label="役割" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+              <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="姫野 大樹" aria-label="名前" style="width:200px"></div>
+              
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
               <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
-                <span class="ava sel" style="background:#c2410c">Y</span>
-                <span class="ava" style="background:#2563eb">Y</span>
-                <span class="ava" style="background:#0f766e">Y</span>
-                <span class="ava" style="background:#a16207">Y</span>
-                <span class="ava" style="background:#6d28d9">Y</span>
+                <span class="ava sel" style="background:#c2410c">姫</span>
+                <span class="ava" style="background:#2563eb">姫</span>
+                <span class="ava" style="background:#0f766e">姫</span>
+                <span class="ava" style="background:#a16207">姫</span>
+                <span class="ava" style="background:#6d28d9">姫</span>
               </div><button class="btn" type="button">画像をアップロード</button></div>
               <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
             </div>
@@ -645,25 +788,25 @@
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
-          <div class="screen-pane" data-screen="agent-edit-sora">
+          <div class="screen-pane" data-screen="agent-edit-ando">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
-            <p class="h-big">エージェント設定 — Sora</p>
+            <p class="h-big">エージェント設定 — 安藤 健二</p>
             <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
-              <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Sora" aria-label="名前" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="データ取り込み" aria-label="役割" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+              <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="安藤 健二" aria-label="名前" style="width:200px"></div>
+              
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
               <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
-                <span class="ava sel" style="background:#0e7490">S</span>
-                <span class="ava" style="background:#2563eb">S</span>
-                <span class="ava" style="background:#be123c">S</span>
-                <span class="ava" style="background:#a16207">S</span>
-                <span class="ava" style="background:#6d28d9">S</span>
+                <span class="ava sel" style="background:#0e7490">安</span>
+                <span class="ava" style="background:#2563eb">安</span>
+                <span class="ava" style="background:#be123c">安</span>
+                <span class="ava" style="background:#a16207">安</span>
+                <span class="ava" style="background:#6d28d9">安</span>
               </div><button class="btn" type="button">画像をアップロード</button></div>
               <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
             </div>
@@ -682,6 +825,117 @@
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
+          <div class="screen-pane" data-screen="agent-edit-hara">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェント設定 — 原 和正</p>
+            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="原 和正" aria-label="名前" style="width:200px"></div>
+              
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava sel" style="background:#6d28d9">原</span>
+                <span class="ava" style="background:#2563eb">原</span>
+                <span class="ava" style="background:#be123c">原</span>
+                <span class="ava" style="background:#a16207">原</span>
+                <span class="ava" style="background:#6d28d9">原</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+            </div>
+            <div class="set-group">
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip" type="button">標準</button><button class="chip on" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="ビルドと検証を重点に。失敗は切り分けてから直す" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip" type="button">default</button><button class="chip on" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="agent-edit-suzuki">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェント設定 — 鈴木 和斗</p>
+            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="鈴木 和斗" aria-label="名前" style="width:200px"></div>
+              
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava sel" style="background:#a16207">鈴</span>
+                <span class="ava" style="background:#2563eb">鈴</span>
+                <span class="ava" style="background:#be123c">鈴</span>
+                <span class="ava" style="background:#a16207">鈴</span>
+                <span class="ava" style="background:#6d28d9">鈴</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+            </div>
+            <div class="set-group">
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip" type="button">Fast</button><button class="chip on" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="調査と整理を重点に。根拠を並べてから提案する" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="agent-edit-hamada">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェント設定 — 濱田 嵩翔</p>
+            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="濱田 嵩翔" aria-label="名前" style="width:200px"></div>
+              
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava sel" style="background:#be123c">濱</span>
+                <span class="ava" style="background:#2563eb">濱</span>
+                <span class="ava" style="background:#be123c">濱</span>
+                <span class="ava" style="background:#a16207">濱</span>
+                <span class="ava" style="background:#6d28d9">濱</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+            </div>
+            <div class="set-group">
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="性能の計測を重点に。数字で確かめてから変える" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+          </div>
           <div class="screen-pane" data-screen="agent-new">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェントを追加</p>
@@ -689,7 +943,7 @@
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前（例：Ren）" aria-label="名前" style="width:200px"></div>
-              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" placeholder="役割（例：実装）" aria-label="役割" style="width:200px"></div>
+              
               <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
             </div>
             <div class="set-group">
@@ -736,18 +990,95 @@
             </div>
             <div class="set-group">
               <h4>Codex</h4>
-              <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">サインイン済み · バージョン 0.164.0 · 最新 0.169.0 — 更新があります</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 土曜 21:25にリセット · いまは割り当て対象外</span></div></div><span class="badge b-wait">要確認</span><button class="btn" type="button">更新</button></div>
+              <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">サインイン済み · バージョン 0.164.0 · 最新 0.169.0 — 更新があります</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 土曜 21:25にリセット · いまは割り当て対象外</span></div></div><span class="badge b-wait">要確認</span><button class="btn" type="button" data-nav="tool-update">更新</button></div>
               <div class="set-row"><div class="grow"><div class="t">Codex 2（個人メール）</div><div class="d2">サインイン済み · バージョン 0.169.0 — 最新です</div><div class="use"><div class="bar"><i class="amb" style="width:90%"></i></div><span>週間90%使用 · 日曜 21:25にリセット</span></div></div><span class="badge b-done">最新</span></div>
-              <div class="set-row"><div class="grow"><div class="t">Codex 3</div><div class="d2">サインインが必要です — サインインするまで割り当て対象外です</div></div><button class="btn" type="button">サインイン</button></div>
+              <div class="set-row"><div class="grow"><div class="t">Codex 3</div><div class="d2">サインインが必要です — サインインするまで割り当て対象外です</div></div><button class="btn" type="button" data-nav="tool-signin">サインイン</button></div>
             </div>
             <div class="set-group">
               <h4>Grok Build</h4>
-              <div class="set-row"><div class="grow"><div class="t">Grok Build 1</div><div class="d2">未インストール</div><div class="use"><div class="bar"><i style="width:2%"></i></div><span>週間2%使用</span></div></div><button class="btn primary" type="button">インストール</button></div>
+              <div class="set-row"><div class="grow"><div class="t">Grok Build 1</div><div class="d2">未インストール</div><div class="use"><div class="bar"><i style="width:2%"></i></div><span>週間2%使用</span></div></div><button class="btn primary" type="button" data-nav="tool-install">インストール</button></div>
             </div>
             <div class="set-group">
               <h4>ツールの管理</h4>
               <div class="set-row"><div class="grow"><div class="t">ツールを自動で更新する</div><div class="d2">次回起動時に、更新の経路が確認できていて新しいバージョンがあるツールだけを更新します。勝手にインストールはしません。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
-              <div class="set-row"><div class="grow"><div class="t">ツールを追加する</div><div class="d2">アカウントを追加すると、プールに入って自動で割り当て候補になります。初回は、少なくとも1つのツールの登録とサインインが済むまで先へ進めません。</div></div><button class="btn" type="button">追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">ツールを追加する</div><div class="d2">アカウントを追加すると、プールに入って自動で割り当て候補になります。初回は、少なくとも1つのツールの登録とサインインが済むまで先へ進めません。</div></div><button class="btn" type="button" data-nav="tool-add">追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">サポートツールの管理</div><div class="d2">ツール本体（CLI）のインストールと更新はこちらです。上のプールは「アカウント」の管理で、本体の管理とは別です。</div></div><button class="btn" type="button" data-nav="tools-supported">管理を開く</button></div>
+            </div>
+          </div>
+          <div class="screen-pane" data-screen="tool-add">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <p class="h-big">ツールを追加する</p>
+            <p class="h-sub">アカウントを追加するとプールに入り、割り当て候補になります。初回は、少なくとも1つのツールの登録とサインインが済むまで先へ進めません。</p>
+            <div class="steps"><span class="st on">1. 種類</span><span>→</span><span class="st">2. アカウント</span><span>→</span><span class="st">3. サインイン</span><span>→</span><span class="st">4. 完了</span></div>
+            <div class="set-group">
+              <h4>種類を選ぶ（アカウント型）</h4>
+              <div class="set-row"><div class="grow"><div class="t">アカウント型のツール</div><div class="d2">アカウントを登録してサインインすると、そのアカウントがプールに入ります。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="ツールの種類"><button class="chip on" type="button">Claude Code</button><button class="chip" type="button">Codex</button><button class="chip" type="button">Grok Build</button><button class="chip" type="button">GitHub Copilot</button><button class="chip" type="button">Antigravity CLI</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">プールでの見分けに使います（例：Claude Code 3（予備））。</div></div><input class="field" type="text" placeholder="表示名" aria-label="表示名" style="width:220px"></div>
+              <div class="set-row"><div class="grow"><div class="t">本体（CLI）</div><div class="d2">選んだ種類の本体が未導入のときは、先にインストールへ案内します。</div></div><button class="btn" type="button" data-nav="tools-supported">サポートツールで確認</button></div>
+            </div>
+            <div class="set-group">
+              <h4>フロントエンド型のツール</h4>
+              <div class="set-row"><div class="grow"><div class="t">OpenCode／OpenClaw／Hermes Agent</div><div class="d2">この3種は、接続先（バックエンド）を切り替えて使うフロントエンド型です。アカウントではなく、バックエンド設定を選んで追加します。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">バックエンド設定を選ぶ</div><div class="d2">（置き場のみ）バックエンドの扱いは現在決定待ちのため、確定形はまだ示しません。</div></div><button class="btn" type="button">バックエンド設定を選ぶ…</button></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tool-signin">追加してサインインへ進む</button><button class="btn ghost" type="button" data-nav="tools-pool">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tool-signin">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <p class="h-big">サインイン — Codex 3</p>
+            <p class="h-sub">サインインが済むまで、このアカウントは割り当て対象外です。済むとプールに入り、候補になります。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">ブラウザでサインインする</div><div class="d2">サインイン用の画面を開きます。終わると、ここに戻って状態が「サインイン済み」になります。</div></div><button class="btn primary" type="button">サインインを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">サインイン用のシェルを開く</div><div class="d2">コマンドでサインインする場合はこちらです。シェルの中でログインを終えてください。</div></div><button class="btn" type="button" data-openpage="terminal">シェルを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">未サインイン — 割り当て対象外</div></div><span class="badge b-block">未サインイン</span></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-pool">完了してツールへ戻る</button><button class="btn ghost" type="button" data-nav="tools-pool">あとで</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tool-install">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <p class="h-big">インストール — Grok Build</p>
+            <p class="h-sub">ツール本体（CLI）をこの端末に入れます。アカウントの追加とは別の操作です。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">導入の経路</div><div class="d2">確認済みの経路から入れます（公式の配布元）。経路が確認できないツールは自動では入れません。</div></div><span class="badge b-run">確認済み</span></div>
+              <div class="set-row"><div class="grow"><div class="t">進み具合</div><div class="d2">ダウンロード → 配置 → 動作確認の順に進みます</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:45%"></i></div></div><span class="badge b-run">インストール中 45%</span></div>
+              <div class="set-row"><div class="grow"><div class="t">受け付けられないとき</div><div class="d2">そのツールのエージェントウィンドウが動いている間は、インストールと更新は受け付けません。理由はこの場に出します。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">終わったら</div><div class="d2">バージョンが「サポートツール」の一覧に出ます。アカウントを使うには、続けてサインインが必要です。</div></div><button class="btn" type="button" data-nav="tool-signin">サインインへ進む</button></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tools-supported">サポートツールへ戻る</button><button class="btn ghost" type="button" data-nav="tools-pool">ツールへ戻る</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tool-update">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <p class="h-big">更新 — Codex 1</p>
+            <p class="h-sub">本体のバージョンを 0.164.0 から 0.169.0 へ更新します。アカウントと使用量には影響しません。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">バージョン</div><div class="d2">導入済み 0.164.0 · 利用可能 0.169.0</div></div><span class="badge b-wait">更新あり</span></div>
+              <div class="set-row"><div class="grow"><div class="t">進み具合</div><div class="d2">更新の実行 → 動作確認の順に進みます</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:0%"></i></div></div><span class="badge b-done">未実行</span></div>
+              <div class="set-row"><div class="grow"><div class="t">受け付けられないとき</div><div class="d2">Codex のウィンドウが動いている間は更新を受け付けません。その場合は、止めてからやり直す案内を出します。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">結果</div><div class="d2">成功・失敗はここに出ます。失敗したときは理由と、ログへの導線を添えます。</div></div></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">更新する</button><button class="btn ghost" type="button" data-nav="tools-pool">戻る</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tools-supported">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <p class="h-big">サポートツール</p>
+            <p class="h-sub">ツール本体（CLI）のインストールと更新を管理します。アカウントのプールとは別で、本体が入っていない種類は使えません。</p>
+            <table class="list" aria-label="サポートツール">
+              <thead><tr><th>ツール</th><th>状態</th><th>導入済み</th><th>利用可能</th><th></th></tr></thead>
+              <tbody>
+                <tr><td>Claude Code</td><td><span class="badge b-run">導入済み</span></td><td class="num">2.1.326</td><td class="num">2.1.326（最新）</td><td></td></tr>
+                <tr><td>Codex</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.164.0</td><td class="num">0.169.0</td><td><button class="btn" type="button" data-nav="tool-update">更新</button></td></tr>
+                <tr><td>Grok Build</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">1.2.0</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
+                <tr><td>Antigravity CLI</td><td><span class="badge b-run">導入済み</span></td><td class="num">1.4.0</td><td class="num">1.4.0（最新）</td><td></td></tr>
+                <tr><td>OpenCode</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.9.2</td><td class="num">1.0.0</td><td><button class="btn" type="button" data-nav="tool-update">更新</button></td></tr>
+                <tr><td>OpenClaw</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">0.5.1</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
+                <tr><td>Hermes Agent</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.7.3</td><td class="num">0.7.3（最新）</td><td></td></tr>
+                <tr><td>GitHub Copilot</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">1.2.0</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
+              </tbody>
+            </table>
+            <div class="set-group" style="margin-top:14px">
+              <div class="set-row"><div class="grow"><div class="t">ツールを自動で更新する</div><div class="d2">次回起動時に、更新の経路が確認できていて新しいバージョンがある、導入済みのツールだけを更新します。勝手にインストールはしません。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+              <div class="set-row"><div class="grow"><div class="t">実行中の制限</div><div class="d2">そのツールのエージェントウィンドウが動いている間は、インストールと更新は受け付けません（理由はその場に出ます）。</div></div></div>
             </div>
           </div>
         </div>
@@ -766,7 +1097,7 @@
               <div class="set-group">
                 <h4>あなたの PM — この端末</h4>
                 <p class="d">PM を務めるエージェントの振る舞いの設定です。誰が PM を務めるかは、「エージェント台帳」で決めます。</p>
-                <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">PM の名前とアバター</div><div class="d2">いまはこの顔と名前（ツムギ）です。アバターはエージェント台帳の各エージェント設定から変えます。</div></div><button class="btn" type="button" data-openpage="agents">台帳で変える</button></div>
+                <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">PM の名前とアバター</div><div class="d2">いまはこの顔と名前（秦泉寺 章夫）です。アバターはエージェント台帳の各エージェント設定から変えます。</div></div><button class="btn" type="button" data-openpage="agents">台帳で変える</button></div>
                 <div class="set-row"><div class="grow"><div class="t">判断は、出てきた時点で知らせる</div><div class="d2">オフにすると、判断は朝と夜の報告にまとめられます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">止まった作業は、理由と次の手つきで知らせる</div><div class="d2">「止まりました」だけで終わらせず、原因の見立てと PM が次にやることを添えます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">23:00〜7:00 は、止まった作業と判断だけを知らせます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
@@ -774,7 +1105,7 @@
               </div>
               <div class="set-group">
                 <h4>アプリの更新 — gwt 本体</h4>
-                <div class="set-row"><div class="grow"><div class="t">現在のバージョン</div><div class="d2">9.170.0 — 最新です。</div></div><button class="btn" type="button">今すぐ確認</button></div>
+                <div class="set-row"><div class="grow"><div class="t">現在のバージョン</div><div class="d2">9.170.0 — 最新です。</div></div><button class="btn" type="button" data-nav="update-flow">今すぐ確認</button></div>
                 <div class="set-row"><div class="grow"><div class="t">更新を自動で適用する</div><div class="d2">更新の準備ができたら、動いている作業を安全に終わらせてから gwt を再起動して適用します。適用前なら取り消せます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
               </div>
               <div class="set-group">
@@ -796,10 +1127,57 @@
               <div class="set-group">
                 <h4>掲示板の共有 — この端末</h4>
                 <div class="set-row"><div class="grow"><div class="t">掲示板の共有先</div><div class="d2">この端末のみ、Slack、Teams から選びます。GitHub Discussions の受け渡し（判断・止まった報告・引き継ぎ）は、共有先が「この端末のみ」のときだけ有効です。</div></div><button class="btn" type="button">この端末のみ ▾</button></div>
-                <div class="set-row"><div class="grow"><div class="t">Slack / Teams の接続</div><div class="d2">サインインとサインアウトもここです。</div></div><button class="btn" type="button">設定する</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Slack / Teams の接続</div><div class="d2">サインインとサインアウトもここです。</div></div><button class="btn" type="button" data-nav="connect-setup">設定する</button></div>
               </div>
             </div>
 
+          </div>
+          <div class="screen-pane" data-screen="connect-setup">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="appsettings">&larr; 設定へ</button></div>
+            <p class="h-big">Slack / Teams の接続</p>
+            <p class="h-sub">掲示板の共有先で Slack か Teams を選んだときに使う接続です。共有先が「この端末のみ」の間は使いません。</p>
+            <div class="set-group">
+              <h4>接続先</h4>
+              <div class="set-row"><div class="chips" role="group" aria-label="接続先"><button class="chip on" type="button">Slack</button><button class="chip" type="button">Teams</button></div><span class="badge b-done">未接続</span></div>
+              <div class="set-row"><div class="grow"><div class="t">Client ID</div><div class="d2">共有先のアプリの Client ID です。</div></div><input class="field" type="text" placeholder="Client ID" aria-label="Client ID" style="width:260px"></div>
+              <div class="set-row"><div class="grow"><div class="t">シークレット</div><div class="d2">この端末の中だけに保存します。画面には出しません。</div></div><input class="field" type="password" placeholder="シークレット" aria-label="シークレット" style="width:260px"></div>
+              <div class="set-row"><div class="grow"><div class="t">OAuth の受け口（ポート）</div><div class="d2">サインインの戻り先に使う、この端末のポートです。</div></div><input class="field" type="text" value="8765" aria-label="OAuth のポート" style="width:120px"></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">設定を保存する</button><button class="btn" type="button">サインイン</button><button class="btn ghost" type="button">サインアウト</button></div>
+            <p class="rel" style="margin-top:10px">保存してサインインが済むと、共有先として選べるようになります。接続が切れたときは、理由をここに出します。</p>
+          </div>
+          <div class="screen-pane" data-screen="update-flow">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="appsettings">&larr; 設定へ</button></div>
+            <p class="h-big">アプリの更新 — gwt 本体</p>
+            <p class="h-sub">確認から適用までの流れです。適用には再起動が要るため、止まる作業を先に確かめます。</p>
+            <div class="steps"><span class="st done">1. 確認</span><span>→</span><span class="st on">2. ダウンロード</span><span>→</span><span class="st">3. 適用の確認</span><span>→</span><span class="st">4. 再起動して適用</span></div>
+            <div class="set-group">
+              <div class="set-head">確認の結果</div>
+              <div class="set-row"><div class="grow"><div class="t">新しいバージョンがあります — 9.171.0</div><div class="d2">いまは 9.170.0 です。確認は今朝 8:12 に済んでいます。</div></div><span class="badge b-wait">更新あり</span><button class="btn" type="button">もう一度確認</button></div>
+              <div class="set-row"><div class="grow"><div class="t">手で入れる場合</div><div class="d2">自動で入らない環境では、配布ページから手で入れる案内を出します。</div></div><button class="btn" type="button">配布ページを開く</button></div>
+            </div>
+            <div class="set-group">
+              <div class="set-head">ダウンロード</div>
+              <div class="set-row"><div class="grow"><div class="t">9.171.0 をダウンロードしています</div><div class="d2">終わると「適用の確認」へ進めます</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:64%"></i></div></div><span class="badge b-run">ダウンロード中 64%</span></div>
+            </div>
+            <div class="set-group">
+              <div class="set-head">適用の確認（再起動の影響）</div>
+              <p class="d">再起動すると、いま動いている次が止まります。安全に終わらせてから適用するか、先に確認してください。</p>
+              <div class="set-row"><div class="grow"><div class="t">小田 洋平 のセッション — #7048 共有状態モデル</div><div class="d2">実行中 · 止まると未保存の出力が残ります</div></div><span class="badge b-run">実行中</span></div>
+              <div class="set-row"><div class="grow"><div class="t">姫野 大樹 のセッション — #7007 全画面刷新</div><div class="d2">実行中 · 保存されていない変更 2件があります</div></div><span class="badge b-wait">未保存</span></div>
+              <div class="set-row"><div class="grow"><div class="t">PM（秦泉寺 章夫）</div><div class="d2">再起動後に自動で戻ります。判断待ちと会話は gwt 側に残ります</div></div><span class="badge b-done">自動で復帰</span></div>
+              <div class="btnrow" style="margin-top:10px"><button class="btn primary" type="button">今すぐ再起動して適用</button><button class="btn" type="button">あとで（次回起動時に適用）</button></div>
+              <p class="rel" style="margin-top:8px">自動適用がオンのときは、準備ができてから自動で適用します（適用前なら取り消せます）。</p>
+            </div>
+            <div class="set-group">
+              <div class="set-head">リリースノート</div>
+              <div class="set-row"><div class="grow"><div class="t">版を選ぶ</div><div class="d2">9.171.0 — 画面の刷新と gwtd の自己回復を含みます。前の版へ戻す（ダウングレード）もここからできます。</div></div><button class="btn" type="button">9.171.0 ▾</button></div>
+              <div class="btnrow"><button class="btn" type="button">この版に更新</button><button class="btn ghost" type="button">前の版に戻す</button></div>
+            </div>
+            <div class="set-group">
+              <div class="set-head">失敗したとき</div>
+              <div class="set-row"><div class="grow"><div class="t">適用に失敗した場合</div><div class="d2">理由とログへの導線を出し、やり直せる形にします。前の版のまま動き続けます。</div></div><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-logs">ログを開く</button><button class="btn" type="button">やり直す</button></div>
+            </div>
           </div>
         </div>
       </div>
@@ -824,7 +1202,7 @@
             <a href="#" data-nav="g-branches">ブランチ</a>
             <a href="#" data-nav="g-logs">ログ</a>
             <a href="#" data-nav="g-settings">設定</a>
-            <div class="foot">担当 PM：ツムギ</div>
+            <div class="foot">担当 PM：秦泉寺 章夫</div>
           </div>
           <div class="content">
 
@@ -833,23 +1211,23 @@
               <p class="h-sub">このプロジェクトの PM との会話はここだけです。判断・報告・進捗は、それぞれの画面と掲示板が正本です。</p>
               <div class="chat">
                 <div class="msg me"><div class="meta">あなた · たった今</div>メモリの課題（#5561）はどうなってる？</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>待ち行列に入っていて、次に始まります。計画は承認済みで、妨げるものはありません。進み具合は「作業」と「タスク」で見られます。
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>待ち行列に入っていて、次に始まります。計画は承認済みで、妨げるものはありません。進み具合は「作業」と「タスク」で見られます。
                   <br><span class="route">範囲：gwt</span>
                   <div class="btnrow"><button class="btn" type="button" data-nav="g-issue">課題 #5561 を開く</button><button class="btn ghost" type="button" data-nav="g-works">作業を見る</button></div></div>
                 <div class="msg me"><div class="meta">あなた · たった今</div>全画面刷新（#7007）の残りは？</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>残りは共有ステータスバーと、E2E・回帰確認です。計画の承認が「判断」に 1件あります。ここでも決められます。
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>残りは共有ステータスバーと、E2E・回帰確認です。計画の承認が「判断」に 1件あります。ここでも決められます。
                   <div class="dcard inchat">
                     <div class="top"><span class="badge b-wait">判断待ち</span><span class="rel">1時間待ち</span></div>
                     <div class="t">「全画面刷新のホームと判断の画面」（#7007）の計画を承認しますか？</div>
-                    <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>承認して始める</b> — 残りの作業はステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
+                    <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>承認して始める</b> — 残りの作業はステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
                     <dl>
                       <dt>理由</dt><dd>土台のマージで前提が揃い、これ以上待っても計画は変わりません。</dd>
                       <dt>影響範囲</dt><dd>gwt の全画面。作業中のセッションは影響を受けません。</dd>
                     </dl>
                     <div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn ghost" type="button" data-nav="g-decide">判断待ちで見る</button></div>
                   </div></div>
-                <div class="msg me"><div class="meta">あなた · たった今</div>Haruto の出力、そのまま見せて</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>基本はこの会話で要約しますが、実物はいつでもターミナル表示で見られます。私（PM）の出力も含め、全エージェント分が開けます。
+                <div class="msg me"><div class="meta">あなた · たった今</div>小田 洋平 の出力、そのまま見せて</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>基本はこの会話で要約しますが、実物はいつでもターミナル表示で見られます。私（PM）の出力も含め、全エージェント分が開けます。
                   <div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナル表示を開く</button></div></div>
               </div>
               <div class="composer">
@@ -868,12 +1246,12 @@
                 <div class="stat warn"><div class="num">1</div><div class="lab">判断待ちのタスク</div></div>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">全画面刷新（#7007）</div><div class="d">配下の課題 4件 · 完了 2件 · 残りはステータスバーと E2E 確認 · 担当：Yui</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:50%"></i></div></div>
+                <div class="grow"><div class="t">全画面刷新（#7007）</div><div class="d">配下の課題 4件 · 完了 2件 · 残りはステータスバーと E2E 確認 · 担当：姫野 大樹</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:50%"></i></div></div>
                 <span class="badge b-wait">判断待ち</span>
                 <button class="btn" type="button" data-nav="g-task">タスクを開く</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">共有状態モデル（#7048 ほか）</div><div class="d">配下の課題 3件 · 完了 2件 · レビュー待ち 1件 · 担当：Haruto</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:67%"></i></div></div>
+                <div class="grow"><div class="t">共有状態モデル（#7048 ほか）</div><div class="d">配下の課題 3件 · 完了 2件 · レビュー待ち 1件 · 担当：小田 洋平</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:67%"></i></div></div>
                 <span class="badge b-run">進行中</span>
                 <button class="btn" type="button" data-nav="g-task">タスクを開く</button>
               </div>
@@ -883,7 +1261,7 @@
                 <button class="btn" type="button" data-nav="g-task">タスクを開く</button>
               </div>
               <p class="rel" style="margin-top:12px">タスクの記録もと：相談の会話（自動）。手で作ることもできます。</p>
-              <div class="btnrow"><button class="btn" type="button">タスクを作る</button></div>
+              <div class="btnrow"><button class="btn" type="button" data-nav="g-task-new">タスクを作る</button></div>
             </div>
 
             <div class="screen-pane" data-screen="g-task">
@@ -898,7 +1276,7 @@
               </div>
               <div class="set-group">
                 <h4>配下の課題</h4>
-                <div class="set-row"><div class="grow"><div class="t">共有ステータスバー（T-015）</div><div class="d2">Yui が作業中 · 1時間12分実行中</div></div><span class="badge b-run">進行中</span><button class="btn" type="button" data-nav="g-works">作業へ</button></div>
+                <div class="set-row"><div class="grow"><div class="t">共有ステータスバー（T-015）</div><div class="d2">姫野 大樹 が作業中 · 1時間12分実行中</div></div><span class="badge b-run">進行中</span><button class="btn" type="button" data-nav="g-works">作業へ</button></div>
                 <div class="set-row"><div class="grow"><div class="t">E2E・回帰確認（T-016）</div><div class="d2">計画の承認待ち — 承認されればそのまま始まります</div></div><span class="badge b-wait">判断待ち</span><button class="btn" type="button" data-nav="g-decide">判断へ</button></div>
                 <div class="set-row"><div class="grow"><div class="t">ホームと判断の画面の実装</div><div class="d2">完了 · レビュー通過済み</div></div><span class="badge b-done">完了</span></div>
                 <div class="set-row"><div class="grow"><div class="t">長いセッションでメモリが増え続ける（#5561）</div><div class="d2">このタスクの前提として待ち行列に入っています · 子課題 5件 · 完了 3件</div><div class="bar" style="margin-top:5px;max-width:240px"><i style="width:60%"></i></div></div><span class="badge b-queue">開始待ち</span><button class="btn" type="button" data-nav="g-issue">課題を開く</button></div>
@@ -916,8 +1294,9 @@
               </div>
               <p class="countline" style="margin-bottom:8px">段階 — 未着手 <b>118</b> · 待ち <b>3</b> · 計画中 <b>1</b> · 実装中 <b>2</b> · レビュー中 <b>1</b> · 今日完了 <b>5</b></p>
               <div class="chips"><span class="chip on">すべて</span><span class="chip">止まっている</span><span class="chip">実行中</span><span class="chip">開始待ち</span><span class="chip">バグ</span></div>
+              <div class="btnrow" style="margin-bottom:10px"><button class="btn primary" type="button" data-nav="g-issue-new">＋ 新しい課題</button></div>
               <div class="lrow">
-                <div class="grow"><div class="t">変更でチェックが失敗している（#7047）</div><div class="d">レビュー · チェック4件が失敗 — 修正を準備中 · Haruto</div></div>
+                <div class="grow"><div class="t">変更でチェックが失敗している（#7047）</div><div class="d">レビュー · チェック4件が失敗 — 修正を準備中 · 小田 洋平</div></div>
                 <span class="badge b-block">要対応</span>
                 <button class="btn" type="button" data-nav="g-board">掲示板で見る</button>
               </div>
@@ -927,11 +1306,11 @@
                 <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">実装 · Haruto が作業中 · レビュー待ち · 子課題 4件 · 完了 2件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:50%"></i></div></div>
+                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">実装 · 小田 洋平 が作業中 · レビュー待ち · 子課題 4件 · 完了 2件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:50%"></i></div></div>
                 <span class="badge b-run">実行中</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">実装 · Yui が作業中 · 計画の承認待ち · タスク「全画面刷新」の配下 · 子課題 3件 · 完了 2件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:67%"></i></div></div>
+                <div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">実装 · 姫野 大樹 が作業中 · 計画の承認待ち · タスク「全画面刷新」の配下 · 子課題 3件 · 完了 2件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:67%"></i></div></div>
                 <span class="badge b-run">実行中</span>
                 <button class="btn" type="button" data-nav="g-task">タスクで見る</button>
               </div>
@@ -960,14 +1339,14 @@
                 <div class="set-row"><div class="grow"><div class="t">再現手順を固定する</div><div class="d2">完了 · レビュー通過済み</div></div><span class="badge b-done">完了</span></div>
                 <div class="set-row"><div class="grow"><div class="t">メモリ増加の発生箇所を特定する</div><div class="d2">完了 · 保持し続けるキャッシュが原因でした</div></div><span class="badge b-done">完了</span></div>
                 <div class="set-row"><div class="grow"><div class="t">保持し続けるキャッシュを洗い出す</div><div class="d2">完了 · 対象は3箇所</div></div><span class="badge b-done">完了</span></div>
-                <div class="set-row"><div class="grow"><div class="t">セッションをまたいだキャッシュの保持を見直す</div><div class="d2">Haruto が作業中 · 22分実行中</div></div><span class="badge b-run">進行中</span><button class="btn" type="button" data-nav="g-works">作業へ</button></div>
+                <div class="set-row"><div class="grow"><div class="t">セッションをまたいだキャッシュの保持を見直す</div><div class="d2">小田 洋平 が作業中 · 22分実行中</div></div><span class="badge b-run">進行中</span><button class="btn" type="button" data-nav="g-works">作業へ</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Windows でも同じ増加を確認する</div><div class="d2">開始待ち · この子課題にも子があります — 子課題 2件 · 完了 1件</div><div class="bar" style="margin-top:5px;max-width:240px"><i style="width:50%"></i></div></div><span class="badge b-queue">開始待ち</span><button class="btn" type="button" data-nav="g-issue">課題を開く</button></div>
                 <p class="rel" style="margin-top:10px">課題の下に子課題をぶら下げられます（GitHub の sub-issue と同じ考え方）。子の完了は、この課題の進み具合に集計されます。</p>
-                <div class="btnrow"><button class="btn" type="button">子課題を追加</button></div>
+                <div class="btnrow"><button class="btn" type="button" data-nav="g-subissue-add">子課題を追加</button></div>
               </div>
               <div class="set-group">
                 <h4>やり取り</h4>
-                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">ツムギ（あなたの PM）</div><div class="d2">フィードバックの待ち行列から拾いました。Windows でも同じ遅さに気づいていたので、両方の報告をここに結びました。</div></div><span class="rel">2日前</span></div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">秦泉寺 章夫（あなたの PM）</div><div class="d2">フィードバックの待ち行列から拾いました。Windows でも同じ遅さに気づいていたので、両方の報告をここに結びました。</div></div><span class="rel">2日前</span></div>
                 <div class="set-row"><div class="grow"><div class="t">あなた</div><div class="d2">長時間動かすと GUI が入力を受け付けなくなることもある — 同じ仲間として扱って。</div></div><span class="rel">2日前</span></div>
               </div>
               <div class="set-group">
@@ -992,23 +1371,23 @@
               <p class="h-big">作業</p>
               <p class="h-sub">今 gwt で動いているセッションです。基本は「相談」の会話で進み、セッションの実物はいつでもターミナル表示で見られます。</p>
               <div class="lrow">
-                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">Codex · Haruto · 42分実行中 · 最後の活動は2分前 · 実装が入ってレビュー待ち</div></div>
+                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">Codex · 小田 洋平 · 42分実行中 · 最後の活動は2分前 · 実装が入ってレビュー待ち</div></div>
                 <span class="badge b-wait">レビュー待ち</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">Claude Code · Yui · 1時間12分実行中 · 最後の活動はたった今</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:62%"></i></div></div>
+                <div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">Claude Code · 姫野 大樹 · 1時間12分実行中 · 最後の活動はたった今</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:62%"></i></div></div>
                 <span class="badge b-run">実行中</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">Codex · Haruto · チェック4件が失敗して停止中 · PM が見ています</div></div>
+                <div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">Codex · 小田 洋平 · チェック4件が失敗して停止中 · PM が見ています</div></div>
                 <span class="badge b-block">止まっている</span>
                 <button class="btn" type="button" data-nav="g-board">掲示板で見る</button>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">PM のセッション（ツムギ）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
+                <div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
                 <span class="badge b-run">常駐</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
@@ -1022,18 +1401,18 @@
               <p class="h-sec">過去のセッション</p>
               <div class="lrow">
                 <div class="grow"><div class="t">過去のセッションを再開する</div><div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div></div>
-                <button class="btn" type="button">セッションを選ぶ…</button>
+                <button class="btn" type="button" data-nav="g-session-picker">セッションを選ぶ…</button>
               </div>
             </div>
 
             <div class="screen-pane" data-screen="g-decide">
               <p class="h-big">判断待ち — gwt</p>
-              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です · 2件</span></div>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>秦泉寺 章夫</b>（あなたの PM）からの判断です · 2件</span></div>
               <div class="dcard">
                 <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">判断待ち</span><span class="rel">1時間待ち</span></div>
                 <div class="t">「全画面刷新のホームと判断の画面」（#7007）の計画を承認しますか？</div>
-                <div class="d">設計は終わり、待っていた土台（共有状態モデル #7048）も入りました。承認すると、Yui がすぐに実装を再開します。</div>
-                <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>承認して始める</b> — 残りのスライスはステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
+                <div class="d">設計は終わり、待っていた土台（共有状態モデル #7048）も入りました。承認すると、姫野 大樹 がすぐに実装を再開します。</div>
+                <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>承認して始める</b> — 残りのスライスはステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
                 <dl>
                   <dt>理由</dt><dd>土台のマージで前提が揃い、これ以上待っても計画は変わりません。遅れるほど他の画面との差分が広がります。</dd>
                   <dt>影響範囲</dt><dd>gwt の全画面（開始画面・プロジェクト画面群・設定）。作業中のセッション 2件は影響を受けません。</dd>
@@ -1044,7 +1423,7 @@
                 <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">判断待ち</span><span class="rel">26分待ち</span></div>
                 <div class="t">保存されていない変更を、保存しますか？</div>
                 <div class="d">このプロジェクトには、まだ保存（コミット）も送信（プッシュ）もされていない変更が2件あります。この端末が初期化されると、その作業は失われます。</div>
-                <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>保存して送信する</b> — 変更は設計書とモックだけで、コードには触れていません。</div></div>
+                <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>保存して送信する</b> — 変更は設計書とモックだけで、コードには触れていません。</div></div>
                 <dl>
                   <dt>理由</dt><dd>6th のフォーマット前救済と同じ形の喪失リスクがあります。2件とも内容は確認済みです。</dd>
                   <dt>影響範囲</dt><dd>ブランチ work/issue-7007 のみ。他のセッション・ブランチには影響しません。</dd>
@@ -1060,7 +1439,7 @@
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
                 <div class="grow">
-                  <div class="t">ツムギ <span class="rel">· あなたの PM · Claude Code（ツール）</span></div>
+                  <div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div>
                   <div class="d">このプロジェクトも見ています · 判断待ち 2件を運んでいます</div>
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div>
                 </div>
@@ -1069,33 +1448,33 @@
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
               </div>
               <div class="rowitem">
-                <span class="ava working" style="background:#2563eb">H</span>
+                <span class="ava working" style="background:#2563eb">小</span>
                 <div class="grow">
-                  <div class="t">Haruto <span class="rel">· Codex（ツール）</span></div>
+                  <div class="t">小田 洋平 <span class="rel">· Codex（ツール）</span></div>
                   <div class="d">作業中：#7048、共有状態モデル · ここまで42分 · #7047 の修正も準備中</div>
                   <div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div>
                   <div class="use"><div class="bar"><i style="width:64%"></i></div><span>Codex 1 — 週間64%使用 · 土曜21:25にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
-                <button class="btn ghost" type="button">一時停止</button>
+                <button class="btn ghost" type="button" data-nav="g-agent-pause">一時停止</button>
               </div>
               <div class="rowitem">
-                <span class="ava working" style="background:#c2410c">Y</span>
+                <span class="ava working" style="background:#c2410c">姫</span>
                 <div class="grow">
-                  <div class="t">Yui <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="t">姫野 大樹 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#7007、全画面刷新 · ここまで1時間12分</div>
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
-                <button class="btn ghost" type="button">一時停止</button>
+                <button class="btn ghost" type="button" data-nav="g-agent-pause">一時停止</button>
               </div>
               <div class="rowitem">
-                <span class="ava" style="background:#0e7490">S</span>
+                <span class="ava" style="background:#0e7490">安</span>
                 <div class="grow">
-                  <div class="t">Sora <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">いまは KeibaDB の取り込みを担当しています · このプロジェクトでは待機中</div>
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
                 </div>
@@ -1105,24 +1484,24 @@
               <table class="list" aria-label="担当履歴">
                 <thead><tr><th>担当者</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
                 <tbody>
-                  <tr><td>ツムギ（PM）</td><td>#7048 の進行管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-run">進行中</span></td></tr>
-                  <tr><td>ツムギ（PM）</td><td>#7541 の修正配信の管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-done">完了（マージ済み）</span></td></tr>
-                  <tr><td>Haruto</td><td>#7048 共有状態モデル</td><td>Codex 1</td><td>gpt-6.2-sol／xhigh</td><td><span class="badge b-wait">レビュー待ち</span></td></tr>
-                  <tr><td>Haruto</td><td>#7047 チェック失敗の切り分け</td><td>Codex 1</td><td>gpt-6.2-sol／xhigh</td><td><span class="badge b-block">停止中</span></td></tr>
-                  <tr><td>Yui</td><td>#7007 ホームと判断の画面</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-run">進行中</span></td></tr>
+                  <tr><td>秦泉寺 章夫（PM）</td><td>#7048 の進行管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-run">進行中</span></td></tr>
+                  <tr><td>秦泉寺 章夫（PM）</td><td>#7541 の修正配信の管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-done">完了（マージ済み）</span></td></tr>
+                  <tr><td>小田 洋平</td><td>#7048 共有状態モデル</td><td>Codex 1</td><td>gpt-6.2-sol／xhigh</td><td><span class="badge b-wait">レビュー待ち</span></td></tr>
+                  <tr><td>小田 洋平</td><td>#7047 チェック失敗の切り分け</td><td>Codex 1</td><td>gpt-6.2-sol／xhigh</td><td><span class="badge b-block">停止中</span></td></tr>
+                  <tr><td>姫野 大樹</td><td>#7007 ホームと判断の画面</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-run">進行中</span></td></tr>
                 </tbody>
               </table>
               <p class="h-sec">担当予定</p>
               <div class="lrow">
-                <div class="grow"><div class="t">Yui → E2E・回帰確認（T-016）</div><div class="d">計画の承認が出たら開始します（タスク「全画面刷新」の配下）</div></div>
+                <div class="grow"><div class="t">姫野 大樹 → E2E・回帰確認（T-016）</div><div class="d">計画の承認が出たら開始します（タスク「全画面刷新」の配下）</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">Haruto → メモリ課題（#5561）</div><div class="d">待ち行列の先頭。#7048 のレビューが通ったら開始します</div></div>
+                <div class="grow"><div class="t">小田 洋平 → メモリ課題（#5561）</div><div class="d">待ち行列の先頭。#7048 のレビューが通ったら開始します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">ツムギ（PM）→ リリース後の実機確認（#7541）</div><div class="d">次のリリースが公開されたら、7th で確認します</div></div>
+                <div class="grow"><div class="t">秦泉寺 章夫（PM）→ リリース後の実機確認（#7541）</div><div class="d">次のリリースが公開されたら、7th で確認します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
               <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うツール（アカウント）が替わっても、顔・名前・特性は変わりません。</p>
@@ -1137,22 +1516,22 @@
               <div class="fold">
                 <div class="t">未解決の詰まり（索引）— 1件</div>
                 <div class="lrow">
-                  <div class="grow"><div class="t">#7047 — 状態モデルの変更でチェック4件が失敗</div><div class="d">Haruto の申告 · 12:03 · PM が見ています · 次の手：失敗ログの切り分け結果を待って再実行</div></div>
+                  <div class="grow"><div class="t">#7047 — 状態モデルの変更でチェック4件が失敗</div><div class="d">小田 洋平 の申告 · 12:03 · PM が見ています · 次の手：失敗ログの切り分け結果を待って再実行</div></div>
                   <span class="badge b-block">要対応</span>
                   <button class="btn" type="button" data-nav="g-works">作業で見る</button>
                 </div>
                 <p class="rel" style="margin-top:6px">詰まりは時系列に埋もれさせず、ここに残り続けます。解けたら索引から消えます。</p>
               </div>
               <div class="post">
-                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">報告</span> · 12:20</div>
+                <div class="meta"><span class="pm-face sm"></span>秦泉寺 章夫 · <span class="badge b-run">報告</span> · 12:20</div>
                 <div class="body">報告：#7048（共有状態モデル）の実装が入り、レビュー待ちになりました。残る判断は #7007 の計画承認だけです。PM の報告は、今後はこの掲示板に残します。</div>
               </div>
               <div class="post">
-                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">判断</span> · 12:12</div>
+                <div class="meta"><span class="pm-face sm"></span>秦泉寺 章夫 · <span class="badge b-run">判断</span> · 12:12</div>
                 <div class="body">判断：設定のセクションは1つの PR で出します（#7039）。</div>
               </div>
               <div class="post">
-                <div class="meta"><span class="ava sm stuck" style="background:#2563eb">H</span>Haruto · <span class="badge b-block">要対応</span> · PM 宛て · 12:03</div>
+                <div class="meta"><span class="ava sm stuck" style="background:#2563eb">小</span>小田 洋平 · <span class="badge b-block">要対応</span> · PM 宛て · 12:03</div>
                 <div class="body">#7047 で止まっています：状態モデルの変更でチェック4件が失敗。<span class="d">エージェントの投稿は、自分の状態申告だけを PM 宛てに出します。調整は PM 経由です。</span></div>
               </div>
               <div class="post">
@@ -1160,11 +1539,11 @@
                 <div class="body">Windows のセッションが #7047 の修正を試し終えました — 詳しくは課題にあります。</div>
               </div>
               <div class="post">
-                <div class="meta"><span class="ava sm" style="background:#c2410c">Y</span>Yui · <span class="badge b-run">進捗</span> · PM 宛て · 11:20</div>
+                <div class="meta"><span class="ava sm" style="background:#c2410c">姫</span>姫野 大樹 · <span class="badge b-run">進捗</span> · PM 宛て · 11:20</div>
                 <div class="body">#7007 の共有ステータスバーに着手しました。判断（計画の承認）が出たら残りを進めます。</div>
               </div>
               <div class="post">
-                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-done">報告</span> · 昨日 18:40</div>
+                <div class="meta"><span class="pm-face sm"></span>秦泉寺 章夫 · <span class="badge b-done">報告</span> · 昨日 18:40</div>
                 <div class="body">報告：#7541（gwtd が落ちない問題）の修正がマージされました。残りは次のリリース後の実機確認だけです。</div>
               </div>
               <p class="rel" style="margin-top:12px">掲示板の共有先：この端末のみ（判断・止まった報告・引き継ぎは GitHub Discussions で受け渡し中。この受け渡しは共有先が「この端末のみ」のときだけ有効です）</p>
@@ -1210,7 +1589,7 @@
                   <div class="t">長時間セッションのメモリ記録 — 報告</div>
                   <div class="d">報告 · 一致度88% · 一致した語：memory、session</div>
                 </div>
-                <button class="btn" type="button">開く</button>
+                <button class="btn" type="button" data-nav="g-board">開く</button>
               </div>
               <div class="lrow">
                 <div class="grow">
@@ -1250,11 +1629,11 @@
                 <span class="badge b-plan">保護</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">work/issue-7048</div><div class="d">Haruto のセッション · 2分前に更新</div></div>
+                <div class="grow"><div class="t">work/issue-7048</div><div class="d">小田 洋平 のセッション · 2分前に更新</div></div>
                 <span class="badge b-run">作業中</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">work/issue-7007</div><div class="d">Yui のセッション · たった今更新 · 保存されていない変更 2件</div></div>
+                <div class="grow"><div class="t">work/issue-7007</div><div class="d">姫野 大樹 のセッション · たった今更新 · 保存されていない変更 2件</div></div>
                 <span class="badge b-run">作業中</span>
                 <span class="badge b-wait">未保存</span>
               </div>
@@ -1264,7 +1643,7 @@
               </div>
               <div class="lrow">
                 <div class="grow"><div class="t">chore/old-cleanup</div><div class="d">30日間動きなし — 片付けて安全です</div></div>
-                <button class="btn ghost" type="button">片付ける…</button>
+                <button class="btn ghost" type="button" data-nav="g-branch-cleanup">片付ける…</button>
               </div>
             </div>
 
@@ -1294,19 +1673,20 @@
                 <div class="set-head">実行ポリシー</div>
                 <div class="set-row">
                   <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトの担当者が終わるのを待ってから止めます。</div></div>
-                  <button class="btn ghost" type="button">このプロジェクトを止める</button>
+                  <button class="btn ghost" type="button" data-nav="g-project-stop">このプロジェクトを止める</button>
                 </div>
               </div>
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
                 <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。オフにすると、このプロジェクトには触りません。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">タスクが終わると、次の課題が自分で始まります（上限 3件）。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：bug、docs。</div></div><button class="btn" type="button">ラベルを編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">起動候補（Candidates）</div><div class="d2">課題を始めるときの候補と、その起動条件（Session mode／Runtime など）です。</div></div><button class="btn" type="button" data-nav="g-candidates">候補を編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：bug、docs。</div></div><button class="btn" type="button" data-nav="g-labels">ラベルを編集</button></div>
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
-                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM のツムギです。PM の特性（推論・速度・性格）と並び順はエージェント台帳に、使用量はツールの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">ツールを開く</button></div>
-                <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">このプロジェクトの状態が変わったときにスクリプトを動かします — 開始、終了、停止など。</div></div><button class="btn" type="button">開く</button></div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性（推論・速度・性格）と並び順はエージェント台帳に、使用量はツールの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">ツールを開く</button></div>
+                <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">このプロジェクトの状態が変わったときにスクリプトを動かします — 開始、終了、停止など。</div></div><button class="btn" type="button" data-nav="g-hooks">開く</button></div>
               </div>
               <div class="set-group">
                 <div class="set-head">プロジェクトの検索索引</div>
@@ -1321,8 +1701,154 @@
               </div>
               <div class="set-group">
                 <div class="set-head">閉じる</div>
-                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、gwt の担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button">閉じる…</button></div>
+                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、gwt の担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="g-close-project">閉じる…</button></div>
               </div>
+            <div class="screen-pane" data-screen="g-task-new">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-tasks">&larr; タスク一覧へ</button></div>
+              <p class="h-big">タスクを作る</p>
+              <p class="h-sub">複数の課題を束ねるテーマを、手で作ります。会話から自動で記録されるタスクと同じ一覧に並びます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">タスク名</div><div class="d2">テーマの名前です。あとから変えられます。</div></div><input class="field" type="text" placeholder="タスク名（例：メモリ課題の解消）" aria-label="タスク名" style="width:min(420px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">説明</div><div class="d2">何のためのテーマか、1〜2文で書きます。</div></div><input class="field" type="text" placeholder="説明" aria-label="説明" style="width:min(420px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">配下にする課題</div><div class="d2">選んだ課題がこのタスクの配下に入り、進捗はタスクへ集計されます（sub-issue 式）。あとから課題の画面でも付け替えられます。</div></div></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="対象の課題" style="accent-color:var(--accent)"><span>長時間のセッションでメモリが増え続ける（#5561）</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="対象の課題" style="accent-color:var(--accent)"><span>画面のスクロールが重くなる（#7553）</span></span></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-task">作る</button><button class="btn ghost" type="button" data-nav="g-tasks">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-subissue-add">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-issue">&larr; 課題へ戻る</button></div>
+              <p class="h-big">子課題を追加 — #5561</p>
+              <p class="h-sub">この課題の下に子課題を置きます。進捗は親へ自動で集計されます（GitHub の sub-issue と同じ考え方）。</p>
+              <div class="set-group">
+                <h4>既存の課題を子にする</h4>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><input class="field" style="flex:1;min-width:220px" type="text" placeholder="課題を検索…" aria-label="課題を検索"><button class="btn" type="button">検索</button></div>
+                <div class="set-row"><div class="grow"><div class="t">スクロールバックの保持を見直す（#7553）</div><div class="d2">いまは単独の課題です。子にすると、この課題の配下へ移ります。</div></div><button class="btn" type="button">子にする</button></div>
+                <div class="set-row"><div class="grow"><div class="t">メモリ使用量の定期記録（#7490）</div><div class="d2">いまは別のタスクの配下です。移す場合は、元の親から外れます。</div></div><button class="btn" type="button">子にする</button></div>
+              </div>
+              <div class="set-group">
+                <h4>新しい子課題を作る</h4>
+                <div class="set-row"><div class="grow"><div class="t">タイトル</div><div class="d2">作った課題は、そのままこの課題の子になります。</div></div><input class="field" type="text" placeholder="子課題のタイトル" aria-label="子課題のタイトル" style="width:min(420px,100%)"></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-issue">作って追加する</button><button class="btn ghost" type="button" data-nav="g-issue">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-session-picker">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-works">&larr; 作業へ戻る</button></div>
+              <p class="h-big">セッションを選ぶ</p>
+              <p class="h-sub">過去のセッションを再開します。再開すると、その作業ツリーとブランチのまま続きから動きます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">#7048 共有状態モデル — 昨日のセッション</div><div class="d2">状態：終了 · ブランチ work/issue-7048 · 作業ツリーは残っています · 最後の活動は昨日 18:22</div></div><button class="btn" type="button" data-nav="g-works">再開する</button></div>
+                <div class="set-row"><div class="grow"><div class="t">#5561 メモリ調査 — 先週のセッション</div><div class="d2">状態：終了 · ブランチ work/issue-5561 · 作業ツリーは残っています · 最後の活動は6日前</div></div><button class="btn" type="button" data-nav="g-works">再開する</button></div>
+                <div class="set-row"><div class="grow"><div class="t">#7047 切り分け — 停止したセッション</div><div class="d2">状態：チェック失敗で停止 · 再開すると失敗したチェックの続きから確認できます</div></div><button class="btn" type="button" data-nav="g-works">再開する</button></div>
+              </div>
+              <div class="notice">再開できないセッション（作業ツリーが片付け済み）は、この一覧には出ません。</div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-agent-pause">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-agents">&larr; 担当者へ戻る</button></div>
+              <p class="h-big">一時停止の確認</p>
+              <p class="h-sub">担当者の自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでの担当者の自動補充と再起動が止まります。他のプロジェクトと PM には影響しません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">実行中のセッション</div><div class="d2">いま動いているセッションは、区切りのよいところで止まります。未保存の出力は作業ツリーに残ります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「担当者」の画面からいつでも再開できます。再開すると、待ち行列の先頭から自動で続きます。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-agents">一時停止する</button><button class="btn ghost" type="button" data-nav="g-agents">やめる</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-project-stop">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">このプロジェクトを止める</p>
+              <p class="h-sub">gwt の再起動をまたいで動き続ける設定を止めます。ファイルや課題は消えません。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">実行中の担当者</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。止めるときは、担当者が終わるのを待ってから止めます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">PM の監視</div><div class="d2">このプロジェクトへの PM の監視も止まります。判断待ちは残り、再開時にそのまま出ます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">開始画面のプロジェクト一覧から、いつでも再開できます。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">止める</button><button class="btn ghost" type="button" data-nav="g-settings">やめる</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-labels">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">許可するラベルを編集 — gwt</p>
+              <p class="h-sub">このラベルが付いた課題は、PM が聞かずに始めてよい対象です。ラベルの一覧は GitHub から取り直せます。</p>
+              <div class="set-group">
+                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="bug" style="accent-color:var(--accent)"><span>bug</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="docs" style="accent-color:var(--accent)"><span>docs</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="gwt-feedback" style="accent-color:var(--accent)"><span>gwt-feedback</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="enhancement" style="accent-color:var(--accent)"><span>enhancement</span></span></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn" type="button">ラベルを取り直す</button><button class="btn primary" type="button" data-nav="g-settings">保存する</button><button class="btn ghost" type="button" data-nav="g-settings">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-hooks">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">フック — gwt</p>
+              <p class="h-sub">このプロジェクトの状態が変わったときに動くスクリプト（Hook Center）です。監査の結果と健全性をここで見ます。</p>
+              <div class="set-group">
+                <div class="set-head">監査</div>
+                <div class="set-row"><div class="grow"><div class="t">監査の結果</div><div class="d2">管理対象のフック 6件 · すべて正常 · 最後の監査は今日 9:12</div></div><span class="badge b-done">正常</span><button class="btn" type="button">監査を取り直す</button></div>
+                <div class="set-row"><div class="grow"><div class="t">フックの再生成</div><div class="d2">管理対象のフックを作り直します。手で変えた部分がある場合は、先に差分が出ます。</div></div><button class="btn" type="button">再生成する</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">構成と信頼</div>
+                <div class="set-row"><div class="grow"><div class="t">構成</div><div class="d2">開始・終了・停止の3つのタイミングにフックがあります。バイナリの版は gwt 本体と一致しています。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">信頼と修復計画</div><div class="d2">信頼できないフックはありません。修復が必要な項目もありません。</div></div></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-close-project">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">このプロジェクトを閉じる</p>
+              <p class="h-sub">閉じると、この端末のプロジェクト一覧から外れます。リポジトリと課題は GitHub 側に残ります。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">閉じる範囲</div><div class="d2">この端末での監視・担当者・索引が止まります。他の端末の gwt には影響しません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">実行中の担当者</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。閉じるときは、担当者が終わるのを待ってから閉じます（待たずに止める選択もできます）。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">結果の確認</div><div class="d2">閉じた結果が確認できないときは、状態の確認（Check status）から同じ選択でもう一度試せます。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-openpage="start">閉じる</button><button class="btn ghost" type="button" data-nav="g-settings">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-issue-new">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-issues">&larr; 課題一覧へ戻る</button></div>
+              <p class="h-big">新しい課題</p>
+              <p class="h-sub">課題を登録します。登録だけでも、登録してそのまま起動することもできます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">タイトル</div><div class="d2">GitHub の Issue として登録されます。</div></div><input class="field" type="text" placeholder="課題のタイトル" aria-label="課題のタイトル" style="width:min(420px,100%)"></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="auto-merge" style="accent-color:var(--accent)"><span>auto-merge ラベルを付ける（チェックが通れば自動でマージします）</span></span></div>
+                <div class="set-row"><div class="grow"><div class="t">親にするタスク・課題</div><div class="d2">選ぶと、その配下の子課題として登録されます（sub-issue 式）。</div></div><div class="chips" role="group" aria-label="親"><button class="chip on" type="button">なし</button><button class="chip" type="button">タスク「全画面刷新」</button><button class="chip" type="button">#5561 の子</button></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="g-issues">登録する</button><button class="btn primary" type="button" data-nav="g-works">登録して起動する</button><button class="btn ghost" type="button" data-nav="g-issues">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-candidates">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">起動候補（Candidates）— gwt</p>
+              <p class="h-sub">課題を始めるときの候補の一覧です。並び順の上から、空いている候補で起動します。候補ごとに起動の条件を持ちます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">1. 標準の候補</div><div class="d2">Session mode：新規 · Runtime：既定 · 権限スキップ：なし · Fast mode：なし · 優先：すべて</div></div><button class="btn ghost" type="button">削除</button></div>
+                <div class="set-row"><div class="grow"><div class="t">2. レビュー用の候補</div><div class="d2">Session mode：再開 · Runtime：既定 · 権限スキップ：なし · Fast mode：あり · 優先：レビュー段階</div></div><button class="btn ghost" type="button">削除</button></div>
+                <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。並べ替えは行の順序で決まります。</div></div><button class="btn" type="button">追加</button></div>
+              </div>
+              <div class="notice">候補はこのプロジェクトの設定です。エージェント（担当者）とは別で、誰が担当するかは起動時に決まります。</div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">保存する</button><button class="btn ghost" type="button" data-nav="g-settings">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-branch-cleanup">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-branches">&larr; ブランチへ戻る</button></div>
+              <p class="h-big">ブランチの片付け</p>
+              <p class="h-sub">動きのないブランチをまとめて片付けます。作業中のブランチと保護されたブランチは対象にできません。</p>
+              <div class="set-group">
+                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="対象ブランチ" style="accent-color:var(--accent)"><span>chore/old-cleanup — 30日間動きなし</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="対象ブランチ" style="accent-color:var(--accent)"><span>work/issue-6900 — マージ済み · 45日間動きなし</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="リモートも削除" style="accent-color:var(--accent)"><span>リモートブランチも削除する</span></span></div>
+                <div class="set-row"><div class="grow"><div class="t">進み具合と結果</div><div class="d2">実行すると、対象ごとに結果（削除済み／失敗と理由）がここに出ます。マージされていない変更があるブランチは止めて知らせます。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">片付けを実行する</button><button class="btn ghost" type="button" data-nav="g-branches">キャンセル</button></div>
+            </div>
+
             </div>
 
           </div>
@@ -1349,7 +1875,7 @@
             <a href="#" data-nav="k-branches">ブランチ</a>
             <a href="#" data-nav="k-logs">ログ</a>
             <a href="#" data-nav="k-settings">設定</a>
-            <div class="foot">担当 PM：ツムギ</div>
+            <div class="foot">担当 PM：秦泉寺 章夫</div>
           </div>
           <div class="content">
 
@@ -1358,12 +1884,12 @@
               <p class="h-sub">このプロジェクトの PM との会話はここだけです。判断・報告・進捗は、それぞれの画面と掲示板が正本です。</p>
               <div class="chat">
                 <div class="msg me"><div class="meta">あなた · たった今</div>取り込みが止まった理由は？</div>
-                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>相手先の形式が変わり、対応表と食い違う行が 3件出ました。データ自体は壊れていません。対応表を直せば、そのまま続けられます。ここでも決められます。
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400">（あなたの PM）</span></div>相手先の形式が変わり、対応表と食い違う行が 3件出ました。データ自体は壊れていません。対応表を直せば、そのまま続けられます。ここでも決められます。
                   <br><span class="route">範囲：KeibaDB</span>
                   <div class="dcard inchat">
                     <div class="top"><span class="badge b-block">要対応</span><span class="rel">48分待ち</span></div>
                     <div class="t">毎日の取り込みが停止 — 対応表を直して続けますか？</div>
-                    <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
+                    <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
                     <dl>
                       <dt>理由</dt><dd>3件とも項目名の対応づけの問題で、データ側の欠落ではありません。今朝の分は再開後にまとめて取り込めます。</dd>
                       <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクトには影響しません。</dd>
@@ -1387,12 +1913,12 @@
                 <div class="stat warn"><div class="num">1</div><div class="lab">判断待ちのタスク</div></div>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">毎日の取り込みの維持（#121 ほか）</div><div class="d">配下の課題 3件 · 完了 1件 · #121 は形式の変更で判断待ち · 担当：Sora</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:33%"></i></div></div>
+                <div class="grow"><div class="t">毎日の取り込みの維持（#121 ほか）</div><div class="d">配下の課題 3件 · 完了 1件 · #121 は形式の変更で判断待ち · 担当：安藤 健二</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:33%"></i></div></div>
                 <span class="badge b-wait">判断待ち</span>
                 <button class="btn" type="button" data-nav="k-task">タスクを開く</button>
               </div>
               <p class="rel" style="margin-top:12px">タスクの記録もと：相談の会話（自動）。手で作ることもできます。</p>
-              <div class="btnrow"><button class="btn" type="button">タスクを作る</button></div>
+              <div class="btnrow"><button class="btn" type="button" data-nav="k-task-new">タスクを作る</button></div>
             </div>
 
             <div class="screen-pane" data-screen="k-task">
@@ -1408,7 +1934,7 @@
               <div class="set-group">
                 <h4>配下の課題</h4>
                 <div class="set-row"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d2">対応表の判断待ち · 48分経過 · 子課題 3件 · 完了 1件</div><div class="bar" style="margin-top:5px;max-width:240px"><i style="width:33%"></i></div></div><span class="badge b-wait">判断待ち</span><button class="btn" type="button" data-nav="k-decide">判断へ</button></div>
-                <div class="set-row"><div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d2">Sora が作業中 · 夜の分まで完了</div></div><span class="badge b-run">進行中</span><button class="btn" type="button" data-nav="k-works">作業へ</button></div>
+                <div class="set-row"><div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d2">安藤 健二 が作業中 · 夜の分まで完了</div></div><span class="badge b-run">進行中</span><button class="btn" type="button" data-nav="k-works">作業へ</button></div>
                 <div class="set-row"><div class="grow"><div class="t">開催日の表記ゆれをそろえる（#118）</div><div class="d2">開始待ち</div></div><span class="badge b-queue">開始待ち</span></div>
               </div>
             </div>
@@ -1422,13 +1948,14 @@
                 <div class="stat"><div class="num">1</div><div class="lab">実行中</div></div>
                 <div class="stat"><div class="num">2</div><div class="lab">今日完了</div></div>
               </div>
+              <div class="btnrow" style="margin-bottom:10px"><button class="btn primary" type="button" data-nav="k-issue-new">＋ 新しい課題</button></div>
               <div class="lrow">
-                <div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">取り込み · 対応表の判断待ち · 48分経過 · Sora · タスク「毎日の取り込みの維持」の配下 · 子課題 3件 · 完了 1件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:33%"></i></div></div>
+                <div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">取り込み · 対応表の判断待ち · 48分経過 · 安藤 健二 · タスク「毎日の取り込みの維持」の配下 · 子課題 3件 · 完了 1件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:33%"></i></div></div>
                 <span class="badge b-block">要対応</span>
                 <button class="btn" type="button" data-nav="k-issue">課題を開く</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">取り込み · Sora が作業中 · 夜の分まで完了</div></div>
+                <div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">取り込み · 安藤 健二 が作業中 · 夜の分まで完了</div></div>
                 <span class="badge b-run">実行中</span>
               </div>
               <div class="lrow">
@@ -1447,7 +1974,7 @@
                 <p class="d">相手先の新しい形式に合わせて対応表を直し、毎日の取り込みを再開します。取り込めなかった分は、再開後にまとめて取り込みます。</p>
                 <div class="set-row"><div class="grow"><div class="t">受け入れ条件</div><div class="d2">新しい形式の行がすべて取り込め、食い違いが 0件。欠けた日付がないこと。</div></div><span class="badge b-block">判断待ち</span></div>
                 <div class="set-row"><div class="grow"><div class="t">親</div><div class="d2">タスク「毎日の取り込みの維持」の配下です。親が課題のときは、その課題がここに出ます。</div></div><button class="btn" type="button" data-nav="k-task">タスクで見る</button></div>
-                <div class="set-row"><div class="grow"><div class="t">段階</div><div class="d2">判断待ち — 「判断」で決めると、Sora がそのまま再開します。</div></div><button class="btn" type="button" data-nav="k-decide">判断へ</button></div>
+                <div class="set-row"><div class="grow"><div class="t">段階</div><div class="d2">判断待ち — 「判断」で決めると、安藤 健二 がそのまま再開します。</div></div><button class="btn" type="button" data-nav="k-decide">判断へ</button></div>
               </div>
               <div class="set-group">
                 <h4>子課題</h4>
@@ -1456,11 +1983,11 @@
                 <div class="set-row"><div class="grow"><div class="t">対応表の食い違い 3件を直す</div><div class="d2">対応表の判断待ち · 48分経過</div></div><span class="badge b-wait">判断待ち</span><button class="btn" type="button" data-nav="k-decide">判断へ</button></div>
                 <div class="set-row"><div class="grow"><div class="t">取り込みを再開して欠けた分を取り込む</div><div class="d2">開始待ち · 判断が出ればそのまま始まります</div></div><span class="badge b-queue">開始待ち</span></div>
                 <p class="rel" style="margin-top:10px">課題の下に子課題をぶら下げられます（GitHub の sub-issue と同じ考え方）。子の完了は、この課題の進み具合に集計されます。</p>
-                <div class="btnrow"><button class="btn" type="button">子課題を追加</button></div>
+                <div class="btnrow"><button class="btn" type="button" data-nav="k-subissue-add">子課題を追加</button></div>
               </div>
               <div class="set-group">
                 <h4>実行</h4>
-                <div class="set-row"><span class="ava sm stuck" style="background:#0e7490">S</span><div class="grow"><div class="t">担当者とセッション</div><div class="d2">Sora · 停止中（安全に止まっています。データの破損はありません）。</div></div><span class="badge b-block">止まっている</span></div>
+                <div class="set-row"><span class="ava sm stuck" style="background:#0e7490">安</span><div class="grow"><div class="t">担当者とセッション</div><div class="d2">安藤 健二 · 停止中（安全に止まっています。データの破損はありません）。</div></div><span class="badge b-block">止まっている</span></div>
                 <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">対応表の食い違い 3件 — あなたの判断待ち。</div></div><span class="badge b-wait">判断待ち</span></div>
               </div>
             </div>
@@ -1469,36 +1996,36 @@
               <p class="h-big">作業</p>
               <p class="h-sub">今 KeibaDB で動いているセッションです。基本は「相談」の会話で進み、セッションの実物はいつでもターミナル表示で見られます。</p>
               <div class="lrow">
-                <div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">Claude Code · Sora · 25分実行中 · 夜の分まで完了</div></div>
+                <div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">Claude Code · 安藤 健二 · 25分実行中 · 夜の分まで完了</div></div>
                 <span class="badge b-run">実行中</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">毎日の取り込み（#121）</div><div class="d">Claude Code · Sora · 形式の変更で停止中 · 判断待ち</div></div>
+                <div class="grow"><div class="t">毎日の取り込み（#121）</div><div class="d">Claude Code · 安藤 健二 · 形式の変更で停止中 · 判断待ち</div></div>
                 <span class="badge b-block">止まっている</span>
                 <button class="btn" type="button" data-nav="k-decide">判断へ</button>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">PM のセッション（ツムギ）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
+                <div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
                 <span class="badge b-run">常駐</span>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
               <p class="h-sec">過去のセッション</p>
               <div class="lrow">
                 <div class="grow"><div class="t">過去のセッションを再開する</div><div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div></div>
-                <button class="btn" type="button">セッションを選ぶ…</button>
+                <button class="btn" type="button" data-nav="k-session-picker">セッションを選ぶ…</button>
               </div>
             </div>
 
             <div class="screen-pane" data-screen="k-decide">
               <p class="h-big">判断待ち — KeibaDB</p>
-              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です · 1件</span></div>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>秦泉寺 章夫</b>（あなたの PM）からの判断です · 1件</span></div>
               <div class="dcard">
                 <div class="top"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="badge b-block">要対応</span><span class="rel">48分待ち</span></div>
                 <div class="t">毎日の取り込みが停止 — 対応表を直して続けますか？</div>
                 <div class="d">相手先の形式が変わり、対応表と食い違う行が 3件あります。データは壊れていません。直せば取り込みはそのまま続けられ、止めれば安全に止まります。</div>
-                <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
+                <div class="rec"><div class="k">秦泉寺 章夫のおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
                 <dl>
                   <dt>理由</dt><dd>3件とも項目名の対応づけの問題で、データ側の欠落ではありません。今朝の分は再開後にまとめて取り込めます。</dd>
                   <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクト・gwt の作業には影響しません。</dd>
@@ -1513,41 +2040,41 @@
               <p class="h-sub">このプロジェクトで動いているエージェントと、その担当の履歴・予定です。台帳と並び順・特性は「エージェント台帳」にあります。</p>
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
-                <div class="grow"><div class="t">ツムギ <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div>
+                <div class="grow"><div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div>
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div></div>
                 <span class="badge b-wait">判断待ち 1件</span>
                 <button class="btn ghost" type="button" data-nav="k-ask">相談する</button>
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
               </div>
               <div class="rowitem">
-                <span class="ava stuck" style="background:#0e7490">S</span>
+                <span class="ava stuck" style="background:#0e7490">安</span>
                 <div class="grow">
-                  <div class="t">Sora <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#130、レース結果の取り込み · #121 は判断待ちで停止中</div>
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
-                <button class="btn ghost" type="button">一時停止</button>
+                <button class="btn ghost" type="button" data-nav="k-agent-pause">一時停止</button>
               </div>
               <p class="h-sec">担当履歴</p>
               <table class="list" aria-label="担当履歴">
                 <thead><tr><th>担当者</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
                 <tbody>
-                  <tr><td>ツムギ（PM）</td><td>#121 の判断の用意</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-wait">判断待ち</span></td></tr>
-                  <tr><td>Sora</td><td>#130 レース結果の取り込み</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-run">進行中</span></td></tr>
-                  <tr><td>Sora</td><td>#121 毎日の取り込み</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-block">停止中</span></td></tr>
-                  <tr><td>Sora</td><td>昨日の取り込み（#119）</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-done">完了</span></td></tr>
+                  <tr><td>秦泉寺 章夫（PM）</td><td>#121 の判断の用意</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-wait">判断待ち</span></td></tr>
+                  <tr><td>安藤 健二</td><td>#130 レース結果の取り込み</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-run">進行中</span></td></tr>
+                  <tr><td>安藤 健二</td><td>#121 毎日の取り込み</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-block">停止中</span></td></tr>
+                  <tr><td>安藤 健二</td><td>昨日の取り込み（#119）</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-done">完了</span></td></tr>
                 </tbody>
               </table>
               <p class="h-sec">担当予定</p>
               <div class="lrow">
-                <div class="grow"><div class="t">Sora → 開催日の表記ゆれをそろえる（#118）</div><div class="d">#121 の判断が出て取り込みが再開したら開始します</div></div>
+                <div class="grow"><div class="t">安藤 健二 → 開催日の表記ゆれをそろえる（#118）</div><div class="d">#121 の判断が出て取り込みが再開したら開始します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">ツムギ（PM）→ 明朝の取り込み確認</div><div class="d">6:00 の定期実行の結果を掲示板に報告します</div></div>
+                <div class="grow"><div class="t">秦泉寺 章夫（PM）→ 明朝の取り込み確認</div><div class="d">6:00 の定期実行の結果を掲示板に報告します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
               <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うツール（アカウント）が替わっても、顔・名前・特性は変わりません。</p>
@@ -1562,22 +2089,22 @@
               <div class="fold">
                 <div class="t">未解決の詰まり（索引）— 1件</div>
                 <div class="lrow">
-                  <div class="grow"><div class="t">#121 — 形式の変更で毎日の取り込みが停止</div><div class="d">Sora の申告 · 48分前 · PM が見ています · 次の手：あなたの判断（対応表を直す／止める）</div></div>
+                  <div class="grow"><div class="t">#121 — 形式の変更で毎日の取り込みが停止</div><div class="d">安藤 健二 の申告 · 48分前 · PM が見ています · 次の手：あなたの判断（対応表を直す／止める）</div></div>
                   <span class="badge b-block">要対応</span>
                   <button class="btn" type="button" data-nav="k-decide">判断へ</button>
                 </div>
                 <p class="rel" style="margin-top:6px">詰まりは時系列に埋もれさせず、ここに残り続けます。解けたら索引から消えます。</p>
               </div>
               <div class="post">
-                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">報告</span> · 47分前</div>
+                <div class="meta"><span class="pm-face sm"></span>秦泉寺 章夫 · <span class="badge b-run">報告</span> · 47分前</div>
                 <div class="body">報告：今朝の取り込みは形式の変更で止まっています。データの破損はありません。判断を用意しました — おすすめは「対応表を直して続ける」です。PM の報告は、今後はこの掲示板に残します。</div>
               </div>
               <div class="post">
-                <div class="meta"><span class="ava sm stuck" style="background:#0e7490">S</span>Sora · <span class="badge b-block">要対応</span> · PM 宛て · 48分前</div>
+                <div class="meta"><span class="ava sm stuck" style="background:#0e7490">安</span>安藤 健二 · <span class="badge b-block">要対応</span> · PM 宛て · 48分前</div>
                 <div class="body">#121 で止まっています：形式が変わり、対応表と食い違う行が 3件。データの破損はありません。</div>
               </div>
               <div class="post">
-                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-done">報告</span> · 昨日 6:12</div>
+                <div class="meta"><span class="pm-face sm"></span>秦泉寺 章夫 · <span class="badge b-done">報告</span> · 昨日 6:12</div>
                 <div class="body">報告：昨日の取り込みは全件完了しました（レース結果 #130 の夜の分まで）。</div>
               </div>
               <p class="rel" style="margin-top:12px">掲示板の共有先：この端末のみ（判断・止まった報告・引き継ぎは GitHub Discussions で受け渡し中。この受け渡しは共有先が「この端末のみ」のときだけ有効です）</p>
@@ -1637,11 +2164,11 @@
                 <span class="badge b-plan">保護</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">work/issue-130</div><div class="d">Sora のセッション · 5分前に更新</div></div>
+                <div class="grow"><div class="t">work/issue-130</div><div class="d">安藤 健二 のセッション · 5分前に更新</div></div>
                 <span class="badge b-run">作業中</span>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">work/issue-121</div><div class="d">Sora のセッション · 停止中（判断待ち）</div></div>
+                <div class="grow"><div class="t">work/issue-121</div><div class="d">安藤 健二 のセッション · 停止中（判断待ち）</div></div>
                 <span class="badge b-block">止まっている</span>
               </div>
             </div>
@@ -1668,13 +2195,14 @@
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
                 <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">取り込みは毎日 6:00</div><div class="d2">このプロジェクトだけの違いです（端末全体の設定とは別に持っています）。</div></div><button class="btn" type="button">変える</button></div>
-                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：import、bug。</div></div><button class="btn" type="button">ラベルを編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">取り込みは毎日 6:00</div><div class="d2">このプロジェクトだけの違いです（端末全体の設定とは別に持っています）。</div></div><button class="btn" type="button" data-nav="k-import-time">変える</button></div>
+                <div class="set-row"><div class="grow"><div class="t">起動候補（Candidates）</div><div class="d2">課題を始めるときの候補と、その起動条件（Session mode／Runtime など）です。</div></div><button class="btn" type="button" data-nav="k-candidates">候補を編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：import、bug。</div></div><button class="btn" type="button" data-nav="k-labels">ラベルを編集</button></div>
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
-                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM のツムギです。PM の特性と並び順はエージェント台帳に、使用量はツールの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">ツールを開く</button></div>
-                <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">取り込みの開始・終了・停止でスクリプトを動かします。</div></div><button class="btn" type="button">開く</button></div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性と並び順はエージェント台帳に、使用量はツールの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">ツールを開く</button></div>
+                <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">取り込みの開始・終了・停止でスクリプトを動かします。</div></div><button class="btn" type="button" data-nav="k-hooks">開く</button></div>
               </div>
               <div class="set-group">
                 <div class="set-head">プロジェクトの検索索引</div>
@@ -1683,8 +2211,136 @@
               </div>
               <div class="set-group">
                 <div class="set-head">閉じる</div>
-                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button">閉じる…</button></div>
+                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="k-close-project">閉じる…</button></div>
               </div>
+            <div class="screen-pane" data-screen="k-task-new">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-tasks">&larr; タスク一覧へ</button></div>
+              <p class="h-big">タスクを作る</p>
+              <p class="h-sub">複数の課題を束ねるテーマを、手で作ります。会話から自動で記録されるタスクと同じ一覧に並びます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">タスク名</div><div class="d2">テーマの名前です。あとから変えられます。</div></div><input class="field" type="text" placeholder="タスク名（例：取り込みの安定化）" aria-label="タスク名" style="width:min(420px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">説明</div><div class="d2">何のためのテーマか、1〜2文で書きます。</div></div><input class="field" type="text" placeholder="説明" aria-label="説明" style="width:min(420px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">配下にする課題</div><div class="d2">選んだ課題がこのタスクの配下に入り、進捗はタスクへ集計されます（sub-issue 式）。</div></div></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="対象の課題" style="accent-color:var(--accent)"><span>毎日の取り込みが停止 — 形式が変わった（#121）</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="対象の課題" style="accent-color:var(--accent)"><span>レース結果の取り込み（#130）</span></span></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-task">作る</button><button class="btn ghost" type="button" data-nav="k-tasks">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-subissue-add">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-issue">&larr; 課題へ戻る</button></div>
+              <p class="h-big">子課題を追加 — #121</p>
+              <p class="h-sub">この課題の下に子課題を置きます。進捗は親へ自動で集計されます（GitHub の sub-issue と同じ考え方）。</p>
+              <div class="set-group">
+                <h4>既存の課題を子にする</h4>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><input class="field" style="flex:1;min-width:220px" type="text" placeholder="課題を検索…" aria-label="課題を検索"><button class="btn" type="button">検索</button></div>
+                <div class="set-row"><div class="grow"><div class="t">対応表の差分チェック（#133）</div><div class="d2">いまは単独の課題です。子にすると、この課題の配下へ移ります。</div></div><button class="btn" type="button">子にする</button></div>
+              </div>
+              <div class="set-group">
+                <h4>新しい子課題を作る</h4>
+                <div class="set-row"><div class="grow"><div class="t">タイトル</div><div class="d2">作った課題は、そのままこの課題の子になります。</div></div><input class="field" type="text" placeholder="子課題のタイトル" aria-label="子課題のタイトル" style="width:min(420px,100%)"></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-issue">作って追加する</button><button class="btn ghost" type="button" data-nav="k-issue">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-session-picker">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-works">&larr; 作業へ戻る</button></div>
+              <p class="h-big">セッションを選ぶ</p>
+              <p class="h-sub">過去のセッションを再開します。再開すると、その作業ツリーとブランチのまま続きから動きます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">#130 レース結果の取り込み — 昨夜のセッション</div><div class="d2">状態：終了 · ブランチ work/issue-130 · 作業ツリーは残っています · 最後の活動は昨夜 23:10</div></div><button class="btn" type="button" data-nav="k-works">再開する</button></div>
+                <div class="set-row"><div class="grow"><div class="t">#121 毎日の取り込み — 停止したセッション</div><div class="d2">状態：形式の変更で停止 · 再開すると判断の結果を受けた続きから動きます</div></div><button class="btn" type="button" data-nav="k-works">再開する</button></div>
+              </div>
+              <div class="notice">再開できないセッション（作業ツリーが片付け済み）は、この一覧には出ません。</div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-agent-pause">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-agents">&larr; 担当者へ戻る</button></div>
+              <p class="h-big">一時停止の確認</p>
+              <p class="h-sub">担当者の自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでの担当者の自動補充と再起動が止まります。毎日の取り込みの予定そのものは残ります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「担当者」の画面からいつでも再開できます。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-agents">一時停止する</button><button class="btn ghost" type="button" data-nav="k-agents">やめる</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-labels">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">許可するラベルを編集 — KeibaDB</p>
+              <p class="h-sub">このラベルが付いた課題は、PM が聞かずに始めてよい対象です。ラベルの一覧は GitHub から取り直せます。</p>
+              <div class="set-group">
+                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="import" style="accent-color:var(--accent)"><span>import</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="bug" style="accent-color:var(--accent)"><span>bug</span></span></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="data" style="accent-color:var(--accent)"><span>data</span></span></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn" type="button">ラベルを取り直す</button><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-hooks">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">フック — KeibaDB</p>
+              <p class="h-sub">取り込みの開始・終了・停止で動くスクリプト（Hook Center）です。監査の結果と健全性をここで見ます。</p>
+              <div class="set-group">
+                <div class="set-head">監査</div>
+                <div class="set-row"><div class="grow"><div class="t">監査の結果</div><div class="d2">管理対象のフック 3件 · すべて正常 · 最後の監査は今日 6:00（取り込みの前）</div></div><span class="badge b-done">正常</span><button class="btn" type="button">監査を取り直す</button></div>
+                <div class="set-row"><div class="grow"><div class="t">フックの再生成</div><div class="d2">管理対象のフックを作り直します。手で変えた部分がある場合は、先に差分が出ます。</div></div><button class="btn" type="button">再生成する</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">構成と信頼</div>
+                <div class="set-row"><div class="grow"><div class="t">構成</div><div class="d2">取り込みの開始・終了・停止にフックがあります。バイナリの版は gwt 本体と一致しています。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">信頼と修復計画</div><div class="d2">信頼できないフックはありません。修復が必要な項目もありません。</div></div></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-close-project">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">このプロジェクトを閉じる</p>
+              <p class="h-sub">閉じると、この端末のプロジェクト一覧から外れます。リポジトリと課題は GitHub 側に残ります。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">閉じる範囲</div><div class="d2">この端末での監視・担当者・索引と、毎日の取り込みの自動実行が止まります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">実行中の担当者</div><div class="d2">安藤 健二（#130）が動いています。閉じるときは、担当者が終わるのを待ってから閉じます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">結果の確認</div><div class="d2">閉じた結果が確認できないときは、状態の確認（Check status）から同じ選択でもう一度試せます。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-openpage="start">閉じる</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-import-time">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">取り込みの時刻を変える — KeibaDB</p>
+              <p class="h-sub">毎日の取り込みの開始時刻です。このプロジェクトだけの設定で、端末全体の設定とは別に持ちます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">開始時刻</div><div class="d2">いまは毎日 6:00 です。レース開催日も同じ時刻に動きます。</div></div><input class="field" type="text" value="6:00" aria-label="開始時刻" style="width:120px"></div>
+                <div class="set-row"><div class="grow"><div class="t">反映</div><div class="d2">次の取り込みから新しい時刻になります。今日の分がまだなら、今日から変わります。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-issue-new">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-issues">&larr; 課題一覧へ戻る</button></div>
+              <p class="h-big">新しい課題</p>
+              <p class="h-sub">課題を登録します。登録だけでも、登録してそのまま起動することもできます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">タイトル</div><div class="d2">GitHub の Issue として登録されます。</div></div><input class="field" type="text" placeholder="課題のタイトル" aria-label="課題のタイトル" style="width:min(420px,100%)"></div>
+                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="auto-merge" style="accent-color:var(--accent)"><span>auto-merge ラベルを付ける（チェックが通れば自動でマージします）</span></span></div>
+                <div class="set-row"><div class="grow"><div class="t">親にするタスク・課題</div><div class="d2">選ぶと、その配下の子課題として登録されます（sub-issue 式）。</div></div><div class="chips" role="group" aria-label="親"><button class="chip on" type="button">なし</button><button class="chip" type="button">タスク「毎日の取り込みの維持」</button><button class="chip" type="button">#121 の子</button></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="k-issues">登録する</button><button class="btn primary" type="button" data-nav="k-works">登録して起動する</button><button class="btn ghost" type="button" data-nav="k-issues">キャンセル</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-candidates">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">起動候補（Candidates）— KeibaDB</p>
+              <p class="h-sub">課題を始めるときの候補の一覧です。並び順の上から、空いている候補で起動します。候補ごとに起動の条件を持ちます。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">1. 取り込み用の候補</div><div class="d2">Session mode：再開 · Runtime：既定 · 権限スキップ：なし · Fast mode：なし · 優先：取り込み段階</div></div><button class="btn ghost" type="button">削除</button></div>
+                <div class="set-row"><div class="grow"><div class="t">2. 標準の候補</div><div class="d2">Session mode：新規 · Runtime：既定 · 権限スキップ：なし · Fast mode：なし · 優先：すべて</div></div><button class="btn ghost" type="button">削除</button></div>
+                <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。並べ替えは行の順序で決まります。</div></div><button class="btn" type="button">追加</button></div>
+              </div>
+              <div class="notice">候補はこのプロジェクトの設定です。エージェント（担当者）とは別で、誰が担当するかは起動時に決まります。</div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
+            </div>
+
             </div>
 
           </div>
@@ -1698,11 +2354,11 @@
           <div class="screen-pane on" data-screen="profile-main">
             <p class="h-big">プロファイル</p>
             <p class="h-sub">プロファイルは端末で定義し、エージェントに割り当てます。ここでは定義（環境変数などの中身）の一覧・追加・編集を管理します。どのエージェントに割り当てるかは、各エージェント設定で変えます。</p>
-            <div class="btnrow" style="margin-bottom:14px"><button class="btn primary" type="button">新しいプロファイル</button><button class="btn" type="button">一覧を更新</button></div>
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn primary" type="button" data-nav="profile-new">新しいプロファイル</button><button class="btn" type="button">一覧を更新</button></div>
             <div class="set-group">
-              <div class="set-row"><div class="grow"><div class="t">default</div><div class="d2">既定のプロファイル · 環境変数の上書き 0件 · 割り当て：ツムギ、Yui</div></div><button class="btn" type="button">編集</button><button class="btn ghost" type="button">削除</button></div>
-              <div class="set-row"><div class="grow"><div class="t">rust-dev</div><div class="d2">Rust 開発用 · 環境変数の上書き 2件 · 割り当て：Haruto</div></div><button class="btn" type="button">編集</button><button class="btn ghost" type="button">削除</button></div>
-              <div class="set-row"><div class="grow"><div class="t">data-import</div><div class="d2">データ取り込み用 · 環境変数の上書き 1件 · 割り当て：Sora</div></div><button class="btn" type="button">編集</button><button class="btn ghost" type="button">削除</button></div>
+              <div class="set-row"><div class="grow"><div class="t">default</div><div class="d2">既定のプロファイル · 環境変数の上書き 0件 · 割り当て：秦泉寺 章夫、姫野 大樹</div></div><button class="btn" type="button" data-nav="profile-edit">編集</button><button class="btn ghost" type="button" data-nav="profile-delete">削除</button></div>
+              <div class="set-row"><div class="grow"><div class="t">rust-dev</div><div class="d2">Rust 開発用 · 環境変数の上書き 2件 · 割り当て：小田 洋平</div></div><button class="btn" type="button" data-nav="profile-edit">編集</button><button class="btn ghost" type="button" data-nav="profile-delete">削除</button></div>
+              <div class="set-row"><div class="grow"><div class="t">data-import</div><div class="d2">データ取り込み用 · 環境変数の上書き 1件 · 割り当て：安藤 健二</div></div><button class="btn" type="button" data-nav="profile-edit">編集</button><button class="btn ghost" type="button" data-nav="profile-delete">削除</button></div>
             </div>
             <div class="set-group">
               <div class="set-head">プロファイルの内容（rust-dev）</div>
@@ -1718,8 +2374,49 @@
                 <tr><td class="num">COMMAND_MODE</td><td>macOS</td><td>そのまま</td><td class="num">unix2003</td></tr>
               </tbody>
             </table>
-            <div class="btnrow" style="margin-top:10px"><button class="btn" type="button">変数を追加</button></div>
+            <div class="btnrow" style="margin-top:10px"><button class="btn" type="button" data-nav="profile-edit">変数を追加（編集で開く）</button></div>
             <p class="rel" style="margin-top:10px">定義を変えると、そのプロファイルを割り当てたエージェントの、次に始まるセッションから新しい環境で動きます。動いているセッションは影響を受けません。</p>
+          </div>
+          <div class="screen-pane" data-screen="profile-new">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="profile-main">&larr; プロファイルへ</button></div>
+            <p class="h-big">新しいプロファイル</p>
+            <p class="h-sub">端末にプロファイルの定義を足します。作ったあとは、そのまま内容（環境変数）の編集へ進みます。エージェントへの割り当ては、各エージェント設定で行います。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">割り当てのときに見分ける名前です。</div></div><input class="field" type="text" placeholder="名前（例：python-data）" aria-label="名前" style="width:220px"></div>
+              <div class="set-row"><div class="grow"><div class="t">説明</div><div class="d2">何のためのプロファイルかを一言で。</div></div><input class="field" type="text" placeholder="説明" aria-label="説明" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">もとにするプロファイル</div><div class="d2">既定（default）から始めるか、既存の定義を複製できます。</div></div><div class="chips" role="group" aria-label="もとにするプロファイル"><button class="chip on" type="button">default から</button><button class="chip" type="button">rust-dev を複製</button><button class="chip" type="button">data-import を複製</button></div></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="profile-edit">作って編集へ進む</button><button class="btn ghost" type="button" data-nav="profile-main">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="profile-edit">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="profile-main">&larr; プロファイルへ</button></div>
+            <p class="h-big">プロファイルを編集 — rust-dev</p>
+            <p class="h-sub">名前・説明と環境変数を編集します。入力すると自動で保存されます。変更は、このプロファイルを割り当てたエージェントの次に始まるセッションから反映されます。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">名前</div></div><input class="field" type="text" value="rust-dev" aria-label="名前" style="width:220px"></div>
+              <div class="set-row"><div class="grow"><div class="t">説明</div></div><input class="field" type="text" value="Rust 開発用 — バックトレースと色出力を有効にします" aria-label="説明" style="width:min(420px,100%)"></div>
+            </div>
+            <p class="h-sec">環境変数</p>
+            <table class="list" aria-label="rust-dev の環境変数（編集）">
+              <thead><tr><th>キー</th><th>OS</th><th>扱い</th><th>値</th><th>実効値</th><th></th></tr></thead>
+              <tbody>
+                <tr><td><input class="field" type="text" value="RUST_BACKTRACE" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button">上書き ▾</button></td><td><input class="field" type="text" value="1" aria-label="値" style="width:120px"></td><td class="num">1</td><td><button class="btn ghost" type="button">削除</button></td></tr>
+                <tr><td><input class="field" type="text" value="CARGO_TERM_COLOR" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button">上書き ▾</button></td><td><input class="field" type="text" value="always" aria-label="値" style="width:120px"></td><td class="num">always</td><td><button class="btn ghost" type="button">削除</button></td></tr>
+                <tr><td><input class="field" type="text" value="COMMAND_MODE" aria-label="キー" style="width:170px"></td><td>macOS</td><td><button class="btn" type="button">そのまま ▾</button></td><td><input class="field" type="text" value="" placeholder="（OS の値）" aria-label="値" style="width:120px"></td><td class="num">unix2003</td><td><button class="btn ghost" type="button">削除</button></td></tr>
+              </tbody>
+            </table>
+            <p class="rel" style="margin-top:8px">扱いは「OS のまま／上書き／無効」から選びます。実効値は、この端末で実際に渡る値です。</p>
+            <div class="btnrow" style="margin-top:10px"><button class="btn" type="button">+ 変数を追加</button><button class="btn ghost" type="button" data-nav="profile-main">一覧へ戻る</button></div>
+          </div>
+          <div class="screen-pane" data-screen="profile-delete">
+            <div class="dlg">
+              <p class="h-big">プロファイルを削除しますか？</p>
+              <p class="h-sub">対象：rust-dev（割り当て：小田 洋平）。削除すると、割り当てていたエージェントは次に始まるセッションから既定（default）で動きます。動いているセッションは影響を受けません。</p>
+              <div class="set-group">
+                <div class="set-row"><div class="grow"><div class="t">既定（default）は削除できません</div><div class="d2">割り当て先が無いエージェントの受け皿のためです。この画面では rust-dev を対象にしています。</div></div></div>
+              </div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn danger" type="button" data-nav="profile-main">削除する</button><button class="btn ghost" type="button" data-nav="profile-main">キャンセル</button></div>
+            </div>
           </div>
         </div>
       </div>
@@ -1727,6 +2424,7 @@
       <!-- ================= 起動ウィザード ================= -->
       <div class="pagegroup" data-page="wizard">
         <div class="pagehead"><a class="plink" data-openpage="gwt" data-openscreen="g-works">&larr; 作業へ戻る</a><span class="rel">エージェントの起動 — gwt · 課題 #5561</span></div>
+        <div class="screen-pane on" data-screen="wizard-step2">
         <div class="wiz">
           <div class="wiz-rail">
             <div class="wiz-step done"><span class="n">✓</span><span>課題と担当</span></div>
@@ -1738,7 +2436,7 @@
             <p class="h-sub">担当は台帳の並び順と特性で決まります。特性はエージェント固定で、この画面では変えません。</p>
             <div class="set-group">
               <div class="set-head">担当エージェント</div>
-              <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">Haruto — 実装</div><div class="d2">台帳の並び順で、この課題の担当に選ばれました</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><button class="btn" type="button">担当を変える</button></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装</div><div class="d2">台帳の並び順で、この課題の担当に選ばれました</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><button class="btn" type="button" data-nav="wizard-step1">担当を変える</button></div>
             </div>
             <div class="set-group">
               <div class="set-head">ツール（自動で割り当て）</div>
@@ -1747,12 +2445,76 @@
             </div>
             <div class="set-group">
               <div class="set-head">計画</div>
-              <div class="set-row"><div class="grow"><div class="t">ブランチ</div><div class="d2">work/issue-5561（develop から作ります）</div></div><button class="btn" type="button">変える</button></div>
+              <div class="set-row"><div class="grow"><div class="t">ブランチ</div><div class="d2">work/issue-5561（develop から作ります）</div></div><button class="btn" type="button" data-nav="wizard-branch">変える</button></div>
               <div class="set-row"><div class="grow"><div class="t">実行環境</div><div class="d2">ホスト</div></div><button class="btn" type="button">ホスト ▾</button></div>
               <div class="set-row"><div class="grow"><div class="t">権限</div><div class="d2">通常（危険な操作は都度確認します）</div></div><button class="btn" type="button">通常 ▾</button></div>
             </div>
-            <div class="btnrow" style="margin-top:16px"><button class="btn ghost" type="button">戻る</button><button class="btn" type="button">やめる</button><button class="btn primary" type="button">確認へ進む</button></div>
+            <div class="btnrow" style="margin-top:16px"><button class="btn ghost" type="button" data-nav="wizard-step1">戻る</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">やめる</button><button class="btn primary" type="button" data-nav="wizard-step3">確認へ進む</button></div>
           </div>
+        </div>
+        </div>
+        <div class="screen-pane" data-screen="wizard-step1">
+        <div class="wiz">
+          <div class="wiz-rail">
+            <div class="wiz-step on"><span class="n">1</span><span>課題と担当</span></div>
+            <div class="wiz-step"><span class="n">2</span><span>起動計画</span></div>
+            <div class="wiz-step"><span class="n">3</span><span>確認</span></div>
+          </div>
+          <div class="wiz-body">
+            <p class="h-big" style="font-size:18px">課題と担当 — 長時間のセッションでメモリが増え続ける（#5561）</p>
+            <p class="h-sub">担当は台帳の並び順と特性で自動で選ばれます。ここで変えることもできます（特性そのものは変えません）。</p>
+            <div class="set-group">
+              <div class="set-head">課題</div>
+              <div class="set-row"><div class="grow"><div class="t">#5561 長時間のセッションでメモリが増え続ける</div><div class="d2">gwt · バグ · 開始待ち（待ち行列の先頭）</div></div><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-issue">課題を開く</button></div>
+            </div>
+            <div class="set-group">
+              <div class="set-head">担当の候補</div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装（選ばれています）</div><div class="d2">台帳の並び順で最上位の適格者です</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><span class="badge b-run">担当</span></div>
+              <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">姫野 大樹 — 実装</div><div class="d2">いま #7007 を作業中です。終わってからなら選べます</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
+              <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">安藤 健二 — データ取り込み</div><div class="d2">特性がこの課題と合わないため、候補の下位です</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
+            </div>
+            <div class="btnrow" style="margin-top:16px"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">やめる</button><button class="btn primary" type="button" data-nav="wizard-step2">起動計画へ進む</button></div>
+          </div>
+        </div>
+        </div>
+        <div class="screen-pane" data-screen="wizard-branch">
+        <div class="wiz">
+          <div class="wiz-rail">
+            <div class="wiz-step done"><span class="n">✓</span><span>課題と担当</span></div>
+            <div class="wiz-step on"><span class="n">2</span><span>起動計画</span></div>
+            <div class="wiz-step"><span class="n">3</span><span>確認</span></div>
+          </div>
+          <div class="wiz-body">
+            <p class="h-big" style="font-size:18px">ブランチを選ぶ — #5561</p>
+            <p class="h-sub">作業するブランチを決めます。既定は課題番号から作る work/ ブランチです。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">新しいブランチを作る</div><div class="d2">もとにするブランチ：develop</div></div><input class="field" type="text" value="work/issue-5561" aria-label="ブランチ名" style="width:220px"></div>
+              <div class="set-row"><div class="grow"><div class="t">既存のブランチで続ける</div><div class="d2">work/issue-5561 がある場合は、そちらで続けられます（この課題ではまだありません）。</div></div><span class="badge b-done">なし</span></div>
+            </div>
+            <div class="btnrow" style="margin-top:16px"><button class="btn ghost" type="button" data-nav="wizard-step2">計画へ戻る</button><button class="btn primary" type="button" data-nav="wizard-step2">このブランチにする</button></div>
+          </div>
+        </div>
+        </div>
+        <div class="screen-pane" data-screen="wizard-step3">
+        <div class="wiz">
+          <div class="wiz-rail">
+            <div class="wiz-step done"><span class="n">✓</span><span>課題と担当</span></div>
+            <div class="wiz-step done"><span class="n">✓</span><span>起動計画</span></div>
+            <div class="wiz-step on"><span class="n">3</span><span>確認</span></div>
+          </div>
+          <div class="wiz-body">
+            <p class="h-big" style="font-size:18px">確認 — この内容で始めます</p>
+            <p class="h-sub">始める前の最終確認です。内容は課題の「実行」にも同じものが残ります。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">課題</div><div class="d2">#5561 長時間のセッションでメモリが増え続ける（gwt）</div></div></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">担当 — 小田 洋平</div><div class="d2">特性：推論 xhigh · 速度 Ultrafast · 実装を重点に（エージェント固定）</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">ツール — Codex 1（会社メール）</div><div class="d2">プールから自動で割り当てました。週間64%使用 · 土曜21:25にリセット</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">ブランチ — work/issue-5561</div><div class="d2">develop から作ります · 実行環境：ホスト · 権限：通常</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">プロファイル — rust-dev</div><div class="d2">小田 洋平 に割り当てられたプロファイルで始まります</div></div></div>
+            </div>
+            <div class="btnrow" style="margin-top:16px"><button class="btn ghost" type="button" data-nav="wizard-step2">戻る</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">やめる</button><button class="btn primary" type="button" data-openpage="gwt" data-openscreen="g-works">始める</button></div>
+          </div>
+        </div>
         </div>
       </div>
 
@@ -1762,12 +2524,12 @@
         <div class="content">
           <div class="screen-pane on" data-screen="terminal-main">
             <p class="h-big">ターミナル表示</p>
-            <p class="h-sub">全エージェントのツール出力を、そのままの形で見られます。PM（ツムギ）のセッションも同じように開けます。</p>
+            <p class="h-sub">全エージェントのツール出力を、そのままの形で見られます。PM（秦泉寺 章夫）のセッションも同じように開けます。</p>
             <div class="chips">
-              <span class="chip on">Haruto · #7048（Codex）</span><span class="chip">Yui · #7007（Claude Code）</span><span class="chip">ツムギ · PM（Claude Code）</span><span class="chip">Sora · #130（KeibaDB）</span>
+              <span class="chip on">小田 洋平 · #7048（Codex）</span><span class="chip">姫野 大樹 · #7007（Claude Code）</span><span class="chip">秦泉寺 章夫 · PM（Claude Code）</span><span class="chip">安藤 健二 · #130（KeibaDB）</span>
             </div>
             <div class="term">
-              <div class="term-head"><b>Haruto</b><span>Codex 1 · gpt-6.2-sol · 推論 xhigh · Ultrafast</span><span>~/Repos/gwt/work/issue-7048</span><span style="margin-left:auto">実行中 · 42分</span></div>
+              <div class="term-head"><b>小田 洋平</b><span>Codex 1 · gpt-6.2-sol · 推論 xhigh · Ultrafast</span><span>~/Repos/gwt/work/issue-7048</span><span style="margin-left:auto">実行中 · 42分</span></div>
               <div class="term-body"><span class="dim">$ codex — #7048 共有状態モデルの実装</span>
 <span class="hl">› 状態ストアの購読を画面単位から共有ストアへ移しています</span>
   crates/gwt/web/store.js を更新しました
@@ -1789,7 +2551,7 @@
       <div class="statusbar" role="status">
         <span class="dot"></span><span><b>稼働中</b> · 作業 9件</span>
         <span class="sep"></span>
-        <span class="pm-face sm"><span class="dot wait"></span></span><span>ツムギ</span>
+        <span class="pm-face sm"><span class="dot wait"></span></span><span>秦泉寺 章夫</span>
         <span><b class="you">判断待ち 5件</b>（<a data-openpage="gwt" data-openscreen="g-decide">gwt 2</a> · <a data-openpage="keibadb" data-openscreen="k-decide">KeibaDB 1</a> · ほか 2）</span>
         <span class="sep"></span>
         <span>止まっている 3件</span>
@@ -1798,28 +2560,28 @@
     </div>
     <div class="app-foot">
       <span>gwt 9.170.0</span>
-      <span>·</span><span>端末 PM：ツムギ（Claude Code）</span>
+      <span>·</span><span>端末 PM：秦泉寺 章夫（Claude Code）</span>
       <span class="fstat">稼働状態：正常 · 最終確認 たった今</span>
     </div>
   </div><!-- /mock -->
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定では割り当てのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・PM 適格・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定では割り当てのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
 <script>
 (function () {
-  var pageLabels = { start: "開始画面", settings: "設定", agents: "エージェント", tools: "ツール", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
+  var pageLabels = { start: "開始画面", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "ツール", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
-    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-tsumugi": "エージェント設定 — ツムギ", "agent-edit-haruto": "エージェント設定 — Haruto", "agent-edit-yui": "エージェント設定 — Yui", "agent-edit-sora": "エージェント設定 — Sora", "agent-new": "エージェントを追加", "tools-pool": "ツール", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
+    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "ツール", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
     "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
-    "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定",
+    "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "タスクを作る", "g-subissue-add": "子課題を追加", "g-session-picker": "セッションを選ぶ", "g-agent-pause": "一時停止の確認", "g-project-stop": "プロジェクトを止める", "g-labels": "ラベルを編集", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
     "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
-    "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定"
+    "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "タスクを作る", "k-subissue-add": "子課題を追加", "k-session-picker": "セッションを選ぶ", "k-agent-pause": "一時停止の確認", "k-labels": "ラベルを編集", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
   };
-  var current = { start: "start", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
+  var current = { start: "start", addproject: "add-github", notifications: "notifications-main", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
   var activePage = "start";
   function titleFor(p) {
     if (p === "start") return "開始画面";
@@ -1919,7 +2681,7 @@
       var reply = b.getAttribute("data-reply");
       if (reply) {
         setTimeout(function () {
-          appendMsg(startChat, "pm", '<span class="pm-face sm"><span class="dot"></span></span>ツムギ', reply);
+          appendMsg(startChat, "pm", '<span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫', reply);
         }, 450);
       }
     });
@@ -1933,7 +2695,7 @@
       appendMsg(startChat, "me", "あなた · たった今", v.replace(/</g, "&lt;"));
       startInput.value = "";
       setTimeout(function () {
-        appendMsg(startChat, "pm", '<span class="pm-face sm"><span class="dot"></span></span>ツムギ', "かしこまりました。内容を確認して、担当プロジェクトの「相談」と「タスク」に反映します。");
+        appendMsg(startChat, "pm", '<span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫', "かしこまりました。内容を確認して、担当プロジェクトの「相談」と「タスク」に反映します。");
       }, 450);
     });
   }
