@@ -7,7 +7,7 @@ import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Page, TestInfo } from "@playwright/test";
 import { watchExactRelaunchProcesses } from "./exact-relaunch-processes.cjs";
-import { inspectLiveFixtureProcess } from "./process-inspection.mjs";
+import { inspectLiveFixtureProcess, queryWindowsProcess } from "./process-inspection.mjs";
 
 export async function readProcessState(pid: number): Promise<{ birth: number; parent: number } | null> {
   if (process.platform === "linux") {
@@ -708,9 +708,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   function processCommand(pid: number) {
     return inspectLiveFixtureProcess(pid, () => {
       const result = windows
-        ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-          `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`],
-        { encoding: "utf8", timeout: 10_000, windowsHide: true })
+        ? queryWindowsProcess(
+          `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`)
         : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
       if (result.error) throw result.error;
       if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
@@ -728,9 +727,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   function processBirth(pid: number) {
     return inspectLiveFixtureProcess(pid, () => {
       const result = windows
-        ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-          `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; if ($p) { $p.CreationDate.ToUniversalTime().Ticks }`],
-        { encoding: "utf8", timeout: 10_000, windowsHide: true })
+        ? queryWindowsProcess(
+          `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; if ($p) { $p.CreationDate.ToUniversalTime().Ticks }`)
         : spawnSync("ps", ["-o", "stat=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
       if (result.error) throw result.error;
       const output = result.stdout.trim();
@@ -833,6 +831,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
     let owner: { pid: number; birth: number; instance: string; startup_intent: "gui_managed" | "standalone"; natural: boolean | null } | null = null;
     let ownerCaptureFailed = false;
+    let ownerCaptureCause: string | undefined;
     let ownerError: Error | undefined;
     const ownerHealthObservations: Record<string, unknown>[] = [];
     const ownerHealthFields = (health: Record<string, unknown>) => {
@@ -931,8 +930,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     if (ownedPid && windows && options.signalFree && !coldCleanupFailed && !protectGuiOwner) {
       try { windowsOwner = await captureGuiOwner(); }
-      catch {
+      catch (error) {
         ownerCaptureFailed = true;
+        // Only the system error code or error class: messages can carry endpoint details.
+        const code = (error as NodeJS.ErrnoException)?.code;
+        ownerCaptureCause = typeof code === "string" ? code : error instanceof Error ? error.name : "unknown";
         ownerError = new Error("Fixture owner capture failed");
       }
     }
@@ -1064,7 +1066,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining,
           owner, owner_health_observations: ownerHealthObservations,
           ...(ownerObservationSupported || windowsOwner ? {} : { owner_observation: { status: "unsupported_platform", platform: process.platform, natural: null } }),
-          ...(ownerCaptureFailed ? { owner_capture_failed: true } : {}), provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
+          ...(ownerCaptureFailed ? { owner_capture_failed: true } : {}),
+          ...(ownerCaptureCause ? { owner_capture_cause: ownerCaptureCause } : {}), provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
         if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
       }
       child = undefined;
