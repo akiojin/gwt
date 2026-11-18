@@ -2971,7 +2971,31 @@ request.catch(() => {});
     const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
     const secondPreferences = async () => JSON.parse((await fixture.second.preferencesBytes()).toString());
     const machine = async (name: string) => JSON.parse(await readFile(join(fixture.home, ".gwt/machine-state", name), "utf8"));
-    const exited = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    type Launch = Awaited<ReturnType<typeof fixture.launches>>[number];
+    type RecordedProcess = { pid: number; birth: string; session_id: string | null };
+    const timeline: Record<string, unknown>[] = [];
+    const mark = (stage: string, details: Record<string, unknown> = {}) =>
+      timeline.push({ stage, at: new Date().toISOString(), ...details });
+    const capture = (stage: string, launch: Launch): RecordedProcess => {
+      const process = { pid: launch.pid, birth: fixture.providerProcessBirth(launch.pid), session_id: launch.gwt_session_id };
+      mark(stage, { process, launch_at: launch.at });
+      expect(process.birth, "creation time of the fixture-owned provider").toBeTruthy();
+      return process;
+    };
+    const liveProcesses = (stage: string, ...providers: RecordedProcess[]) => {
+      const observed = providers.map(provider => ({ ...provider, observed_birth: fixture.processBirth(provider.pid) }));
+      mark(stage, { observed });
+      return observed.filter(provider => provider.observed_birth === provider.birth)
+        .map(({ observed_birth: _observedBirth, ...provider }) => provider);
+    };
+    const waitForExit = async (stage: string, provider: RecordedProcess) => {
+      let observedBirth: string;
+      await expect.poll(() => {
+        observedBirth = fixture.processBirth(provider.pid);
+        return observedBirth;
+      }, { timeout: 60_000, message: stage }).not.toBe(provider.birth);
+      mark(stage, { process: provider, observed_birth: observedBirth! });
+    };
     const status = async (project?: string) => JSON.parse((await fixture.operationAsync("issue.monitor.status", {}, project)).output);
     const inboxState = async (number: number, project?: string) =>
       (await status(project)).inbox.find((row: any) => row.issue_number === number)?.state;
@@ -3009,7 +3033,31 @@ request.catch(() => {});
         }, { timeout: 180_000, message: `${pass} scan of the ${subject}` }).toBe(true);
       }
     };
-    const live = async () => (await fixture.launches()).filter(launch => !exited(launch.pid)).length;
+    const queue = async (target: Page, number: number, read: () => Promise<any>) => {
+      await expect.poll(async () => {
+        const prefs = await read();
+        return !!prefs.last_scan_at && !prefs.last_scan_error;
+      }, { timeout: 180_000, message: `the Issue #${number} Monitor has completed its initial scan` }).toBe(true);
+      await expect.poll(async () => {
+        const after = await target.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+        mark("queue request", { issue_number: number });
+        await sendLiveGwtEvent(target, { kind: "issue_monitor_queue_push", issue_numbers: [number] });
+        const handle = await target.waitForFunction(({ after, number }) =>
+          (window as any).__gwtPlaywrightMessages?.find(({ sequence, payload }: any) =>
+            sequence > after && payload.kind === "issue_monitor_queue_result" && payload.operation === "push"
+            && payload.issue_numbers?.length === 1 && payload.issue_numbers[0] === number)?.payload,
+        { after, number }, { timeout: 30_000 });
+        const { error } = await handle.jsonValue();
+        await handle.dispose();
+        mark("queue response", { issue_number: number, error });
+        // This refusal is emitted before the daemon connection is attempted.
+        // A missing acknowledgement or any other error must fail the test.
+        if (error && !/^publish budget exhausted during scope\/bootstrap resolution after \d+ms$/.test(error)) {
+          throw new Error(`Queue push for Issue #${number} failed: ${error}`);
+        }
+        return error;
+      }, { timeout: 30_000, message: `queue push for Issue #${number} is acknowledged` }).toBeNull();
+    };
     const shots = async (stage: string) => {
       await info.attach(`shared-pool-${stage}-first-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       await info.attach(`shared-pool-${stage}-second-${theme}`, { body: await secondPage.screenshot(), contentType: "image/png" });
@@ -3030,10 +3078,10 @@ request.catch(() => {});
       await expect(secondPage.locator("html")).toHaveAttribute("data-theme", theme);
 
       // 1. The original owner takes the only machine slot.
-      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [43] });
+      await queue(page, 43, preferences);
       await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43]);
       const source = (await fixture.launches())[0];
-      expect(exited(source.pid)).toBe(false);
+      const sourceProcess = capture("original owner launched", source);
       await expect.poll(async () => !!(await preferences()).launch_confirmations?.[43]?.delivery_id, { timeout: 30_000 }).toBe(true);
       await expect.poll(async () => (await activity(page))?.agents?.map((agent: any) => agent.session_id),
         { timeout: 60_000 }).toEqual([source.gwt_session_id]);
@@ -3045,7 +3093,7 @@ request.catch(() => {});
       // 2. The second project is ready, but the shared limit keeps it out. A Host whose
       // capacity sample is still warming attempts the launch and the shared registry
       // refuses it; a Host with a settled sample counts the other project and waits.
-      await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_queue_push", issue_numbers: [45] });
+      await queue(secondPage, 45, secondPreferences);
       const withheld = async () => {
         const second = await status(fixture.second.project);
         const refusals = await capacityRefusals(45);
@@ -3064,18 +3112,19 @@ request.catch(() => {});
       expect(protectedBy).not.toBeNull();
       expect(held.inbox.find((row: any) => row.issue_number === 45)?.state).not.toBe("launched");
       expect(await fixture.launchIssues()).toEqual([43]);
-      expect(exited(source.pid)).toBe(false);
+      expect(liveProcesses("original owner still live", sourceProcess)).toEqual([sourceProcess]);
       expect((await machine("agent-registry.json")).project_assignments[fixture.second.key] ?? {}).toEqual({});
       await shots("occupied");
 
       // 3. The original owner returns the slot; its Issue stays held.
       const identity = (await status()).inbox.find((row: any) => row.issue_number === 43);
       const confirmation = (await preferences()).launch_confirmations[43];
+      mark("stop original owner");
       const stopped = JSON.parse((await fixture.operationAsync("issue.monitor.stop", {
         number: 43, reason: "Issue #7451 slot return", remove_from_queue: false, claim_id: identity.claim_id,
         delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id })).output);
       expect(stopped).toMatchObject({ status: "stopped", removed_from_queue: false, runtime_stop: "requested" });
-      await expect.poll(() => exited(source.pid), { timeout: 60_000 }).toBe(true);
+      await waitForExit("original owner exited", sourceProcess);
       // Remove the exited diagnostic pane so only the hold keeps the Issue from relaunching.
       const windows = async () => JSON.parse(await readFile(join(fixture.home, ".gwt", "projects", firstKey, "workspace.json"), "utf8")).windows;
       expect((await windows()).some((window: any) => window.session_id === source.gwt_session_id)).toBe(true);
@@ -3089,8 +3138,8 @@ request.catch(() => {});
       await expect.poll(() => fixture.launchIssues(), { timeout: 420_000,
         message: "the second project takes the returned slot without a rescue operation" }).toEqual([43, 45]);
       const other = (await fixture.launches())[1];
-      expect(exited(other.pid)).toBe(false);
-      expect(await live()).toBe(1);
+      const otherProcess = capture("second project launched", other);
+      expect(liveProcesses("only the second project is live", sourceProcess, otherProcess)).toEqual([otherProcess]);
       expect(other.gwt_session_id).not.toBe(source.gwt_session_id);
       expect(await realpath(other.cwd)).not.toBe(await realpath(source.cwd));
       await expect.poll(async () => Object.values((await machine("agent-registry.json")).project_assignments[fixture.second.key] ?? {}),
@@ -3103,6 +3152,7 @@ request.catch(() => {});
       await shots("admitted");
 
       // 5. An explicit resume of the original owner waits for the slot too.
+      mark("requeue original owner");
       const requeued = JSON.parse((await fixture.operationAsync("issue.monitor.requeue", {
         number: 43, reason: "Issue #7451 resume the original owner" })).output);
       expect(requeued.status).toBe("requeued");
@@ -3117,17 +3167,17 @@ request.catch(() => {});
       expect(waiting.launch_capacity).toMatchObject({ admission_saturated: true, configured_max_active: 0 });
       expect(waiting.inbox.find((row: any) => row.issue_number === 43)?.state).not.toBe("launched");
       expect(await fixture.launchIssues()).toEqual([43, 45]);
-      expect(exited(other.pid)).toBe(false);
+      expect(liveProcesses("second project still live", otherProcess)).toEqual([otherProcess]);
 
       // 6. The second project returns the slot and the original owner resumes.
+      mark("request second project exit");
       await sendLiveGwtEvent(secondPage, { kind: "terminal_input", id: otherWindow, data: "GWT_FIXTURE_EXIT\r" });
-      await expect.poll(() => exited(other.pid), { timeout: 60_000 }).toBe(true);
+      await waitForExit("second project exited", otherProcess);
       await expect.poll(() => fixture.launchIssues(), { timeout: 420_000,
         message: "the original owner resumes in the returned slot" }).toEqual([43, 45, 43]);
       const resumed = (await fixture.launches())[2];
-      expect(exited(resumed.pid)).toBe(false);
-      expect(await live()).toBe(1);
-      expect([source.pid, other.pid]).not.toContain(resumed.pid);
+      const resumedProcess = capture("original owner resumed", resumed);
+      expect(liveProcesses("only the resumed owner is live", sourceProcess, otherProcess, resumedProcess)).toEqual([resumedProcess]);
       expect(await realpath(resumed.cwd), "the original owner continues in its saved worktree").toBe(await realpath(source.cwd));
       await expect.poll(() => inboxState(43), { timeout: 60_000 }).toBe("launched");
       expect(await hold()).toBeUndefined();
@@ -3139,17 +3189,17 @@ request.catch(() => {});
         second_project_protected_by: protectedBy, refused_second_project: refusedSecond,
         second_project_waiting: held.launch_capacity,
         original_owner_waiting: waiting.launch_capacity,
-        launches: await fixture.launches(),
+        launches: await fixture.launches(), timeline,
       }, null, 2), contentType: "application/json" });
     } catch (error) {
       // A native runner's HOME is not retained; keep both projects' view of the shared pool.
+      const observedAt = new Date().toISOString();
+      const [launches, first, second, policy, registry, capacity] = await Promise.all([
+        fixture.launches(), status(), status(fixture.second.project),
+        machine("agent-settings.json"), machine("agent-registry.json"), machine("agent-capacity.json"),
+      ].map(promise => promise.catch(failure => String(failure))));
       await info.attach("issue-7451-failure-state", { body: JSON.stringify({
-        launches: await fixture.launches().catch(() => null),
-        first: await status().catch(failure => String(failure)),
-        second: await status(fixture.second.project).catch(failure => String(failure)),
-        policy: await machine("agent-settings.json").catch(() => null),
-        registry: await machine("agent-registry.json").catch(() => null),
-        capacity: await machine("agent-capacity.json").catch(() => null),
+        observed_at: observedAt, launches, first, second, policy, registry, capacity, timeline,
       }, null, 2), contentType: "application/json" }).catch(() => {});
       throw error;
     } finally {
