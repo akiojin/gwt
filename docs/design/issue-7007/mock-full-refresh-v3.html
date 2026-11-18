@@ -312,6 +312,17 @@
   .checkrow .t{font-weight:700;font-size:13.5px}
   .checkrow .d2{font-size:12.3px;color:var(--ink2)}
   .belldot{display:inline-flex;align-items:center;justify-content:center;background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px;margin-left:5px}
+  /* project list rows (projects screen) */
+  .prow{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+  .prow:first-child{border-top:none}
+  .prow .grow{flex:1;min-width:230px}
+  .prow .meta{display:flex;gap:8px 14px;flex-wrap:wrap;font-size:12.3px;color:var(--ink2);margin-top:2px;align-items:center}
+  .prow .st{display:inline-flex;align-items:center;gap:5px;font-weight:700;color:var(--ink)}
+  .prow .st i{width:8px;height:8px;border-radius:50%;display:block;flex:none;background:var(--ink3)}
+  .prow .st.run i{background:var(--accent)}
+  .prow .st.wait i{background:var(--amber)}
+  .prow .st.stop i{background:var(--red)}
+  .prow .path{font-family:var(--mono);font-size:11.8px}
 </style>
 </head>
 <body>
@@ -319,12 +330,13 @@
   <header class="doc">
     <div class="doc-kicker">gwt — Issue #7007</div>
     <h1>全画面刷新モック v3</h1>
-    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面はチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（名前だけの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
+    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面はチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（状態などの目安つきの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
   </header>
 
   <nav class="screens" aria-label="画面一覧">
     <div class="row">
       <a data-openpage="start">開始画面</a>
+      <a data-openpage="firstrun">初回セットアップ</a>
       <a data-openpage="projects">プロジェクト</a>
       <a data-openpage="agents">エージェント</a>
       <a data-openpage="agents" data-openscreen="agent-edit-jinsenji">エージェント設定</a>
@@ -348,7 +360,7 @@
       <a data-openpage="gwt" data-openscreen="g-index">検索</a>
       <a data-openpage="gwt" data-openscreen="g-logs">ログ</a>
       <a data-openpage="gwt" data-openscreen="g-settings">プロジェクト設定</a>
-      <a data-openpage="wizard">起動ウィザード</a>
+      <a data-openpage="wizard">起動ウィザード（エージェント起動）</a>
       <a data-openpage="terminal">ターミナル表示</a>
       <span class="sep">KeibaDB：</span>
       <a data-openpage="keibadb" data-openscreen="k-decide">判断待ち</a>
@@ -384,7 +396,6 @@
             <div class="seg" role="group" aria-label="開始画面の状態切替">
               <button type="button" data-startstate="has" aria-pressed="true">プロジェクトあり</button>
               <button type="button" data-startstate="empty" aria-pressed="false">プロジェクトなし</button>
-              <button type="button" data-startstate="many" aria-pressed="false">プロジェクトが多い（20件）</button>
             </div>
           </div>
 
@@ -451,27 +462,77 @@
             </div>
           </div>
 
-          <!-- 多い（20件） -->
-          <div data-startpane="many" hidden>
-              <div>
-                <div class="chat-head">
-                  <span class="pm-face"><span class="dot wait"></span></span>
-                  <div>
-                    <div class="nm">秦泉寺 章夫</div>
-                    <div class="sub">あなたの PM · 判断待ち 5件</div>
-                  </div>
-                </div>
-                <div class="chat">
-                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>秦泉寺 章夫<span style="font-weight:400"> · 今朝 7:02</span></div>プロジェクトが多くても、ここに出すのは判断だけです。gwt と KeibaDB に判断があります — 上の会話のカードから、その場で決められます。
-                    <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button><button class="btn" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断へ</button></div></div>
-                </div>
-                <div class="composer">
-                  <textarea placeholder="秦泉寺 章夫に話しかける…"></textarea>
-                  <div class="send"><button class="btn primary" type="button">送る</button></div>
-                </div>
-              </div>
-          </div>
+        </div>
+      </div>
 
+      <!-- ================= 初回セットアップ ================= -->
+      <div class="pagegroup" data-page="firstrun">
+        <div class="pagehead"><span class="rel">初回セットアップ — 初回起動のときだけ表示されます（エージェントの起動計画である「起動ウィザード」とは別物です）</span></div>
+        <div class="content">
+          <div class="screen-pane on" data-screen="setup-welcome">
+            <p class="h-big">ようこそ、gwt へ</p>
+            <p class="h-sub">これは初回セットアップです。初回起動のときだけ表示され、終わると開始画面（PM とのチャット）へ移ります。エージェントの起動計画である「起動ウィザード」とは別の流れです。</p>
+            <div class="steps"><span class="st on">1. ようこそ</span><span>→</span><span class="st">2. アカウント</span><span>→</span><span class="st">3. エージェントと PM</span><span>→</span><span class="st">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
+            <div class="set-group">
+              <h4>これから必要になること</h4>
+              <div class="set-row"><div class="grow"><div class="t">アカウント（必須）</div><div class="d2">エージェントが使うアカウントを、最低1つ登録してサインインします。これが済むまで先へは進めません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">最初のエージェント（必須）</div><div class="d2">担当者になるエージェントを1人作ります。その人が台帳の先頭になり、この端末の PM を務めます。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">プロジェクト（任意）</div><div class="d2">最初のプロジェクトを開きます。ここで開かなくても、後からいつでも開けます。</div></div></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="setup-account">始める — アカウントへ</button></div>
+          </div>
+          <div class="screen-pane" data-screen="setup-account">
+            <p class="h-big">アカウントを追加する</p>
+            <p class="h-sub">エージェントが使うアカウントを登録します。<b>最低1つのアカウントの登録とサインインが済むまで、次へは進めません。</b>追加の操作は、アカウント追加ウィザードで行います。</p>
+            <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st on">2. アカウント</span><span>→</span><span class="st">3. エージェントと PM</span><span>→</span><span class="st">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">アカウント追加ウィザードを開く</div><div class="d2">種類を選ぶ → 本体の確認 → サインイン → 完了、の順に進めます。本体（CLI）が未導入の種類は、途中でツール管理へ案内します。</div></div><button class="btn primary" type="button" data-openpage="tools" data-openscreen="tool-add">ウィザードを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">アカウントはまだ登録されていません。登録とサインインが済むと、ここが「完了」になり、次へ進めるようになります。</div></div><span class="badge b-block">未完了</span></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="setup-welcome">戻る</button><button class="btn primary" type="button">次へ — エージェントと PM</button></div>
+            <p class="rel" style="margin-top:8px">「次へ」は、アカウントの登録とサインインが済むと押せるようになります（このモックでは未完了の状態を示しています）。</p>
+          </div>
+          <div class="screen-pane" data-screen="setup-agent">
+            <p class="h-big">最初のエージェントを作る</p>
+            <p class="h-sub">担当者になるエージェントを1人作ります。<b>作った人が台帳の先頭になり、この端末の PM を務めます</b>（PM の指定は、後から台帳で変えられます）。特性や性格などの詳しい設定は、後からエージェント設定でいつでも変えられます。</p>
+            <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st done">2. アカウント</span><span>→</span><span class="st on">3. エージェントと PM</span><span>→</span><span class="st">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
+            <div class="set-group">
+              <h4>エージェント</h4>
+              <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava sel" style="background:#0f766e">秦</span>
+                <span class="ava" style="background:#2563eb">秦</span>
+                <span class="ava" style="background:#be123c">秦</span>
+                <span class="ava" style="background:#a16207">秦</span>
+                <span class="ava" style="background:#6d28d9">秦</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">この人が PM を務めます</div><div class="d2">台帳の先頭の人が PM です。優先指定で別の人に変えることもできます（指定はエージェントの属性ではなく、端末の PM の状態として持ちます）。</div></div><span class="badge b-run">PM</span></div>
+              <div class="set-row"><div class="grow"><div class="t">詳しく設定する</div><div class="d2">特性（推論レベル・速度・性格）やプロファイルの割り当ては、エージェント設定で決めます。ここで決めなくても始められます。</div></div><button class="btn" type="button" data-openpage="agents" data-openscreen="agent-new">エージェント設定を開く</button></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="setup-account">戻る</button><button class="btn primary" type="button" data-nav="setup-project">次へ — プロジェクト</button></div>
+          </div>
+          <div class="screen-pane" data-screen="setup-project">
+            <p class="h-big">プロジェクトを開く</p>
+            <p class="h-sub">最初のプロジェクトを開きます。このステップは任意です。開かずに終えても、後からヘッダーの「プロジェクト」からいつでも開けます。</p>
+            <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st done">2. アカウント</span><span>→</span><span class="st done">3. エージェントと PM</span><span>→</span><span class="st on">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
+            <button class="opt primary" type="button" data-openpage="addproject" data-openscreen="add-github">GitHub から取り込む<small>リポジトリを選ぶと、そのままプロジェクトになります</small></button>
+            <button class="opt" type="button" data-openpage="addproject" data-openscreen="add-folder">フォルダを開く<small>この端末にあるフォルダをプロジェクトにします</small></button>
+            <button class="opt" type="button" data-openpage="addproject" data-openscreen="add-clone">URL から複製する<small>Git の URL を貼ると、複製してから開きます</small></button>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="setup-agent">戻る</button><button class="btn primary" type="button" data-nav="setup-done">次へ — 完了</button></div>
+            <p class="rel" style="margin-top:8px">プロジェクトを開かずに「次へ — 完了」へ進んでもかまいません。</p>
+          </div>
+          <div class="screen-pane" data-screen="setup-done">
+            <p class="h-big">準備ができました</p>
+            <p class="h-sub">セットアップが終わりました。<b>PM が自動で起動しています。</b>開始画面で PM と話せます。</p>
+            <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st done">2. アカウント</span><span>→</span><span class="st done">3. エージェントと PM</span><span>→</span><span class="st done">4. プロジェクト</span><span>→</span><span class="st on">5. 完了</span></div>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">登録とサインインが済んでいます。プールに入り、割り当て候補になっています。</div></div><span class="badge b-done">完了</span></div>
+              <div class="set-row"><div class="grow"><div class="t">エージェントと PM</div><div class="d2">最初のエージェントが台帳の先頭になり、PM として起動しています。</div></div><span class="badge b-done">完了</span></div>
+              <div class="set-row"><div class="grow"><div class="t">プロジェクト</div><div class="d2">開いていない場合は、ヘッダーの「プロジェクト」から後で開けます。</div></div><span class="badge b-plan">後でも可</span></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-openpage="start">開始画面へ</button></div>
+          </div>
         </div>
       </div>
 
@@ -481,18 +542,31 @@
         <div class="content">
           <div class="screen-pane on" data-screen="projects-main">
             <p class="h-big">プロジェクト</p>
-            <p class="h-sub">この端末で開いているプロジェクトの一覧です。一覧は名前だけの導線で、作業状況・タスク数・Issue 数などの内容は持ちません（内容は各プロジェクトのページで見ます）。プロジェクトは新しいブラウザタブで開きます。</p>
+            <p class="h-sub">この端末で開いているプロジェクトの一覧です（20件・最終更新の新しい順）。各行には、状態・判断待ちの有無・最終更新・場所の目安だけを出します。作業状況の詳細や Issue の中身は持ち込まず、各プロジェクトのページで見ます。プロジェクトは新しいブラウザタブで開きます。</p>
             <input class="field" type="text" placeholder="プロジェクトを探す…" aria-label="プロジェクトを探す" style="width:100%;margin-bottom:12px">
             <div class="plist">
-              <div class="mrow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><button class="btn" type="button" data-openpage="gwt">開く</button></div>
-              <div class="mrow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><button class="btn" type="button" data-openpage="keibadb">開く</button></div>
-              <div class="mrow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><button class="btn" type="button">開く</button></div>
-              <div class="mrow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><button class="btn" type="button">開く</button></div>
-              <div class="mrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><button class="btn" type="button">開く</button></div>
-              <div class="mrow"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><button class="btn" type="button">開く</button></div>
-              <div class="mrow"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span>最終更新 12分前</span><span class="path">~/Repos/gwt</span></div></div><span class="badge b-wait">判断待ち 2件</span><button class="btn" type="button" data-openpage="gwt">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span>最終更新 34分前</span><span class="path">~/Repos/keiba-db</span></div></div><span class="badge b-wait">判断待ち 1件</span><button class="btn" type="button" data-openpage="keibadb">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#0e7490"></i>vr-cabin-exposure</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span>最終更新 1時間前</span><span class="path">~/Repos/vr-cabin-exposure</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span>最終更新 2時間前</span><span class="path">~/Repos/event-magazine</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 昨日 22:10</span><span class="path">~/Repos/llmlb</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#6d28d9"></i>browser-terminal</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 2日前</span><span class="path">~/tools/browser-terminal</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 3日前</span><span class="path">~/Repos/unity-cli</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#be5a83"></i>streamer-review-service</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 4日前</span><span class="path">~/Repos/streamer-review-service</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><div class="grow"><div class="meta"><span class="st stop"><i></i>停止中</span><span>最終更新 先週</span><span class="path">~/Repos/155-Demi</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 先週</span><span class="path">~/Repos/160-Idina</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#1d4ed8"></i>abyssal-update</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 先週</span><span class="path">~/Repos/abyssal-update</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#0f766e"></i>kdt-tools</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 2週間前</span><span class="path">~/Repos/kdt-tools</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#b45309"></i>photo-sorter</span><div class="grow"><div class="meta"><span class="st stop"><i></i>停止中</span><span>最終更新 先月</span><span class="path">~/Repos/photo-sorter</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#15803d"></i>home-log</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 先月</span><span class="path">~/Repos/home-log</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#7c3aed"></i>invoice-kit</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 先月</span><span class="path">~/Repos/invoice-kit</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#0369a1"></i>slide-maker</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 2か月前</span><span class="path">~/Repos/slide-maker</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#9f1239"></i>chat-archive</span><div class="grow"><div class="meta"><span class="st stop"><i></i>停止中</span><span>最終更新 2か月前</span><span class="path">~/Repos/chat-archive</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#65a30d"></i>music-lib</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 3か月前</span><span class="path">~/Repos/music-lib</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#0d9488"></i>garden-plan</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 3か月前</span><span class="path">~/Repos/garden-plan</span></div></div><button class="btn" type="button">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#9333ea"></i>trip-note</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span>最終更新 半年前</span><span class="path">~/Repos/trip-note</span></div></div><button class="btn" type="button">開く</button></div>
             </div>
-            <p class="rel" style="margin-top:8px">プロジェクトが多いときは、上の検索で名前から探せます（この一覧が全件の置き場です）。</p>
+            <p class="rel" style="margin-top:8px">プロジェクトが多いときは、上の検索で名前から探せます（この一覧が全件の置き場です）。開始画面にはプロジェクトの状態は出さず、件数が多くても開始画面の見え方は変わりません。</p>
             <p class="h-sec" style="margin-top:18px">プロジェクトを追加する</p>
             <div class="btnrow">
               <button class="btn primary" type="button" data-openpage="addproject" data-openscreen="add-github">GitHub から取り込む</button>
@@ -1010,15 +1084,8 @@
             <p class="h-sub">ウィザード形式で、順に進めます。アカウントを追加するとプールに入り、割り当て候補になります。初回は、少なくとも1つのアカウントの登録とサインインが済むまで先へ進めません。</p>
             <div class="steps"><span class="st on">1. 種類</span><span>→</span><span class="st">2. 本体の確認</span><span>→</span><span class="st">3. サインイン</span><span>→</span><span class="st">4. 完了</span></div>
             <div class="set-group">
-              <h4>種類を選ぶ（アカウント型）</h4>
-              <div class="set-row"><div class="grow"><div class="t">アカウント型のツール</div><div class="d2">アカウントを登録してサインインすると、そのアカウントがプールに入ります。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="ツールの種類"><button class="chip on" type="button">Claude Code</button><button class="chip" type="button">Codex</button><button class="chip" type="button">Grok Build</button><button class="chip" type="button">GitHub Copilot</button><button class="chip" type="button">Antigravity CLI</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">プールでの見分けに使います（例：Claude Code 3（予備））。</div></div><input class="field" type="text" placeholder="表示名" aria-label="表示名" style="width:220px"></div>
-            </div>
-            <div class="set-group">
-              <h4>フロントエンド型のツール</h4>
-              <div class="set-row"><div class="grow"><div class="t">OpenCode／OpenClaw／Hermes Agent</div><div class="d2">この3種は、接続先（バックエンド）を切り替えて使うフロントエンド型です。アカウントではなく、バックエンド設定を選んで追加します。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">バックエンド設定を選ぶ</div><div class="d2">（置き場のみ）バックエンドの扱いは現在決定待ちのため、確定形はまだ示しません。</div></div><button class="btn" type="button">バックエンド設定を選ぶ…</button></div>
+              <h4>種類を選ぶ</h4>
+              <div class="set-row"><div class="chips" role="group" aria-label="ツールの種類"><button class="chip on" type="button">Claude Code</button><button class="chip" type="button">Codex</button><button class="chip" type="button">Grok Build</button><button class="chip" type="button">GitHub Copilot</button><button class="chip" type="button">Antigravity CLI</button><button class="chip" type="button">OpenCode</button><button class="chip" type="button">OpenClaw</button><button class="chip" type="button">Hermes Agent</button></div></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tool-add-body">次へ — 本体の確認</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
           </div>
@@ -1043,7 +1110,17 @@
               <div class="set-row"><div class="grow"><div class="t">サインイン用のシェルを開く</div><div class="d2">コマンドでサインインする場合はこちらです。シェルの中でログインを終えてください。</div></div><button class="btn" type="button" data-openpage="terminal">シェルを開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">未サインイン — 割り当て対象外</div></div><span class="badge b-block">未サインイン</span></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tool-add-body">戻る</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tool-add-body">戻る</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tool-add-backend">フロントエンド型のステップ3を見る</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tool-add-backend">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
+            <p class="h-big">アカウントを追加する — バックエンド設定</p>
+            <p class="h-sub">フロントエンド型のツール（OpenCode／OpenClaw／Hermes Agent）を選んだ場合のステップ3です。サインインの代わりに、接続先（バックエンド）を設定します。</p>
+            <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st done">2. 本体の確認</span><span>→</span><span class="st on">3. バックエンド設定</span><span>→</span><span class="st">4. 完了</span></div>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">バックエンド設定を選ぶ</div><div class="d2">（置き場のみ）バックエンドの扱いは現在決定待ちのため、確定形はまだ示しません。決まり次第、このステップの中身として示します。</div></div><button class="btn" type="button">バックエンド設定を選ぶ…</button></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tool-add-body">戻る</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tool-add-signin">アカウント型のステップ3を見る</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
           </div>
           <div class="screen-pane" data-screen="tool-add-done">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
@@ -1051,8 +1128,16 @@
             <p class="h-sub">アカウントがプールに入りました。セッション開始時に、空き・制限状態に応じて自動で割り当て候補になります。</p>
             <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st done">2. 本体の確認</span><span>→</span><span class="st done">3. サインイン</span><span>→</span><span class="st on">4. 完了</span></div>
             <div class="set-group">
-              <div class="set-row"><div class="grow"><div class="t">追加したアカウント</div><div class="d2">Claude Code のアカウントです。プールでの見分けには表示名を使います。</div></div><span class="badge b-run">サインイン済み</span></div>
-              <div class="set-row"><div class="grow"><div class="t">プールの状態</div><div class="d2">アカウント画面のプールに、このアカウントが並んでいます。</div></div></div>
+              <h4>設定のサマリー</h4>
+              <div class="set-row"><div class="grow"><div class="t">種類</div><div class="d2">Claude Code</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">本体</div><div class="d2">導入済み（この端末に入っています）</div></div><span class="badge b-run">導入済み</span></div>
+              <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">会社メールでサインイン済みです</div></div><span class="badge b-run">サインイン済み</span></div>
+              <div class="set-row"><div class="grow"><div class="t">バックエンド</div><div class="d2">フロントエンド型を選んだ場合のみ、ここに選んだバックエンドが出ます。</div></div></div>
+            </div>
+            <div class="set-group">
+              <h4>表示名</h4>
+              <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">上のサマリーをもとに自動で付けた名前です。その場で変更できます（例：Claude Code 3（予備））。フロントエンド型の場合は「Hermes Agent 1（Z.ai）」のように、バックエンドも含めて提案します。</div></div><input class="field" type="text" value="Claude Code 3" aria-label="表示名" style="width:220px"></div>
+              <div class="set-row"><div class="grow"><div class="t">プールの状態</div><div class="d2">アカウント画面のプールに、この表示名で並んでいます。</div></div></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-pool">アカウントへ戻る</button><button class="btn ghost" type="button" data-nav="tool-add">続けて追加する</button></div>
           </div>
@@ -2599,13 +2684,13 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。名前だけの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
 <script>
 (function () {
-  var pageLabels = { start: "開始画面", projects: "プロジェクト", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
+  var pageLabels = { start: "開始画面", firstrun: "初回セットアップ", projects: "プロジェクト", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
     appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
     "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
@@ -2613,7 +2698,7 @@
     "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
     "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "タスクを作る", "k-subissue-add": "子課題を追加", "k-session-picker": "セッションを選ぶ", "k-agent-pause": "一時停止の確認", "k-labels": "ラベルを編集", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
   };
-  var current = { start: "start", addproject: "add-github", notifications: "notifications-main", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
+  var current = { start: "start", firstrun: "setup-welcome", addproject: "add-github", notifications: "notifications-main", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
   var activePage = "start";
   function titleFor(p) {
     if (p === "start") return "開始画面";
