@@ -3611,6 +3611,74 @@ fn gwtd_artifact_restore_command(worktree: &Path, command: &str) -> Result<Optio
     )))
 }
 
+/// Effective commands, the index where appended restorations start, and
+/// (arming command, restoration command) pairs.
+type RestorationMatrix = (Vec<String>, usize, Vec<(String, String)>);
+
+/// Append operational gwtd restoration after the matrix, unless a registered
+/// command already rebuilds that same unarmed artifact after its last arming
+/// test. That registered command then serves as the restoration, so it still
+/// runs after a failure and no unregistered duplicate waits for admission once
+/// every registered command has passed (Issue #7318).
+fn matrix_with_gwtd_restoration(
+    worktree: &Path,
+    commands: &[String],
+) -> Result<RestorationMatrix, VerificationError> {
+    let mut restoration_by_command: Vec<(String, String)> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    for command in commands {
+        let mut covered = Vec::new();
+        for restoration in &pending {
+            if is_explicit_gwtd_restoration(worktree, command, restoration)? {
+                covered.push(restoration.clone());
+            }
+        }
+        for restoration in covered {
+            pending.retain(|pending| pending != &restoration);
+            for (_, mapped) in restoration_by_command.iter_mut() {
+                if *mapped == restoration {
+                    *mapped = command.clone();
+                }
+            }
+        }
+        for restoration in gwtd_artifact_restoration(worktree, std::slice::from_ref(command))? {
+            if !pending.contains(&restoration) {
+                pending.push(restoration.clone());
+            }
+            restoration_by_command.push((command.clone(), restoration));
+        }
+    }
+    let mut effective_commands = commands.to_vec();
+    let restoration_start = effective_commands.len();
+    effective_commands.extend(pending);
+    Ok((
+        effective_commands,
+        restoration_start,
+        restoration_by_command,
+    ))
+}
+
+/// A plain `cargo build -p gwt --bin gwtd [--target-dir DIR]` resolving to the
+/// restoration's target rebuilds the same unarmed artifact.
+fn is_explicit_gwtd_restoration(
+    worktree: &Path,
+    command: &str,
+    restoration: &str,
+) -> Result<bool, String> {
+    let Ok((assignments, args)) = split_command_line(command).and_then(take_env_assignments) else {
+        return Ok(false);
+    };
+    let plain = ["cargo", "build", "-p", "gwt", "--bin", "gwtd"];
+    let shape = args.len() >= plain.len()
+        && args[..plain.len()].iter().map(String::as_str).eq(plain)
+        && (args.len() == plain.len()
+            || (args.len() == plain.len() + 2 && args[plain.len()] == "--target-dir"));
+    if !assignments.is_empty() || !shape {
+        return Ok(false);
+    }
+    Ok(gwtd_artifact_restore_command(worktree, command)?.as_deref() == Some(restoration))
+}
+
 /// Identify this repository without comparing another project's HEAD to gwt's.
 pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
     let manifest =
@@ -4815,18 +4883,8 @@ where
             .to_string()
             .into());
     }
-    // Keep operational artifact restoration at the end of the matrix.
-    let mut effective_commands = commands.to_vec();
-    let restoration_start = effective_commands.len();
-    let mut restoration_by_command = Vec::new();
-    for command in commands {
-        for restoration in gwtd_artifact_restoration(worktree, std::slice::from_ref(command))? {
-            if !effective_commands[restoration_start..].contains(&restoration) {
-                effective_commands.push(restoration.clone());
-            }
-            restoration_by_command.push((command.clone(), restoration));
-        }
-    }
+    let (effective_commands, restoration_start, restoration_by_command) =
+        matrix_with_gwtd_restoration(worktree, commands)?;
     let commands = effective_commands.as_slice();
     let request = authority.map(|authority| {
         continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
@@ -5145,10 +5203,9 @@ where
         }
         let command = &commands[index];
         if failed_raw.is_some()
-            && (index < restoration_start
-                || !restoration_by_command.iter().any(|(source, restoration)| {
-                    restoration == command && results.iter().any(|result| &result.command == source)
-                }))
+            && !restoration_by_command.iter().any(|(source, restoration)| {
+                restoration == command && results.iter().any(|result| &result.command == source)
+            })
         {
             skipped_after_failure.push(command.clone());
             continue;
@@ -9777,6 +9834,47 @@ mod tests {
             &["cargo test --manifest-path missing/Cargo.toml".to_string()]
         )
         .is_err());
+    }
+
+    #[test]
+    fn explicit_trailing_gwtd_build_serves_as_the_restoration() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        let test = "cargo test -p gwt --lib --target-dir target".to_string();
+        let build = "cargo build -p gwt --bin gwtd --target-dir target".to_string();
+
+        // Issue #7318: the registered trailing build is the restoration.
+        let commands = [test.clone(), build.clone()];
+        let (effective, start, by_command) =
+            matrix_with_gwtd_restoration(dir.path(), &commands).unwrap();
+        assert_eq!(effective, commands.to_vec());
+        assert_eq!(start, 2);
+        assert_eq!(by_command, vec![(test.clone(), build.clone())]);
+
+        // A build before the arming test does not restore its artifact.
+        let commands = [build.clone(), test.clone()];
+        let (effective, start, by_command) =
+            matrix_with_gwtd_restoration(dir.path(), &commands).unwrap();
+        assert_eq!(effective.len(), 3);
+        assert_eq!(start, 2);
+        assert_eq!(by_command, vec![(test, effective[2].clone())]);
     }
 
     #[test]
