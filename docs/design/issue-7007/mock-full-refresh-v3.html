@@ -761,7 +761,7 @@
             <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st done">2. アカウント</span><span>→</span><span class="st on">3. エージェントと PM</span><span>→</span><span class="st">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
             <div class="set-group">
               <h4>エージェント</h4>
-              <div class="set-row"><div class="grow"><div class="t">名前</div></div><input class="field" type="text" placeholder="名前" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">名前</div></div><input class="field" id="setupAgentName" type="text" placeholder="名前" aria-label="名前" style="width:200px"></div>
               <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#0f766e">秦</span>
@@ -773,7 +773,8 @@
               <div class="set-row"><div class="grow"><div class="t">この人が PM を務めます</div><div class="d2">PM は指名制です。ここで作った人が PM として指名されます。変更は、エージェントの画面での割り当て直しだけです。</div></div><span class="badge b-run">PM</span></div>
               <div class="set-row"><div class="grow"><div class="t">詳しく設定する</div><div class="d2">特性（推論レベル・速度・性格）は、エージェント設定で決めます。ここで決めなくても始められます。</div></div><button class="btn" type="button" data-openpage="agents" data-openscreen="agent-new">エージェント設定を開く</button></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn iconbtn" type="button" data-nav="setup-account" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="setup-project">次へ — プロジェクト</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn iconbtn" type="button" data-nav="setup-account" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" id="setupAgentNext" type="button" data-nav="setup-project" disabled>次へ — プロジェクト</button></div>
+            <p class="rel" style="margin-top:8px">「次へ」は、名前を入力して PM を指名すると押せるようになります。</p>
           </div>
           <div class="screen-pane" data-screen="setup-project">
             <p class="h-big">プロジェクトを開く</p>
@@ -809,7 +810,7 @@
             <input class="field" type="text" placeholder="プロジェクトを探す…" aria-label="プロジェクトを探す" style="width:100%;margin-bottom:12px">
             <div class="plist">
               <div class="prow" data-rowpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst run">自律駆動中</span><span>最終更新 12分前</span><span class="path">~/Repos/gwt</span></div></div><span class="badge b-wait">判断待ち 2件</span><button class="btn ghost" type="button" data-dlg="proj-stop">自律駆動を止める</button></div>
-              <div class="prow" data-rowpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst drain">停止待ち</span><span data-loopnote>作業中のエージェント 2件の完了待ち</span><span>最終更新 34分前</span><span class="path">~/Repos/keiba-db</span></div></div><span class="badge b-wait">判断待ち 1件</span><button class="btn ghost" type="button" data-dlg="proj-resume">停止を取り消す</button></div>
+              <div class="prow" data-rowpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst drain">停止待ち</span><span data-loopnote>作業中のエージェント 2件の完了待ち</span><span>最終更新 34分前</span><span class="path">~/Repos/keiba-db</span></div></div><span class="badge b-wait">判断待ち 1件</span></div>
               <div class="prow"><span class="ptag"><i style="background:#0e7490"></i>vr-cabin-exposure</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst run">自律駆動中</span><span>最終更新 1時間前</span><span class="path">~/Repos/vr-cabin-exposure</span></div></div><button class="btn ghost" type="button" data-dlg="proj-stop">自律駆動を止める</button></div>
               <div class="prow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst run">自律駆動中</span><span>最終更新 2時間前</span><span class="path">~/Repos/event-magazine</span></div></div><button class="btn ghost" type="button" data-dlg="proj-stop">自律駆動を止める</button></div>
               <div class="prow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span class="loopst run">自律駆動中</span><span>最終更新 昨日 22:10</span><span class="path">~/Repos/llmlb</span></div></div><button class="btn ghost" type="button" data-dlg="proj-stop">自律駆動を止める</button></div>
@@ -1743,7 +1744,7 @@
                 <div class="stat"><div class="num">2</div><div class="lab">実行中</div></div>
                 <div class="stat"><div class="num">5</div><div class="lab">今日完了</div></div>
               </div>
-              <p class="countline" style="margin-bottom:8px">状態 — 開始待ち <b>3</b> · 実行中 <b>2</b> · 入力待ち <b>1</b> · 詰まっている <b>2</b> · エラー <b>0</b> · 今日完了 <b>5</b> · 未着手 <b>118</b></p>
+              <p class="countline" style="margin-bottom:8px">状態 — 開始待ち <b>121</b> · 実行中 <b>2</b> · 入力待ち <b>1</b> · 詰まっている <b>2</b> · エラー <b>0</b> · 今日完了 <b>5</b></p>
               <div class="chips"><span class="chip on">すべて</span><span class="chip">詰まっている</span><span class="chip">実行中</span><span class="chip">開始待ち</span><span class="chip">バグ</span></div>
               <div class="btnrow" style="margin-bottom:10px"><button class="btn primary" type="button" data-nav="g-issue-new">＋ 新しい課題</button></div>
               <div class="lrow" data-rownav="g-issue">
@@ -1772,9 +1773,8 @@
                 <span class="badge b-block">詰まっている</span>
               </div>
               <div class="lrow" data-rownav="g-issue">
-                <div class="grow"><div class="t">リリースノートのひな形を用意する</div><div class="d">未着手 · 自律駆動の対象</div></div>
-                <span class="badge b-plan">未着手</span>
-                <button class="btn link" type="button">開始待ちに入れる</button>
+                <div class="grow"><div class="t">リリースノートのひな形を用意する</div><div class="d">開始待ち · 自律駆動の対象</div></div>
+                <span class="badge b-queue">開始待ち</span>
               </div>
               <p class="rel" style="margin-top:12px">+ gwt の課題があと126件 — 詰まっているもの・実行中のものが上に来ます。</p>
             </div>
@@ -2437,9 +2437,8 @@
                 <span class="badge b-queue">開始待ち</span>
               </div>
               <div class="lrow" data-rownav="k-issue">
-                <div class="grow"><div class="t">結果表の脚注を統一する</div><div class="d">未着手 · 自律駆動の対象</div></div>
-                <span class="badge b-plan">未着手</span>
-                <button class="btn link" type="button">開始待ちに入れる</button>
+                <div class="grow"><div class="t">結果表の脚注を統一する</div><div class="d">開始待ち · 自律駆動の対象</div></div>
+                <span class="badge b-queue">開始待ち</span>
               </div>
               <p class="rel" style="margin-top:12px">+ KeibaDB の課題があと44件</p>
             </div>
@@ -3286,6 +3285,14 @@
       });
     });
   });
+  /* firstrun: the first agent (who becomes the PM) needs a name before moving on */
+  var setupName = document.getElementById("setupAgentName");
+  var setupNext = document.getElementById("setupAgentNext");
+  if (setupName && setupNext) {
+    setupName.addEventListener("input", function () {
+      setupNext.disabled = setupName.value.trim() === "";
+    });
+  }
   /* profile edit: environment variable rows (add / delete) */
   var envPane = document.querySelector('.screen-pane[data-screen="profile-edit"]');
   if (envPane) {
@@ -3469,9 +3476,9 @@
       } else if (note) { note.hidden = true; }
       var btn = row.querySelector("[data-loopbtn]");
       if (btn) {
+        btn.hidden = st === "drain";
         if (st === "run") { btn.textContent = "自律駆動を止める"; btn.className = "btn ghost"; }
-        else if (st === "drain") { btn.textContent = "停止を取り消す"; btn.className = "btn ghost"; }
-        else { btn.textContent = "開始"; btn.className = "btn"; }
+        else if (st === "stop") { btn.textContent = "開始"; btn.className = "btn"; }
       }
     });
     document.querySelectorAll('[data-loopchip="' + key + '"]').forEach(function (chip) {
@@ -3487,10 +3494,11 @@
     loopState[key] = chip.classList.contains("drain") ? "drain" : chip.classList.contains("stop") ? "stop" : "run";
     row.querySelectorAll("button").forEach(function (b) {
       var label = b.textContent.trim();
-      if (label !== "停止" && label !== "停止を取り消す" && label !== "開始") return;
+      if (label !== "停止" && label !== "開始") return;
       b.setAttribute("data-loopbtn", "");
       b.addEventListener("click", function () {
-        loopState[key] = loopState[key] === "run" ? "drain" : "run";
+        if (loopState[key] === "run") loopState[key] = "drain";
+        else if (loopState[key] === "stop") loopState[key] = "run";
         renderLoop(key);
       });
     });
@@ -3963,6 +3971,30 @@
     }
   }, true);
 
+  /* sync one project row (list chip + note + settings chip) to a loop state */
+  function syncLoopRow(row, state) {
+    if (!row) return;
+    var labels = { run: "自律駆動中", drain: "停止待ち", stop: "停止中" };
+    var chip = row.querySelector(".loopst");
+    if (chip) { chip.className = "loopst " + state; chip.textContent = labels[state]; }
+    var note = row.querySelector("[data-loopnote]");
+    if (state === "drain") {
+      if (!note && chip) {
+        note = document.createElement("span");
+        note.setAttribute("data-loopnote", "");
+        note.textContent = "作業中のエージェントの完了待ち";
+        chip.after(note);
+      }
+      if (note) note.hidden = false;
+    } else if (note) { note.hidden = true; }
+    var tag = row.querySelector(".ptag");
+    var key = tag ? tag.textContent.trim().toLowerCase() : "";
+    document.querySelectorAll('[data-loopchip="' + key + '"]').forEach(function (c) {
+      c.className = "loopst " + state;
+      c.textContent = labels[state];
+    });
+  }
+
   /* dialogs for actions without a native handler */
   document.addEventListener("click", function (ev) {
     var btn = ev.target.closest ? ev.target.closest("button[data-dlg]") : null;
@@ -3971,25 +4003,25 @@
     if (kind === "proj-stop") {
       var row = btn.closest(".prow");
       openDlg("自律駆動を停止しますか",
-        "新しい割り当てを止めます。動いているエージェントは、今の作業を終えてから止まります（全員の作業が終わるまでは「停止待ち」と表示されます）。",
+        "新しい割り当てと PM の巡回を止めます。動いているエージェントは、今の作業を終えてから止まります（全員の作業が終わるまでは「停止待ち」と表示されます）。活動が止まったままのエージェントは、自動で終了されます。停止は取り消せません。",
         "自律駆動を止める",
         function () {
-          if (row) {
-            var st = row.querySelector(".loopst");
-            var working = row.querySelector(".st.run");
-            if (st) { st.className = "loopst " + (working ? "drain" : "stop"); st.textContent = working ? "停止待ち" : "停止中"; }
+          var working = row && row.querySelector(".st.run");
+          var next = working ? "drain" : "stop";
+          syncLoopRow(row, next);
+          if (next === "drain") {
+            btn.hidden = true;
+            btn.removeAttribute("data-dlg");
+          } else {
+            btn.textContent = "開始";
+            btn.setAttribute("data-dlg", "proj-start");
           }
-          btn.textContent = "停止を取り消す"; btn.setAttribute("data-dlg", "proj-resume");
           toast("自律駆動を停止します");
         });
-    } else if (kind === "proj-resume") {
-      var row2 = btn.closest(".prow");
-      if (row2) {
-        var st2 = row2.querySelector(".loopst");
-        if (st2) { st2.className = "loopst run"; st2.textContent = "自律駆動中"; }
-      }
+    } else if (kind === "proj-start") {
+      syncLoopRow(btn.closest(".prow"), "run");
       btn.textContent = "自律駆動を止める"; btn.setAttribute("data-dlg", "proj-stop");
-      toast("自律駆動を再開しました");
+      toast("自律駆動を開始しました");
     } else if (kind === "signout") {
       openDlg("サインアウトしますか",
         "サインアウトすると、この接続は使えなくなります。再度サインインすると、また使えるようになります。",
