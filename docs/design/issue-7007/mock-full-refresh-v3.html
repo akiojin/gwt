@@ -323,10 +323,10 @@
   .prow .st.wait i{background:var(--amber)}
   .prow .st.stop i{background:var(--red)}
   .prow .path{font-family:var(--mono);font-size:11.8px}
-  .prow .loopst{display:inline-flex;align-items:center;font-weight:700;font-size:11.8px;border:1px solid var(--line2);border-radius:999px;padding:1px 9px;color:var(--ink2);background:var(--gray-soft);white-space:nowrap}
-  .prow .loopst.run{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
-  .prow .loopst.drain{border-color:var(--amber);color:var(--amber);background:var(--amber-soft)}
-  .prow .loopst.stop{color:var(--ink3)}
+  .loopst{display:inline-flex;align-items:center;font-weight:700;font-size:11.8px;border:1px solid var(--line2);border-radius:999px;padding:1px 9px;color:var(--ink2);background:var(--gray-soft);white-space:nowrap}
+  .loopst.run{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
+  .loopst.drain{border-color:var(--amber);color:var(--amber);background:var(--amber-soft)}
+  .loopst.stop{color:var(--ink3)}
 
   /* ---------- mobile project tab strip (replaces the rail on small screens) ---------- */
   .mtabs{display:none}
@@ -1861,9 +1861,17 @@
                 </div>
               </div>
               <div class="set-group">
+                <div class="set-head">自律駆動</div>
+                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止すると、新しい課題の割り当ても PM の巡回も止まります（動いているエージェントは、今の作業を終えてから止まります）。</div></div><span class="loopst run">自律駆動中</span></div>
+                <div class="set-row"><div class="grow"><div class="t">自動で補充する（Auto Refill）</div><div class="d2">キューが補充の上限（Refill limit）未満のとき、Backlog から対象の課題を自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">補充の上限（Refill limit）</div><div class="d2">キューに保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">自律実行（Autonomous）</div><div class="d2">人手の承認なしで、対象の課題を自動で実行します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">同時実行数（Max active）</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="2" aria-label="同時実行数" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div><button class="btn" type="button" data-nav="g-settings-tuning">詳細設定を開く</button></div>
+              </div>
+              <div class="set-group">
                 <div class="set-head">作業の進め方</div>
                 <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。オフにすると、このプロジェクトには触りません。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">タスクが終わると、次の課題が自分で始まります（上限 3件）。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">起動候補（Candidates）</div><div class="d2">課題を始めるときの候補と、その起動条件（Session mode／Runtime など）です。</div></div><button class="btn" type="button" data-nav="g-candidates">候補を編集</button></div>
                 <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：bug、docs。</div></div><button class="btn" type="button" data-nav="g-labels">ラベルを編集</button></div>
               </div>
@@ -1887,6 +1895,33 @@
                 <div class="set-head">閉じる</div>
                 <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、gwt の担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="g-close-project">閉じる…</button></div>
               </div>
+            </div>
+            <div class="screen-pane" data-screen="g-settings-tuning">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">自律駆動の詳細設定 — gwt</p>
+              <p class="h-sub">自律駆動の細かい調整値です。通常は既定のままで問題ありません。変えると、このプロジェクトの自律駆動の動きだけに効きます。空欄の項目は、既定の動きをします。</p>
+              <div class="set-group">
+                <div class="set-head">試行と判定</div>
+                <div class="set-row"><div class="grow"><div class="t">試行上限</div><div class="d2">課題ごとの自動試行の上限です。超えると、人の対応待ち（NeedsHuman）になります（既定 3）。</div></div><input class="field" type="number" value="3" aria-label="試行上限" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">スタック判定の無進捗時間（秒）</div><div class="d2">進捗がないまま、この秒数を超えるとスタックと判定します（既定 1800秒＝30分）。</div></div><input class="field" type="number" value="1800" aria-label="スタック判定の無進捗時間" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">ハートビート間隔（秒）</div><div class="d2">スタック／アイドル判定に使う、ハートビートの鮮度の秒数です（既定 120秒）。</div></div><input class="field" type="number" value="120" aria-label="ハートビート間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">PR マージ監視の上限（秒）</div><div class="d2">PR のマージを監視し続ける上限の秒数です（既定 3600秒＝60分）。</div></div><input class="field" type="number" value="3600" aria-label="PR マージ監視の上限" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">Deliver Fix ループの上限</div><div class="d2">1回の試行の中で、修正の届け直しを繰り返す上限です（既定 5）。</div></div><input class="field" type="number" value="5" aria-label="Deliver Fix ループの上限" style="width:80px"></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">リトライとレビュー</div>
+                <div class="set-row"><div class="grow"><div class="t">リトライのバックオフ（基本・秒）</div><div class="d2">一時的な失敗を再試行するときの、待ち時間の基本の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="リトライのバックオフ（基本）" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">リトライのバックオフ（上限・秒）</div><div class="d2">指数バックオフで待ち時間が伸びる上限の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="リトライのバックオフ（上限）" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">レビューのモデル</div><div class="d2">独立レビューエージェントのモデルです。空欄なら、起動プロファイルのモデルを使います。</div></div><input class="field" type="text" placeholder="（空欄＝起動プロファイルのモデル）" aria-label="レビューのモデル" style="width:min(300px,100%)"></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">監視の間隔</div>
+                <div class="set-row"><div class="grow"><div class="t">ポーリング間隔（秒）</div><div class="d2">課題のキューを見に行く間隔の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="ポーリング間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">クレームのハートビート間隔（秒）</div><div class="d2">課題のクレーム（担当の確保）を保つためのハートビートの間隔です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームのハートビート間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">クレームの TTL（秒）</div><div class="d2">ハートビートが途絶えたクレームが失効するまでの秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームの TTL" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">起動を止める使用率の閾値（%）</div><div class="d2">プロバイダの使用率がこの値以上になると、新しい起動を止めます。</div></div><input class="field" type="number" placeholder="%" aria-label="起動を止める使用率の閾値" style="width:90px"></div>
+              </div>
+            </div>
             <div class="screen-pane" data-screen="g-task-new">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-tasks">&larr; タスク一覧へ</button></div>
               <p class="h-big">タスクを作る</p>
@@ -2031,8 +2066,6 @@
                 <div class="set-row"><div class="grow"><div class="t">進み具合と結果</div><div class="d2">実行すると、対象ごとに結果（削除済み／失敗と理由）がここに出ます。マージされていない変更があるブランチは止めて知らせます。</div></div></div>
               </div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">片付けを実行する</button><button class="btn ghost" type="button" data-nav="g-branches">キャンセル</button></div>
-            </div>
-
             </div>
 
           </div>
@@ -2390,6 +2423,16 @@
               <p class="h-big">設定 — KeibaDB</p>
               <p class="h-sub">このプロジェクトだけの設定です。</p>
               <div class="set-group">
+                <div class="set-head">自律駆動</div>
+                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止待ちの間は、新しい課題の割り当ても PM の巡回も止まっています（動いているエージェントは、今の作業を終えてから止まります）。</div></div><span class="loopst drain">停止待ち</span></div>
+                <div class="set-row"><div class="grow"><div class="t">残っている作業</div><div class="d2">作業中のエージェント 2件の完了待ちです。全員が終わると「停止中」になります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">自動で補充する（Auto Refill）</div><div class="d2">キューが補充の上限（Refill limit）未満のとき、Backlog から対象の課題を自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">補充の上限（Refill limit）</div><div class="d2">キューに保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">自律実行（Autonomous）</div><div class="d2">人手の承認なしで、対象の課題を自動で実行します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">同時実行数（Max active）</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="1" aria-label="同時実行数" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div><button class="btn" type="button" data-nav="k-settings-tuning">詳細設定を開く</button></div>
+              </div>
+              <div class="set-group">
                 <div class="set-head">作業の進め方</div>
                 <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">取り込みは毎日 6:00</div><div class="d2">このプロジェクトだけの違いです（端末全体の設定とは別に持っています）。</div></div><button class="btn" type="button" data-nav="k-import-time">変える</button></div>
@@ -2410,6 +2453,33 @@
                 <div class="set-head">閉じる</div>
                 <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button" data-nav="k-close-project">閉じる…</button></div>
               </div>
+            </div>
+            <div class="screen-pane" data-screen="k-settings-tuning">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-settings">&larr; 設定へ戻る</button></div>
+              <p class="h-big">自律駆動の詳細設定 — KeibaDB</p>
+              <p class="h-sub">自律駆動の細かい調整値です。通常は既定のままで問題ありません。変えると、このプロジェクトの自律駆動の動きだけに効きます。空欄の項目は、既定の動きをします。</p>
+              <div class="set-group">
+                <div class="set-head">試行と判定</div>
+                <div class="set-row"><div class="grow"><div class="t">試行上限</div><div class="d2">課題ごとの自動試行の上限です。超えると、人の対応待ち（NeedsHuman）になります（既定 3）。</div></div><input class="field" type="number" value="3" aria-label="試行上限" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">スタック判定の無進捗時間（秒）</div><div class="d2">進捗がないまま、この秒数を超えるとスタックと判定します（既定 1800秒＝30分）。</div></div><input class="field" type="number" value="1800" aria-label="スタック判定の無進捗時間" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">ハートビート間隔（秒）</div><div class="d2">スタック／アイドル判定に使う、ハートビートの鮮度の秒数です（既定 120秒）。</div></div><input class="field" type="number" value="120" aria-label="ハートビート間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">PR マージ監視の上限（秒）</div><div class="d2">PR のマージを監視し続ける上限の秒数です（既定 3600秒＝60分）。</div></div><input class="field" type="number" value="3600" aria-label="PR マージ監視の上限" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">Deliver Fix ループの上限</div><div class="d2">1回の試行の中で、修正の届け直しを繰り返す上限です（既定 5）。</div></div><input class="field" type="number" value="5" aria-label="Deliver Fix ループの上限" style="width:80px"></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">リトライとレビュー</div>
+                <div class="set-row"><div class="grow"><div class="t">リトライのバックオフ（基本・秒）</div><div class="d2">一時的な失敗を再試行するときの、待ち時間の基本の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="リトライのバックオフ（基本）" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">リトライのバックオフ（上限・秒）</div><div class="d2">指数バックオフで待ち時間が伸びる上限の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="リトライのバックオフ（上限）" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">レビューのモデル</div><div class="d2">独立レビューエージェントのモデルです。空欄なら、起動プロファイルのモデルを使います。</div></div><input class="field" type="text" placeholder="（空欄＝起動プロファイルのモデル）" aria-label="レビューのモデル" style="width:min(300px,100%)"></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">監視の間隔</div>
+                <div class="set-row"><div class="grow"><div class="t">ポーリング間隔（秒）</div><div class="d2">課題のキューを見に行く間隔の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="ポーリング間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">クレームのハートビート間隔（秒）</div><div class="d2">課題のクレーム（担当の確保）を保つためのハートビートの間隔です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームのハートビート間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">クレームの TTL（秒）</div><div class="d2">ハートビートが途絶えたクレームが失効するまでの秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームの TTL" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">起動を止める使用率の閾値（%）</div><div class="d2">プロバイダの使用率がこの値以上になると、新しい起動を止めます。</div></div><input class="field" type="number" placeholder="%" aria-label="起動を止める使用率の閾値" style="width:90px"></div>
+              </div>
+            </div>
             <div class="screen-pane" data-screen="k-task-new">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-tasks">&larr; タスク一覧へ</button></div>
               <p class="h-big">タスクを作る</p>
@@ -2536,8 +2606,6 @@
               </div>
               <div class="notice">候補はこのプロジェクトの設定です。エージェント（担当者）とは別で、誰が担当するかは起動時に決まります。</div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
-            </div>
-
             </div>
 
           </div>
@@ -2735,7 +2803,7 @@
 <span class="warn">⚠ 警告 2件：未使用の変数（従来からあるもの）</span>
 <span class="dim">— 出力はここまで。続きはライブで流れます —</span></div>
             </div>
-            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。指示は「相談」の会話から出します（会話の内容はタスクに自動で記録されます）。</p>
+            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。指示は「相談」の会話から出します（会話の内容はタスクに自動で記録されます）。この表示の要件（大量の出力でも詰まらない描画、時間とともに劣化しないスクロール、残像・重なりなし、再接続時の再生、セッション消滅時の自動復帰）は、設計正本の項目58を正とします。</p>
             <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-ask">相談へ戻る</button><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-agents">担当者で選ぶ</button></div>
           </div>
         </div>
@@ -2775,9 +2843,9 @@
   var pageLabels = { start: "開始画面", firstrun: "初回セットアップ", projects: "プロジェクト", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
     appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
-    "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
+    "g-settings-tuning": "自律駆動の詳細設定", "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
     "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "タスクを作る", "g-subissue-add": "子課題を追加", "g-session-picker": "セッションを選ぶ", "g-agent-pause": "一時停止の確認", "g-project-stop": "プロジェクトを止める", "g-labels": "ラベルを編集", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
-    "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
+    "k-settings-tuning": "自律駆動の詳細設定", "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
     "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "タスクを作る", "k-subissue-add": "子課題を追加", "k-session-picker": "セッションを選ぶ", "k-agent-pause": "一時停止の確認", "k-labels": "ラベルを編集", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
   };
   var current = { start: "start", firstrun: "setup-welcome", addproject: "add-github", notifications: "notifications-main", settings: "appsettings", agents: "agents-ledger", tools: "tools-pool", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
