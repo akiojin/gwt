@@ -696,6 +696,7 @@ pub(crate) enum OwnerMessage {
     },
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
+    MonitorWindowSnapshot(mpsc::Sender<Option<crate::IssueMonitorWindowSnapshot>>),
     GuiAttached {
         instance: uuid::Uuid,
         reply: oneshot::Sender<Result<u64, String>>,
@@ -716,6 +717,19 @@ pub struct OwnerHandle {
         Arc<std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>>,
 }
 impl OwnerHandle {
+    pub(crate) fn monitor_window_snapshot(&self) -> Option<crate::IssueMonitorWindowSnapshot> {
+        let now = gwt_core::operation_deadline::now();
+        let timeout = std::time::Duration::from_secs(1);
+        let timeout = gwt_core::operation_deadline::current().map_or(timeout, |deadline| {
+            timeout.min(deadline.saturating_duration_since(now))
+        });
+        let (reply, receive) = mpsc::channel();
+        self.sender
+            .send(OwnerMessage::MonitorWindowSnapshot(reply))
+            .ok()?;
+        receive.recv_timeout(timeout).ok().flatten()
+    }
+
     #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_pause_runtime_reconciliation(
         &self,
@@ -2309,6 +2323,10 @@ impl OwnerState {
                 }
                 OwnerMessage::Pane(event) => self.pane_event(event),
                 OwnerMessage::Transport(event) => self.handle_transport_event(event),
+                OwnerMessage::MonitorWindowSnapshot(reply) => {
+                    let _ = reply
+                        .send((!self.stopping).then(|| self.owner_monitor_window_snapshot("")));
+                }
                 OwnerMessage::Shutdown(reply) => self.begin_shutdown(Some(reply)),
             }
             #[cfg(any(test, feature = "test-gh-guard"))]

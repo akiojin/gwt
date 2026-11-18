@@ -1025,6 +1025,7 @@ pub(crate) fn read_execution_observations_from_inventory(
                     *issue_number,
                     crate::issue_monitor::IssueMonitorExecutionObservation {
                         settlement: IssueMonitorExecutionSettlement::Unknown,
+                        reaped_at: None,
                         process_held: true,
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
@@ -1138,6 +1139,7 @@ pub(crate) fn read_execution_observations_from_inventory(
                 *issue_number,
                 crate::issue_monitor::IssueMonitorExecutionObservation {
                     settlement,
+                    reaped_at: diagnosis.reaped_at,
                     process_held,
                     // A terminal sidecar can outlive its GUI host. Its exact
                     // PID/start-time death remains independent runtime evidence.

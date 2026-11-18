@@ -3392,6 +3392,8 @@ pub enum IssueMonitorExecutionSettlement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMonitorExecutionObservation {
     pub settlement: IssueMonitorExecutionSettlement,
+    /// The exact generation's startup reaper settlement, when available.
+    pub reaped_at: Option<gwt_core::timestamp::UtcTimestamp>,
     /// A live worktree agent or ambiguous runtime evidence vetoes recovery.
     pub process_held: bool,
     /// Exact holder runtime evidence proves its previous GUI host has exited.
@@ -25666,7 +25668,15 @@ impl IssueMonitorState {
     /// Keep observations received while a scan ran, without replaying a stale
     /// heartbeat over the scan's own progress or newer steering request.
     pub(crate) fn merge_scan_observations_from(&mut self, live: &Self) {
-        if let Some(snapshot) = &live.window_snapshot {
+        // The scan can sample the native owner after the last pushed canvas.
+        // An older GUI alias must not replace that newer observation at commit.
+        if let Some(snapshot) = live.window_snapshot.as_ref().filter(|incoming| {
+            self.window_snapshot.as_ref().is_none_or(|sampled| {
+                parse_rfc3339_utc(&incoming.observed_at)
+                    .zip(parse_rfc3339_utc(&sampled.observed_at))
+                    .is_none_or(|(incoming, sampled)| incoming >= sampled)
+            })
+        }) {
             self.record_window_snapshot_with_origin(
                 snapshot.clone(),
                 live.window_snapshot_host,
@@ -26012,35 +26022,51 @@ impl IssueMonitorState {
         settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) -> Vec<IssueMonitorIdleWindow> {
+        let fresh_snapshot = self.fresh_window_snapshot(now);
         let mut classified = self
             .launched_windows
             .iter()
             .filter(|(number, window)| {
-                settlements.get(number).is_some_and(|observation| {
-                    observation.holder_host_dead
-                        // Inbox payloads are not persisted. At startup wait
-                        // for the candidate read before deciding whether this
-                        // Completed generation finished its owner or one slice,
-                        // or whether an Interrupted owner may be requeued.
-                        && (!matches!(observation.settlement,
-                            IssueMonitorExecutionSettlement::Completed
-                                | IssueMonitorExecutionSettlement::Interrupted)
-                            || self.inbox_item(**number).is_some())
-                        && matches!(
-                            observation.settlement,
-                            IssueMonitorExecutionSettlement::Completed
-                                | IssueMonitorExecutionSettlement::Blocked
-                                | IssueMonitorExecutionSettlement::Interrupted
-                                | IssueMonitorExecutionSettlement::RecoveryExhausted
-                        )
-                }) && !self.binding_recovery_pending(**number, now, settlements)
+                use IssueMonitorExecutionSettlement::{
+                    Blocked, Completed, Interrupted, RecoveryExhausted,
+                };
+                let Some(observation) = settlements.get(number) else {
+                    return false;
+                };
+                let settlement = observation.settlement;
+                // Startup prefs omit the inbox. Wait for the candidate read
+                // before deciding whether this unfinished owner can requeue.
+                if observation.process_held
+                    || (matches!(settlement, Completed | Interrupted)
+                        && self.inbox_item(**number).is_none())
+                {
+                    return false;
+                }
+                // The reaper proved this generation's holder had exited. An ACK
+                // ordered before that proof needs no second canvas observation
+                // or registration grace. A later ACK can be a fresh launch.
+                if let Some(reaped_at) = observation.reaped_at.filter(|_| settlement == Interrupted)
+                {
+                    if let Some(confirmed_at) = self
+                        .launch_confirmations
+                        .get(number)
+                        .filter(|ack| ack.window_id == **window)
+                        .and_then(|ack| parse_rfc3339_utc(&ack.confirmed_at))
+                    {
+                        return observation.held_holder_session_id.is_none()
+                            && confirmed_at < reaped_at;
+                    }
+                }
+                observation.holder_host_dead
+                    && matches!(settlement, Completed | Blocked | Interrupted | RecoveryExhausted)
+                    && !self.binding_recovery_pending(**number, now, settlements)
                     // A fresh ordered absence already has its own unfinished
                     // recovery policy. Only bypass missing/stale canvas proof
                     // or a retained obsolete pane identity (Issue #4446).
                     // Exhausted recovery releases capacity without retrying,
                     // even when the new canvas confirms the old pane absent.
-                    && !(settlements[number].settlement != IssueMonitorExecutionSettlement::RecoveryExhausted
-                        && self.fresh_window_snapshot(now).is_some_and(|snapshot| {
+                    && !(settlement != RecoveryExhausted
+                        && fresh_snapshot.is_some_and(|snapshot| {
                         issue_monitor_qualified_window_id(window).is_some_and(|(tab, _)| {
                             self.window_snapshot_tabs.contains(tab)
                                 || self.window_snapshot_host.is_some()
@@ -26070,7 +26096,7 @@ impl IssueMonitorState {
                     && !self.failed_issues.contains_key(number),
             })
             .collect::<Vec<_>>();
-        let Some(snapshot) = self.fresh_window_snapshot(now) else {
+        let Some(snapshot) = fresh_snapshot else {
             return classified;
         };
         let observation = |window_id: &str| {
@@ -26491,12 +26517,8 @@ impl IssueMonitorState {
             .into_iter()
             .filter(|idle| {
                 idle.bound
+                    && !idle.pane_present
                     && idle.idle_kind == IssueMonitorIdleKind::ExecutionSettled
-                    && idle.issue_number.is_some_and(|number| {
-                        settlements.get(&number).is_some_and(|observation| {
-                            observation.holder_host_dead && !observation.process_held
-                        })
-                    })
             })
             .collect();
         let mut outcome = IssueMonitorIdleReconciliation {
@@ -42864,6 +42886,139 @@ mod tests {
     }
 
     #[test]
+    fn issue_7614_scan_commit_keeps_the_newer_native_pane_ids() {
+        let restored_window = "native::restored";
+        let mut live = launched_monitor(42, restored_window);
+        let mut gui_alias =
+            idle_observation("gui::restored", Some(42), WindowState::Running, false);
+        gui_alias.monitor_owned = true;
+        live.record_window_snapshot_from_host(
+            idle_snapshot(IDLE_NOW, vec![gui_alias]),
+            123,
+            1,
+            BTreeSet::from(["gui".into()]),
+        );
+
+        let mut scanned = live.clone();
+        let now = "2026-09-07T04:01:00Z";
+        let mut restored = idle_observation(restored_window, Some(42), WindowState::Running, false);
+        restored.monitor_owned = true;
+        scanned.record_window_snapshot_from_host(
+            idle_snapshot(now, vec![restored]),
+            124,
+            1,
+            BTreeSet::from(["native".into()]),
+        );
+        scanned.record_monitor_runtime_windows(
+            124,
+            1,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([(restored_window.into(), 42)]),
+            now,
+        );
+
+        scanned.merge_scan_observations_from(&live);
+
+        assert_eq!(scanned.occupied_slot_count(), 1);
+    }
+
+    #[test]
+    fn issue_7614_recovers_a_mixed_cohort_on_the_first_restart_scan() {
+        let mut previous = launched_cohort(&[
+            (42, "tab-1::old-42"),
+            (43, "tab-1::old-43"),
+            (44, "tab-1::old-44"),
+        ]);
+        previous
+            .launch_confirmations
+            .get_mut(&44)
+            .unwrap()
+            .confirmed_at = "2026-09-07T04:09:00Z".into();
+        let before_restart = previous.prefs();
+        let mut monitor = test_monitor_with_prefs(previous.config.clone(), before_restart.clone());
+        for number in [42, 43, 44] {
+            monitor.record_candidate(issue(number));
+        }
+        let new_window = "tab-1::restored-42";
+        let mut pane = idle_observation(new_window, Some(42), WindowState::Running, false);
+        pane.monitor_owned = true;
+        pane.session_id = Some("restored-holder".into());
+        let now = "2026-09-07T04:10:00Z";
+        monitor.record_window_snapshot_from_host(
+            idle_snapshot(now, vec![pane]),
+            123,
+            1,
+            BTreeSet::new(),
+        );
+        let owners = BTreeMap::from([(new_window.into(), 42)]);
+        monitor.record_monitor_runtime_windows(
+            123,
+            1,
+            BTreeMap::from([(42, 1)]),
+            owners.clone(),
+            now,
+        );
+        let mut observed = settlements(&[
+            (42, IssueMonitorExecutionSettlement::Active),
+            (43, IssueMonitorExecutionSettlement::Interrupted),
+            (44, IssueMonitorExecutionSettlement::Interrupted),
+        ]);
+        let holder = observed.get_mut(&42).unwrap();
+        holder.process_held = true;
+        holder.held_holder_session_id = Some("restored-holder".into());
+        for number in [43, 44] {
+            observed.get_mut(&number).unwrap().reaped_at =
+                parse_rfc3339_utc("2026-09-07T04:09:45Z");
+        }
+        let mut protected = monitor.clone();
+        protected
+            .launch_confirmations
+            .get_mut(&44)
+            .unwrap()
+            .confirmed_at = "2026-09-07T04:09:50Z".into();
+        observed.get_mut(&43).unwrap().process_held = true;
+        assert!(protected
+            .reconcile_dead_terminal_launches(&observed, now)
+            .released
+            .is_empty());
+        observed.get_mut(&43).unwrap().process_held = false;
+        observed.get_mut(&43).unwrap().held_holder_session_id = Some("uncertain-holder".into());
+        assert!(protected
+            .reconcile_dead_terminal_launches(&observed, now)
+            .released
+            .is_empty());
+        observed.get_mut(&43).unwrap().held_holder_session_id = None;
+        assert_eq!(
+            monitor
+                .active_issue_numbers()
+                .iter()
+                .filter(|&&n| n == 42)
+                .count(),
+            2
+        );
+
+        let terminal = monitor.reconcile_dead_terminal_launches(&observed, now);
+        let outcome =
+            crate::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                &mut monitor,
+                &observed,
+                &owners,
+                now,
+                now,
+                terminal,
+            );
+
+        assert_eq!(outcome.rebound, vec![(42, new_window.into())]);
+        assert_eq!(outcome.requeued, vec![43, 44]);
+        assert!(outcome.pane_closes.is_empty());
+        assert_eq!(monitor.occupied_slot_count(), 1);
+        monitor.rebase_daemon_driver_prefs(&before_restart);
+        assert_eq!(monitor.occupied_slot_count(), 1);
+        assert_eq!(monitor.queued_issue_numbers(), vec![43, 44]);
+        assert_eq!(monitor.claim_probe_plan(3), (2, vec![43, 44]));
+    }
+
+    #[test]
     fn issue_4131_cross_tab_rebind_requires_verified_exact_holder() {
         for (holder, verified) in [
             (None, true),
@@ -55388,6 +55543,7 @@ mod tests {
                 42,
                 IssueMonitorExecutionObservation {
                     settlement,
+                    reaped_at: None,
                     process_held,
                     holder_host_dead,
                     dead_holder_hosts: Default::default(),
@@ -55453,6 +55609,7 @@ mod tests {
                     *number,
                     IssueMonitorExecutionObservation {
                         settlement: *settlement,
+                        reaped_at: None,
                         process_held: false,
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
@@ -55613,6 +55770,7 @@ mod tests {
             42,
             IssueMonitorExecutionObservation {
                 settlement: IssueMonitorExecutionSettlement::Completed,
+                reaped_at: None,
                 process_held: true,
                 holder_host_dead: false,
                 dead_holder_hosts: Default::default(),
