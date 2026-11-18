@@ -321,7 +321,7 @@ jobs:
       # Windows agent launch job, 25 switch proofs need an isolated Linux root
       # process namespace (GWT_PLAYWRIGHT_SWITCH_POSITIVE), and the remaining
       # 14 are unmeasured on this runner, so a flake there would stop every PR.
-      - name: Build checkout binaries for the live Issue Monitor regression
+      - name: Build checkout binaries for the live Issues regression
         if: matrix.shard == 1
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -332,11 +332,11 @@ jobs:
         with:
           node-version: 22
         timeout-minutes: 5
-      - name: Install Chromium for the live Issue Monitor regression
+      - name: Install Chromium for the live Issues regression
         if: matrix.shard == 1
         run: bash scripts/install-playwright-browsers.sh all
         timeout-minutes: 18
-      - name: Verify Issue Monitor operator hold in both themes
+      - name: Verify Issues operator hold in both themes
         if: matrix.shard == 1
         env:
           GWT_PLAYWRIGHT_QUEUE_LAUNCH: "1"

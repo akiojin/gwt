@@ -626,7 +626,7 @@ fn required_linux_shard_runs_t94418_in_both_themes() {
     let jobs = &workflow["jobs"];
     let steps = jobs["test"]["steps"].as_sequence().unwrap();
     let position = |name: &str| steps.iter().position(|step| step["name"] == name);
-    let browser = position("Verify Issue Monitor operator hold in both themes")
+    let browser = position("Verify Issues operator hold in both themes")
         .expect("T94418 must run in the required Linux test matrix");
     let regression = &steps[browser];
     let last_test = steps
@@ -637,7 +637,7 @@ fn required_linux_shard_runs_t94418_in_both_themes() {
                 .is_some_and(|run| run.contains("cargo test"))
         })
         .unwrap();
-    let restore = position("Build checkout binaries for the live Issue Monitor regression")
+    let restore = position("Build checkout binaries for the live Issues regression")
         .expect("cargo test arms test-gh-guard; restore operational binaries first");
     assert!(last_test < restore && restore < browser);
     assert_eq!(steps[restore]["if"], "matrix.shard == 1");
