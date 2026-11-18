@@ -327,7 +327,7 @@
   <header class="doc">
     <div class="doc-kicker">gwt — Issue #7007</div>
     <h1>全画面刷新モック v3</h1>
-    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面にプロジェクトの内容は出さず、脇の一覧と上部のタブは名前だけの導線に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>ツール</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
+    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面にプロジェクトの内容は出さず、脇の一覧と上部のタブは名前だけの導線に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
   </header>
 
   <nav class="screens" aria-label="画面一覧">
@@ -335,9 +335,9 @@
       <a data-openpage="start">開始画面</a>
       <a data-openpage="agents">エージェント</a>
       <a data-openpage="agents" data-openscreen="agent-edit-jinsenji">エージェント設定</a>
-      <a data-openpage="tools">ツール</a>
-      <a data-openpage="tools" data-openscreen="tool-add">ツールを追加</a>
-      <a data-openpage="tools" data-openscreen="tools-supported">サポートツール</a>
+      <a data-openpage="tools">アカウント</a>
+      <a data-openpage="tools" data-openscreen="tool-add">アカウントを追加</a>
+      <a data-openpage="tools" data-openscreen="tools-supported">ツール管理</a>
       <a data-openpage="settings">アプリ設定</a>
       <a data-openpage="profile">プロファイル</a>
       <a data-openpage="notifications">通知</a>
@@ -376,7 +376,7 @@
         <button class="hpm" type="button" data-openpage="start"><span class="pm-face sm"><span class="dot wait"></span></span><span class="hname">秦泉寺 章夫</span><span class="badge b-wait">判断待ち 5件</span></button>
         <button class="btn ghost" type="button" data-openpage="notifications">通知<span class="belldot">3</span></button>
         <button class="btn ghost" type="button" data-openpage="agents">エージェント</button>
-        <button class="btn ghost" type="button" data-openpage="tools">ツール</button>
+        <button class="btn ghost" type="button" data-openpage="tools">アカウント</button>
         <button class="btn ghost" type="button" data-openpage="settings">設定</button>
       </div>
     </div>
@@ -661,7 +661,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="agents-ledger">
             <p class="h-big">エージェント台帳</p>
-            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持つ担当者です（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はパラメータ、性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM の担当者は入れ替わりません。ツールの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
+            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持つ担当者です（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はパラメータ、性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM の担当者は入れ替わりません。アカウントの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
             <div class="set-group">
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
             </div>
@@ -674,7 +674,7 @@
               <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hamada">編集</button></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button" data-nav="agent-new">追加</button></div>
             </div>
-            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのツール（アカウント）で動くかは、セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。担当の履歴と予定、いま何をしているか（現在の作業状態）は台帳には置かず、各プロジェクトの「担当者」と「作業」で見ます。エージェントは特定のプロジェクトに所属せず、全プロジェクト共通のマスタです。</div>
+            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのアカウントで動くかは、セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。担当の履歴と予定、いま何をしているか（現在の作業状態）は台帳には置かず、各プロジェクトの「担当者」と「作業」で見ます。エージェントは特定のプロジェクトに所属せず、全プロジェクト共通のマスタです。</div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-jinsenji">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
@@ -684,12 +684,12 @@
               <h4>基本</h4>
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="秦泉寺 章夫" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">優先指定されています。この人が PM を務めます。担当者はエージェントの層で決まるため、レート制限では入れ替わりません。ツールの割り当ては別の層で、PM のセッションはプールから優先的に割り当てられ、使える間は同じインスタンスに sticky です。インスタンスが枯渇したときだけ gwtd が別のインスタンスへ切り替えます（担当者は変わりません）。</div></div><button class="btn" type="button">優先指定を外す</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">優先指定されています。この人が PM を務めます。担当者はエージェントの層で決まるため、レート制限では入れ替わりません。アカウントの割り当ては別の層で、PM のセッションはプールから優先的に割り当てられ、使える間は同じインスタンスに sticky です。インスタンスが枯渇したときだけ gwtd が別のインスタンスへ切り替えます（担当者は変わりません）。</div></div><button class="btn" type="button">優先指定を外す</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">この端末の PM を務めています。PM の振る舞い（知らせ方など）は、設定の「あなたの PM」で変えます。</div></div><button class="btn" type="button" data-openpage="settings">あなたの PM を開く</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#0f766e">ツ</span>
                 <span class="ava" style="background:#2563eb">ツ</span>
@@ -716,7 +716,7 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-oda">
@@ -727,11 +727,11 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="小田 洋平" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#2563eb">小</span>
                 <span class="ava" style="background:#0f766e">小</span>
@@ -757,7 +757,7 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-himeno">
@@ -768,11 +768,11 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="姫野 大樹" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#c2410c">姫</span>
                 <span class="ava" style="background:#2563eb">姫</span>
@@ -798,7 +798,7 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-ando">
@@ -809,11 +809,11 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="安藤 健二" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#0e7490">安</span>
                 <span class="ava" style="background:#2563eb">安</span>
@@ -839,7 +839,7 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev">rust-dev</option><option value="data-import" selected>data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hara">
@@ -850,11 +850,11 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="原 和正" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#6d28d9">原</span>
                 <span class="ava" style="background:#2563eb">原</span>
@@ -880,7 +880,7 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-suzuki">
@@ -891,11 +891,11 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="鈴木 和斗" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#a16207">鈴</span>
                 <span class="ava" style="background:#2563eb">鈴</span>
@@ -921,7 +921,7 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hamada">
@@ -932,11 +932,11 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="濱田 嵩翔" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。アカウントの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#be123c">濱</span>
                 <span class="ava" style="background:#2563eb">濱</span>
@@ -962,7 +962,7 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-new">
@@ -977,7 +977,7 @@
             </div>
             <div class="set-group">
               <h4>アバター</h4>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。選ばなければ、名前の頭文字の既定アバターになります。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。選ばなければ、名前の頭文字の既定アバターになります。アバターはエージェントの属性で、使うアカウントが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava" style="background:#0f766e">？</span>
                 <span class="ava" style="background:#2563eb">？</span>
@@ -1000,52 +1000,51 @@
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">追加する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
         </div>
       </div>
 
-      <!-- ================= ツール ================= -->
+      <!-- ================= アカウント ================= -->
       <div class="pagegroup" data-page="tools">
-        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">ツールは端末全体の画面です（ヘッダーから開きます）</span></div>
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">アカウントは端末全体の画面です（ヘッダーから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="tools-pool">
-            <p class="h-big">ツール</p>
-            <p class="h-sub">ツールはアカウント単位の実体（インスタンス）の集まりです。使用率・リセット時刻・制限状態と、プロバイダの使用量はここで見ます。エージェントへの割り当ては、セッション開始時に空いているツールから自動で行われます。</p>
+            <p class="h-big">アカウント</p>
+            <p class="h-sub">アカウントは、ツール（本体＝CLI）に登録されたアカウントの集まりです。プールには、本体がインストール済みで、アカウント登録ができているものだけを並べます。使用率・リセット時刻・制限状態と、プロバイダの使用量はここで見ます。エージェントへの割り当ては、セッション開始時に空いているアカウントから自動で行われます。本体（CLI）のインストールと更新は「ツール管理」で行います。</p>
             <div class="set-group">
               <h4>Claude Code</h4>
-              <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">サインイン済み · バージョン 2.1.326 — 最新です</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div><span class="badge b-done">最新</span></div>
-              <div class="set-row"><div class="grow"><div class="t">Claude Code 2（個人メール）</div><div class="d2">サインイン済み · バージョン 2.1.326 — 最新です</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 金曜 18:00にリセット · 上限のため、いまは割り当て対象外</span></div></div><span class="badge b-block">上限</span></div>
+              <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Claude Code 2（個人メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 金曜 18:00にリセット · 上限のため、いまは割り当て対象外</span></div></div><span class="badge b-block">上限</span></div>
             </div>
             <div class="set-group">
               <h4>Codex</h4>
-              <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">サインイン済み · バージョン 0.164.0 · 最新 0.169.0 — 更新があります</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 土曜 21:25にリセット · いまは割り当て対象外</span></div></div><span class="badge b-wait">要確認</span><button class="btn" type="button" data-nav="tool-update">更新</button></div>
-              <div class="set-row"><div class="grow"><div class="t">Codex 2（個人メール）</div><div class="d2">サインイン済み · バージョン 0.169.0 — 最新です</div><div class="use"><div class="bar"><i class="amb" style="width:90%"></i></div><span>週間90%使用 · 日曜 21:25にリセット</span></div></div><span class="badge b-done">最新</span></div>
+              <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 土曜 21:25にリセット · いまは割り当て対象外</span></div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Codex 2（個人メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i class="amb" style="width:90%"></i></div><span>週間90%使用 · 日曜 21:25にリセット</span></div></div></div>
               <div class="set-row"><div class="grow"><div class="t">Codex 3</div><div class="d2">サインインが必要です — サインインするまで割り当て対象外です</div></div><button class="btn" type="button" data-nav="tool-signin">サインイン</button></div>
             </div>
             <div class="set-group">
               <h4>Grok Build</h4>
-              <div class="set-row"><div class="grow"><div class="t">Grok Build 1</div><div class="d2">未インストール</div><div class="use"><div class="bar"><i style="width:2%"></i></div><span>週間2%使用</span></div></div><button class="btn primary" type="button" data-nav="tool-install">インストール</button></div>
+              <div class="set-row"><div class="grow"><div class="t">Grok Build 1</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:2%"></i></div><span>週間2%使用</span></div></div></div>
             </div>
             <div class="set-group">
-              <h4>ツールの管理</h4>
-              <div class="set-row"><div class="grow"><div class="t">ツールを自動で更新する</div><div class="d2">次回起動時に、更新の経路が確認できていて新しいバージョンがあるツールだけを更新します。勝手にインストールはしません。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
-              <div class="set-row"><div class="grow"><div class="t">ツールを追加する</div><div class="d2">アカウントを追加すると、プールに入って自動で割り当て候補になります。初回は、少なくとも1つのツールの登録とサインインが済むまで先へ進めません。</div></div><button class="btn" type="button" data-nav="tool-add">追加</button></div>
-              <div class="set-row"><div class="grow"><div class="t">サポートツールの管理</div><div class="d2">ツール本体（CLI）のインストールと更新はこちらです。上のプールは「アカウント」の管理で、本体の管理とは別です。</div></div><button class="btn" type="button" data-nav="tools-supported">管理を開く</button></div>
+              <h4>追加と管理</h4>
+              <div class="set-row"><div class="grow"><div class="t">アカウントを追加する</div><div class="d2">アカウントを追加すると、プールに入って自動で割り当て候補になります。初回は、少なくとも1つのアカウントの登録とサインインが済むまで先へ進めません。</div></div><button class="btn" type="button" data-nav="tool-add">追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">ツール管理</div><div class="d2">ツール（本体＝CLI）のインストールと更新は、ツール管理だけで行います。この画面（アカウント）では扱いません。</div></div><button class="btn" type="button" data-nav="tools-supported">管理を開く</button></div>
             </div>
           </div>
           <div class="screen-pane" data-screen="tool-add">
-            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
-            <p class="h-big">ツールを追加する</p>
-            <p class="h-sub">アカウントを追加するとプールに入り、割り当て候補になります。初回は、少なくとも1つのツールの登録とサインインが済むまで先へ進めません。</p>
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
+            <p class="h-big">アカウントを追加する</p>
+            <p class="h-sub">アカウントを追加するとプールに入り、割り当て候補になります。初回は、少なくとも1つのアカウントの登録とサインインが済むまで先へ進めません。</p>
             <div class="steps"><span class="st on">1. 種類</span><span>→</span><span class="st">2. アカウント</span><span>→</span><span class="st">3. サインイン</span><span>→</span><span class="st">4. 完了</span></div>
             <div class="set-group">
               <h4>種類を選ぶ（アカウント型）</h4>
               <div class="set-row"><div class="grow"><div class="t">アカウント型のツール</div><div class="d2">アカウントを登録してサインインすると、そのアカウントがプールに入ります。</div></div></div>
               <div class="set-row"><div class="chips" role="group" aria-label="ツールの種類"><button class="chip on" type="button">Claude Code</button><button class="chip" type="button">Codex</button><button class="chip" type="button">Grok Build</button><button class="chip" type="button">GitHub Copilot</button><button class="chip" type="button">Antigravity CLI</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">プールでの見分けに使います（例：Claude Code 3（予備））。</div></div><input class="field" type="text" placeholder="表示名" aria-label="表示名" style="width:220px"></div>
-              <div class="set-row"><div class="grow"><div class="t">本体（CLI）</div><div class="d2">選んだ種類の本体が未導入のときは、先にインストールへ案内します。</div></div><button class="btn" type="button" data-nav="tools-supported">サポートツールで確認</button></div>
+              <div class="set-row"><div class="grow"><div class="t">本体（CLI）</div><div class="d2">選んだ種類の本体が未導入のときは、先にインストールへ案内します。</div></div><button class="btn" type="button" data-nav="tools-supported">ツール管理で確認</button></div>
             </div>
             <div class="set-group">
               <h4>フロントエンド型のツール</h4>
@@ -1055,7 +1054,7 @@
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tool-signin">追加してサインインへ進む</button><button class="btn ghost" type="button" data-nav="tools-pool">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="tool-signin">
-            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
             <p class="h-big">サインイン — Codex 3</p>
             <p class="h-sub">サインインが済むまで、このアカウントは割り当て対象外です。済むとプールに入り、候補になります。</p>
             <div class="set-group">
@@ -1063,22 +1062,22 @@
               <div class="set-row"><div class="grow"><div class="t">サインイン用のシェルを開く</div><div class="d2">コマンドでサインインする場合はこちらです。シェルの中でログインを終えてください。</div></div><button class="btn" type="button" data-openpage="terminal">シェルを開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">未サインイン — 割り当て対象外</div></div><span class="badge b-block">未サインイン</span></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-pool">完了してツールへ戻る</button><button class="btn ghost" type="button" data-nav="tools-pool">あとで</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-pool">完了してアカウントへ戻る</button><button class="btn ghost" type="button" data-nav="tools-pool">あとで</button></div>
           </div>
           <div class="screen-pane" data-screen="tool-install">
-            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-supported">&larr; ツール管理へ</button></div>
             <p class="h-big">インストール — Grok Build</p>
             <p class="h-sub">ツール本体（CLI）をこの端末に入れます。アカウントの追加とは別の操作です。</p>
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">導入の経路</div><div class="d2">確認済みの経路から入れます（公式の配布元）。経路が確認できないツールは自動では入れません。</div></div><span class="badge b-run">確認済み</span></div>
               <div class="set-row"><div class="grow"><div class="t">進み具合</div><div class="d2">ダウンロード → 配置 → 動作確認の順に進みます</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:45%"></i></div></div><span class="badge b-run">インストール中 45%</span></div>
               <div class="set-row"><div class="grow"><div class="t">受け付けられないとき</div><div class="d2">そのツールのエージェントウィンドウが動いている間は、インストールと更新は受け付けません。理由はこの場に出します。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">終わったら</div><div class="d2">バージョンが「サポートツール」の一覧に出ます。アカウントを使うには、続けてサインインが必要です。</div></div><button class="btn" type="button" data-nav="tool-signin">サインインへ進む</button></div>
+              <div class="set-row"><div class="grow"><div class="t">終わったら</div><div class="d2">バージョンが「ツール管理」の一覧に出ます。アカウントを使うには、続けてサインインが必要です。</div></div><button class="btn" type="button" data-nav="tool-signin">サインインへ進む</button></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tools-supported">サポートツールへ戻る</button><button class="btn ghost" type="button" data-nav="tools-pool">ツールへ戻る</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tools-supported">ツール管理へ戻る</button><button class="btn ghost" type="button" data-nav="tools-pool">アカウントへ戻る</button></div>
           </div>
           <div class="screen-pane" data-screen="tool-update">
-            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-supported">&larr; ツール管理へ</button></div>
             <p class="h-big">更新 — Codex 1</p>
             <p class="h-sub">本体のバージョンを 0.164.0 から 0.169.0 へ更新します。アカウントと使用量には影響しません。</p>
             <div class="set-group">
@@ -1087,18 +1086,18 @@
               <div class="set-row"><div class="grow"><div class="t">受け付けられないとき</div><div class="d2">Codex のウィンドウが動いている間は更新を受け付けません。その場合は、止めてからやり直す案内を出します。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">結果</div><div class="d2">成功・失敗はここに出ます。失敗したときは理由と、ログへの導線を添えます。</div></div></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">更新する</button><button class="btn ghost" type="button" data-nav="tools-pool">戻る</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">更新する</button><button class="btn ghost" type="button" data-nav="tools-supported">戻る</button></div>
           </div>
           <div class="screen-pane" data-screen="tools-supported">
-            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; ツールへ</button></div>
-            <p class="h-big">サポートツール</p>
-            <p class="h-sub">ツール本体（CLI）のインストールと更新を管理します。アカウントのプールとは別で、本体が入っていない種類は使えません。</p>
-            <table class="list" aria-label="サポートツール">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
+            <p class="h-big">ツール管理</p>
+            <p class="h-sub">ツール（本体＝CLI）のインストールと更新は、ここだけで行います。アカウントの追加やサインインは「アカウント」の画面で扱い、ここでは扱いません。本体が入っていない種類は、アカウントを登録できません。</p>
+            <table class="list" aria-label="ツール管理">
               <thead><tr><th>ツール</th><th>状態</th><th>導入済み</th><th>利用可能</th><th></th></tr></thead>
               <tbody>
                 <tr><td>Claude Code</td><td><span class="badge b-run">導入済み</span></td><td class="num">2.1.326</td><td class="num">2.1.326（最新）</td><td></td></tr>
                 <tr><td>Codex</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.164.0</td><td class="num">0.169.0</td><td><button class="btn" type="button" data-nav="tool-update">更新</button></td></tr>
-                <tr><td>Grok Build</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">1.2.0</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
+                <tr><td>Grok Build</td><td><span class="badge b-run">導入済み</span></td><td class="num">1.2.0</td><td class="num">1.2.0（最新）</td><td></td></tr>
                 <tr><td>Antigravity CLI</td><td><span class="badge b-run">導入済み</span></td><td class="num">1.4.0</td><td class="num">1.4.0（最新）</td><td></td></tr>
                 <tr><td>OpenCode</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.9.2</td><td class="num">1.0.0</td><td><button class="btn" type="button" data-nav="tool-update">更新</button></td></tr>
                 <tr><td>OpenClaw</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">0.5.1</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
@@ -1120,7 +1119,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="appsettings">
             <p class="h-big">設定</p>
-            <p class="h-sub">この端末全体の設定です。エージェント台帳とツールは独立した画面にあります。プロジェクトごとの設定は、各プロジェクトページの「設定」にあります。</p>
+            <p class="h-sub">この端末全体の設定です。エージェント台帳とアカウントは独立した画面にあります。プロジェクトごとの設定は、各プロジェクトページの「設定」にあります。</p>
             <div class="chips" role="group" aria-label="設定のタブ"><button class="chip on" type="button" data-tab="yourpm">あなたの PM</button><button class="chip" type="button" data-tab="projects">プロジェクト</button></div>
 
             <div class="set-pane on" data-pane="yourpm">
@@ -1382,7 +1381,7 @@
               <div class="set-group">
                 <h4>実行</h4>
                 <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">開始待ち — まだ誰も作業していません。</div></div><span class="badge b-queue">開始待ち</span></div>
-                <div class="set-row"><div class="grow"><div class="t">担当者とセッション</div><div class="d2">まだありません。空きが出たら、台帳の並び順で割り当てます。ツールはプールから自動で決まります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">担当者とセッション</div><div class="d2">まだありません。空きが出たら、台帳の並び順で割り当てます。アカウントはプールから自動で決まります。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">ありません。</div></div><span class="badge b-done">なし</span></div>
               </div>
               <div class="set-group">
@@ -1534,7 +1533,7 @@
                 <div class="grow"><div class="t">秦泉寺 章夫（PM）→ リリース後の実機確認（#7541）</div><div class="d">次のリリースが公開されたら、7th で確認します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
-              <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うツール（アカウント）が替わっても、顔・名前・特性は変わりません。</p>
+              <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うアカウントが替わっても、顔・名前・特性は変わりません。</p>
             </div>
 
             <div class="screen-pane" data-screen="g-board">
@@ -1715,7 +1714,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
-                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性（推論・速度・性格）と並び順はエージェント台帳に、使用量はツールの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">ツールを開く</button></div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性（推論・速度・性格）と並び順はエージェント台帳に、使用量はアカウントの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
                 <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">このプロジェクトの状態が変わったときにスクリプトを動かします — 開始、終了、停止など。</div></div><button class="btn" type="button" data-nav="g-hooks">開く</button></div>
               </div>
               <div class="set-group">
@@ -2107,7 +2106,7 @@
                 <div class="grow"><div class="t">秦泉寺 章夫（PM）→ 明朝の取り込み確認</div><div class="d">6:00 の定期実行の結果を掲示板に報告します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
-              <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うツール（アカウント）が替わっても、顔・名前・特性は変わりません。</p>
+              <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うアカウントが替わっても、顔・名前・特性は変わりません。</p>
             </div>
 
             <div class="screen-pane" data-screen="k-board">
@@ -2231,7 +2230,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
-                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性と並び順はエージェント台帳に、使用量はツールの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">ツールを開く</button></div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM の秦泉寺 章夫です。PM の特性と並び順はエージェント台帳に、使用量はアカウントの画面にあります。</div></div><button class="btn" type="button" data-openpage="agents">台帳を開く</button><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
                 <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">取り込みの開始・終了・停止でスクリプトを動かします。</div></div><button class="btn" type="button" data-nav="k-hooks">開く</button></div>
               </div>
               <div class="set-group">
@@ -2469,9 +2468,9 @@
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装</div><div class="d2">台帳の並び順で、この課題の担当に選ばれました</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><button class="btn" type="button" data-nav="wizard-step1">担当を変える</button></div>
             </div>
             <div class="set-group">
-              <div class="set-head">ツール（自動で割り当て）</div>
+              <div class="set-head">アカウント（自動で割り当て）</div>
               <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">プールから自動で割り当てました — 空きがあり、上限に達していません</div><div class="use"><div class="bar"><i style="width:64%"></i></div><span>週間64%使用 · 土曜21:25にリセット</span></div></div><span class="badge b-run">割り当て可</span></div>
-              <p class="d" style="font-size:12.8px;color:var(--ink2)">ツールはエージェントの項目ではありません。起動のたびに、Issue 側の計画とプールの空き・制限状態から決まります。上限中のツールは候補から外れます。</p>
+              <p class="d" style="font-size:12.8px;color:var(--ink2)">アカウントはエージェントの項目ではありません。起動のたびに、Issue 側の計画とプールの空き・制限状態から決まります。上限中のアカウントは候補から外れます。</p>
             </div>
             <div class="set-group">
               <div class="set-head">計画</div>
@@ -2538,7 +2537,7 @@
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">課題</div><div class="d2">#5561 長時間のセッションでメモリが増え続ける（gwt）</div></div></div>
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">担当 — 小田 洋平</div><div class="d2">特性：推論 xhigh · 速度 Ultrafast · 実装を重点に（エージェント固定）</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">ツール — Codex 1（会社メール）</div><div class="d2">プールから自動で割り当てました。週間64%使用 · 土曜21:25にリセット</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アカウント — Codex 1（会社メール）</div><div class="d2">プールから自動で割り当てました。週間64%使用 · 土曜21:25にリセット</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">ブランチ — work/issue-5561</div><div class="d2">develop から作ります · 実行環境：ホスト · 権限：通常</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">プロファイル — rust-dev</div><div class="d2">小田 洋平 に割り当てられたプロファイルで始まります</div></div></div>
             </div>
@@ -2597,15 +2596,15 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（パラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（パラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
 <script>
 (function () {
-  var pageLabels = { start: "開始画面", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "ツール", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
+  var pageLabels = { start: "開始画面", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
-    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "ツール", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
+    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
     "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
     "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "タスクを作る", "g-subissue-add": "子課題を追加", "g-session-picker": "セッションを選ぶ", "g-agent-pause": "一時停止の確認", "g-project-stop": "プロジェクトを止める", "g-labels": "ラベルを編集", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
     "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
