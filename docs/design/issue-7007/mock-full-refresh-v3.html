@@ -172,16 +172,9 @@
   /* start screen */
   .start-wrap{flex:1;padding:24px 28px 28px;min-width:0}
   @media (max-width:640px){.start-wrap{padding:16px}}
-  .start-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(320px,1fr);gap:26px;align-items:start}
-  @media (max-width:920px){.start-grid{grid-template-columns:1fr}}
   .statebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px}
   .statebar .lab{font-size:13px;font-weight:700;color:var(--ink2)}
   .statebar .seg{margin:0}
-  .ptabs{display:flex;align-items:flex-end;gap:2px;border-bottom:1px solid var(--line);margin:0 0 18px;overflow-x:auto}
-  .ptab{display:inline-flex;align-items:center;gap:6px;border:0;background:transparent;font:inherit;font-size:13px;font-weight:700;color:var(--ink2);padding:8px 13px;border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer;white-space:nowrap;min-height:36px}
-  .ptab i{width:8px;height:8px;border-radius:50%;display:block;flex:none}
-  .ptab.on{color:var(--ink);border-bottom-color:var(--ink)}
-  .ptab-more{font-size:12px;color:var(--ink2);padding:8px 6px;white-space:nowrap}
   .chat-head{display:flex;align-items:center;gap:11px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
   .chat-head .nm{font-weight:800;font-size:15px;line-height:1.3}
   .chat-head .sub{font-size:12px;color:var(--ink2)}
@@ -202,7 +195,6 @@
   .opt small{display:block;font-weight:500;color:var(--ink2);font-size:12.3px;margin-top:2px}
   .opt.primary{background:var(--accent);border-color:var(--accent);color:#fff}
   .opt.primary small{color:#cdeee8}
-  .many-search{margin:10px 0 4px}
   .mrow{display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid var(--line)}
   .mrow .badge{margin-left:auto}
 
@@ -327,12 +319,13 @@
   <header class="doc">
     <div class="doc-kicker">gwt — Issue #7007</div>
     <h1>全画面刷新モック v3</h1>
-    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面にプロジェクトの内容は出さず、脇の一覧と上部のタブは名前だけの導線に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
+    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面はチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（名前だけの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
   </header>
 
   <nav class="screens" aria-label="画面一覧">
     <div class="row">
       <a data-openpage="start">開始画面</a>
+      <a data-openpage="projects">プロジェクト</a>
       <a data-openpage="agents">エージェント</a>
       <a data-openpage="agents" data-openscreen="agent-edit-jinsenji">エージェント設定</a>
       <a data-openpage="tools">アカウント</a>
@@ -374,6 +367,7 @@
       <span class="proj" id="appProj" hidden></span>
       <div class="hnav">
         <button class="hpm" type="button" data-openpage="start"><span class="pm-face sm"><span class="dot wait"></span></span><span class="hname">秦泉寺 章夫</span><span class="badge b-wait">判断待ち 5件</span></button>
+        <button class="btn ghost" type="button" data-openpage="projects">プロジェクト</button>
         <button class="btn ghost" type="button" data-openpage="notifications">通知<span class="belldot">3</span></button>
         <button class="btn ghost" type="button" data-openpage="agents">エージェント</button>
         <button class="btn ghost" type="button" data-openpage="tools">アカウント</button>
@@ -396,14 +390,6 @@
 
           <!-- あり -->
           <div data-startpane="has">
-            <div class="ptabs" role="tablist" aria-label="プロジェクトのタブ">
-              <button class="ptab on" type="button" aria-current="page">ホーム</button>
-              <button class="ptab" type="button" data-openpage="gwt"><i style="background:#0f766e"></i>gwt</button>
-              <button class="ptab" type="button" data-openpage="keibadb"><i style="background:#be123c"></i>KeibaDB</button>
-              <button class="ptab" type="button"><i style="background:#6d28d9"></i>unity-cli</button>
-            </div>
-            <p class="rel" style="margin:-8px 0 14px">上部のタブも名前だけの導線です（件数・要約・バッジは出しません）。タブを選ぶと、そのプロジェクトのページへ移ります。</p>
-            <div class="start-grid">
               <div>
                 <div class="chat-head">
                   <span class="pm-face"><span class="dot wait"></span></span>
@@ -444,27 +430,10 @@
                   <div class="send"><button class="btn primary" type="button" id="startSend">送る</button></div>
                 </div>
               </div>
-              <div>
-                <p class="h-sec">プロジェクト</p>
-                <div class="plist">
-                  <div class="mrow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><button class="btn" type="button" data-openpage="gwt">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><button class="btn" type="button" data-openpage="keibadb">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><button class="btn" type="button">開く</button></div>
-                </div>
-                <div class="btnrow" style="margin-top:12px">
-                  <button class="btn ghost" type="button" data-openpage="addproject" data-openscreen="add-folder">フォルダを開く…</button>
-                  <button class="btn ghost" type="button" data-openpage="addproject" data-openscreen="add-github">GitHub から取り込む…</button>
-                </div>
-                <p class="rel" style="margin-top:8px">一覧は名前だけの導線です。作業状況・タスク数・Issue 数などの内容は、各プロジェクトのページで見ます。プロジェクトは新しいブラウザタブで開きます。</p>
-              </div>
-            </div>
           </div>
 
           <!-- なし（空状態） -->
           <div data-startpane="empty" hidden>
-            <div class="ptabs" role="tablist" aria-label="プロジェクトのタブ">
-              <button class="ptab on" type="button" aria-current="page">ホーム</button>
-            </div>
             <div class="empty-col">
               <div class="chat-head">
                 <span class="pm-face"><span class="dot"></span></span>
@@ -484,18 +453,6 @@
 
           <!-- 多い（20件） -->
           <div data-startpane="many" hidden>
-            <div class="ptabs" role="tablist" aria-label="プロジェクトのタブ">
-              <button class="ptab on" type="button" aria-current="page">ホーム</button>
-              <button class="ptab" type="button" data-openpage="gwt"><i style="background:#0f766e"></i>gwt</button>
-              <button class="ptab" type="button" data-openpage="keibadb"><i style="background:#be123c"></i>KeibaDB</button>
-              <button class="ptab" type="button"><i style="background:#2563eb"></i>llmlb</button>
-              <button class="ptab" type="button"><i style="background:#c2410c"></i>event-magazine</button>
-              <button class="ptab" type="button"><i style="background:#6d28d9"></i>unity-cli</button>
-              <button class="ptab" type="button"><i style="background:#a16207"></i>155-Demi</button>
-              <button class="ptab" type="button"><i style="background:#475569"></i>160-Idina</button>
-              <span class="ptab-more">ほか13件（脇の一覧と検索で探します）</span>
-            </div>
-            <div class="start-grid">
               <div>
                 <div class="chat-head">
                   <span class="pm-face"><span class="dot wait"></span></span>
@@ -513,23 +470,36 @@
                   <div class="send"><button class="btn primary" type="button">送る</button></div>
                 </div>
               </div>
-              <div>
-                <p class="h-sec">プロジェクト（20件）</p>
-                <input class="field many-search" type="text" placeholder="プロジェクトを探す…" aria-label="プロジェクトを探す" style="width:100%">
-                <div class="plist" style="margin-top:10px">
-                  <div class="mrow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><button class="btn" type="button" data-openpage="gwt">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><button class="btn" type="button" data-openpage="keibadb">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><button class="btn" type="button">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><button class="btn" type="button">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><button class="btn" type="button">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><button class="btn" type="button">開く</button></div>
-                  <div class="mrow"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><button class="btn" type="button">開く</button></div>
-                </div>
-                <p class="rel" style="margin-top:8px">あと13件 — 一覧は名前だけの導線のままです。内容は各プロジェクトのページで見ます。</p>
-              </div>
-            </div>
           </div>
 
+        </div>
+      </div>
+
+      <!-- ================= プロジェクト ================= -->
+      <div class="pagegroup" data-page="projects">
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">プロジェクトは端末全体の画面です（ヘッダーから開きます）</span></div>
+        <div class="content">
+          <div class="screen-pane on" data-screen="projects-main">
+            <p class="h-big">プロジェクト</p>
+            <p class="h-sub">この端末で開いているプロジェクトの一覧です。一覧は名前だけの導線で、作業状況・タスク数・Issue 数などの内容は持ちません（内容は各プロジェクトのページで見ます）。プロジェクトは新しいブラウザタブで開きます。</p>
+            <input class="field" type="text" placeholder="プロジェクトを探す…" aria-label="プロジェクトを探す" style="width:100%;margin-bottom:12px">
+            <div class="plist">
+              <div class="mrow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><button class="btn" type="button" data-openpage="gwt">開く</button></div>
+              <div class="mrow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><button class="btn" type="button" data-openpage="keibadb">開く</button></div>
+              <div class="mrow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><button class="btn" type="button">開く</button></div>
+              <div class="mrow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><button class="btn" type="button">開く</button></div>
+              <div class="mrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><button class="btn" type="button">開く</button></div>
+              <div class="mrow"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><button class="btn" type="button">開く</button></div>
+              <div class="mrow"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><button class="btn" type="button">開く</button></div>
+            </div>
+            <p class="rel" style="margin-top:8px">プロジェクトが多いときは、上の検索で名前から探せます（この一覧が全件の置き場です）。</p>
+            <p class="h-sec" style="margin-top:18px">プロジェクトを追加する</p>
+            <div class="btnrow">
+              <button class="btn primary" type="button" data-openpage="addproject" data-openscreen="add-github">GitHub から取り込む</button>
+              <button class="btn" type="button" data-openpage="addproject" data-openscreen="add-folder">フォルダを開く</button>
+              <button class="btn" type="button" data-openpage="addproject" data-openscreen="add-clone">URL から複製する</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -661,17 +631,17 @@
         <div class="content">
           <div class="screen-pane on" data-screen="agents-ledger">
             <p class="h-big">エージェント台帳</p>
-            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持つ担当者です（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はパラメータ、性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM の担当者は入れ替わりません。アカウントの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
+            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持つ担当者です（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータです（実際に割り当てられたツールでは、その幅に最も近い段階が使われます）。性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM の担当者は入れ替わりません。アカウントの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
             <div class="set-group">
-              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
+              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
             </div>
             <div class="set-group">
-              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">2. 小田 洋平</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-oda">編集</button></div>
-              <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">3. 姫野 大樹</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に。実機で見て確かめる</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-himeno">編集</button></div>
-              <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">4. 安藤 健二</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-ando">編集</button></div>
-              <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">5. 原 和正</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>ビルドと検証を重点に。失敗は切り分けてから直す</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hara">編集</button></div>
-              <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">6. 鈴木 和斗</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>調査と整理を重点に。根拠を並べてから提案する</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-suzuki">編集</button></div>
-              <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hamada">編集</button></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">2. 小田 洋平</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-oda">編集</button></div>
+              <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">3. 姫野 大樹</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>画面と体験の実装を重点に。実機で見て確かめる</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-himeno">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">4. 安藤 健二</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-ando">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">5. 原 和正</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>ビルドと検証を重点に。失敗は切り分けてから直す</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hara">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">6. 鈴木 和斗</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>調査と整理を重点に。根拠を並べてから提案する</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-suzuki">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-hamada">編集</button></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button" data-nav="agent-new">追加</button></div>
             </div>
             <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのアカウントで動くかは、セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。担当の履歴と予定、いま何をしているか（現在の作業状態）は台帳には置かず、各プロジェクトの「担当者」と「作業」で見ます。エージェントは特定のプロジェクトに所属せず、全プロジェクト共通のマスタです。</div>
@@ -701,9 +671,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option selected>標準</option><option>高め</option><option>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option selected>速め</option><option>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる。
 - 担当の割り当てと進み具合の監視を行い、詰まりを見つけたら早めに知らせる。
@@ -743,9 +713,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip" type="button">標準</button><button class="chip on" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip" type="button">Fast</button><button class="chip on" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option>標準</option><option>高め</option><option selected>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option>速め</option><option selected>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">実装を重点に。変更は小さく刻み、テストで確かめてから進める。
 - 仕様に無い挙動を足さない。迷ったら既存の実装の流儀に合わせる。
@@ -784,9 +754,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option selected>標準</option><option>高め</option><option>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option selected>速め</option><option>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">画面と体験の実装を重点に。実機で見て確かめる。
 - 見た目と操作の確認は実機で行い、推測で済ませない。
@@ -825,9 +795,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option selected>標準</option><option>高め</option><option>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option selected>速め</option><option>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">データの調査と取り込みを重点に。形式の変化は止めて知らせる。
 - 取り込み前に形式を確認し、想定と違う形式が来たら止めて知らせる。
@@ -866,9 +836,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip" type="button">標準</button><button class="chip on" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option>標準</option><option>高め</option><option selected>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option selected>速め</option><option>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">ビルドと検証を重点に。失敗は切り分けてから直す。
 - 再現できない失敗は、その旨を記録し、推測で直さない。
@@ -907,9 +877,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip" type="button">Fast</button><button class="chip on" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option selected>標準</option><option>高め</option><option>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option>速め</option><option selected>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">調査と整理を重点に。根拠を並べてから提案する。
 - 出典が曖昧な情報は、その旨を明記する。
@@ -948,9 +918,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option selected>標準</option><option>高め</option><option>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option selected>速め</option><option>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">性能の計測を重点に。数字で確かめてから変える。
 - 変える前に測る。計測条件（端末・データ量・回数）を結果と一緒に残す。
@@ -989,9 +959,9 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。段階はツールに依存しない共通の幅（低め／標準／高め／最大）で選びます。実際に割り当てられたツールでは、この幅に最も近い段階が使われます（対応付けはツールの層で行います）。</div></div><select class="field" aria-label="推論レベル" style="width:min(220px,100%)"><option>低め</option><option selected>標準</option><option>高め</option><option>最大</option></select></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。推論レベルと同じく、ツールに依存しない共通の段階で選びます。「通常」は、割り当てられたツールの標準の速さにあたります。</div></div><select class="field" aria-label="速度" style="width:min(220px,100%)"><option>通常</option><option selected>速め</option><option>最速</option></select></div>
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical" placeholder="（例）実装を重点に。変更は小さく刻み、テストで確かめてから進める。&#10;- 仕様に無い挙動は足さない。&#10;- 失敗したら原因を切り分けてから直す。"></textarea></div>
             </div>
@@ -1037,21 +1007,54 @@
           <div class="screen-pane" data-screen="tool-add">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
             <p class="h-big">アカウントを追加する</p>
-            <p class="h-sub">アカウントを追加するとプールに入り、割り当て候補になります。初回は、少なくとも1つのアカウントの登録とサインインが済むまで先へ進めません。</p>
-            <div class="steps"><span class="st on">1. 種類</span><span>→</span><span class="st">2. アカウント</span><span>→</span><span class="st">3. サインイン</span><span>→</span><span class="st">4. 完了</span></div>
+            <p class="h-sub">ウィザード形式で、順に進めます。アカウントを追加するとプールに入り、割り当て候補になります。初回は、少なくとも1つのアカウントの登録とサインインが済むまで先へ進めません。</p>
+            <div class="steps"><span class="st on">1. 種類</span><span>→</span><span class="st">2. 本体の確認</span><span>→</span><span class="st">3. サインイン</span><span>→</span><span class="st">4. 完了</span></div>
             <div class="set-group">
               <h4>種類を選ぶ（アカウント型）</h4>
               <div class="set-row"><div class="grow"><div class="t">アカウント型のツール</div><div class="d2">アカウントを登録してサインインすると、そのアカウントがプールに入ります。</div></div></div>
               <div class="set-row"><div class="chips" role="group" aria-label="ツールの種類"><button class="chip on" type="button">Claude Code</button><button class="chip" type="button">Codex</button><button class="chip" type="button">Grok Build</button><button class="chip" type="button">GitHub Copilot</button><button class="chip" type="button">Antigravity CLI</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">プールでの見分けに使います（例：Claude Code 3（予備））。</div></div><input class="field" type="text" placeholder="表示名" aria-label="表示名" style="width:220px"></div>
-              <div class="set-row"><div class="grow"><div class="t">本体（CLI）</div><div class="d2">選んだ種類の本体が未導入のときは、先にインストールへ案内します。</div></div><button class="btn" type="button" data-nav="tools-supported">ツール管理で確認</button></div>
             </div>
             <div class="set-group">
               <h4>フロントエンド型のツール</h4>
               <div class="set-row"><div class="grow"><div class="t">OpenCode／OpenClaw／Hermes Agent</div><div class="d2">この3種は、接続先（バックエンド）を切り替えて使うフロントエンド型です。アカウントではなく、バックエンド設定を選んで追加します。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">バックエンド設定を選ぶ</div><div class="d2">（置き場のみ）バックエンドの扱いは現在決定待ちのため、確定形はまだ示しません。</div></div><button class="btn" type="button">バックエンド設定を選ぶ…</button></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tool-signin">追加してサインインへ進む</button><button class="btn ghost" type="button" data-nav="tools-pool">キャンセル</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tool-add-body">次へ — 本体の確認</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tool-add-body">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
+            <p class="h-big">アカウントを追加する — 本体の確認</p>
+            <p class="h-sub">選んだ種類の本体（CLI）が、この端末に入っているかを確認します。</p>
+            <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st on">2. 本体の確認</span><span>→</span><span class="st">3. サインイン</span><span>→</span><span class="st">4. 完了</span></div>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">Claude Code の本体</div><div class="d2">導入済みです。そのまま次へ進めます。</div></div><span class="badge b-run">導入済み</span></div>
+              <div class="set-row"><div class="grow"><div class="t">本体が未導入のとき</div><div class="d2">先にツール管理でインストールしてください。インストールが終わったら、この画面に戻ってそのまま続けられます（このウィザードの入力は保持されます）。</div></div><button class="btn" type="button" data-nav="tools-supported">ツール管理を開く</button></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tool-add">戻る</button><button class="btn primary" type="button" data-nav="tool-add-signin">次へ — サインイン</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tool-add-signin">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
+            <p class="h-big">アカウントを追加する — サインイン</p>
+            <p class="h-sub">追加するアカウントでサインインします。サインインが済むまで、このアカウントは割り当て対象外です。</p>
+            <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st done">2. 本体の確認</span><span>→</span><span class="st on">3. サインイン</span><span>→</span><span class="st">4. 完了</span></div>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">ブラウザでサインインする</div><div class="d2">サインイン用の画面を開きます。終わると、ここに戻って状態が「サインイン済み」になります。</div></div><button class="btn primary" type="button">サインインを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">サインイン用のシェルを開く</div><div class="d2">コマンドでサインインする場合はこちらです。シェルの中でログインを終えてください。</div></div><button class="btn" type="button" data-openpage="terminal">シェルを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">未サインイン — 割り当て対象外</div></div><span class="badge b-block">未サインイン</span></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tool-add-body">戻る</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
+          </div>
+          <div class="screen-pane" data-screen="tool-add-done">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
+            <p class="h-big">アカウントを追加する — 完了</p>
+            <p class="h-sub">アカウントがプールに入りました。セッション開始時に、空き・制限状態に応じて自動で割り当て候補になります。</p>
+            <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st done">2. 本体の確認</span><span>→</span><span class="st done">3. サインイン</span><span>→</span><span class="st on">4. 完了</span></div>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">追加したアカウント</div><div class="d2">Claude Code のアカウントです。プールでの見分けには表示名を使います。</div></div><span class="badge b-run">サインイン済み</span></div>
+              <div class="set-row"><div class="grow"><div class="t">プールの状態</div><div class="d2">アカウント画面のプールに、このアカウントが並んでいます。</div></div></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-pool">アカウントへ戻る</button><button class="btn ghost" type="button" data-nav="tool-add">続けて追加する</button></div>
           </div>
           <div class="screen-pane" data-screen="tool-signin">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
@@ -1470,7 +1473,7 @@
                 <div class="grow">
                   <div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div>
                   <div class="d">このプロジェクトも見ています · 判断待ち 2件を運んでいます</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div>
                 </div>
                 <span class="badge b-wait">判断待ち 2件</span>
                 <button class="btn ghost" type="button" data-nav="g-ask">相談する</button>
@@ -1481,7 +1484,7 @@
                 <div class="grow">
                   <div class="t">小田 洋平 <span class="rel">· Codex（ツール）</span></div>
                   <div class="d">作業中：#7048、共有状態モデル · ここまで42分 · #7047 の修正も準備中</div>
-                  <div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span></div>
                   <div class="use"><div class="bar"><i style="width:64%"></i></div><span>Codex 1 — 週間64%使用 · 土曜21:25にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -1493,7 +1496,7 @@
                 <div class="grow">
                   <div class="t">姫野 大樹 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#7007、全画面刷新 · ここまで1時間12分</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -1505,7 +1508,7 @@
                 <div class="grow">
                   <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">いまは KeibaDB の取り込みを担当しています · このプロジェクトでは待機中</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
                 </div>
                 <span class="badge b-done">待機中</span>
               </div>
@@ -2070,7 +2073,7 @@
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
                 <div class="grow"><div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div></div>
                 <span class="badge b-wait">判断待ち 1件</span>
                 <button class="btn ghost" type="button" data-nav="k-ask">相談する</button>
                 <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
@@ -2080,7 +2083,7 @@
                 <div class="grow">
                   <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#130、レース結果の取り込み · #121 は判断待ちで停止中</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -2465,7 +2468,7 @@
             <p class="h-sub">担当は台帳の並び順と特性で決まります。特性はエージェント固定で、この画面では変えません。</p>
             <div class="set-group">
               <div class="set-head">担当エージェント</div>
-              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装</div><div class="d2">台帳の並び順で、この課題の担当に選ばれました</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><button class="btn" type="button" data-nav="wizard-step1">担当を変える</button></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装</div><div class="d2">台帳の並び順で、この課題の担当に選ばれました</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><button class="btn" type="button" data-nav="wizard-step1">担当を変える</button></div>
             </div>
             <div class="set-group">
               <div class="set-head">アカウント（自動で割り当て）</div>
@@ -2498,9 +2501,9 @@
             </div>
             <div class="set-group">
               <div class="set-head">担当の候補</div>
-              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装（選ばれています）</div><div class="d2">台帳の並び順で選ばれた担当です</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><span class="badge b-run">担当</span></div>
-              <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">姫野 大樹 — 実装</div><div class="d2">いま #7007 を作業中です。終わってからなら選べます</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
-              <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">安藤 健二 — データ取り込み</div><div class="d2">特性がこの課題と合わないため、候補の下位です</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装（選ばれています）</div><div class="d2">台帳の並び順で選ばれた担当です</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><span class="badge b-run">担当</span></div>
+              <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">姫野 大樹 — 実装</div><div class="d2">いま #7007 を作業中です。終わってからなら選べます</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
+              <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">安藤 健二 — データ取り込み</div><div class="d2">特性がこの課題と合わないため、候補の下位です</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
             </div>
             <div class="btnrow" style="margin-top:16px"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">やめる</button><button class="btn primary" type="button" data-nav="wizard-step2">起動計画へ進む</button></div>
           </div>
@@ -2536,7 +2539,7 @@
             <p class="h-sub">始める前の最終確認です。内容は課題の「実行」にも同じものが残ります。</p>
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">課題</div><div class="d2">#5561 長時間のセッションでメモリが増え続ける（gwt）</div></div></div>
-              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">担当 — 小田 洋平</div><div class="d2">特性：推論 xhigh · 速度 Ultrafast · 実装を重点に（エージェント固定）</div></div></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">担当 — 小田 洋平</div><div class="d2">特性：推論 最大 · 速度 最速 · 実装を重点に（エージェント固定）</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">アカウント — Codex 1（会社メール）</div><div class="d2">プールから自動で割り当てました。週間64%使用 · 土曜21:25にリセット</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">ブランチ — work/issue-5561</div><div class="d2">develop から作ります · 実行環境：ホスト · 権限：通常</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">プロファイル — rust-dev</div><div class="d2">小田 洋平 に割り当てられたプロファイルで始まります</div></div></div>
@@ -2596,13 +2599,13 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（パラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。名前だけの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
 <script>
 (function () {
-  var pageLabels = { start: "開始画面", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
+  var pageLabels = { start: "開始画面", projects: "プロジェクト", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "アカウント", profile: "プロファイル", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
     appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "profile-main": "プロファイル", "terminal-main": "ターミナル表示",
     "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
