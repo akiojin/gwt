@@ -187,8 +187,8 @@ jobs:
     runs-on: ubuntu-latest
     # Issue #4055 / #4191: the step budgets below are the operative limits;
     # this cap only bounds the job as a whole and must cover their sum
-    # including nextest installation, doctests and the timeout regression.
-    timeout-minutes: 113
+    # including nextest installation, doctests and the live browser check.
+    timeout-minutes: 155
     steps:
       - uses: actions/checkout@v7
       # Issue #4191 AC-2: restoring the .deb archive before the install means a
@@ -312,6 +312,41 @@ jobs:
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: dbus-run-session -- xvfb-run -a cargo test --workspace --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture
+        timeout-minutes: 10
+      # Issue #7610: reuse the display dependencies from the front-door tests.
+      # Keep the live suite opt-in and select the hold regression explicitly to
+      # bound PR latency. cargo test leaves binaries armed with test-gh-guard,
+      # so restore the ordinary checkout binaries before the browser uses them.
+      # The spec's other tests stay out of required CI: Issue #7451 runs in the
+      # Windows agent launch job, 25 switch proofs need an isolated Linux root
+      # process namespace (GWT_PLAYWRIGHT_SWITCH_POSITIVE), and the remaining
+      # 14 are unmeasured on this runner, so a flake there would stop every PR.
+      - name: Build checkout binaries for the live Issues regression
+        if: matrix.shard == 1
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build -p gwt --bin gwt --bin gwtd
+        timeout-minutes: 15
+      - uses: actions/setup-node@v7
+        if: matrix.shard == 1
+        with:
+          node-version: 22
+        timeout-minutes: 5
+      - name: Install Chromium for the live Issues regression
+        if: matrix.shard == 1
+        run: bash scripts/install-playwright-browsers.sh all
+        timeout-minutes: 18
+      - name: Verify Issues operator hold in both themes
+        if: matrix.shard == 1
+        env:
+          GWT_PLAYWRIGHT_QUEUE_LAUNCH: "1"
+          GWT_HEADED_E2E_REPORT: ${{ runner.temp }}/linux-operator-hold-headed.json
+        run: |
+          dbus-run-session -- xvfb-run -a bash scripts/run-visual-tests.sh issue-queue-launch-live.spec.ts \
+            --grep 'T94418 operator hold survives ordinary exit until explicit requeue$' \
+            --project=chromium-dark --project=chromium-light --workers=1 --retries=0 --headed --trace=on \
+            --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
+          node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
         timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
         if: matrix.shard == 1

@@ -2737,13 +2737,19 @@ impl ExecutionGenerationLedger {
     /// one they are looking at.
     #[must_use]
     pub fn current_generation_settled_by_host_reaper(&self) -> bool {
-        self.current_generation().is_some_and(|generation| {
+        self.current_generation_reaped_at().is_some()
+    }
+
+    fn current_generation_reaped_at(&self) -> Option<UtcTimestamp> {
+        self.current_generation().and_then(|generation| {
             self.lifecycle_events_for(&generation.identity.generation_id)
                 .max_by_key(|event| event.sequence)
-                .and_then(|event| event.operation_id.as_deref())
-                .is_some_and(|operation_id| {
-                    operation_id.starts_with(STARTUP_ACTIVE_REAPER_OPERATION_PREFIX)
+                .filter(|event| {
+                    event.operation_id.as_deref().is_some_and(|operation_id| {
+                        operation_id.starts_with(STARTUP_ACTIVE_REAPER_OPERATION_PREFIX)
+                    })
                 })
+                .map(|event| event.recorded_at)
         })
     }
 
@@ -3172,6 +3178,8 @@ pub struct OwnerExecutionDiagnosis {
     /// which is interrupted work rather than a settled outcome.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ecr_settled_by_host_reaper: bool,
+    #[serde(skip)]
+    pub(crate) reaped_at: Option<UtcTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3248,6 +3256,7 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         owner_number: owner.number,
         ecr_status: None,
         ecr_settled_by_host_reaper: false,
+        reaped_at: None,
         generation_id: None,
         generation_entrypoint: None,
         generation_activated_at: None,
@@ -3334,7 +3343,8 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
     };
     let status = ledger.effective_status_for(current);
     diagnosis.ecr_status = Some(status);
-    diagnosis.ecr_settled_by_host_reaper = ledger.current_generation_settled_by_host_reaper();
+    diagnosis.reaped_at = ledger.current_generation_reaped_at();
+    diagnosis.ecr_settled_by_host_reaper = diagnosis.reaped_at.is_some();
     diagnosis.generation_id = Some(current.identity.generation_id.clone());
     diagnosis.generation_entrypoint = Some(current.identity.entrypoint.clone());
     diagnosis.generation_activated_at = Some(current.identity.activated_at);

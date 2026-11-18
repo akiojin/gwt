@@ -621,6 +621,64 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
 }
 
 #[test]
+fn required_linux_shard_runs_t94418_in_both_themes() {
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(TEST_WORKFLOW)).unwrap();
+    let jobs = &workflow["jobs"];
+    let steps = jobs["test"]["steps"].as_sequence().unwrap();
+    let position = |name: &str| steps.iter().position(|step| step["name"] == name);
+    let browser = position("Verify Issues operator hold in both themes")
+        .expect("T94418 must run in the required Linux test matrix");
+    let regression = &steps[browser];
+    let last_test = steps
+        .iter()
+        .rposition(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("cargo test"))
+        })
+        .unwrap();
+    let restore = position("Build checkout binaries for the live Issues regression")
+        .expect("cargo test arms test-gh-guard; restore operational binaries first");
+    assert!(last_test < restore && restore < browser);
+    assert_eq!(steps[restore]["if"], "matrix.shard == 1");
+    assert_eq!(
+        steps[restore]["run"],
+        "cargo build -p gwt --bin gwt --bin gwtd"
+    );
+    assert_eq!(regression["if"], "matrix.shard == 1");
+    assert_eq!(regression["env"]["GWT_PLAYWRIGHT_QUEUE_LAUNCH"], "1");
+    assert!(regression["continue-on-error"].is_null());
+    let run = regression["run"].as_str().unwrap();
+    for argument in [
+        "dbus-run-session -- xvfb-run -a",
+        "issue-queue-launch-live.spec.ts",
+        "--grep 'T94418 operator hold survives ordinary exit until explicit requeue$'",
+        "--project=chromium-dark --project=chromium-light",
+        "--headed",
+        "chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0",
+    ] {
+        assert!(
+            run.contains(argument),
+            "missing T94418 requirement {argument}"
+        );
+    }
+    let gate = &jobs["test-rust-required"];
+    assert!(gate["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|job| job == "test"));
+    assert_eq!(
+        gate["steps"][0]["env"]["RUST_RESULT"],
+        "${{ needs.test.result }}"
+    );
+    assert!(gate["steps"][0]["run"]
+        .as_str()
+        .unwrap()
+        .contains("test \"$RUST_RESULT\" = success"));
+}
+
+#[test]
 fn native_tray_measurement_runs_only_on_nightly_by_exact_name() {
     let nightly = read(NIGHTLY_WORKFLOW);
     let job = job_body(&nightly, "  test-windows-startup-tray:");

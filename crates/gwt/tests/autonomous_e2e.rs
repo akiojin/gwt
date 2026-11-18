@@ -531,6 +531,7 @@ mod idle_windows {
                     *number,
                     IssueMonitorExecutionObservation {
                         settlement: *settlement,
+                        reaped_at: None,
                         process_held: false,
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),

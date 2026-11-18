@@ -639,6 +639,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.agent.add",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.approval.request",
         aliases: &[],
     },

@@ -1476,11 +1476,11 @@ pub fn is_active() -> io::Result<bool> {
 
 /// Shared registration and PM selection do not mutate project execution mirrors.
 pub(crate) fn mutate_pm_selection(
-    root: &Path,
+    project_key: &ProjectKey,
     action: AgentRosterAction,
     expected_revision: Option<u64>,
 ) -> io::Result<IssueMonitorPrefs> {
-    let key = gwt_core::paths::project_scope_hash(root).to_string();
+    let key = project_key.to_string();
     let adding = matches!(action, AgentRosterAction::Add { .. });
     let source_path = prefs_path(&key)?;
     let _source_guard = if adding && source_path.exists() {

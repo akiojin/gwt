@@ -624,10 +624,10 @@ crates/gwt/tests/verification_admission_cli_test.rs|measure_two_worktree_continu
 crates/gwt/tests/verification_admission_cli_test.rs|measure_two_worktree_continuation|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/tests/verification_admission_cli_test.rs|spawn_sibling_heavy|ifchild.try_wait().unwrap().is_some()||Instant::now()>=deadline|1
 crates/gwt/tests/verification_admission_cli_test.rs|spawn_sibling_heavy|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt/tests/verification_admission_cli_test.rs|start_command|assert!(Instant::now()<deadline,)|1
-crates/gwt/tests/verification_admission_cli_test.rs|start_command|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/tests/verification_admission_cli_test.rs|wait_for_attempt|assert!(Instant::now()<deadline,)|1
 crates/gwt/tests/verification_admission_cli_test.rs|wait_for_attempt|letdeadline=Instant::now()+Duration::from_secs(30)|1
+crates/gwt/tests/verification_admission_cli_test.rs|wait_until_ready|assert!(Instant::now()<deadline,)|1
+crates/gwt/tests/verification_admission_cli_test.rs|wait_until_ready|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/tests/verification_command_admission_test.rs|canonical_four_matrix_throughput_probe|ifInstant::now()>=next_target_sample|1
 crates/gwt/tests/verification_command_admission_test.rs|canonical_four_matrix_throughput_probe|next_target_sample=Instant::now()+Duration::from_secs(5)|1
 crates/gwt/tests/verification_command_admission_test.rs|derived_matrices_overlap_light_commands_and_serialize_heavy_commands|assert!(Instant::now()<deadline,)|1

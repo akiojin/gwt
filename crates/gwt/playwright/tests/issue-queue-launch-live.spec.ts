@@ -482,20 +482,27 @@ test.describe("Issue queue real backend launch", () => {
                 : afterAck === "restart"
                   ? "T94428 owner restart after checkpoint ACK preserves saved work without replay"
                   : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
-    test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
-      "positive proof requires the isolated Linux root process namespace");
+    const macOsSwitch = afterAck === "unchanged" && process.platform === "darwin" && (process.geteuid?.() ?? 0) !== 0;
+    test.skip((process.platform !== "linux" && !macOsSwitch) || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
+      "positive proof requires the isolated Linux root process namespace or a non-root macOS Host for the normal switch");
     const postBody = afterAck === "body cancel" || afterAck === "body input" || afterAck === "body submit";
     const preBody = afterAck === "before body cancel" || afterAck === "source replaced" || afterAck === "claim replaced" || afterAck === "reserved submit";
     const gatedInput = postBody || preBody;
     let bodyGate = "";
     const fixture = await startIssueQueueLaunchFixture(info, {
       page,
-      ...(gatedInput || afterAck === "stop claim replaced" ? { prepare: async ({ home, bin, env }) => {
-        bodyGate = join(home, "switch-body-gate");
-        env.GWT_TEST_SWITCH_BODY_GATE = bodyGate;
+      ...(macOsSwitch || gatedInput || afterAck === "stop claim replaced" ? { prepare: async ({ home, bin, env }) => {
         const provider = join(bin, "codex");
         const source = await readFile(provider, "utf8");
         const lineHandler = "readline.createInterface({input:process.stdin}).on('line', line => {";
+        if (macOsSwitch) {
+          env.RUST_LOG = "info,gwt::issue_monitor::switch_checkpoint::macos=debug";
+          // The real TUI reads raw input. Darwin's canonical PTY buffer drops the full checkpoint prompt.
+          await writeFile(provider, source.replace(lineHandler, "process.stdin.setRawMode(true);\n" + lineHandler));
+          return;
+        }
+        bodyGate = join(home, "switch-body-gate");
+        env.GWT_TEST_SWITCH_BODY_GATE = bodyGate;
         expect(source.split(lineHandler)).toHaveLength(2);
         // Capture before checkpointed Set deduplication, with the actual PTY
         // byte stream as the independent proof of the body and its one CR.
@@ -1933,9 +1940,20 @@ request.catch(() => {});
           expect(checkpoint.remoteHead).toBe(ack.head);
           expect(checkpoint.porcelain).toBe("");
           await expect(plans.locator(".roster-switch-status")).toContainText("Switch completed");
+          const targetClaimId = finalPreferences.launch_confirmations?.[44]?.claim_id;
+          if (macOsSwitch) {
+            expect(targetClaimId).toEqual(expect.any(String));
+            expect(targetClaimId).toBe(finalPreferences.launched_claims?.[44]);
+            expect(targetClaimId).not.toBe(saved.source.claim_id);
+            await expect.poll(async () => (await fixture.switchCwdCensus()).filter(fields =>
+              fields.source_pid === source.pid && fields.complete === true && fields.matching === 0 &&
+              fields.unknown === 0 && fields.excluded_by_uid !== undefined).length,
+            { timeout: 10_000, message: "macOS Host recorded clear censuses for the source provider" }).toBeGreaterThanOrEqual(2);
+          }
           await info.attach(`agent-switch-completed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
           await info.attach("agent-switch-native-proof", { body: JSON.stringify({ source, target, idle,
-            checkpoint, operation: ack.operation, work_id: ack.work_id, board_entry_id: ack.board_entry_id }), contentType: "application/json" });
+            checkpoint, operation: ack.operation, work_id: ack.work_id, board_entry_id: ack.board_entry_id,
+            target_claim_id: targetClaimId }), contentType: "application/json" });
           expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
         }
 
@@ -1943,6 +1961,13 @@ request.catch(() => {});
       expect(errors).toEqual([]);
     } finally {
       try {
+        if (macOsSwitch) {
+          const prefs = await preferences();
+          await info.attach("agent-switch-cwd-census", {
+            body: JSON.stringify({ uid: process.geteuid?.(), observations: await fixture.switchCwdCensus(),
+              intents: prefs.agent_switch_intents }), contentType: "application/json",
+          });
+        }
         if ((gatedInput || afterAck === "stop claim replaced") && bodyGate) {
           const armed = await readFile(`${bodyGate}.claimed`, "utf8").then(JSON.parse).catch(() => null);
           if (armed) await writeFile(`${bodyGate}.release`, armed.operation);

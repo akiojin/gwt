@@ -7443,6 +7443,9 @@ pub(super) fn run_with_response<E: CliEnv>(
                         Some(command),
                         max_wait,
                         |artifacts| {
+                            if let Err(error) = attempt.mark_deferral_cleanup() {
+                                tracing::warn!(%error, "verify.run deferral cleanup status not published");
+                            }
                             let check = || attempt.cancelled().map_err(|error| error.to_string());
                             restore_gwtd_after_deferral_cancellable(
                                 &worktree,

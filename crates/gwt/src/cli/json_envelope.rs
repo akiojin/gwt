@@ -2179,6 +2179,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "project.open" => CliCommand::ProjectControl(super::open::ProjectControlCommand::Open {
             path: required_string(params, "path")?.into(),
         }),
+        "pm.agent.add" => {
+            reject_unknown_params(params, &["name", "agent_id"], &envelope.operation)?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::AgentAdd {
+                name: required_string(params, "name")?,
+                agent_id: required_string(params, "agent_id")?,
+            })
+        }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.request_tasks.read" => {
             reject_unknown_params(params, &["selector"], "pm.request_tasks.read")?;
@@ -9230,6 +9237,90 @@ mod tests {
                 "pm.capabilities"
             )
         );
+    }
+
+    #[test]
+    fn pm_agent_add_is_published_and_registers_one_member() {
+        use crate::{agent_names, pm_registry};
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let pm_worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).unwrap();
+        let mut env = TestEnv::new(pm_worktree.clone());
+        let (_, output) =
+            crate::cli::run_collect(&mut env, ok("pm.capabilities", json!({}))).unwrap();
+        let catalog: Value = serde_json::from_str(&output).unwrap();
+        assert!(
+            catalog["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["operation"] == "pm.agent.add" && row["executable"] == true),
+            "the published catalog must offer member registration"
+        );
+
+        let monitor_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let before = agent_names::read_project_roster(&repo, &sessions).unwrap();
+        let monitor_before = std::fs::read(&monitor_path).unwrap();
+        let pm_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let pm_prefs = serde_json::from_value(json!({
+            "registration": {
+                "session_id": "resident", "agent_id": "codex", "worktree_path": pm_worktree
+            }
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&pm_path, &pm_prefs).unwrap();
+        let pm_before = std::fs::read(&pm_path).unwrap();
+        let params = json!({"name": "Additional teammate", "agent_id": "codex"});
+        let add = || ok("pm.agent.add", params.clone());
+        let registry_path = crate::agent_registry::path();
+        let registry_before = std::fs::read(&registry_path).unwrap();
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "another-agent");
+            assert!(crate::cli::run_collect(&mut env, add()).is_err());
+            assert_eq!(std::fs::read(&registry_path).unwrap(), registry_before);
+        }
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        assert!(crate::cli::run_collect(
+            &mut env,
+            ok(
+                "pm.agent.add",
+                json!({"name": "Other teammate", "agent_id": "unregistered-tool"})
+            )
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry_before);
+        let (_, output) = crate::cli::run_collect(&mut env, add()).unwrap();
+        let member: agent_names::AgentMember = serde_json::from_str(&output).unwrap();
+        assert_eq!(member.name, "Additional teammate");
+        assert_eq!(member.agent_id.as_deref(), Some("codex"));
+        assert!(member.enabled && member.implementation_eligible());
+        assert!(member.assignment.is_none());
+        let key = gwt_core::paths::project_scope_hash(&repo);
+        let persisted = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .project_snapshot(&key)
+            .unwrap()
+            .agent_roster
+            .unwrap();
+        assert_eq!(
+            persisted.members.split_last(),
+            Some((&member, before.members.as_slice()))
+        );
+        let registry_after = std::fs::read(&registry_path).unwrap();
+        assert!(crate::cli::run_collect(&mut env, add()).is_err());
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry_after);
+        assert_eq!(std::fs::read(monitor_path).unwrap(), monitor_before);
+        assert_eq!(std::fs::read(pm_path).unwrap(), pm_before);
     }
 
     #[test]
