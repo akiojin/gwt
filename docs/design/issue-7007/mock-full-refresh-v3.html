@@ -461,6 +461,7 @@
                     <div class="nm">秦泉寺 章夫</div>
                     <div class="sub">あなたの PM · 判断待ち 5件</div>
                   </div>
+                  <button class="btn ghost" type="button" data-openpage="terminal" style="margin-left:auto">PM の出力を見る</button>
                 </div>
                 <div class="chat" id="startChat">
                   <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。昨夜の作業はすべて終わっています。いまお渡しする判断は 2件です。プロジェクトの中身は、ここには出しません — 詳しくは各プロジェクトのページで見てください。</div>
@@ -506,6 +507,7 @@
                   <div class="nm">秦泉寺 章夫</div>
                   <div class="sub">あなたの PM</div>
                 </div>
+                <button class="btn ghost" type="button" data-openpage="terminal" style="margin-left:auto">PM の出力を見る</button>
               </div>
               <div class="chat">
                 <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>秦泉寺 章夫</div>はじめまして、秦泉寺 章夫です。まだプロジェクトがありません。最初のプロジェクトを開くと、ここで様子をお知らせできるようになります。</div>
@@ -761,7 +763,7 @@
             <p class="h-big">エージェント</p>
             <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持ちます（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はツールに依存しない共通の段階から選ぶパラメータです（実際に割り当てられたツールでは、その幅に最も近い段階が使われます）。性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM のエージェントは入れ替わりません。アカウントの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
             <div class="set-group">
-              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
+              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
             </div>
             <div class="set-group">
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">2. 小田 洋平</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn ghost" type="button">PM に割り当てる</button><button class="btn" type="button" data-nav="agent-edit-oda">編集</button></div>
@@ -1557,11 +1559,6 @@
                 <button class="btn" type="button" data-nav="g-board">掲示板で見る</button>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
-              <div class="lrow">
-                <span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
-                <span class="badge b-run">常駐</span>
-                <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
-              </div>
               <p class="h-sec">待ち行列</p>
               <div class="lrow">
                 <div class="grow"><div class="t">長時間のセッションでメモリが増え続ける（#5561）</div><div class="d">先頭 — 空きが出たら自動で始まります</div></div>
@@ -1616,7 +1613,6 @@
                 </div>
                 <span class="badge b-wait">判断待ち 2件</span>
                 <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
-                <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
               </div>
               <div class="rowitem">
                 <span class="ava working" style="background:#2563eb">小</span>
@@ -1655,8 +1651,6 @@
               <table class="list" aria-label="エージェント履歴">
                 <thead><tr><th>エージェント</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
                 <tbody>
-                  <tr><td>秦泉寺 章夫（PM）</td><td>#7048 の進行管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-run">進行中</span></td></tr>
-                  <tr><td>秦泉寺 章夫（PM）</td><td>#7541 の修正配信の管理</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-done">完了（マージ済み）</span></td></tr>
                   <tr><td>小田 洋平</td><td>#7048 共有状態モデル</td><td>Codex 1</td><td>gpt-6.2-sol／xhigh</td><td><span class="badge b-wait">レビュー待ち</span></td></tr>
                   <tr><td>小田 洋平</td><td>#7047 チェック失敗の切り分け</td><td>Codex 1</td><td>gpt-6.2-sol／xhigh</td><td><span class="badge b-block">停止中</span></td></tr>
                   <tr><td>姫野 大樹</td><td>#7007 ホームと判断の画面</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-run">進行中</span></td></tr>
@@ -1669,10 +1663,6 @@
               </div>
               <div class="lrow">
                 <div class="grow"><div class="t">小田 洋平 → メモリ課題（#5561）</div><div class="d">待ち行列の先頭。#7048 のレビューが通ったら開始します</div></div>
-                <span class="badge b-plan">予定</span>
-              </div>
-              <div class="lrow">
-                <div class="grow"><div class="t">秦泉寺 章夫（PM）→ リリース後の実機確認（#7541）</div><div class="d">次のリリースが公開されたら、7th で確認します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
               <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うアカウントが替わっても、顔・名前・特性は変わりません。</p>
@@ -2199,11 +2189,6 @@
                 <button class="btn" type="button" data-nav="k-decide">判断へ</button>
                 <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
               </div>
-              <div class="lrow">
-                <span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">PM のセッション（秦泉寺 章夫）</div><div class="d">Claude Code · 常駐 · 判断と報告を運んでいます · 出力もターミナル表示で見られます</div></div>
-                <span class="badge b-run">常駐</span>
-                <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
-              </div>
               <p class="h-sec">過去のセッション</p>
               <div class="lrow">
                 <div class="grow"><div class="t">過去のセッションを再開する</div><div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div></div>
@@ -2237,7 +2222,6 @@
                   <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div></div>
                 <span class="badge b-wait">判断待ち 1件</span>
                 <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
-                <button class="btn ghost" type="button" data-openpage="terminal">出力を見る</button>
               </div>
               <div class="rowitem">
                 <span class="ava stuck" style="background:#0e7490">安</span>
@@ -2255,7 +2239,6 @@
               <table class="list" aria-label="エージェント履歴">
                 <thead><tr><th>エージェント</th><th>課題</th><th>ツール</th><th>モデル／推論</th><th>結果</th></tr></thead>
                 <tbody>
-                  <tr><td>秦泉寺 章夫（PM）</td><td>#121 の判断の用意</td><td>Claude Code 1</td><td>claude-fable-5-2／標準</td><td><span class="badge b-wait">判断待ち</span></td></tr>
                   <tr><td>安藤 健二</td><td>#130 レース結果の取り込み</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-run">進行中</span></td></tr>
                   <tr><td>安藤 健二</td><td>#121 毎日の取り込み</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-block">停止中</span></td></tr>
                   <tr><td>安藤 健二</td><td>昨日の取り込み（#119）</td><td>Claude Code 1</td><td>claude-sonnet／標準</td><td><span class="badge b-done">完了</span></td></tr>
@@ -2264,10 +2247,6 @@
               <p class="h-sec">担当予定</p>
               <div class="lrow">
                 <div class="grow"><div class="t">安藤 健二 → 開催日の表記ゆれをそろえる（#118）</div><div class="d">#121 の判断が出て取り込みが再開したら開始します</div></div>
-                <span class="badge b-plan">予定</span>
-              </div>
-              <div class="lrow">
-                <div class="grow"><div class="t">秦泉寺 章夫（PM）→ 明朝の取り込み確認</div><div class="d">6:00 の定期実行の結果を掲示板に報告します</div></div>
                 <span class="badge b-plan">予定</span>
               </div>
               <p class="rel" style="margin-top:10px">アバターと特性はエージェントごとに固定です。使うアカウントが替わっても、顔・名前・特性は変わりません。</p>
@@ -2751,7 +2730,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="terminal-main">
             <p class="h-big">ターミナル表示</p>
-            <p class="h-sub">いま見ている作業のツール出力を、そのままの形で見られます。ターミナル表示は作業ごとに1つで、エージェントの切り替えはありません。別の作業の出力は、「作業」や「エージェント」の画面から、その作業を選んで開きます。PM（秦泉寺 章夫）のセッションも、作業の1つとして同じように開けます。</p>
+            <p class="h-sub">いま見ている作業のツール出力を、そのままの形で見られます。ターミナル表示は作業ごとに1つで、エージェントの切り替えはありません。別の作業の出力は、「作業」や「エージェント」の画面から、その作業を選んで開きます。PM のセッションは作業とは別で、プロジェクトの画面には出さず、ホームか「エージェント」の画面から開きます。</p>
             <div class="term">
               <div class="term-head"><b>小田 洋平</b><span>#7048 新しい画面の共有状態モデル</span><span>Codex 1 · gpt-6.2-sol · 推論 xhigh · Ultrafast</span><span>~/Repos/gwt/work/issue-7048</span><span style="margin-left:auto">実行中 · 42分</span></div>
               <div class="term-body"><span class="dim">$ codex — #7048 共有状態モデルの実装</span>
