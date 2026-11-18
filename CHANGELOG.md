@@ -1,6 +1,37 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.171.1] - 2026-11-18
+
+### Bug Fixes
+
+- **issue-monitor:** 重複 runtime の needs_human 理由に判別材料を載せる
+- **ci:** Answer ConPTY startup in monitor hook tests
+- **daemon:** Exit after exact retirement recovery is exhausted
+- **issue-monitor:** Stop retries for invalid agent profiles
+- **runtime:** Close stopped diagnostic agent windows
+- **hook:** Wait for pr contention during tool runtime publication
+- **gui:** Work event の dirty 診断を変更時だけ再スキャンする
+
+### Miscellaneous Tasks
+
+- **work:** Issue 5132 の Work イベントを記録
+- **work:** Issue 5132 の blocked イベントを記録
+- **work:** Issue 5132 の Work イベントを記録
+- **work:** Issue 5132 の検証 Work イベントを記録
+- **work:** Record Windows verification handoff
+- **work:** Record PR #7631 delivery event
+- **work:** Record issue 7608 pull request
+- **work:** Issue 7616 の Work イベントを記録
+- **work:** Issue 7616 の検証 Work イベントを記録
+- **work:** Record issue 7608 acceptance evaluation
+
+### Testing
+
+- **ci:** Record ConPTY regressions in Windows inventory
+- **daemon:** Keep shutdown deadline annotation attached
+- **gui:** Work event 診断テストの Git 起動数を対象リポジトリに限定する
+
 ## [9.171.0] - 2026-11-18
 
 ### Bug Fixes
