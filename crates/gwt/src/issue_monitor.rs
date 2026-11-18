@@ -5491,6 +5491,8 @@ pub struct IssueMonitorState {
     /// success or failure must not erase its cause and recovery instructions.
     #[serde(skip)]
     scan_recovery_error: Option<String>,
+    #[serde(skip)]
+    registered_profile_error: Option<String>,
     /// Issue #3628 (AC-5): when the fleet went to zero running agents while it
     /// still had runnable work. `None` while the fleet is healthy.
     #[serde(default)]
@@ -7445,8 +7447,7 @@ fn save_legacy_issue_monitor_prefs_unlocked(
         ));
     }
     let mut normalized = prefs.clone();
-    crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
-        .map_err(io::Error::other)?;
+    crate::agent_names::synchronize_roster_capacity(&mut normalized, path)?;
     normalized.enforce_retention();
     let prefs = &normalized;
     let normalized_at = std::time::Instant::now();
@@ -8129,8 +8130,7 @@ pub fn try_mutate_issue_monitor_prefs<T>(
         let mut prefs = load_issue_monitor_prefs_for_registry(path, registry)?;
         let before = prefs.clone();
         let result = mutation(&mut prefs)?;
-        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
-            .map_err(io::Error::other)?;
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)?;
         if prefs != before {
             prefs = save_issue_monitor_prefs_unlocked(path, &prefs, registry, true)?;
         }
@@ -8194,8 +8194,7 @@ pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
         }
         let mut prefs = load_issue_monitor_prefs_for_registry(path, registry)?;
         let result = mutation(&mut prefs)?;
-        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
-            .map_err(io::Error::other)?;
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)?;
         prefs = save_issue_monitor_prefs_unlocked(path, &prefs, registry, true)?;
         Ok((prefs, result))
     })
@@ -8823,6 +8822,7 @@ impl IssueMonitorState {
             last_scan_at: None,
             last_scan_error: None,
             scan_recovery_error: None,
+            registered_profile_error: None,
             agent_blackout_since: None,
             last_error: None,
             launch_auth_required: false,
@@ -9272,8 +9272,7 @@ impl IssueMonitorState {
     /// Finalize a numerical cap change inside its existing prefs transaction.
     pub fn synchronize_agent_roster_capacity(&mut self, prefs_path: &Path) -> io::Result<()> {
         let mut prefs = self.prefs();
-        crate::agent_names::synchronize_roster_capacity(&mut prefs, prefs_path)
-            .map_err(io::Error::other)?;
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, prefs_path)?;
         self.agent_roster = prefs.agent_roster;
         Ok(())
     }
@@ -12096,6 +12095,28 @@ impl IssueMonitorState {
     pub fn record_control_commit_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
         self.launch_auth_required = false;
+    }
+
+    /// Keep invalid configuration visible across scans until validated prefs commit.
+    pub(crate) fn record_registered_profile_error(&mut self, message: String) -> bool {
+        if self.registered_profile_error.as_ref() == Some(&message) {
+            return false;
+        }
+        self.registered_profile_error = Some(message);
+        true
+    }
+
+    pub(crate) fn clear_registered_profile_error_if_valid(&mut self, prefs: &IssueMonitorPrefs) {
+        if self.registered_profile_error.is_some()
+            && crate::agent_names::validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+                .is_ok()
+        {
+            self.registered_profile_error = None;
+        }
+    }
+
+    pub(crate) fn allows_delivery_publication(&self) -> bool {
+        self.registered_profile_error.is_none() && self.scan_recovery_error.is_none()
     }
 
     /// A failed write may change its diagnostic without changing scan inputs.
@@ -15693,6 +15714,7 @@ impl IssueMonitorState {
                     reason = reset.reason,
                 ), "monitor")
             })
+            .or_else(|| self.registered_profile_error.clone().map(|message| (message, "monitor")))
             .or_else(|| self.current_monitor_error().cloned().map(|message| (message, "monitor")))
             .or_else(|| self.last_scan_error.as_ref().map(|error| (error.message.clone(), "scan_failure")))
             .or_else(|| {
@@ -15721,6 +15743,7 @@ impl IssueMonitorState {
         // only a current monitor fault makes the whole monitor read as Error.
         let has_current_error = self.scan_recovery_error.is_some()
             || self.last_prefs_reset.is_some()
+            || self.registered_profile_error.is_some()
             || (!self.launch_auth_required
                 && (self.last_scan_error.is_some() || self.current_monitor_error().is_some()));
         let host = crate::process::current_hostname();
@@ -16618,7 +16641,10 @@ impl IssueMonitorState {
     fn apply_status_view_scan_diagnostics(&self, status: &mut IssueMonitorStatusView, now: &str) {
         // Fleet blackout is independent of the current scan/error state.
         status.agent_blackout = self.agent_blackout_at(now);
-        if !status.enabled || self.scan_recovery_error.is_some() || status.state == "auth_required"
+        if !status.enabled
+            || self.scan_recovery_error.is_some()
+            || self.registered_profile_error.is_some()
+            || status.state == "auth_required"
         {
             return;
         }

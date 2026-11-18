@@ -708,7 +708,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     });
     return input;
   };
-  const draft = () => rows.map(({ row, profile }) => {
+  const draft = (repair = false) => rows.map(({ row, profile, staleTool }) => {
     const { model: _model, reasoning: _reasoning, ...next } = profile;
     for (const input of row.querySelectorAll("[data-profile-field]")) {
       const key = input.dataset.profileField;
@@ -720,6 +720,11 @@ export function renderAgentsSettingsPanel(panel, options) {
     }
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === next.agent_member_id);
     if (member) next.agent_id = member.agent_id;
+    if (repair && staleTool) {
+      // Sparse writes otherwise inherit these settings from the old tool by member ID.
+      Object.assign(next, { model: null, reasoning: null, version: null, session_mode: "Normal", fast_mode: false, codex_speed: "off" });
+      if (!choices?.agents.find(tool => provider(tool.id) === provider(next.agent_id))?.supports_skip_permissions) next.skip_permissions = false;
+    }
     return next;
   });
   const submit = (next, input = null) => {
@@ -766,7 +771,9 @@ export function renderAgentsSettingsPanel(panel, options) {
     legend.textContent = `${index + 1}. ${savedMember?.name || profile.agent_member_id || "Unavailable member"}`;
     row.appendChild(legend);
     panel.appendChild(row);
-    rows.push({ row, profile });
+    const staleTool = savedMember?.agent_id && implementationEligible(savedMember)
+      && provider(savedMember.agent_id) !== provider(profile.agent_id);
+    rows.push({ row, profile, staleTool });
     const memberChoices = (availableMembers || []).filter(implementationEligible).map(member => ({ value: member.member_id || member.agent_member_id,
       label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})${member.enabled ? "" : " · Resting"}` }));
     if ((!savedMember || !implementationEligible(savedMember)) && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
@@ -849,6 +856,10 @@ export function renderAgentsSettingsPanel(panel, options) {
     }
     const remove = button(row, `Remove ${row.dataset.profileLabel}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
     remove.disabled = profiles.length <= 1;
+  }
+  if (rows.some(({ staleTool }) => staleTool)) {
+    const repair = button(panel, "Use registered profiles", "repair-candidates", () => submit(draft(true)));
+    poolHeading.after(repair);
   }
   const add = document.createElement("section");
   add.className = "settings-section";

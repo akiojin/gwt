@@ -509,6 +509,15 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
       return active.start();
     },
     issueNumber: issue.number, targetIssueNumber: options.targetIssueNumber, requests, comments, hookAudits, restoreSummary,
+    async ownerCloseResult(windowId: string, since: string) {
+      for await (const row of logRows()) {
+        if (row.target === "gwt.pane.teardown" && row.fields?.stage === "owner_close_result"
+          && row.fields.window_id === windowId && Date.parse(row.timestamp) >= Date.parse(since)) {
+          return { timestamp: row.timestamp, ...row.fields };
+        }
+      }
+      return null;
+    },
     async switchCwdCensus() {
       const observations = [];
       for await (const row of logRows()) {

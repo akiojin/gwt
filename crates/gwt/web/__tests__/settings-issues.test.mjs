@@ -553,6 +553,40 @@ test("Candidates disable addition with an accessible reason when the catalog is 
   assert.match(panel.querySelector('[data-candidate-status]').textContent, /All registered members.*candidate pool/);
 });
 
+test("Use registered profiles repairs stale fixed tools without changing the pool order", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  const render = load("renderAgentsSettingsPanel");
+  const profiles = [
+    { agent_member_id: "m-claude", agent_id: "codex", codex_speed: "ultrafast", prefer_for: ["label:bug"],
+      model: "codex-only", reasoning: "high", version: "0.1.0", session_mode: "Continue", fast_mode: true,
+      runtime_target: "Docker", docker_service: "worker" },
+    { agent_member_id: "m-codex", agent_id: "Codex", codex_speed: "fast" },
+  ];
+  const options = { profiles, choices: candidateChoices, send: message => sent.push(message) };
+  render(panel, options);
+  assert.deepEqual(sent, [], "loading stale settings does not write them");
+  const repair = panel.querySelector('button[aria-label="Use registered profiles"]');
+  assert.ok(repair);
+  repair.click();
+  assert.equal(repair.disabled, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "issue_monitor_profiles_set");
+  assert.deepEqual(sent[0].profiles.map(({ agent_member_id, agent_id, codex_speed }) =>
+    [agent_member_id, agent_id, codex_speed]), [["m-claude", "claude", "off"], ["m-codex", "codex", "fast"]]);
+  const { model, reasoning, version, session_mode, fast_mode, prefer_for, runtime_target, docker_service } = sent[0].profiles[0];
+  assert.deepEqual({ model, reasoning, version, session_mode, fast_mode, prefer_for, runtime_target, docker_service }, {
+    model: null, reasoning: null, version: null, session_mode: "Normal", fast_mode: false,
+    prefer_for: ["label:bug"], runtime_target: "Docker", docker_service: "worker",
+  });
+
+  render(panel, { ...options, profiles: sent[0].profiles });
+  assert.equal(panel.querySelector('[data-action="repair-candidates"]'), null);
+  const unavailable = candidateMembers.map(member => member.agent_id === "claude" ? { ...member, is_pm: true } : member);
+  render(panel, { ...options, availableMembers: unavailable });
+  assert.equal(panel.querySelector('[data-action="repair-candidates"]'), null);
+});
+
 test("a rejected candidate save shows its reason inline and preserves the draft", () => {
   const { document } = parseHTML('<div id="settings"><section data-settings-candidates data-saving="true" data-dirty="true" data-pending-request="1"><input value="draft model"><p data-candidate-status></p></section></div>');
   const body = document.getElementById("settings");

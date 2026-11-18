@@ -81,6 +81,61 @@ test("Issues strip coalesces receiver bursts and updates without animation frame
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
+test("Issue #7620 shows how to correct an invalid fixed-tool candidate", async ({ page }, info) => {
+  test.skip(!BASE, "requires an isolated checkout server");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.endsWith("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  await gotoLiveGwt(page, BASE);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+  const guidance = "Agent Sato has a fixed tool. In Settings → Issues → Candidates, select “Use registered profiles” to apply Sato (codex).";
+  // Feed the monitor's configuration diagnostic through the live receiver.
+  await page.evaluate(lastError => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+    detail: {
+      kind: "issue_monitor_status",
+      status: { enabled: true, state: "error", last_error_source: "monitor", last_error: lastError },
+    },
+  })), guidance);
+
+  await expect(page.locator("#op-strip-issue-monitor")).toHaveAttribute("data-state", "error");
+  await page.getByRole("button", { name: /^Notifications(?: \(|$)/ }).click();
+  const notice = page.locator('.notification-center__item[data-error-key^="issue-monitor:"]');
+  await expect(notice.getByText(guidance, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+
+  await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
+  const candidates = page.locator("[data-settings-candidates]");
+  await expect(candidates).toBeVisible();
+  await candidates.evaluate(panel => {
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function(data) {
+      const request = typeof data === "string" ? JSON.parse(data) : null;
+      if (request?.kind === "issue_monitor_profiles_set") {
+        (window as any).__candidateRepair = request;
+        return; // Fixture settings never reach the checkout's prefs writer.
+      }
+      send.call(this, data);
+    };
+    const inject = (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+    inject({ kind: "agent_roster", roster: {
+      project_key: location.pathname.split("/")[2], revision: Number.MAX_SAFE_INTEGER, capacity: 1,
+      members: [{ agent_member_id: "sato", name: "Sato", agent_id: "codex", enabled: true }],
+    } });
+    inject({ kind: "issue_monitor_profiles", project_root: panel.closest<HTMLElement>("[data-settings-project-root]")?.dataset.settingsProjectRoot,
+      profiles: [{ agent_member_id: "sato", agent_id: "claude", prefer_for: ["label:bug"] }],
+    });
+  });
+  const repair = candidates.getByRole("button", { name: "Use registered profiles", exact: true });
+  await repair.click();
+  await expect(repair).toBeDisabled();
+  const submitted = await page.waitForFunction(() => (window as any).__candidateRepair).then(handle => handle.jsonValue());
+  expect(submitted.profiles).toMatchObject([{ agent_member_id: "sato", agent_id: "codex", prefer_for: ["label:bug"] }]);
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test.describe("Mission Briefing dismissal (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 

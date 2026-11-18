@@ -3088,6 +3088,10 @@ request.catch(() => {});
       await info.attach(`shared-pool-${stage}-first-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       await info.attach(`shared-pool-${stage}-second-${theme}`, { body: await secondPage.screenshot(), contentType: "image/png" });
     };
+    let closeRequest: { windowId: string; at: string } | undefined;
+    const closeResult = () => closeRequest
+      ? fixture.ownerCloseResult(closeRequest.windowId, closeRequest.at)
+      : Promise.resolve(null);
     try {
       for (const target of [page, secondPage])
         await target.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -3111,7 +3115,8 @@ request.catch(() => {});
       await expect.poll(async () => !!(await preferences()).launch_confirmations?.[43]?.delivery_id, { timeout: 30_000 }).toBe(true);
       await expect.poll(async () => (await activity(page))?.agents?.map((agent: any) => agent.session_id),
         { timeout: 60_000 }).toEqual([source.gwt_session_id]);
-      const sourceWindow = (await activity(page)).agents[0].window_id;
+      const sourceRuntime = (await activity(page)).agents[0];
+      const sourceWindow = sourceRuntime.window_id;
       const sourceAssignment = (await machine("agent-registry.json")).project_assignments[firstKey];
       expect(Object.values(sourceAssignment)).toEqual([expect.objectContaining({
         project_key: firstKey, issue_number: 43, session_id: source.gwt_session_id })]);
@@ -3154,7 +3159,15 @@ request.catch(() => {});
       // Remove the exited diagnostic pane so only the hold keeps the Issue from relaunching.
       const windows = async () => JSON.parse(await readFile(join(fixture.home, ".gwt", "projects", firstKey, "workspace.json"), "utf8")).windows;
       expect((await windows()).some((window: any) => window.session_id === source.gwt_session_id)).toBe(true);
+      closeRequest = { windowId: sourceWindow, at: new Date().toISOString() };
+      mark("close original owner window", closeRequest);
       await sendLiveGwtEvent(page, { kind: "close_window", id: sourceWindow });
+      await expect.poll(closeResult, { timeout: 30_000, message: "the owner answers the exact window Close" }).not.toBeNull();
+      const reply = await closeResult();
+      mark("owner close response", { reply });
+      expect(reply).toMatchObject({
+        ok: true, owner_pane_id: identity.launched_window_id, incarnation: sourceRuntime.runtime_incarnation,
+      });
       await expect.poll(async () => (await windows()).some((window: any) => window.session_id === source.gwt_session_id),
         { timeout: 30_000 }).toBe(false);
       const hold = async () => (await preferences()).failed_issues?.find((entry: any) => entry.issue_number === 43);
@@ -3220,12 +3233,13 @@ request.catch(() => {});
     } catch (error) {
       // A native runner's HOME is not retained; keep both projects' view of the shared pool.
       const observedAt = new Date().toISOString();
-      const [launches, first, second, policy, registry, capacity] = await Promise.all([
+      const [launches, first, second, policy, registry, capacity, ownerClose] = await Promise.all([
         fixture.launches(), status(), status(fixture.second.project),
         machine("agent-settings.json"), machine("agent-registry.json"), machine("agent-capacity.json"),
+        closeResult(),
       ].map(promise => promise.catch(failure => String(failure))));
       await info.attach("issue-7451-failure-state", { body: JSON.stringify({
-        observed_at: observedAt, launches, first, second, policy, registry, capacity, timeline,
+        observed_at: observedAt, launches, first, second, policy, registry, capacity, owner_close: ownerClose, timeline,
       }, null, 2), contentType: "application/json" }).catch(() => {});
       throw error;
     } finally {

@@ -31,8 +31,11 @@ use crate::window_state::window_state_for_hook_event;
 
 const HOOK_SESSION_METADATA_LEASE_WAIT: Duration = Duration::from_millis(25);
 // Leave room for runtime publication and prompt context within the dispatcher
-// deadline. Tool hooks can use the ordinary bounded Session lease wait.
+// deadline.
 const PROMPT_RUNTIME_SESSION_LEASE_WAIT: Duration = Duration::from_millis(150);
+// PR dispatch can hold the Session lease across GitHub I/O. Give tool hooks
+// time to publish their lifetime after the observed 2.131s hold (Issue #7605).
+const TOOL_RUNTIME_SESSION_LEASE_WAIT: Duration = Duration::from_secs(5);
 const OWNED_RUNTIME_SESSION_LEASE_WAIT: Duration = Duration::from_secs(2);
 // Native startup identity is a mandatory durable commit, so use the normal
 // Session transaction's bounded wait rather than fail-open bookkeeping's budget.
@@ -538,10 +541,10 @@ impl HookCompletionContext {
             .observation
             .as_ref()
             .map_or("completion", |observation| observation.event.as_str());
-        let wait = if event == "UserPromptSubmit" {
-            PROMPT_RUNTIME_SESSION_LEASE_WAIT
-        } else {
-            OWNED_RUNTIME_SESSION_LEASE_WAIT
+        let wait = match event {
+            "UserPromptSubmit" => PROMPT_RUNTIME_SESSION_LEASE_WAIT,
+            "PreToolUse" | "PostToolUse" => TOOL_RUNTIME_SESSION_LEASE_WAIT,
+            _ => OWNED_RUNTIME_SESSION_LEASE_WAIT,
         };
         let deadline = operation_deadline::now() + wait;
         let deadline = operation_deadline::current().map_or(deadline, |outer| outer.min(deadline));
@@ -1643,6 +1646,9 @@ mod tests {
                     entry.clone(),
                 )])));
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // With no terminal frontend, answer ConPTY's startup cursor query.
+                    #[cfg(windows)]
+                    handle.write_input(b"\x1b[1;1R").unwrap();
                     std::fs::write(directory.join("go"), b"").unwrap();
                     wait_for(&directory.join("ready"));
                     let before = std::fs::read(path).unwrap();
@@ -2075,6 +2081,80 @@ mod tests {
         for result in results {
             result.unwrap().unwrap();
         }
+    }
+
+    #[test]
+    fn tool_hooks_publish_after_observed_pr_mutation_lease_hold() {
+        use gwt_core::operation_deadline::{
+            ScopedNamedLockContentionObserver, ScopedOperationClock,
+        };
+        use gwt_core::test_support::{gwt_home_override, ScopedGwtHome};
+        use std::{rc::Rc, sync::mpsc};
+
+        super::super::health::browser_preflight_tests::with_source(|input, session, path, _| {
+            let home = gwt_home_override().unwrap();
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let lock_path = sessions.join(format!(".{}.lock", session.id));
+            let binding = session.execution_binding.as_ref().unwrap();
+            let payload = r#"{"tool_use_id":"issue-7605-tool"}"#;
+
+            for event in ["PreToolUse", "PostToolUse"] {
+                let completion = begin_hook_event(&input.worktree_root, event, payload).unwrap();
+                let (lease_state, wait_for_lease_state) = mpsc::channel();
+                let (release, wait_for_release) = mpsc::channel();
+                let published = std::thread::scope(|scope| {
+                    let home = &home;
+                    let sessions = &sessions;
+                    scope.spawn(move || {
+                        let _home = ScopedGwtHome::set(home);
+                        let dispatched = crate::cli::execution_state::with_current_pr_mutation_execution_binding_lease(
+                            sessions,
+                            binding,
+                            || {
+                                lease_state.send(()).unwrap();
+                                wait_for_release.recv().unwrap();
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(dispatched, Some(()));
+                        lease_state.send(()).unwrap();
+                    });
+                    wait_for_lease_state
+                        .recv()
+                        .expect("PR mutation holds the Session lease");
+                    let started = operation_deadline::now();
+                    let _clock = ScopedOperationClock::set(started);
+                    let advanced_clock = Rc::new(Cell::new(None));
+                    let after_contention = advanced_clock.clone();
+                    let observer = ScopedNamedLockContentionObserver::set(&lock_path, move || {
+                        after_contention.set(Some(ScopedOperationClock::set(
+                            started + Duration::from_millis(2_131),
+                        )));
+                        release.send(()).unwrap();
+                        wait_for_lease_state
+                            .recv()
+                            .expect("PR mutation released the lease");
+                    });
+                    let result = handle_with_input_owned(event, payload, Some(&completion));
+                    drop(observer);
+                    assert!(advanced_clock.take().is_some(), "the hook must contend");
+                    result
+                });
+
+                let published = published.unwrap().expect("publish after PR mutation");
+                assert_eq!(published.last_hook_event.as_deref(), Some(event));
+                assert!(completion.runtime_was_published());
+                let runtime = SessionRuntimeState::load(path).unwrap();
+                assert_eq!(runtime.source_event.as_deref(), Some(event));
+                assert_eq!(
+                    runtime
+                        .active_tool_calls
+                        .unwrap()
+                        .contains("issue-7605-tool"),
+                    event == "PreToolUse"
+                );
+            }
+        });
     }
 
     #[test]
