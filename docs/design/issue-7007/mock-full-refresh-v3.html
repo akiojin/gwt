@@ -429,6 +429,7 @@
       <a data-openpage="tools">アカウント</a>
       <a data-openpage="tools" data-openscreen="tool-add">アカウントを追加</a>
       <a data-openpage="tools" data-openscreen="tools-supported">ツール管理</a>
+      <a data-openpage="tools" data-openscreen="tools-env">実行環境</a>
       <a data-openpage="settings">アプリ設定</a>
       <a data-openpage="profile">プロファイル</a>
       <a data-openpage="notifications">通知</a>
@@ -666,7 +667,7 @@
             <p class="h-sub">セットアップが終わりました。<b>PM が自動で起動しています。</b>ホームで PM と話せます。</p>
             <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st done">2. アカウント</span><span>→</span><span class="st done">3. エージェントと PM</span><span>→</span><span class="st done">4. プロジェクト</span><span>→</span><span class="st on">5. 完了</span></div>
             <div class="set-group">
-              <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">登録とサインインが済んでいます。プールに入り、割り当て候補になっています。</div></div><span class="badge b-done">完了</span></div>
+              <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">登録とサインインが済んでいます。実行環境で選べるようになっています。</div></div><span class="badge b-done">完了</span></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントと PM</div><div class="d2">最初のエージェントが台帳の先頭になり、PM として起動しています。</div></div><span class="badge b-done">完了</span></div>
               <div class="set-row"><div class="grow"><div class="t">プロジェクト</div><div class="d2">開いていない場合は、ヘッダーの「プロジェクト」から後で開けます。</div></div><span class="badge b-plan">後でも可</span></div>
             </div>
@@ -894,16 +895,17 @@
 - 実装は自分では行わず、担当のエージェントに任せる。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1" selected>Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）" selected>Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える" selected>同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ">切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-oda">
@@ -940,16 +942,17 @@
 - 変更の前後で関連テストを走らせ、結果を報告に含める。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1" selected>Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）">Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）" selected>Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える" selected>同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ">切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-himeno">
@@ -986,16 +989,17 @@
 - 操作の手数は増やさず、既存の画面の導線に沿わせる。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1" selected>Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）" selected>Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える" selected>同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ">切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-ando">
@@ -1032,16 +1036,17 @@
 - 元データは書き換えず、変換は取り込み側で行う。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1" selected>Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）" selected>Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える" selected>同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ">切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev">rust-dev</option><option value="data-import" selected>data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hara">
@@ -1078,16 +1083,17 @@
 - 環境の差異が疑われるときは、環境の情報も添える。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2" selected>Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）">Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）" selected>Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える" selected>同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ">切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-suzuki">
@@ -1124,16 +1130,17 @@
 - 決められないことは決めず、判断の材料として上げる。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2" selected>Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）">Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）" selected>Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える" selected>同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ">切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hamada">
@@ -1170,16 +1177,17 @@
 - 再現の取れない計測値は、結論に使わない。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）" selected>自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）">Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）" selected>Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える">同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ" selected>切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-new">
@@ -1213,16 +1221,17 @@
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical" placeholder="（例）実装を重点に。変更は小さく刻み、テストで確かめてから進める。&#10;- 仕様に無い挙動は足さない。&#10;- 失敗したら原因を切り分けてから直す。"></textarea></div>
             </div>
             <div class="set-group">
-              <h4>使用するアカウント</h4>
-              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）" selected>自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
+              <h4>実行環境</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用する実行環境</div><div class="d2">このエージェントが動く実行環境です。実行環境は、アカウントと経由ツールの組です。次に始まるセッションから反映されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用する実行環境" style="width:min(320px,100%)"><option value="Claude Code 1（会社メール）" selected>Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-env">実行環境を開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">指定した実行環境が使えないとき</div><div class="d2">アカウントが上限などで使えないときの扱いです。切り替える場合も、動いているセッションはそのまま続きます。</div></div><select class="field" aria-label="指定した実行環境が使えないとき" style="width:min(320px,100%)"><option value="同じプロバイダーの実行環境へ自動で切り替える" selected>同じプロバイダーの実行環境へ自動で切り替える</option><option value="切り替えずに待つ">切り替えずに待つ</option></select></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
               <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
-            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
+            <div class="notice">使用する実行環境と既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">追加する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
         </div>
@@ -1233,7 +1242,7 @@
         <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a></div>
         <div class="content">
           <div class="screen-pane on" data-screen="tools-pool">
-            <p class="h-big">アカウント（実行環境）</p>
+            <p class="h-big">アカウント</p>
             
             <div class="set-group">
               <h4>Claude Code</h4>
@@ -1252,7 +1261,7 @@
             </div>
             <div class="set-group">
               <h4>Z.ai</h4>
-              <div class="set-row"><div class="grow"><div class="t">Z.ai 1</div><div class="d2">サインイン済み（API キー）</div><div class="use"><div class="bar"><i style="width:35%"></i></div><span>週間35%使用 · 日曜 9:00にリセット</span></div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Z.ai 1</div><div class="d2">サインイン済み（API キー）</div><div class="use"><div class="bar"><i style="width:35%"></i></div><span>週間35%使用 · 日曜 9:00にリセット</span></div><div class="d2">このアカウントを使う実行環境：Z.ai 1（Hermes Agent 経由）／Z.ai 1（OpenClaw 経由）／Z.ai 1（OpenCode 経由）</div></div><button class="btn" type="button" data-nav="tools-env">実行環境を開く</button></div>
             </div>
             <div class="set-group">
               <h4>Hermes Agent</h4>
@@ -1270,8 +1279,39 @@
             </div>
             <div class="set-group">
               <h4>追加と管理</h4>
-              <div class="set-row"><div class="grow"><div class="t">アカウントを追加する</div><div class="d2">アカウントを追加すると、プールに入って自動で割り当て候補になります。初回は、少なくとも1つのアカウントの登録とサインインが済むまで先へ進めません。</div></div><button class="btn" type="button" data-nav="tool-add">追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アカウントを追加する</div><div class="d2">追加したアカウントは、実行環境で選べるようになります。初回は、少なくとも1つのアカウントの登録とサインインが済むまで先へ進めません。</div></div><button class="btn" type="button" data-nav="tool-add">追加</button></div>
+              <div class="set-row"><div class="grow"><div class="t">実行環境</div><div class="d2">アカウントと経由ツールの組の一覧です。エージェントが使うのは、この実行環境です。</div></div><button class="btn" type="button" data-nav="tools-env">開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">ツール管理</div><div class="d2">ツール（本体＝CLI）のインストールと更新は、ツール管理だけで行います。この画面（アカウント）では扱いません。</div></div><button class="btn" type="button" data-nav="tools-supported">管理を開く</button></div>
+            </div>
+          </div>
+          <div class="screen-pane" data-screen="tools-env">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
+            <p class="h-big">実行環境</p>
+            <div class="set-group">
+              <h4>Claude</h4>
+              <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">アカウント：Claude Code 1 · 経由：Claude Code</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Claude Code 2（個人メール）</div><div class="d2">アカウント：Claude Code 2 · 経由：Claude Code</div></div><span class="badge b-block">上限</span></div>
+            </div>
+            <div class="set-group">
+              <h4>OpenAI</h4>
+              <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">アカウント：Codex 1 · 経由：Codex</div></div><span class="badge b-block">上限</span></div>
+              <div class="set-row"><div class="grow"><div class="t">Codex 2（個人メール）</div><div class="d2">アカウント：Codex 2 · 経由：Codex</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Codex 3</div><div class="d2">アカウント：Codex 3 · 経由：Codex</div></div><span class="badge b-block">サインインが必要</span></div>
+            </div>
+            <div class="set-group">
+              <h4>xAI</h4>
+              <div class="set-row"><div class="grow"><div class="t">Grok Build 1</div><div class="d2">アカウント：Grok Build 1 · 経由：Grok Build</div></div></div>
+            </div>
+            <div class="set-group">
+              <h4>Z.ai</h4>
+              <div class="set-row"><div class="grow"><div class="t">Z.ai 1（Hermes Agent 経由）</div><div class="d2">アカウント：Z.ai 1 · 経由：Hermes Agent</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Z.ai 1（OpenClaw 経由）</div><div class="d2">アカウント：Z.ai 1 · 経由：OpenClaw</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">Z.ai 1（OpenCode 経由）</div><div class="d2">アカウント：Z.ai 1 · 経由：OpenCode</div></div></div>
+            </div>
+            <div class="set-group">
+              <h4>管理</h4>
+              <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">アカウントの資格情報・サインイン状態・使用量・制限は、アカウントの画面で扱います。</div></div><button class="btn" type="button" data-nav="tools-pool">アカウントを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">ツール管理</div><div class="d2">ツール（本体＝CLI）のインストールと更新は、ツール管理で扱います。</div></div><button class="btn" type="button" data-nav="tools-supported">ツール管理を開く</button></div>
             </div>
           </div>
           <div class="screen-pane" data-screen="tool-add">
@@ -1322,7 +1362,7 @@
           <div class="screen-pane" data-screen="tool-add-done">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
             <p class="h-big">アカウントを追加する — 完了</p>
-            <p class="h-sub">アカウントがプールに入りました。</p>
+            <p class="h-sub">アカウントを追加しました。</p>
             <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st done">2. 本体の確認</span><span>→</span><span class="st done">3. サインイン</span><span>→</span><span class="st on">4. 完了</span></div>
             <div class="set-group">
               <h4>設定のサマリー</h4>
@@ -1334,14 +1374,14 @@
             <div class="set-group">
               <h4>表示名</h4>
               <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">上のサマリーをもとに自動で付けた名前です。その場で変更できます（例：Claude Code 3（予備））。接続先を差し替えられるツールの場合は「Hermes Agent 1（Z.ai）」のように、プロバイダーも含めて提案します。</div></div><input class="field" type="text" value="Claude Code 3" aria-label="表示名" style="width:220px"></div>
-              <div class="set-row"><div class="grow"><div class="t">プールの状態</div><div class="d2">アカウント画面のプールに、この表示名で並んでいます。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">アカウントの状態</div><div class="d2">アカウント画面に、この表示名で並んでいます。</div></div></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-pool">アカウントへ戻る</button><button class="btn ghost" type="button" data-nav="tool-add">続けて追加する</button></div>
           </div>
           <div class="screen-pane" data-screen="tool-signin">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
             <p class="h-big">サインイン — Codex 3</p>
-            <p class="h-sub">サインインが済むまで、このアカウントは割り当て対象外です。済むとプールに入り、候補になります。</p>
+            <p class="h-sub">サインインが済むまで、このアカウントは割り当て対象外です。済むと、実行環境で選べるようになります。</p>
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">ブラウザでサインインする</div><div class="d2">サインイン用の画面を開きます。終わると、ここに戻って状態が「サインイン済み」になります。</div></div><button class="btn primary" type="button">サインインを開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">サインイン用のシェルを開く</div><div class="d2">コマンドでサインインする場合はこちらです。シェルの中でログインを終えてください。</div></div><button class="btn" type="button" data-openpage="terminal">シェルを開く</button></div>
@@ -1375,7 +1415,7 @@
           </div>
           <div class="screen-pane" data-screen="tools-supported">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
-            <p class="h-big">ツール管理（実行環境）</p>
+            <p class="h-big">ツール管理</p>
             <p class="h-sub">本体が入っていない種類は、アカウントを登録できません。</p>
             <table class="list" aria-label="ツール管理">
               <thead><tr><th>ツール</th><th>状態</th><th>導入済み</th><th>利用可能</th><th></th></tr></thead>
@@ -1393,6 +1433,7 @@
             <div class="set-group" style="margin-top:14px">
               <div class="set-row"><div class="grow"><div class="t">ツールを自動で更新する</div><div class="d2">次回起動時に、更新の経路が確認できていて新しいバージョンがある、導入済みのツールだけを更新します。勝手にインストールはしません。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
               <div class="set-row"><div class="grow"><div class="t">実行中の制限</div><div class="d2">そのツールのエージェントウィンドウが動いている間は、インストールと更新は受け付けません（理由はその場に出ます）。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">実行環境</div><div class="d2">アカウントと経由ツールの組の一覧です。</div></div><button class="btn" type="button" data-nav="tools-env">実行環境を開く</button></div>
             </div>
           </div>
         </div>
@@ -1734,7 +1775,7 @@
                 <div class="grow">
                   <div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div>
                   <div class="d">このプロジェクトも見ています · 判断待ち 2件を運んでいます</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span><span class="trait">実行環境 <b>Claude Code 1（エージェントの既定）</b></span></div>
                 </div>
                 <span class="badge b-wait">判断待ち 2件</span>
                 <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
@@ -1744,7 +1785,7 @@
                 <div class="grow">
                   <div class="t">小田 洋平 <span class="rel">· Codex（ツール）</span></div>
                   <div class="d">作業中：#7048、共有状態モデル · ここまで42分 · #7047 の修正も準備中</div>
-                  <div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span><span class="trait">実行環境 <b>Codex 1（エージェントの既定）</b></span></div>
                   <div class="use"><div class="bar"><i style="width:64%"></i></div><span>Codex 1 — 週間64%使用 · 土曜21:25にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -1756,7 +1797,7 @@
                 <div class="grow">
                   <div class="t">姫野 大樹 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#7007、全画面刷新 · ここまで1時間12分</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span><span class="trait">実行環境 <b>Claude Code 1（エージェントの既定）</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -1768,7 +1809,7 @@
                 <div class="grow">
                   <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">いまは KeibaDB の取り込みを担当しています · このプロジェクトでは待機中</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span><span class="trait">実行環境 <b>Claude Code 1（エージェントの既定）</b></span></div>
                 </div>
                 <span class="badge b-done">待機中</span>
               </div>
@@ -1973,6 +2014,10 @@
               <div class="set-group">
                 <div class="set-head">プロファイル</div>
                 <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このプロジェクトで働く全エージェントに効く既定です。プロジェクトの既定が、エージェントの既定を上書きします。未設定のときは、各エージェントの既定が使われます。</div></div><select class="field" aria-label="既定のプロファイル" style="width:min(280px,100%)"><option value="">未設定（エージェントの既定を使う）</option><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">実行環境</div>
+                <div class="set-row"><div class="grow"><div class="t">既定の実行環境</div><div class="d2">このプロジェクトで働く全エージェントに効く既定です。プロジェクトの既定が、エージェントの既定を上書きします。未設定のときは、各エージェントの既定が使われます。</div></div><select class="field" aria-label="既定の実行環境" style="width:min(320px,100%)"><option value="" selected>未設定（エージェントの既定を使う）</option><option value="Claude Code 1（会社メール）">Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select></div>
               </div>
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
@@ -2348,7 +2393,7 @@
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
                 <div class="grow"><div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span><span class="trait">プロファイル <b>data-import（プロジェクトの既定）</b></span></div></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span><span class="trait">プロファイル <b>data-import（プロジェクトの既定）</b></span><span class="trait">実行環境 <b>Claude Code 1（プロジェクトの既定）</b></span></div></div>
                 <span class="badge b-wait">判断待ち 1件</span>
                 <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
               </div>
@@ -2357,7 +2402,7 @@
                 <div class="grow">
                   <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#130、レース結果の取り込み · #121 は判断待ちで停止中</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span><span class="trait">プロファイル <b>data-import（プロジェクトの既定）</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span><span class="trait">プロファイル <b>data-import（プロジェクトの既定）</b></span><span class="trait">実行環境 <b>Claude Code 1（プロジェクトの既定）</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -2505,6 +2550,10 @@
               <div class="set-group">
                 <div class="set-head">プロファイル</div>
                 <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このプロジェクトで働く全エージェントに効く既定です。プロジェクトの既定が、エージェントの既定を上書きします。未設定のときは、各エージェントの既定が使われます。</div></div><select class="field" aria-label="既定のプロファイル" style="width:min(280px,100%)"><option value="">未設定（エージェントの既定を使う）</option><option value="default">default</option><option value="rust-dev">rust-dev</option><option value="data-import" selected>data-import</option></select></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">実行環境</div>
+                <div class="set-row"><div class="grow"><div class="t">既定の実行環境</div><div class="d2">このプロジェクトで働く全エージェントに効く既定です。プロジェクトの既定が、エージェントの既定を上書きします。未設定のときは、各エージェントの既定が使われます。</div></div><select class="field" aria-label="既定の実行環境" style="width:min(320px,100%)"><option value="">未設定（エージェントの既定を使う）</option><option value="Claude Code 1（会社メール）" selected>Claude Code 1（会社メール）</option><option value="Claude Code 2（個人メール）">Claude Code 2（個人メール）</option><option value="Codex 1（会社メール）">Codex 1（会社メール）</option><option value="Codex 2（個人メール）">Codex 2（個人メール）</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1（Hermes Agent 経由）">Z.ai 1（Hermes Agent 経由）</option><option value="Z.ai 1（OpenClaw 経由）">Z.ai 1（OpenClaw 経由）</option><option value="Z.ai 1（OpenCode 経由）">Z.ai 1（OpenCode 経由）</option></select></div>
               </div>
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
@@ -2778,14 +2827,14 @@
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装</div><div class="d2">台帳の並び順で、この課題の担当に選ばれました</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><button class="btn" type="button" data-nav="wizard-step1">担当を変える</button></div>
             </div>
             <div class="set-group">
-              <div class="set-head">アカウント（自動で割り当て）</div>
-              <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">エージェント設定の「使用するアカウント」に従いました — 空きがあり、上限に達していません</div><div class="use"><div class="bar"><i style="width:64%"></i></div><span>週間64%使用 · 土曜21:25にリセット</span></div></div><span class="badge b-run">割り当て可</span></div>
-              <p class="d" style="font-size:12.8px;color:var(--ink2)">使うアカウントは、エージェント設定の「使用するアカウント」が基本です。そのアカウントが上限などで使えないときは、プール内の別のアカウントが使われます。</p>
+              <div class="set-head">実行環境</div>
+              <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">小田 洋平の既定の実行環境です — 空きがあり、上限に達していません</div><div class="use"><div class="bar"><i style="width:64%"></i></div><span>週間64%使用 · 土曜21:25にリセット</span></div></div><span class="badge b-run">割り当て可</span></div>
+              <p class="d" style="font-size:12.8px;color:var(--ink2)">使う実行環境は、エージェント設定の「使用する実行環境」が基本です（プロジェクトに既定があれば、そちらが優先されます）。指定した実行環境が上限などで使えないときは、宣言した範囲（同じプロバイダー）で別の実行環境が使われます。</p>
             </div>
             <div class="set-group">
               <div class="set-head">計画</div>
               <div class="set-row"><div class="grow"><div class="t">ブランチ</div><div class="d2">work/issue-5561（develop から作ります）</div></div><button class="btn" type="button" data-nav="wizard-branch">変える</button></div>
-              <div class="set-row"><div class="grow"><div class="t">実行環境</div><div class="d2">ホスト</div></div><button class="btn" type="button" data-menu="ホスト,コンテナ,リモート">ホスト ▾</button></div>
+              <div class="set-row"><div class="grow"><div class="t">動かす場所</div><div class="d2">ホスト</div></div><button class="btn" type="button" data-menu="ホスト,コンテナ,リモート">ホスト ▾</button></div>
               <div class="set-row"><div class="grow"><div class="t">権限</div><div class="d2">通常（危険な操作は都度確認します）</div></div><button class="btn" type="button" data-menu="通常,自動で進める">通常 ▾</button></div>
             </div>
             <div class="btnrow" style="margin-top:16px"><button class="btn ghost" type="button" data-nav="wizard-step1">戻る</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">やめる</button><button class="btn primary" type="button" data-nav="wizard-step3">確認へ進む</button></div>
@@ -2847,8 +2896,8 @@
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">課題</div><div class="d2">#5561 長時間のセッションでメモリが増え続ける（gwt）</div></div></div>
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">担当 — 小田 洋平</div><div class="d2">特性：推論 最大 · 速度 最速 · 実装を重点に（エージェント固定）</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">アカウント — Codex 1（会社メール）</div><div class="d2">プールから自動で割り当てました。週間64%使用 · 土曜21:25にリセット</div></div></div>
-              <div class="set-row"><div class="grow"><div class="t">ブランチ — work/issue-5561</div><div class="d2">develop から作ります · 実行環境：ホスト · 権限：通常</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">実行環境 — Codex 1（会社メール）</div><div class="d2">エージェント設定の既定どおりです。週間64%使用 · 土曜21:25にリセット</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">ブランチ — work/issue-5561</div><div class="d2">develop から作ります · 動かす場所：ホスト · 権限：通常</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">プロファイル — rust-dev</div><div class="d2">小田 洋平 に割り当てられたプロファイルで始まります</div></div></div>
             </div>
             <div class="btnrow" style="margin-top:16px"><button class="btn ghost" type="button" data-nav="wizard-step2">戻る</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">やめる</button><button class="btn primary" type="button" data-openpage="gwt" data-openscreen="g-works">始める</button></div>
@@ -2919,9 +2968,9 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェントとアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェントとアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントは資格情報と使用量、実行環境はアカウントと経由ツールの組の一覧、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
     <p>画面の外に置いた説明（モックを読む人向け）：アカウント画面の Hermes Agent／OpenCode／OpenClaw の行は、各ツールが現在使っているプロバイダーのアカウントへの参照です。Hermes Agent と OpenClaw はプロジェクトごとの起動ホームで動くため、参照先のアカウントはプロジェクトごとに変わります。エージェント（台帳）には「使えるツール種別」の項目はなく、担当の履歴と予定・現在の作業状態も台帳には置かず、各プロジェクトの「エージェント」と「作業」で見ます。エージェントは特定のプロジェクトに所属しない、全プロジェクト共通のマスタです。ターミナル表示の要件（大量の出力でも詰まらない描画、時間とともに劣化しないスクロール、残像・重なりなし、再接続時の再生、セッション消滅時の自動復帰）は設計正本の項目58を正とします。</p>
-    <p>画面の外に置いた説明（続き）：プロジェクト・通知・エージェント・アカウント・プロファイルは端末全体の画面で、ヘッダーから開きます。プロジェクトのページは独立したページとして、ブラウザのタブで並べて開けます。初回セットアップは、エージェントの起動計画である「起動ウィザード」とは別の流れです。エージェントの並び順が利用優先度で、特性（推論レベル・速度・性格）はエージェントごとに固定です。PM は「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人が務めます。使用するアカウントはエージェント設定で選び（選択の主軸はアカウントで、ツールはそのアカウントを使う経路として従います）、割り当ては層としても画面としても出しません。実行環境は、本体（ツール：インストール・バージョン・更新はツール管理）と、プロバイダー単位のアカウント（資格情報・使用量・制限はアカウント画面）の2つでできています。接続先を差し替えられるツール（Hermes Agent／OpenCode／OpenClaw）の接続先の設定はツール自身が行うため、gwt はフォームを作らず、ツールのセットアップをそのまま開きます。プロファイルは端末で定義する環境変数の束で、既定はエージェント側とプロジェクト側にあり、プロジェクトの既定がエージェントの既定を上書きします。プロジェクト一覧の各行には、作業の状態と自律駆動の状態、判断待ちの有無・最終更新・場所の目安だけを出し、作業状況の詳細や Issue の中身は各プロジェクトのページで見ます。ターミナル表示は作業ごとに1つで、エージェントの切り替えはありません。PM のセッションは作業とは別で、その出力画面の戻り先はホームとエージェント画面だけです。やり取りの基本はホームの会話で、ターミナルは実物の出力を見る場所です。起動ウィザードの担当は台帳の並び順と特性で決まり、特性そのものはウィザードでは変えません。</p>
+    <p>画面の外に置いた説明（続き）：プロジェクト・通知・エージェント・アカウント・プロファイルは端末全体の画面で、ヘッダーから開きます。プロジェクトのページは独立したページとして、ブラウザのタブで並べて開けます。初回セットアップは、エージェントの起動計画である「起動ウィザード」とは別の流れです。エージェントの並び順が利用優先度で、特性（推論レベル・速度・性格）はエージェントごとに固定です。PM は「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人が務めます。エージェントが使うのは実行環境（アカウントと経由ツールの組）で、エージェント設定で選び、プロジェクトに既定があればそちらが優先されます（プロファイルと同じ解決順序です）。実行環境は定義であり、複数のエージェントが同じ実行環境を同時に使えます。指定した実行環境が使えないときは、エージェント設定で宣言した範囲（同じプロバイダー）でのみ自動で切り替わります。本体（ツール）のインストール・バージョン・更新はツール管理、プロバイダー単位のアカウントの資格情報・使用量・制限はアカウント画面で扱います。接続先を差し替えられるツール（Hermes Agent／OpenCode／OpenClaw）の接続先の設定はツール自身が行うため、gwt はフォームを作らず、ツールのセットアップをそのまま開きます。プロファイルは端末で定義する環境変数の束で、既定はエージェント側とプロジェクト側にあり、プロジェクトの既定がエージェントの既定を上書きします。プロジェクト一覧の各行には、作業の状態と自律駆動の状態、判断待ちの有無・最終更新・場所の目安だけを出し、作業状況の詳細や Issue の中身は各プロジェクトのページで見ます。ターミナル表示は作業ごとに1つで、エージェントの切り替えはありません。PM のセッションは作業とは別で、その出力画面の戻り先はホームとエージェント画面だけです。やり取りの基本はホームの会話で、ターミナルは実物の出力を見る場所です。起動ウィザードの担当は台帳の並び順と特性で決まり、特性そのものはウィザードでは変えません。</p>
   </footer>
 </div>
 
