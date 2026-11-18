@@ -563,6 +563,22 @@
     </div>
   </div>
 
+  <div class="statebar reviewbar">
+    <span class="lab">初回セットアップ「アカウント」の状態（モック確認用）：</span>
+    <div class="seg" role="group" aria-label="初回セットアップのアカウント状態切替">
+      <button type="button" data-setupstate="todo" aria-pressed="true">未完了（登録・サインイン前）</button>
+      <button type="button" data-setupstate="done" aria-pressed="false">完了（登録・サインイン済み）</button>
+    </div>
+  </div>
+
+  <div class="statebar reviewbar">
+    <span class="lab">アカウント追加ウィザード「接続の設定」の状態（モック確認用）：</span>
+    <div class="seg" role="group" aria-label="アカウント追加ウィザードのサインイン状態切替">
+      <button type="button" data-signinstate="todo" aria-pressed="true">未サインイン</button>
+      <button type="button" data-signinstate="done" aria-pressed="false">サインイン済み</button>
+    </div>
+  </div>
+
   <div class="mock" id="app">
     <div class="mock-head">
       <span class="dots"><i style="background:#e0655f"></i><i style="background:#e5b95c"></i><i style="background:#63b06a"></i></span>
@@ -727,12 +743,17 @@
             <p class="h-big">アカウントを追加する</p>
             <p class="h-sub">エージェントが使うアカウントを登録します。<b>最低1つのアカウントの登録とサインインが済むまで、次へは進めません。</b>追加の操作は、アカウント追加ウィザードで行います。</p>
             <div class="steps"><span class="st done">1. ようこそ</span><span>→</span><span class="st on">2. アカウント</span><span>→</span><span class="st">3. エージェントと PM</span><span>→</span><span class="st">4. プロジェクト</span><span>→</span><span class="st">5. 完了</span></div>
-            <div class="set-group">
+            <div class="set-group" data-setuppane="todo">
               <div class="set-row"><div class="grow"><div class="t">アカウント追加ウィザードを開く</div><div class="d2">本体（CLI）が未導入の種類は、途中でツール管理へ案内します。</div></div><button class="btn primary" type="button" data-openpage="tools" data-openscreen="tool-add">ウィザードを開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">アカウントはまだ登録されていません。登録とサインインが済むと、ここが「完了」になり、次へ進めるようになります。</div></div><span class="badge b-block">未完了</span></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn iconbtn" type="button" data-nav="setup-welcome" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="setup-agent">次へ — エージェントと PM</button></div>
-            <p class="rel" style="margin-top:8px">「次へ」は、アカウントの登録とサインインが済むと押せるようになります。</p>
+            <div class="set-group" data-setuppane="done" hidden>
+              <div class="set-row"><div class="grow"><div class="t">Claude Code 1</div><div class="d2">会社メールでサインイン済みです。実行環境で選べるようになっています。</div></div><span class="badge b-done">完了</span></div>
+              <div class="set-row"><div class="grow"><div class="t">別のアカウントを追加する</div><div class="d2">追加の操作は、アカウント追加ウィザードで行います。</div></div><button class="btn" type="button" data-openpage="tools" data-openscreen="tool-add">ウィザードを開く</button></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px" data-setuppane="todo"><button class="btn iconbtn" type="button" data-nav="setup-welcome" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="setup-agent" disabled>次へ — エージェントと PM</button></div>
+            <p class="rel" style="margin-top:8px" data-setuppane="todo">「次へ」は、アカウントの登録とサインインが済むと押せるようになります。</p>
+            <div class="btnrow" style="margin-top:14px" data-setuppane="done" hidden><button class="btn iconbtn" type="button" data-nav="setup-welcome" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="setup-agent">次へ — エージェントと PM</button></div>
           </div>
           <div class="screen-pane" data-screen="setup-agent">
             <p class="h-big">最初のエージェントを作る</p>
@@ -1441,9 +1462,12 @@
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">ブラウザでサインインする</div><div class="d2">サインイン用の画面を開きます。終わると、ここに戻って状態が「サインイン済み」になります。</div></div><button class="btn primary" type="button">サインインを開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">サインイン用のシェルを開く</div><div class="d2">コマンドでサインインする場合はこちらです。シェルの中でログインを終えてください。</div></div><button class="btn" type="button" data-openpage="terminal">シェルを開く</button></div>
-              <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">未サインイン — 割り当て対象外</div></div><span class="badge b-block">未サインイン</span></div>
+              <div class="set-row" data-signinpane="todo"><div class="grow"><div class="t">いまの状態</div><div class="d2">未サインイン — 割り当て対象外</div></div><span class="badge b-block">未サインイン</span></div>
+              <div class="set-row" data-signinpane="done" hidden><div class="grow"><div class="t">いまの状態</div><div class="d2">サインイン済み — 割り当て対象になります</div></div><span class="badge b-run">サインイン済み</span></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn iconbtn" type="button" data-nav="tool-add-body" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tool-add-backend">接続先の設定（ステップ3）を見る</button><button class="btn ghost iconbtn" type="button" data-nav="tools-pool" title="中止してアカウントへ戻る" aria-label="中止してアカウントへ戻る">&larr;</button></div>
+            <div class="btnrow" style="margin-top:14px" data-signinpane="todo"><button class="btn iconbtn" type="button" data-nav="tool-add-body" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="tool-add-done" disabled>次へ — 完了</button><button class="btn ghost" type="button" data-nav="tool-add-backend">接続先の設定（ステップ3）を見る</button><button class="btn ghost iconbtn" type="button" data-nav="tools-pool" title="中止してアカウントへ戻る" aria-label="中止してアカウントへ戻る">&larr;</button></div>
+            <div class="btnrow" style="margin-top:14px" data-signinpane="done" hidden><button class="btn iconbtn" type="button" data-nav="tool-add-body" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tool-add-backend">接続先の設定（ステップ3）を見る</button><button class="btn ghost iconbtn" type="button" data-nav="tools-pool" title="中止してアカウントへ戻る" aria-label="中止してアカウントへ戻る">&larr;</button></div>
+            <p class="rel" style="margin-top:8px" data-signinpane="todo">「次へ — 完了」は、サインインが済むと押せるようになります。</p>
           </div>
           <div class="screen-pane" data-screen="tool-add-backend">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="tools-pool" title="アカウントへ戻る" aria-label="アカウントへ戻る">&larr;</button></div>
@@ -3245,6 +3269,20 @@
       var target = b.getAttribute("data-startstate");
       document.querySelectorAll("[data-startpane]").forEach(function (p) {
         p.hidden = p.getAttribute("data-startpane") !== target;
+      });
+    });
+  });
+  /* mock state toggles: firstrun account gate / wizard sign-in gate */
+  [["data-setupstate", "data-setuppane"], ["data-signinstate", "data-signinpane"]].forEach(function (pair) {
+    document.querySelectorAll("[" + pair[0] + "]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        document.querySelectorAll("[" + pair[0] + "]").forEach(function (x) {
+          x.setAttribute("aria-pressed", x === b ? "true" : "false");
+        });
+        var target = b.getAttribute(pair[0]);
+        document.querySelectorAll("[" + pair[1] + "]").forEach(function (p) {
+          p.hidden = p.getAttribute(pair[1]) !== target;
+        });
       });
     });
   });
