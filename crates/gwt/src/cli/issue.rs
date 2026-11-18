@@ -4874,12 +4874,7 @@ fn run_monitor_release_stranded_launch(
                 return Ok(crate::IssueMonitorRequeueOutcome::LaunchLive);
             }
         }
-        monitor.set_process_held_issues(
-            observations
-                .iter()
-                .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
-                .collect(),
-        );
+        crate::issue_monitor_worker::apply_process_holds(&mut monitor, &observations);
         let outcome = monitor.release_stranded_launch(number, reason, now);
         if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
             monitor.terminal_queue_push(&[number], "operator", now);

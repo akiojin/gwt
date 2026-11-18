@@ -3405,6 +3405,9 @@ pub struct IssueMonitorExecutionObservation {
     pub reaped_at: Option<gwt_core::timestamp::UtcTimestamp>,
     /// A live worktree agent or ambiguous runtime evidence vetoes recovery.
     pub process_held: bool,
+    /// The hold rests on a Session observed live, not on evidence that could
+    /// not be read or attributed (Issue #7679).
+    pub process_hold_proven: bool,
     /// Exact holder runtime evidence proves its previous GUI host has exited.
     pub holder_host_dead: bool,
     /// Exact dead holder host incarnations, observed outside the prefs lock.
@@ -5475,6 +5478,9 @@ pub struct IssueMonitorState {
     /// Live worktree Sessions (including uncertain inventory); never persisted.
     #[serde(skip)]
     process_held_issues: BTreeSet<u64>,
+    /// The held Issues whose hold no live Session proves; never persisted.
+    #[serde(skip)]
+    process_hold_unproven_issues: BTreeSet<u64>,
     pub gui_connected: bool,
     /// Live observation that a project window subscriber is attached, or
     /// dropped inside the reconnect grace. Never persisted.
@@ -8860,6 +8866,7 @@ impl IssueMonitorState {
             monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
             process_held_issues: BTreeSet::new(),
+            process_hold_unproven_issues: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
             terminal_queue_retirements: BTreeMap::new(),
@@ -11986,8 +11993,30 @@ impl IssueMonitorState {
         self.apply_agent_capacity_limit();
     }
 
+    /// Every hold set here counts as proven by a live Session.
+    #[cfg(test)]
     pub(crate) fn set_process_held_issues(&mut self, issues: BTreeSet<u64>) {
-        self.process_held_issues = issues;
+        self.set_process_holds(issues, BTreeSet::new());
+    }
+
+    /// `unproven` names the held Issues whose hold is only evidence that could
+    /// not be read or attributed.
+    pub(crate) fn set_process_holds(&mut self, held: BTreeSet<u64>, unproven: BTreeSet<u64>) {
+        self.process_hold_unproven_issues = unproven.intersection(&held).copied().collect();
+        self.process_held_issues = held;
+    }
+
+    pub(crate) fn process_hold_unproven_issues(&self) -> &BTreeSet<u64> {
+        &self.process_hold_unproven_issues
+    }
+
+    /// Issue #7679: a launch that never produced a window is not kept by a
+    /// hold nobody can prove. What a failed launch leaves behind can make the
+    /// Session census uncertain, and that used to veto the launch's own
+    /// windowless timeout for as long as the leftover stayed.
+    fn process_hold_vetoes_windowless_timeout(&self, issue_number: u64) -> bool {
+        self.process_held_issues.contains(&issue_number)
+            && !self.process_hold_unproven_issues.contains(&issue_number)
     }
 
     pub(crate) fn process_held_issues(&self) -> &BTreeSet<u64> {
@@ -14738,7 +14767,11 @@ impl IssueMonitorState {
         let launches = self.active_launches.clone();
         let mut expired = Vec::new();
         for issue_number in launches {
-            if self.process_held_issues.contains(&issue_number) {
+            let held = self.process_held_issues.contains(&issue_number);
+            if held
+                && (self.launched_windows.contains_key(&issue_number)
+                    || self.process_hold_vetoes_windowless_timeout(issue_number))
+            {
                 continue;
             }
             if self.launched_windows.contains_key(&issue_number) {
@@ -14776,6 +14809,10 @@ impl IssueMonitorState {
                     now,
                 );
                 expired.push(issue_number);
+                continue;
+            }
+            if held {
+                // An unproven hold yields to the windowless deadline only.
                 continue;
             }
             if let Some(delivery) = self
@@ -15261,7 +15298,7 @@ impl IssueMonitorState {
                     || delivery.workspace_durable_window_id.is_some()
             })
             || self.launched_windows.contains_key(&issue_number)
-            || self.process_held_issues.contains(&issue_number)
+            || self.process_hold_vetoes_windowless_timeout(issue_number)
             || self.has_monitor_runtime_census(issue_number)
             || self.observed_live_issue_pane(issue_number, now).is_some()
         {
@@ -30589,6 +30626,153 @@ mod tests {
                 .error_message
                 .is_none());
         }
+    }
+
+    /// Issue #7679: the owner could not record its launch failure, and what
+    /// the failed launch left behind made the Session census uncertain. That
+    /// uncertainty counted as a held process and skipped the windowless
+    /// timeout, so the row stayed `launching` until someone requeued it.
+    #[test]
+    fn issue_7679_unrecorded_launch_failure_does_not_leave_the_row_launching() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-02T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            std::process::id(),
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+
+        // The fake: the launch spent its deadline, so the owner's failure
+        // record cannot even read the Monitor.
+        let mut session = gwt_agent::Session::new(&root, "work", gwt_agent::AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions_dir).unwrap();
+        let launch = crate::project_runtime::monitor::MonitorLaunch {
+            root: root.clone(),
+            id: "tab-1::agent-42".into(),
+            incarnation: 1,
+            session_id: session.id.clone(),
+            agent_id: "codex".into(),
+            materializer_id: "gui-a".into(),
+            feedback: serde_json::from_value(serde_json::json!({
+                "client_id": "client", "title": "Start Work",
+                "issue_monitor_issue_number": 42,
+                "issue_monitor_delivery_id": "launch:effect-42",
+                "issue_monitor_project_root": null,
+                "issue_monitor_session_mode": null,
+                "issue_monitor_review_dispatch": false,
+            }))
+            .unwrap(),
+            current: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            source: None,
+        };
+        {
+            let spent = std::time::Instant::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(spent);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(spent);
+            launch
+                .commit_unspawned_failure("worktree add: process deadline expired", true, None)
+                .expect_err("the failure record itself fails");
+        }
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        monitor.record_candidate(issue(42));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launching,
+            "nothing recorded the failure"
+        );
+
+        // The failed launch's leftover runtime is all the census has: no live
+        // Session, only an observation it cannot attribute.
+        let uncertain = crate::session_inventory::SessionInventory {
+            uncertainties: vec![crate::session_inventory::SessionObservationUncertainty {
+                runtime_path: gwt_agent::runtime_state_path(&sessions_dir, &session.id),
+                session_id: Some(session.id.clone()),
+                reason: "child_identity_missing".into(),
+            }],
+            ..Default::default()
+        };
+        let observations = crate::issue_monitor_worker::read_execution_observations_from_inventory(
+            &root,
+            &[42],
+            &uncertain,
+        );
+        assert!(observations[&42].process_held);
+        crate::issue_monitor_worker::apply_process_holds(&mut monitor, &observations);
+
+        assert!(monitor
+            .expire_stale_unbound_launches_with("2026-07-02T00:01:59Z", |_| true)
+            .is_empty());
+        assert_eq!(
+            monitor.expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true),
+            vec![42],
+            "an unproven hold must not keep a windowless launch forever"
+        );
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::LaunchFailed
+        );
+
+        // A Session proven live in the Issue's worktree still vetoes it.
+        let mut held = test_monitor(IssueMonitorConfig::default());
+        scan_queued_candidates(&mut held, &[issue(42)], "2026-07-02T00:00:00Z");
+        assert!(held.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-02T00:00:00Z",
+        ));
+        let live = crate::session_inventory::SessionInventory {
+            sessions: vec![crate::session_inventory::SessionObservation {
+                session_id: session.id.clone(),
+                issue_number: Some(42),
+                execution_binding_missing: false,
+                agent_id: "codex".to_string(),
+                worktree_path: root.clone(),
+                worktree_exists: true,
+                host_pid: 1,
+                child_pid: 2,
+                child_started_at: 1,
+                started_at: "2026-07-02T00:00:00Z".to_string(),
+                launch_origin: gwt_agent::SessionLaunchOrigin::Launch,
+                launch_entrypoint: None,
+                restore_source_session_id: None,
+            }],
+            ..Default::default()
+        };
+        let observations = crate::issue_monitor_worker::read_execution_observations_from_inventory(
+            &root,
+            &[42],
+            &live,
+        );
+        crate::issue_monitor_worker::apply_process_holds(&mut held, &observations);
+        assert!(held
+            .expire_stale_unbound_launches_with("2026-07-02T00:03:00Z", |_| true)
+            .is_empty());
+        assert_eq!(held.active_count(), 1);
     }
 
     #[test]
@@ -55994,6 +56178,7 @@ mod tests {
                     settlement,
                     reaped_at: None,
                     process_held,
+                    process_hold_proven: process_held,
                     holder_host_dead,
                     dead_holder_hosts: Default::default(),
                     held_holder_session_id: None,
@@ -56060,6 +56245,7 @@ mod tests {
                         settlement: *settlement,
                         reaped_at: None,
                         process_held: false,
+                        process_hold_proven: false,
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
@@ -56221,6 +56407,7 @@ mod tests {
                 settlement: IssueMonitorExecutionSettlement::Completed,
                 reaped_at: None,
                 process_held: true,
+                process_hold_proven: true,
                 holder_host_dead: false,
                 dead_holder_hosts: Default::default(),
                 held_holder_session_id: None,

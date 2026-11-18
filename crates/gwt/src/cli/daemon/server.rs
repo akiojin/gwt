@@ -8117,7 +8117,10 @@ fn commit_issue_monitor_scan_if_current(
     // cap did not change (and therefore did not fence the scan by revision).
     scanned.config.max_active = monitor.effective_max_active_agents();
     scanned.set_agent_capacity(monitor.status_view().agent_capacity);
-    scanned.set_process_held_issues(monitor.process_held_issues().clone());
+    scanned.set_process_holds(
+        monitor.process_held_issues().clone(),
+        monitor.process_hold_unproven_issues().clone(),
+    );
     let proposed_effects = scanned.pending_effects().to_vec();
     let proposed_launch_session_strategies = scanned.prefs().queued_launch_session_strategies;
     // Read trusted runtime evidence before the prefs transaction. Its rebase
