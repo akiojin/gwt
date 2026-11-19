@@ -4079,6 +4079,7 @@ impl OwnerState {
                             &entry,
                             None,
                             super::pm_delivery::RetainedWakeRelease::HumanInput,
+                            std::time::Instant::now(),
                         ) {
                             tracing::warn!(%error, "PM wake input retention was not released");
                         }

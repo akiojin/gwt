@@ -738,6 +738,7 @@ pub(crate) fn release_retained_wake(
     entry: &super::agent_dispatch::PtyWriterEntry,
     session: Option<&str>,
     cause: RetainedWakeRelease,
+    now: Instant,
 ) -> Result<bool, String> {
     let released = {
         let mut guard = entry
@@ -747,7 +748,7 @@ pub(crate) fn release_retained_wake(
         if guard.as_ref().is_some_and(|guard| {
             guard.retained_input.is_some()
                 && session.is_none_or(|session| guard.target_session_id == session)
-                && (cause != RetainedWakeRelease::Expired || Instant::now() >= guard.retained_until)
+                && (cause != RetainedWakeRelease::Expired || now >= guard.retained_until)
         }) {
             guard.take()
         } else {
@@ -777,7 +778,12 @@ pub(crate) fn release_wake_at_turn_boundary(
     entry: &super::agent_dispatch::PtyWriterEntry,
 ) -> Result<(), String> {
     release_acknowledged_wake(root, id, session, entry, None)?;
-    release_retained_wake(entry, Some(session), RetainedWakeRelease::TurnBoundary)?;
+    release_retained_wake(
+        entry,
+        Some(session),
+        RetainedWakeRelease::TurnBoundary,
+        Instant::now(),
+    )?;
     Ok(())
 }
 
@@ -807,7 +813,7 @@ pub(crate) fn deliver_pm_wake(
     let _operation_budget = (!delivery.idle)
         .then(|| gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_deadline));
     let deadline = operation_deadline - PM_DELIVERY_TERMINAL_MARGIN;
-    release_retained_wake(entry, None, RetainedWakeRelease::Expired)?;
+    release_retained_wake(entry, None, RetainedWakeRelease::Expired, Instant::now())?;
     if let Some(session) = target_session {
         if release_acknowledged_wake(root, id, session, entry, Some(&delivery.operation_id))? {
             return Ok(PmWakeWrite::Injected);
@@ -1976,11 +1982,12 @@ mod retained_wake_tests {
 
     #[test]
     fn startup_prompt_turn_boundary_releases_an_unconfirmed_wake() {
+        let base = Instant::now();
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let root = home.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
-        let (entry, id) = unconfirmed_wake(Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT);
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
         // The human's input queues behind the wake reservation.
         entry.handle.write_input(b"human prompt").unwrap();
         assert!(input_is_retained(&entry));
@@ -2006,8 +2013,11 @@ mod retained_wake_tests {
 
     #[test]
     fn human_input_outranks_an_unconfirmed_wake() {
-        let (entry, id) = unconfirmed_wake(Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT);
-        assert!(release_retained_wake(&entry, None, RetainedWakeRelease::HumanInput).unwrap());
+        let base = Instant::now();
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
+        assert!(
+            release_retained_wake(&entry, None, RetainedWakeRelease::HumanInput, base).unwrap()
+        );
         assert!(!input_is_retained(&entry));
         entry.handle.write_input(b"human prompt").unwrap();
         finish(&entry, &id);
@@ -2015,13 +2025,14 @@ mod retained_wake_tests {
 
     #[test]
     fn retention_is_released_only_after_its_deadline() {
-        let (entry, id) = unconfirmed_wake(Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT);
-        assert!(!release_retained_wake(&entry, None, RetainedWakeRelease::Expired).unwrap());
+        let base = Instant::now();
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
+        assert!(!release_retained_wake(&entry, None, RetainedWakeRelease::Expired, base).unwrap());
         assert!(input_is_retained(&entry));
         finish(&entry, &id);
 
-        let (entry, id) = unconfirmed_wake(Instant::now());
-        assert!(release_retained_wake(&entry, None, RetainedWakeRelease::Expired).unwrap());
+        let (entry, id) = unconfirmed_wake(base);
+        assert!(release_retained_wake(&entry, None, RetainedWakeRelease::Expired, base).unwrap());
         assert!(!input_is_retained(&entry));
         finish(&entry, &id);
     }
