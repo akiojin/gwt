@@ -132,14 +132,16 @@ class AptCacheTests(unittest.TestCase):
             'if [[ "$*" == *update* ]]; then\n'
             '  for host in archive.ubuntu.com azure.archive.ubuntu.com; do\n'
             '    if grep -qr "://$host/" "$GWT_APT_ETC_DIR"/sources.list* && [[ " ' + down + ' " == *" $host "* ]]; then\n'
-            '      printf "Err:1 https://%s/ubuntu resolute InRelease\\n  Could not resolve \'%s\'\\n" "$host" "$host"\n'
+            '      printf "Err:1 https://%s/ubuntu resolute InRelease\\n  %s\\n" "$host" "${GWT_MOCK_REASON:-Could not resolve $host}"\n'
             '      echo "W: Some index files failed to download."\n'
             '      exit 0\n'
             '    fi\n'
             '  done\n'
             'fi\n'
             'if [[ "$*" == *install* && "$*" != *--no-download* ]]; then\n'
-            '  grep -qr "://archive.ubuntu.com/" "$GWT_APT_ETC_DIR"/sources.list* && [[ " ' + down + ' " == *" archive.ubuntu.com "* ]] && exit 100\n'
+            '  if grep -qr "://archive.ubuntu.com/" "$GWT_APT_ETC_DIR"/sources.list* && [[ " ' + down + ' " == *" archive.ubuntu.com "* ]]; then\n'
+            '    echo "E: Unable to locate package libgtk-3-dev"; exit 100\n'
+            '  fi\n'
             'fi\n'
             'exit 0\n', encoding="utf-8", newline="\n",
         )
@@ -188,6 +190,51 @@ class AptCacheTests(unittest.TestCase):
         self.assertIn("foo_1.10_amd64.deb", install[0])
         self.assertIn("bar_2_amd64.deb", install[0])
         self.assertNotIn("foo_1.0_amd64.deb", install[0])
+
+    # Issue #7717: reasons from run 44518013157. apt prints the host on the Err
+    # line and the reason on the next one, so neither matched the #7081 regex.
+    SERVER_FD = ("Could not wait for server fd - select (11: Resource temporarily "
+                 "unavailable) [IP: 91.189.91.83 443]")
+    TLS_RESET = ("SSL connection failed: error:00000000:lib(0)::reason(0) / "
+                 "Connection reset by peer [IP: 91.189.92.24 443]")
+
+    def assert_in_order(self, output, *markers):
+        positions = [output.find(m) for m in markers]
+        self.assertNotIn(-1, positions, output)
+        self.assertEqual(positions, sorted(positions), output)
+
+    def test_server_fd_wait_failure_fails_over_to_the_runner_mirror(self):
+        self.dns_outage("archive.ubuntu.com")
+        result = self.outage_install(GWT_MOCK_REASON=self.SERVER_FD)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_in_order(result.stdout, "status=mirror-unreachable",
+                             "mirror-switch to=http://azure.archive.ubuntu.com/ubuntu")
+        self.assertNotIn("Unable to locate package", result.stdout)
+
+    def test_tls_reset_on_every_mirror_replays_the_cache(self):
+        self.dns_outage("archive.ubuntu.com azure.archive.ubuntu.com")
+        (self.root / "archives/foo_1_amd64.deb").write_text("archive")
+        result = self.outage_install(GWT_MOCK_REASON=self.TLS_RESET, GWT_APT_TOTAL_DEADLINE="30")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_in_order(result.stdout, "mirror-switch", "cache-replay")
+        self.assertNotIn("backoff=", result.stdout)
+
+    def test_tls_reset_without_a_cache_backs_off_instead_of_giving_up(self):
+        self.dns_outage("archive.ubuntu.com azure.archive.ubuntu.com")
+        result = self.outage_install(GWT_MOCK_REASON=self.TLS_RESET,
+                                     GWT_APT_RETRY_DELAY="1", GWT_APT_TOTAL_DEADLINE="10")
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assert_in_order(output, "mirror-switch", "backoff=1s", "backoff=2s")
+        self.assertIn("mirror unreachable (external cause", output)
+        self.assertNotIn("install", (self.root / "trace").read_text())
+
+    def test_unlocatable_packages_after_every_index_failed_is_a_mirror_outage(self):
+        self.dns_outage("archive.ubuntu.com")
+        result = self.outage_install(GWT_MOCK_REASON="Connection failed [IP: 91.189.91.83 443]")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_in_order(result.stdout, "Unable to locate package", "status=mirror-unreachable",
+                             "mirror-switch to=http://azure.archive.ubuntu.com/ubuntu")
 
     def test_local_install_preserves_the_configured_mirror(self):
         source = self.root / "apt/sources.list"
