@@ -4554,6 +4554,12 @@ pub struct IssueMonitorAgentStatus {
     /// `None` in daemon projections and before the first run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_artifact_gc: Option<crate::worktree::gc::BuildArtifactGcRecord>,
+    /// Issue #7694 AC-4: the resident PM is alive but its periodic wake has
+    /// not been delivered for several loop intervals. Filled in by the
+    /// `issue.monitor.status` surface from the record the wake owner writes;
+    /// `None` while wakes arrive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pm_wake_stall: Option<crate::pm_registry::PmWakeStall>,
     /// Issue #4087 AC-1: the Issue cache full-refresh cadence — when it last
     /// completed and how far past its TTL it is — so a stopped refresh is
     /// read from the same snapshot as `scan_stall` instead of inferred from
@@ -16475,6 +16481,7 @@ impl IssueMonitorState {
             memory_pressure: None,
             spotlight: None,
             build_artifact_gc: None,
+            pm_wake_stall: None,
             failure_surge,
             launch_failures,
             candidate_pool_degradation: self.candidate_pool_degradation.clone(),
@@ -29696,6 +29703,7 @@ mod tests {
                 memory_pressure: None,
                 spotlight: None,
                 build_artifact_gc: None,
+                pm_wake_stall: None,
                 needs_human_fleet: None,
                 provider_usage: None,
                 issue_cache: None,

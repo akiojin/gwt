@@ -4793,6 +4793,65 @@ pub fn save_pm_loop_state(path: &Path, state: &PmLoopState) -> io::Result<()> {
     fs::rename(&scratch, path)
 }
 
+/// Issue #7694: how many loop intervals a live, unpaused PM may go without a
+/// periodic wake before the stall is recorded.
+pub const PM_WAKE_STALL_REPORT_INTERVALS: u64 = 5;
+
+/// Issue #7694: a resident PM that is alive but has not received its periodic
+/// wake for several loop intervals. Written once per stall by the GUI that
+/// owns the wake and removed when a wake is delivered, so `issue.monitor.status`
+/// can show it without reaching into that process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmWakeStall {
+    /// When the first undelivered tick of this stall was observed.
+    pub since: String,
+    /// Why the latest tick was skipped or its delivery not committed.
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub interval_secs: u64,
+    pub recorded_at: String,
+}
+
+pub fn pm_wake_stall_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+        .join("project-state/pm-wake-stall.json")
+}
+
+/// A missing or unreadable record reads as "no stall": this is a diagnostic,
+/// never a gate.
+pub fn load_pm_wake_stall(path: &Path) -> Option<PmWakeStall> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+pub fn save_pm_wake_stall(path: &Path, stall: &PmWakeStall) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let scratch = unique_pm_scratch_path(path);
+    fs::write(&scratch, serde_json::to_string_pretty(stall)?)?;
+    fs::rename(&scratch, path)
+}
+
+pub fn clear_pm_wake_stall(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+/// Whether a stall that began at `since` has lasted long enough to record.
+pub fn pm_wake_stall_is_reportable(since: &str, now: &str, interval_secs: u64) -> bool {
+    match (
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(since),
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now),
+    ) {
+        (Ok(since), Ok(now)) => {
+            (now - since).whole_seconds()
+                >= i64::try_from(interval_secs.saturating_mul(PM_WAKE_STALL_REPORT_INTERVALS))
+                    .unwrap_or(i64::MAX)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `path` is some project's canonical PM worktree.
 ///
 /// Gates PM-only managed assets, so it anchors on the full shape
