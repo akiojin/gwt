@@ -5290,7 +5290,7 @@ where
         .then(|| nextest::Capture::new(worktree))
         .transpose()?;
         let execution_command = match &nextest_capture {
-            Some(capture) => format!("{command} --config-file \"{}\"", capture.arguments()[1]),
+            Some(capture) => nextest::with_config_file(command, &capture.arguments()[1]),
             None => command.clone(),
         };
         let command_started = std::time::Instant::now();
