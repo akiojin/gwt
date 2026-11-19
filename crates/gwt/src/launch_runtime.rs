@@ -1700,6 +1700,13 @@ mod tests {
     /// materialize its worktree without waiting for that push.
     #[test]
     fn new_work_branch_launch_does_not_wait_for_slow_remote_branch_push() {
+        // Issue #7714: the background push spawns `git` (and its hook `sh`)
+        // through the process-wide PATH. Parallel tests swap PATH under the
+        // env lock (e.g. to an empty value or a fake git), so the push must
+        // run while this test holds that lock or it can fail to publish.
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = init_launch_test_repo(temp.path());
@@ -1797,7 +1804,11 @@ mod tests {
         );
 
         fs::write(markers.join("release"), "").expect("release the push");
-        gwt_git::worktree::wait_for_remote_branch_publications();
+        let failed_publications = gwt_git::worktree::wait_for_remote_branch_publications();
+        assert!(
+            failed_publications.is_empty(),
+            "the background publication failed: {failed_publications:?}"
+        );
         assert!(
             markers.join("started").exists(),
             "the push ran after launch"
