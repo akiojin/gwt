@@ -43,7 +43,7 @@ jobs:
             exit 0
           fi
           # Issue #7700: a `work/issue-N` PR whose Issue N carries `auto-merge`
-          # goes to independent review, and the Issue Monitor arms it once a
+          # goes to independent review, and gwt Issues arms it once a
           # pass verdict is recorded. Arming here let required CI merge PR
           # #7695 before its `fail` verdict arrived. An unreadable Issue fails
           # the job instead of arming. Pinned by
@@ -55,7 +55,7 @@ jobs:
               exit 1
             fi
             if grep -qixF 'auto-merge' <<<"$labels"; then
-              echo "Issue #$issue carries auto-merge: leaving PR #$PR_NUMBER for the Issue Monitor to arm after the review verdict"
+              echo "Issue #$issue carries auto-merge: leaving PR #$PR_NUMBER for gwt Issues to arm after the review verdict"
               exit 0
             fi
           fi

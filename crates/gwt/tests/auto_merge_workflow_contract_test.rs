@@ -1,13 +1,13 @@
 //! Contract tests for `.github/workflows/auto-merge.yml` (Issue #7700).
 //!
 //! The workflow armed auto-merge on every akiojin PR at open / synchronize.
-//! For a PR that the Issue Monitor sends to independent review (head
+//! For a PR that gwt Issues sends to independent review (head
 //! `work/issue-N`, Issue N labeled `auto-merge`) that arm preceded the review:
 //! PR #7695 was armed at 02:05:13Z, its review started at 02:08Z, required CI
 //! merged it at 02:25:04Z and the `fail` verdict arrived at 02:25:32Z
-//! (Issue #7697). The monitor's own hold is a per-scan disarm after the fact,
-//! so the workflow must not arm those PRs in the first place; the monitor arms
-//! them once a pass verdict is recorded.
+//! (Issue #7697). The hold gwt Issues applies itself is a per-scan disarm
+//! after the fact, so the workflow must not arm those PRs in the first place;
+//! gwt Issues arms them once a pass verdict is recorded.
 //!
 //! The step's script is executed against a stub `gh`, so these tests pin what
 //! the workflow does rather than how its text reads.
@@ -109,10 +109,10 @@ fn run_arm_step(head_ref: &str, issue_labels: Result<&str, i32>) -> Run {
     }
 }
 
-/// AC-1: the monitor arms a review-target PR after the pass verdict; the
+/// AC-1: gwt Issues arms a review-target PR after the pass verdict; the
 /// workflow leaves it unarmed and the job still succeeds.
 #[test]
-fn review_target_pr_is_left_for_the_monitor_to_arm() {
+fn review_target_pr_is_left_for_issues_to_arm() {
     for labels in ["auto-merge\n", "bug\nAuto-Merge\n"] {
         let run = run_arm_step("work/issue-42", Ok(labels));
         assert!(
