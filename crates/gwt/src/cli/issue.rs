@@ -699,6 +699,17 @@ fn attach_build_artifact_gc(
     status.build_artifact_gc = last_build_artifact_gc_record(project_root);
 }
 
+/// Issue #7694 AC-4: a resident PM whose periodic wake stopped arriving, read
+/// from the record the wake owner writes. Read-only: no record, no field.
+fn attach_pm_wake_stall(
+    project_root: &std::path::Path,
+    status: &mut crate::IssueMonitorAgentStatus,
+) {
+    status.pm_wake_stall = crate::pm_registry::load_pm_wake_stall(
+        &crate::pm_registry::pm_wake_stall_path_for_repo_path(project_root),
+    );
+}
+
 fn last_build_artifact_gc_record(
     project_root: &std::path::Path,
 ) -> Option<crate::worktree::gc::BuildArtifactGcRecord> {
@@ -972,6 +983,7 @@ fn run_monitor_status<E: CliEnv>(
     attach_verification_capacity(&mut status);
     attach_disk_space(&project_root, &mut status);
     attach_build_artifact_gc(&project_root, &mut status);
+    attach_pm_wake_stall(&project_root, &mut status);
     attach_memory_pressure(&mut status);
     attach_spotlight(&mut status);
     attach_provider_usage(&mut status);
@@ -13875,6 +13887,70 @@ mod tests {
         }
     }
 
+    /// Issue #7694 AC-4: a PM that is alive but no longer woken is visible in
+    /// the status the PM and the operator already read, and disappears from it
+    /// once the wake owner clears the record.
+    #[test]
+    fn issue_monitor_status_reports_a_stalled_pm_periodic_wake() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let status = |repo: &std::path::Path| -> serde_json::Value {
+            let mut env = crate::cli::TestEnv::new(repo.to_path_buf());
+            let mut out = String::new();
+            run(
+                &mut env,
+                IssueCommand::MonitorStatus { project_root: None },
+                &mut out,
+            )
+            .expect("status");
+            serde_json::from_str(out.trim()).expect("status json")
+        };
+        assert!(status(&repo).get("pm_wake_stall").is_none());
+
+        let root = issue_monitor_project_root(&crate::cli::TestEnv::new(repo.clone()), None)
+            .expect("project root");
+        let path = crate::pm_registry::pm_wake_stall_path_for_repo_path(&root);
+        crate::pm_registry::save_pm_wake_stall(
+            &path,
+            &crate::pm_registry::PmWakeStall {
+                since: "2026-11-18T18:20:43Z".into(),
+                reason: "held_wake".into(),
+                detail: Some("owner_runtime_busy=true".into()),
+                interval_secs: 60,
+                recorded_at: "2026-11-18T18:25:43Z".into(),
+            },
+        )
+        .expect("stall record");
+        let stalled = status(&repo);
+        assert_eq!(stalled["pm_wake_stall"]["reason"], "held_wake");
+        assert_eq!(stalled["pm_wake_stall"]["since"], "2026-11-18T18:20:43Z");
+        assert_eq!(
+            stalled["pm_wake_stall"]["detail"],
+            "owner_runtime_busy=true"
+        );
+        assert_eq!(stalled["pm_wake_stall"]["interval_secs"], 60);
+
+        crate::pm_registry::clear_pm_wake_stall(&path);
+        assert!(status(&repo).get("pm_wake_stall").is_none());
+        assert!(!crate::pm_registry::pm_wake_stall_is_reportable(
+            "2026-11-18T18:20:43Z",
+            "2026-11-18T18:25:42Z",
+            60
+        ));
+        assert!(crate::pm_registry::pm_wake_stall_is_reportable(
+            "2026-11-18T18:20:43Z",
+            "2026-11-18T18:25:43Z",
+            60
+        ));
+        assert!(!crate::pm_registry::pm_wake_stall_is_reportable(
+            "not a time",
+            "x",
+            60
+        ));
+    }
+
     /// Issue #4009 AC-4: free space is observable from the status the PM
     /// already reads, with the thresholds that would raise a warning.
     #[test]
@@ -13995,6 +14071,7 @@ mod tests {
             memory_pressure: None,
             spotlight: None,
             build_artifact_gc: None,
+            pm_wake_stall: None,
             needs_human_fleet: None,
             provider_usage: None,
             issue_cache: None,
@@ -14101,6 +14178,7 @@ mod tests {
             memory_pressure: None,
             spotlight: None,
             build_artifact_gc: None,
+            pm_wake_stall: None,
             needs_human_fleet: None,
             provider_usage: None,
             issue_cache: None,
@@ -14259,6 +14337,7 @@ mod tests {
                 memory_pressure: None,
                 spotlight: None,
                 build_artifact_gc: None,
+                pm_wake_stall: None,
                 needs_human_fleet: None,
                 provider_usage: None,
                 issue_cache: None,
@@ -14352,6 +14431,7 @@ mod tests {
             memory_pressure: None,
             spotlight: None,
             build_artifact_gc: None,
+            pm_wake_stall: None,
             needs_human_fleet: None,
             provider_usage: None,
             issue_cache: None,
@@ -19252,6 +19332,7 @@ command = "my-agent-cli"
             memory_pressure: None,
             spotlight: None,
             build_artifact_gc: None,
+            pm_wake_stall: None,
             needs_human_fleet: None,
             provider_usage: None,
             review_windows: Vec::new(),

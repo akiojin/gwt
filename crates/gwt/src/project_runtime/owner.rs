@@ -839,6 +839,8 @@ pub(crate) enum OwnerMessage {
     },
     PmWakeWritten {
         operation_id: String,
+        /// Issue #7694: the physical facts behind a wake that was not committed.
+        facts: serde_json::Value,
         reply: oneshot::Sender<OwnerReply>,
         result: Result<super::pm_delivery::PmWakeWrite, String>,
     },
@@ -2501,12 +2503,13 @@ impl OwnerState {
                 }
                 OwnerMessage::PmWakeWritten {
                     operation_id,
+                    facts,
                     reply,
                     result,
                 } => {
                     self.input_jobs -= 1;
                     self.pm_wake_permits.finish(&operation_id);
-                    let _ = reply.send(result.map(|status| json!({"status":status})));
+                    let _ = reply.send(result.map(|status| json!({"status":status,"facts":facts})));
                 }
                 OwnerMessage::PmWakeAcknowledged { result } => {
                     self.input_jobs -= 1;
@@ -4167,8 +4170,19 @@ impl OwnerState {
                                 output_seq,
                             ),
                         );
+                        let facts = json!({
+                            "input_observation":
+                                super::events::OwnerInputObservation::capture(&entry.handle),
+                            "runtime_busy": session.as_deref().map(|session| {
+                                super::pm_delivery::pm_wake_runtime_is_busy(
+                                    &gwt_agent::runtime_state_path(&sessions_dir, session),
+                                    incarnation,
+                                )
+                            }),
+                        });
                         let _ = sender.send(OwnerMessage::PmWakeWritten {
                             operation_id: delivery.operation_id,
+                            facts,
                             reply,
                             result,
                         });
