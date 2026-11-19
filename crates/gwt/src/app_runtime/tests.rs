@@ -2039,6 +2039,8 @@ fn sample_runtime_with_events(
         initial_launch_workers: HashMap::new(),
         project_open_started: None,
         pending_startup_pm_tabs: Vec::new(),
+        pending_frontend_ready_snapshots: Vec::new(),
+        gui_slice_continue_queued: false,
         deferred_issue_monitor_launches: None,
         startup_generation_reaper_pending: false,
         startup_worktree_inventories: HashMap::new(),
@@ -13035,6 +13037,8 @@ mod execution_readiness_tests;
 mod execution_recovery_tests;
 #[cfg(test)]
 mod frontend_launch_tests;
+#[cfg(test)]
+mod gui_slice_tests;
 #[cfg(test)]
 mod issue_monitor_claim_tests;
 #[cfg(test)]

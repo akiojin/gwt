@@ -35,6 +35,9 @@ pub struct PmDeliveryReplayGuard {
     // A wake retains ordinary input until its exact provider turn ACK. Partial
     // body writes permit readback only; a complete body permits CR-only retry.
     pub retained_input: Option<(gwt_terminal::pty::PtyInputReservation, bool)>,
+    /// Issue #7701: retained input never outlives this instant, even when no
+    /// human input or turn boundary arrives to release it first.
+    pub retained_until: Instant,
 }
 
 pub type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;
@@ -943,6 +946,7 @@ pub fn authenticated_pm_pane_send_input_events(
                         ordinary_revision,
                         transaction_revision: reservation.transaction_revision(),
                         retained_input: None,
+                        retained_until: Instant::now(),
                     });
             }
             outcome

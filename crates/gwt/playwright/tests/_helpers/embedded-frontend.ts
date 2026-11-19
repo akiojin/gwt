@@ -127,6 +127,8 @@ const ROOT_MODULES = new Set([
   "terminal-output-buffer.js",
   "terminal-wheel-scroll.js",
   "terminal-viewport-reflow.js",
+  // Issue #7702 — IME commit gate imported by app.js.
+  "terminal-input-commit.js",
   "theme-manager.js",
   "theme-toggle.js",
   "ui-trace-profiler.js",
