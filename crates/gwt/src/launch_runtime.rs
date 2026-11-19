@@ -1707,14 +1707,25 @@ mod tests {
         let markers = temp.path().join("push-markers");
         fs::create_dir_all(&markers).expect("marker dir");
         // The fake slow push: git runs pre-push before contacting the remote.
-        // It holds the push until the test releases it, and fails on its own
-        // after ~20s so a launch that waits for it reports RED instead of hanging.
+        // It holds the push until the test releases it. `finished` is written
+        // only after the release, and the release happens only after the
+        // launch returned, so the verdict is the order of events, never a
+        // wall-clock limit (Issue #7710). The ~300s self-exit writes a
+        // separate `abandoned` marker and only cleans up a hook the test
+        // could not release; the guard below releases it if the test panics.
         let hook = repo.join(".git").join("hooks").join("pre-push");
         fs::create_dir_all(hook.parent().unwrap()).expect("hooks dir");
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = fs::write(&self.0, "");
+            }
+        }
+        let _release_guard = ReleaseOnDrop(markers.join("release"));
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\ndir='{}'\n: > \"$dir/started\"\ni=0\nwhile [ ! -f \"$dir/release\" ]; do\n  i=$((i+1))\n  if [ $i -gt 200 ]; then : > \"$dir/finished\"; exit 1; fi\n  sleep 0.1\ndone\n: > \"$dir/finished\"\nexit 0\n",
+                "#!/bin/sh\ndir='{}'\n: > \"$dir/started\"\ni=0\nwhile [ ! -f \"$dir/release\" ]; do\n  i=$((i+1))\n  if [ $i -gt 3000 ]; then : > \"$dir/abandoned\"; exit 1; fi\n  sleep 0.1\ndone\n: > \"$dir/finished\"\nexit 0\n",
                 markers.display().to_string().replace('\\', "/")
             ),
         )
@@ -1762,8 +1773,8 @@ mod tests {
 
         let worktree = working_dir.expect("materialized worktree");
         assert!(
-            !markers.join("finished").exists(),
-            "the launch returned only after the remote branch push finished"
+            !markers.join("finished").exists() && !markers.join("abandoned").exists(),
+            "the launch returned only after the remote branch push ended"
         );
         assert!(
             !remote_branch_exists(),

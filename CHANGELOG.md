@@ -1,6 +1,30 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.171.3] - 2026-11-19
+
+### Bug Fixes
+
+- **verify:** 明示済みの gwtd 復元ビルドを verify.run が重複追加しないようにする
+- **monitor:** 窓の無いレビュー予約を scan の時計で解放する
+- **pm:** Periodic wake の見送り理由を記録し issue.monitor.status に表示する
+- **restore:** 通常 Agent の自動復元も census の次回観測を待つ
+- **pm:** PM wake の停滞を最終配送からの経過で判定して issue.monitor.status に表示する
+- **verify:** Nextest の --config-file を libtest 区切り -- より前に挿入する
+- **verify:** Admission defer 後も実行中の gwtd.exe を復元する
+- **issue-monitor:** 独立レビューの PASS が記録されるまで auto-merge を保留する
+
+### Documentation
+
+- **monitor:** Private 関数への rustdoc リンクを外す
+- **issue-monitor:** Private 関数への rustdoc リンクを外す
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue #7688 PR handoff work events
+- **work:** Record Issue #7694 delivery work events
+- **work:** Record Issue #7697 work events
+
 ## [9.171.2] - 2026-11-18
 
 ### Bug Fixes
