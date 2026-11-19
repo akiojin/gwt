@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.171.4] - 2026-11-19
+
+### Bug Fixes
+
+- **test:** Slow remote push テストの判定を実時間上限から順序に変更
+- **gui:** GUI 停止中の IME 確定が二重に送られないようにする
+- **pm:** Unconfirmed の PM wake が保持する PTY 入力予約を人の入力・turn 境界・期限で解放する
+- **pm:** 保持期限の判定に clock seam を入れ、テストの wall-clock 依存を除く
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7702 の作業イベントを記録する
+- **work:** Issue #7701 の作業記録を更新する
+
+### Testing
+
+- **gui:** Works の端末生成フィクスチャに IME 確定ゲートを渡す
+
 ## [9.171.3] - 2026-11-19
 
 ### Bug Fixes
