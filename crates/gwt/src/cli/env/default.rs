@@ -271,6 +271,9 @@ impl CliEnv for DefaultCliEnv {
     fn repo_path(&self) -> &std::path::Path {
         &self.repo_path
     }
+    fn github_writer(&self) -> Option<crate::session_launch::GithubWriter> {
+        crate::session_launch::current_github_writer(self.repo_path())
+    }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout
     }
