@@ -6826,7 +6826,7 @@ impl AutonomousIssueRecord {
         }
     }
 
-    /// Issue #7697 AC-4: the reason shown while [`Self::awaits_review_pass`]
+    /// Issue #7697 AC-4: the reason shown while `awaits_review_pass`
     /// holds a known PR. `None` when no PR or review is known for the record.
     pub fn merge_hold_reason(&self) -> Option<String> {
         if !self.awaits_review_pass() {
