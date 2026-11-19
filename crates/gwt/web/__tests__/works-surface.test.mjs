@@ -5,6 +5,7 @@ import { parse } from "acorn";
 import { existsSync, readFileSync } from "node:fs";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createAgentActivityModel } from "../agent-activity-model.js";
+import { createTerminalInputCommitGate } from "../terminal-input-commit.js";
 
 const moduleUrl = new URL("../works-surface.js", import.meta.url);
 const source = existsSync(moduleUrl) ? readFileSync(moduleUrl, "utf8") : "";
@@ -707,6 +708,8 @@ async function nativeLifetimeFixture(outputBatcher = null) {
     window: {}, requestSocketSnapshots: () => events.push("resync"), workspaceWindowById: () => windows[0],
     Terminal: NativeTerminal, FitAddon: class {}, XTERM_THEME_DARK: {}, resolveTerminalFontFamily: () => "mono", isBlinkBrowser: () => false,
     installTerminalViewportRefreshHandlers: () => noop, createTerminalSnapshotWriteCoordinator: () => ({}),
+    // app.js imports this gate. The eval of createTerminalRuntime does not see imports.
+    createTerminalInputCommitGate,
   };
   for (const name of ["renderedTerminalPackets", "decoderMap", "windowRuntimeStateMap", "windowRuntimeStateSinceMap", "renderedWindowElementKeys", "renderedRuntimeStatusKeys", "renderedAgentKanbanBodyKeys", "renderedIssuePreviewBodyKeys", "renderedIssueWindowHeaderKeys", "pendingSnapshotMap", "branchListStateMap", "boardStateMap", "logStateMap"]) env[name] = new Map();
   const factory = new Function(...Object.keys(env), Object.values(definitions).join("\n") + `\nreturn { adapters: {${Object.entries(adapters).map(([key,value]) => `${key}:${value}`).join(",")}}, bind(surface){worksSurface=surface;}, workspace(next){appState=next;return renderWorkspace(next.tabs[0].workspace);}, create:createTerminalRuntime, leave(){setWorksHost(null);}, enter(){setWorksHost(document.querySelector("main"));} };`);
