@@ -3807,6 +3807,38 @@ where
     )?))
 }
 
+/// Issue #7697: the open-PR inventory with the auto-merge state of each row.
+///
+/// `auto_merge_requested` holds the numbers whose REST row carries a non-null
+/// `auto_merge`, so a scan can tell that something armed a PR without a
+/// request per candidate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenPrInventory {
+    pub numbers_by_branch: std::collections::HashMap<String, u64>,
+    pub auto_merge_requested: std::collections::BTreeSet<u64>,
+}
+
+/// [`try_fetch_open_pr_numbers_by_branch_for_monitor`] plus the auto-merge
+/// state, from the same single read.
+pub fn try_fetch_open_pr_inventory_for_monitor(repo_path: &Path) -> Result<OpenPrInventory> {
+    try_fetch_open_pr_inventory_with(repo_path, run_cached_list_command)
+}
+
+fn try_fetch_open_pr_inventory_with<F>(repo_path: &Path, run_gh: F) -> Result<OpenPrInventory>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let rows = try_fetch_open_pr_rows_with(repo_path, run_gh)?;
+    Ok(OpenPrInventory {
+        numbers_by_branch: open_pr_numbers_by_branch(&rows),
+        auto_merge_requested: rows
+            .iter()
+            .filter(|row| row.get("auto_merge").is_some_and(|value| !value.is_null()))
+            .filter_map(|row| row.get("number").and_then(serde_json::Value::as_u64))
+            .collect(),
+    })
+}
+
 fn try_fetch_open_pr_rows_with<F>(repo_path: &Path, mut run_gh: F) -> Result<Vec<serde_json::Value>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
@@ -4518,6 +4550,7 @@ where
         return AutoMergeMutationOutcome::AlreadyTargetState;
     }
 
+    let method = permitted_auto_merge_method(repository, repo_path, &mut run_gh);
     let number = number.to_string();
     let args = pinned_pr_command_args(
         repository,
@@ -4526,13 +4559,56 @@ where
             "merge",
             &number,
             "--auto",
-            "--squash",
+            method,
             "--match-head-commit",
             reviewed_head_sha,
         ],
     );
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     classify_auto_merge_command(run_gh(repo_path, &args))
+}
+
+/// Issue #7697: the merge method flag for an auto-merge arm.
+///
+/// A repository that forbids squash merges rejects `--squash`, so the arm
+/// reads which methods the repository allows and takes the first of squash,
+/// merge commit, rebase. An unreadable setting keeps the squash default; the
+/// read is not a mutation, so its failure never becomes the arm's outcome.
+fn permitted_auto_merge_method<F>(
+    repository: Option<&str>,
+    repo_path: &Path,
+    run_gh: &mut F,
+) -> &'static str
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    let pinned = repository.and_then(|repository| repository.split_once('/'));
+    let path = pinned.map_or_else(
+        || "repos/{owner}/{repo}".to_string(),
+        |(_host, slug)| format!("repos/{slug}"),
+    );
+    let mut args = vec!["api", path.as_str()];
+    if pinned.is_some() {
+        args.extend(["--hostname", "github.com"]);
+    }
+    let settings = run_gh(repo_path, &args)
+        .ok()
+        .filter(|output| output.success)
+        .and_then(|output| serde_json::from_str::<serde_json::Value>(&output.stdout).ok());
+    [
+        ("allow_squash_merge", "--squash"),
+        ("allow_merge_commit", "--merge"),
+        ("allow_rebase_merge", "--rebase"),
+    ]
+    .into_iter()
+    .find(|(setting, _)| {
+        settings
+            .as_ref()
+            .and_then(|settings| settings.get(setting))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    })
+    .map_or("--squash", |(_, flag)| flag)
 }
 
 fn merge_pr_auto_with<F>(
@@ -6038,6 +6114,15 @@ mod tests {
                 auto_merge_requested: false,
             },
             |_p, args| {
+                if args.first() == Some(&"api") {
+                    // Issue #7697: the settings read is pinned like the arm.
+                    assert_eq!(args, ["api", "repos/o/r", "--hostname", "github.com"]);
+                    return Ok(GhCliOutput {
+                        success: true,
+                        stdout: r#"{"allow_squash_merge":false,"allow_merge_commit":true,"allow_rebase_merge":true}"#.to_string(),
+                        stderr: String::new(),
+                    });
+                }
                 calls += 1;
                 assert_eq!(
                     args,
@@ -6046,7 +6131,7 @@ mod tests {
                         "merge",
                         "7",
                         "--auto",
-                        "--squash",
+                        "--merge",
                         "--match-head-commit",
                         "abc123",
                         "--repo",
@@ -6063,6 +6148,85 @@ mod tests {
         assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
         assert!(confirmed.is_success());
         assert_eq!(calls, 1);
+    }
+
+    /// Issue #7697: squash stays the method wherever it is allowed or the
+    /// setting cannot be read; otherwise the first allowed method is used.
+    #[test]
+    fn arm_pr_auto_merge_uses_a_merge_method_the_repository_allows() {
+        let remote = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: false,
+        };
+        let method_for = |settings: Option<&str>| {
+            let mut method = String::new();
+            let outcome = arm_pr_auto_merge_with(
+                None,
+                Path::new("/tmp/repo"),
+                7,
+                "abc123",
+                &remote,
+                |_p, args| {
+                    if args.first() == Some(&"api") {
+                        assert_eq!(args, ["api", "repos/{owner}/{repo}"]);
+                        return Ok(GhCliOutput {
+                            success: settings.is_some(),
+                            stdout: settings.unwrap_or_default().to_string(),
+                            stderr: String::new(),
+                        });
+                    }
+                    method = args[4].to_string();
+                    Ok(GhCliOutput {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                },
+            );
+            assert_eq!(outcome, AutoMergeMutationOutcome::Confirmed);
+            method
+        };
+        assert_eq!(
+            method_for(Some(
+                r#"{"allow_squash_merge":true,"allow_merge_commit":true}"#
+            )),
+            "--squash"
+        );
+        assert_eq!(
+            method_for(Some(
+                r#"{"allow_squash_merge":false,"allow_merge_commit":false,"allow_rebase_merge":true}"#
+            )),
+            "--rebase"
+        );
+        assert_eq!(method_for(Some("{}")), "--squash", "settings not exposed");
+        assert_eq!(method_for(None), "--squash", "settings read failed");
+    }
+
+    /// Issue #7697: the inventory names the open PRs that have auto-merge
+    /// requested, from the same single read as the branch index.
+    #[test]
+    fn open_pr_inventory_reports_which_prs_have_auto_merge_requested() {
+        let mut calls = 0;
+        let inventory = try_fetch_open_pr_inventory_with(Path::new("/repo"), |_, _| {
+            calls += 1;
+            Ok(GhCliOutput {
+                success: true,
+                stdout: "HTTP/2.0 200 OK\n\r\n".to_owned()
+                    + r#"[{"number":7,"head":{"ref":"work/issue-43"},"auto_merge":{"merge_method":"merge"}},{"number":8,"head":{"ref":"work/issue-44"},"auto_merge":null},{"number":9,"head":{"ref":"work/issue-45"}}]"#,
+                stderr: String::new(),
+            })
+        })
+        .expect("open PR inventory");
+        assert_eq!(calls, 1);
+        assert_eq!(inventory.numbers_by_branch.get("work/issue-44"), Some(&8));
+        assert_eq!(
+            inventory
+                .auto_merge_requested
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [7]
+        );
     }
 
     #[test]

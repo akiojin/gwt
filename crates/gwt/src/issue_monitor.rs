@@ -5432,6 +5432,10 @@ pub struct AutonomousIssueSummary {
     /// yet, when the dispatch was refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_dispatch_hold: Option<AutonomousReviewDispatchHold>,
+    /// Issue #7697 AC-4: why this Issue's PR is not being merged yet, while
+    /// its current head has no PASS verdict from the independent review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_hold: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -6808,6 +6812,45 @@ impl AutonomousIssueRecord {
             && self.reviewed_sha.is_some())
         .then_some(self.last_failure_message.as_deref())
         .flatten()
+    }
+
+    /// Issue #7697: whether the monitor has not authorized a merge of this
+    /// record's PR. Only a PASS for the head under review authorizes one, so
+    /// an implementation that is still producing or correcting the head and a
+    /// review without a PASS both keep the PR unmerged.
+    fn awaits_review_pass(&self) -> bool {
+        match self.phase {
+            AutonomousPhase::Implementing => true,
+            AutonomousPhase::Reviewing => self.review_passed != Some(true),
+            _ => false,
+        }
+    }
+
+    /// Issue #7697 AC-4: the reason shown while [`Self::awaits_review_pass`]
+    /// holds a known PR. `None` when no PR or review is known for the record.
+    pub fn merge_hold_reason(&self) -> Option<String> {
+        if !self.awaits_review_pass() {
+            return None;
+        }
+        let pr = self
+            .pr_number
+            .map_or_else(|| "the PR".to_string(), |pr| format!("PR #{pr}"));
+        let hold = format!(
+            "{pr} is not merged until its head has a PASS verdict from the independent review"
+        );
+        match (self.review_passed, self.reviewed_sha.as_deref()) {
+            (Some(false), Some(sha)) => Some(format!("{hold}: the review of {sha} returned FAIL")),
+            (Some(true), Some(sha)) => Some(format!(
+                "{hold}: the reviewed head {sha} is being corrected and the new head needs its own review"
+            )),
+            (None, Some(sha)) if self.phase == AutonomousPhase::Reviewing => {
+                Some(format!("{hold}: the review of {sha} has no verdict yet"))
+            }
+            _ => self
+                .review_dispatch_hold
+                .as_ref()
+                .map(|dispatch| format!("{hold}: the review is not dispatched: {}", dispatch.reason)),
+        }
     }
 
     pub fn tier_input(&self) -> u32 {
@@ -15944,6 +15987,7 @@ impl IssueMonitorState {
                         needs_human_kind: needs_human.then_some(record.needs_human_kind).flatten(),
                         steering: record.steering.clone(),
                         review_dispatch_hold: record.review_dispatch_hold.clone(),
+                        merge_hold: record.merge_hold_reason(),
                         pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
                             handoff_id: handoff.handoff_id.clone(),
                             question: handoff.question.clone(),
@@ -18316,6 +18360,59 @@ impl IssueMonitorState {
             issue_number,
             pr_number,
         );
+    }
+
+    /// Issue #7697: keep a PR unmerged while its head has no PASS verdict.
+    ///
+    /// The monitor arms auto-merge itself, and only after the gate passes.
+    /// Anything else that requests auto-merge earlier (a repository workflow,
+    /// a person) would let required CI land the head before the review is
+    /// back, so the caller names a PR it observed with auto-merge requested
+    /// and this queues one disarm for it. Returns whether the hold applies.
+    ///
+    /// A pending arm of the same PR is left to settle first: it is bound to
+    /// the reviewed SHA and compensates itself when the head has moved.
+    pub fn hold_auto_merge_until_review_pass(&mut self, issue_number: u64, pr_number: u64) -> bool {
+        if !self
+            .autonomous_record(issue_number)
+            .is_some_and(AutonomousIssueRecord::awaits_review_pass)
+            || self.pending_effects.iter().any(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ArmAutoMerge {
+                        issue_number: pending_issue,
+                        pr_number: pending_pr,
+                        ..
+                    } if pending_issue == issue_number && pending_pr == pr_number
+                )
+            })
+        {
+            return false;
+        }
+        ensure_auto_merge_disarm_effect(
+            &mut self.pending_effects,
+            self.effect_authority_epoch,
+            &format!("review-hold:{issue_number}:{pr_number}"),
+            issue_number,
+            pr_number,
+        );
+        true
+    }
+
+    /// Issue #7697: the gate passed and is about to arm this PR itself, so a
+    /// hold that has not been submitted yet must not disarm that arm.
+    pub fn release_review_merge_hold(&mut self, issue_number: u64, pr_number: u64) {
+        let hold = format!("review-hold:{issue_number}:{pr_number}");
+        self.pending_effects.retain(|effect| {
+            effect.state != IssueMonitorEffectState::Prepared
+                || !matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        compensates_effect_id,
+                        ..
+                    } if *compensates_effect_id == hold
+                )
+        });
     }
 
     /// Issue #4117: live independent review windows, ordered by Issue.
@@ -53082,6 +53179,149 @@ mod tests {
                 )
             })
             .count()
+    }
+
+    fn issue_7697_merge_hold(monitor: &IssueMonitorState) -> Option<String> {
+        monitor
+            .status_view()
+            .autonomous_issues
+            .into_iter()
+            .find(|row| row.issue_number == 7)
+            .and_then(|row| row.merge_hold)
+    }
+
+    fn issue_7697_arms(monitor: &IssueMonitorState) -> usize {
+        monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ArmAutoMerge { .. }
+                )
+            })
+            .count()
+    }
+
+    /// Issue #7697 AC-1/AC-3: an auto-merge requested on a PR whose current
+    /// head has no PASS verdict is disarmed, before and after the review is
+    /// dispatched and again after the head moves. Only a PASS for the head
+    /// under review lifts the hold.
+    #[test]
+    fn issue_7697_auto_merge_is_held_until_the_head_has_a_pass_verdict() {
+        use crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA;
+        let pass_raw =
+            format!(r#"{{"schema":"{REVIEW_VERDICT_SCHEMA}","overall":"pass","criteria":[]}}"#);
+
+        // The implementation opened the PR; its review is not dispatched yet.
+        let mut pending = autonomous_state();
+        pending.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        assert!(pending.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&pending), 1);
+        assert!(pending.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&pending), 1, "one disarm per PR");
+
+        // Dispatched, no verdict yet.
+        let mut reviewing = autonomous_state();
+        reviewing.begin_review(7, 99, "abc123");
+        assert!(reviewing.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&reviewing), 1);
+        assert_eq!(issue_7697_arms(&reviewing), 0);
+        // Once the gate passes, a hold that was never submitted is withdrawn
+        // so it cannot undo the gate's own arm.
+        reviewing.record_review_verdict(7, true);
+        reviewing.release_review_merge_hold(7, 99);
+        assert_eq!(review_fail_disarms(&reviewing), 0);
+
+        // A PASS for the head under review ends the hold.
+        let mut passed = autonomous_state();
+        passed.begin_review(7, 99, "abc123");
+        assert_eq!(
+            passed.apply_review_verdict(7, "abc123", &pass_raw),
+            Some(true)
+        );
+        assert!(!passed.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&passed), 0);
+
+        // AC-3: the head moved. The old head's verdict is not accepted for
+        // the new one, and the hold is back until the new head passes.
+        passed.begin_review(7, 99, "def456");
+        assert_eq!(passed.apply_review_verdict(7, "abc123", &pass_raw), None);
+        assert!(passed.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&passed), 1);
+        assert_eq!(issue_7697_arms(&passed), 0);
+
+        // The monitor's own delivery and unknown Issues are left alone.
+        let mut delivering = autonomous_state();
+        delivering.begin_review(7, 99, "abc123");
+        delivering.record_review_verdict(7, true);
+        delivering.begin_delivering(7);
+        assert!(!delivering.hold_auto_merge_until_review_pass(7, 99));
+        assert!(!autonomous_state().hold_auto_merge_until_review_pass(7, 99));
+    }
+
+    /// Issue #7697 AC-2: a FAIL verdict, and a review that never produced a
+    /// verdict up to the attempt cap, both keep the PR unmerged with a reason.
+    #[test]
+    fn issue_7697_failed_or_missing_review_keeps_the_merge_held_with_a_reason() {
+        let mut failed = autonomous_state();
+        failed.begin_review(7, 99, "abc123");
+        failed.record_review_verdict(7, false);
+        assert!(failed.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&failed), 1);
+        assert_eq!(issue_7697_arms(&failed), 0);
+        let reason = issue_7697_merge_hold(&failed).expect("a FAIL holds the merge");
+        assert!(
+            reason.contains("PR #99") && reason.contains("FAIL"),
+            "{reason}"
+        );
+
+        let mut silent = autonomous_state();
+        let max = silent.autonomous_tuning.max_attempts;
+        for _ in 0..max {
+            silent.begin_review(7, 99, "abc123");
+            silent.record_review_failure(
+                7,
+                "review window closed without a verdict",
+                "2026-11-19T00:00:00Z",
+            );
+        }
+        let record = silent.autonomous_record(7).expect("record");
+        assert!(
+            record
+                .steering
+                .as_ref()
+                .is_some_and(|steering| steering.reason.contains("dispatch stops")),
+            "the exhausted review asks the PM to steer"
+        );
+        assert!(silent.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&silent), 1);
+        assert_eq!(issue_7697_arms(&silent), 0);
+        let reason = issue_7697_merge_hold(&silent).expect("no verdict holds the merge");
+        assert!(reason.contains("not dispatched"), "{reason}");
+    }
+
+    /// Issue #7697 AC-4: `issue.monitor.status` says that the merge is waiting
+    /// for the review, and stops saying so once the head has passed.
+    #[test]
+    fn issue_7697_status_names_the_merge_hold_while_the_review_is_pending() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        let reason = issue_7697_merge_hold(&monitor).expect("review pending");
+        assert!(
+            reason.contains("PR #99") && reason.contains("abc123") && reason.contains("no verdict"),
+            "{reason}"
+        );
+        let json = serde_json::to_value(monitor.status_view()).expect("status json");
+        assert_eq!(
+            json["autonomous_issues"][0]["merge_hold"].as_str(),
+            Some(reason.as_str())
+        );
+
+        monitor.record_review_verdict(7, true);
+        assert_eq!(issue_7697_merge_hold(&monitor), None);
+        monitor.begin_delivering(7);
+        assert_eq!(issue_7697_merge_hold(&monitor), None);
     }
 
     #[test]
