@@ -433,14 +433,13 @@ fn durable_agent_execution_authority(principal: &AgentSessionPrincipal) -> Agent
     }
 }
 
-pub async fn durable_agent_execution_authority_async(
+const ACTIVATION_AUTHORITY_BUDGET: Duration = Duration::from_secs(10);
+
+async fn poll_durable_authority_until(
     principal: AgentSessionPrincipal,
+    deadline: tokio::time::Instant,
 ) -> AgentDurableAuthority {
-    if !principal.authorizes_producing_mutation() {
-        return AgentDurableAuthority::ObservationOnly;
-    }
-    // Bound activation waiting independently of the subsequent mutation lease.
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout_at(deadline, async move {
         loop {
             let current = principal.clone();
             let authority =
@@ -457,20 +456,44 @@ pub async fn durable_agent_execution_authority_async(
     .unwrap_or(AgentDurableAuthority::Unavailable)
 }
 
+pub async fn durable_agent_execution_authority_async(
+    principal: AgentSessionPrincipal,
+) -> AgentDurableAuthority {
+    if !principal.authorizes_producing_mutation() {
+        return AgentDurableAuthority::ObservationOnly;
+    }
+    // Bound activation waiting independently of the subsequent mutation lease.
+    poll_durable_authority_until(
+        principal,
+        tokio::time::Instant::now() + ACTIVATION_AUTHORITY_BUDGET,
+    )
+    .await
+}
+
 pub async fn durable_agent_execution_authority_with_lease_async(
     principal: AgentSessionPrincipal,
 ) -> AgentDurableAuthority {
     let Some(binding) = principal.active_execution_binding().cloned() else {
         return AgentDurableAuthority::ObservationOnly;
     };
-    let authority = durable_agent_execution_authority_async(principal).await;
+    // One budget covers both the PendingActivation poll and the owner lease.
+    // Activation publishes Current while it still holds the owner lease, and
+    // the default 2s write-lease cap expires under coverage before that
+    // transaction releases (Issue #7704).
+    let deadline = tokio::time::Instant::now() + ACTIVATION_AUTHORITY_BUDGET;
+    let authority = poll_durable_authority_until(principal, deadline).await;
     if authority != AgentDurableAuthority::Current {
         return authority;
     }
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return AgentDurableAuthority::Unavailable;
+    }
     tokio::task::spawn_blocking(move || {
-        match crate::cli::execution_state::with_current_active_execution_binding_lease(
+        match crate::cli::execution_state::with_current_active_execution_binding_activation_lease(
             &gwt_core::paths::gwt_sessions_dir(),
             &binding,
+            remaining,
             || (),
         ) {
             Ok(Some(())) => AgentDurableAuthority::Current,
