@@ -18,6 +18,10 @@ use crate::{BackendEvent, PmAgentOption};
 pub const PM_WAKE_DELIVERY_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
     gwt_core::deadline_budget::DeadlineBudget::new("PM_WAKE_DELIVERY", Duration::from_secs(2));
 
+/// Issue #7701: an unconfirmed wake may hold ordinary input for at most this
+/// long. Human input and the next turn boundary release it sooner.
+pub const PM_WAKE_RETAINED_INPUT_LIMIT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PmWakeInput {
     pub operation_id: String,
@@ -716,6 +720,67 @@ pub(crate) fn release_acknowledged_wake(
     Ok(true)
 }
 
+/// When an unconfirmed wake may stop holding ordinary input (Issue #7701).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedWakeRelease {
+    /// Human input always outranks an automated wake.
+    HumanInput,
+    /// Stop / UserPromptSubmit of this Session ends the turn the wake raced.
+    TurnBoundary,
+    /// Only a retention whose deadline has passed.
+    Expired,
+}
+
+/// Drop the PTY input reservation an unconfirmed wake still retains, so queued
+/// ordinary input reaches the provider. The durable receipt is left as is: a
+/// later attempt of the same operation becomes readback-only.
+pub(crate) fn release_retained_wake(
+    entry: &super::agent_dispatch::PtyWriterEntry,
+    session: Option<&str>,
+    cause: RetainedWakeRelease,
+) -> Result<bool, String> {
+    let released = {
+        let mut guard = entry
+            .pm_delivery_replay
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if guard.as_ref().is_some_and(|guard| {
+            guard.retained_input.is_some()
+                && session.is_none_or(|session| guard.target_session_id == session)
+                && (cause != RetainedWakeRelease::Expired || Instant::now() >= guard.retained_until)
+        }) {
+            guard.take()
+        } else {
+            None
+        }
+    };
+    let Some(released) = released else {
+        return Ok(false);
+    };
+    tracing::info!(
+        operation_id = %released.operation_id,
+        ?cause,
+        "released input retained by an unconfirmed PM wake"
+    );
+    // Reservation drop flushes queued input on the physical writer; never
+    // hold the replay mutex across that write.
+    drop(released);
+    Ok(true)
+}
+
+/// A Stop / UserPromptSubmit of `session`: release an acknowledged wake, and
+/// also an unconfirmed one, because the turn it raced has ended (Issue #7701).
+pub(crate) fn release_wake_at_turn_boundary(
+    root: &Path,
+    id: &str,
+    session: &str,
+    entry: &super::agent_dispatch::PtyWriterEntry,
+) -> Result<(), String> {
+    release_acknowledged_wake(root, id, session, entry, None)?;
+    release_retained_wake(entry, Some(session), RetainedWakeRelease::TurnBoundary)?;
+    Ok(())
+}
+
 /// Resolve current escalation subjects and commit the protected prompt in the
 /// same project owner that holds its exact physical writer.
 pub(crate) fn deliver_pm_wake(
@@ -742,6 +807,7 @@ pub(crate) fn deliver_pm_wake(
     let _operation_budget = (!delivery.idle)
         .then(|| gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_deadline));
     let deadline = operation_deadline - PM_DELIVERY_TERMINAL_MARGIN;
+    release_retained_wake(entry, None, RetainedWakeRelease::Expired)?;
     if let Some(session) = target_session {
         if release_acknowledged_wake(root, id, session, entry, Some(&delivery.operation_id))? {
             return Ok(PmWakeWrite::Injected);
@@ -1035,6 +1101,12 @@ pub(crate) fn deliver_pm_wake(
                     ordinary_revision,
                     transaction_revision: reservation.transaction_revision(),
                     retained_input: Some((reservation, body_written || continuing)),
+                    // A CR-only retry keeps the first retention deadline.
+                    retained_until: replay
+                        .as_ref()
+                        .filter(|_| continuing)
+                        .map(|guard| guard.retained_until)
+                        .unwrap_or_else(|| Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT),
                 };
                 let previous = entry
                     .pm_delivery_replay
@@ -1830,4 +1902,127 @@ pub(crate) fn deliver_board_notification(
         tracing::warn!(%error, operation_id, "Board notification receipt finish failed");
     }
     Ok(())
+}
+
+/// Issue #7701: an unconfirmed PM wake must never keep the PTY input
+/// reservation once a human types, the raced turn ends, or retention expires.
+#[cfg(test)]
+mod retained_wake_tests {
+    use super::*;
+    use crate::project_runtime::agent_dispatch::{PmDeliveryReplayGuard, PtyWriterEntry};
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+
+    const SESSION: &str = "pm-session";
+
+    fn sleeper() -> Arc<gwt_terminal::PtyHandle> {
+        #[cfg(windows)]
+        let (command, args) = (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Start-Sleep -Seconds 60".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = ("/bin/sleep".to_string(), vec!["60".to_string()]);
+        Arc::new(
+            gwt_terminal::PtyHandle::spawn(gwt_terminal::pty::SpawnConfig {
+                command,
+                args,
+                cols: 80,
+                rows: 24,
+                env: Default::default(),
+                remove_env: Vec::new(),
+                cwd: None,
+            })
+            .expect("spawn PM stand-in"),
+        )
+    }
+
+    /// The state the startup-prompt / wake race leaves behind: the wake body
+    /// was written, no exact turn ACK arrived, and its reservation is retained.
+    fn unconfirmed_wake(retained_until: Instant) -> (Arc<PtyWriterEntry>, String) {
+        let handle = sleeper();
+        let reservation = Arc::clone(&handle)
+            .reserve_input_transaction()
+            .expect("wake reservation");
+        let entry = Arc::new(PtyWriterEntry {
+            project_key: gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap(),
+            handle,
+            current: Arc::new(AtomicBool::new(true)),
+            monitor_runtime: None,
+            pm_delivery_replay: Mutex::new(Some(PmDeliveryReplayGuard {
+                operation_id: "wake-op".into(),
+                target_session_id: SESSION.into(),
+                ordinary_revision: 0,
+                transaction_revision: reservation.transaction_revision(),
+                retained_input: Some((reservation, true)),
+                retained_until,
+            })),
+        });
+        (entry, "pm-window".into())
+    }
+
+    fn input_is_retained(entry: &PtyWriterEntry) -> bool {
+        Arc::clone(&entry.handle)
+            .reserve_input_transaction()
+            .is_err()
+    }
+
+    fn finish(entry: &PtyWriterEntry, id: &str) {
+        let _ = crate::session_finalizer::kill_and_reap(&entry.handle, id);
+    }
+
+    #[test]
+    fn startup_prompt_turn_boundary_releases_an_unconfirmed_wake() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (entry, id) = unconfirmed_wake(Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT);
+        // The human's input queues behind the wake reservation.
+        entry.handle.write_input(b"human prompt").unwrap();
+        assert!(input_is_retained(&entry));
+
+        // The startup prompt's UserPromptSubmit carries no ACK for the wake.
+        release_acknowledged_wake(&root, &id, SESSION, &entry, None).unwrap();
+        assert!(
+            input_is_retained(&entry),
+            "precondition: an unverified receipt alone keeps the reservation"
+        );
+        // A foreign Session's boundary does not release this PM's wake.
+        release_wake_at_turn_boundary(&root, &id, "other-session", &entry).unwrap();
+        assert!(input_is_retained(&entry));
+
+        release_wake_at_turn_boundary(&root, &id, SESSION, &entry).unwrap();
+        assert!(
+            !input_is_retained(&entry),
+            "turn boundary must release input"
+        );
+        assert!(entry.pm_delivery_replay.lock().unwrap().is_none());
+        finish(&entry, &id);
+    }
+
+    #[test]
+    fn human_input_outranks_an_unconfirmed_wake() {
+        let (entry, id) = unconfirmed_wake(Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT);
+        assert!(release_retained_wake(&entry, None, RetainedWakeRelease::HumanInput).unwrap());
+        assert!(!input_is_retained(&entry));
+        entry.handle.write_input(b"human prompt").unwrap();
+        finish(&entry, &id);
+    }
+
+    #[test]
+    fn retention_is_released_only_after_its_deadline() {
+        let (entry, id) = unconfirmed_wake(Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT);
+        assert!(!release_retained_wake(&entry, None, RetainedWakeRelease::Expired).unwrap());
+        assert!(input_is_retained(&entry));
+        finish(&entry, &id);
+
+        let (entry, id) = unconfirmed_wake(Instant::now());
+        assert!(release_retained_wake(&entry, None, RetainedWakeRelease::Expired).unwrap());
+        assert!(!input_is_retained(&entry));
+        finish(&entry, &id);
+    }
 }
