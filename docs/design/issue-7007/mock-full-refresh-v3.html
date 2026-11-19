@@ -222,7 +222,7 @@
   .statebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px}
   .statebar .lab{font-size:13px;font-weight:700;color:var(--ink2)}
   .statebar .seg{margin:0}
-  .chat-head{display:flex;align-items:center;gap:11px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
+  .chat-head{display:flex;align-items:center;gap:11px;padding:10px 0 12px;border-bottom:1px solid var(--line);margin-bottom:16px;position:sticky;top:0;z-index:20;background:var(--bg)}
   .chat-head .nm{font-weight:800;font-size:15px;line-height:1.3}
   .chat-head .sub{font-size:12px;color:var(--ink2)}
   .pblock{border:1px solid var(--line);border-radius:12px;padding:11px 13px 6px;margin-bottom:10px;background:var(--panel)}
@@ -3317,6 +3317,14 @@
         h.hidden = h.getAttribute("data-termhead") !== (name === "terminal-pm" ? "pm" : "work");
       });
     }
+    if (name === "start") {
+      setTimeout(function () {
+        var t = document.getElementById("startTopics");
+        if (!t) return;
+        var groups = t.querySelectorAll(".tgroup");
+        if (groups.length) groups[groups.length - 1].scrollIntoView({ block: "end" });
+      }, 30);
+    }
     var railName = name.replace(/-issue$/, "-issues").replace(/-task$/, "-tasks");
     pageEl.querySelectorAll(".rail a[data-nav], .mtabs a[data-nav]").forEach(function (a) {
       a.classList.toggle("on", a.getAttribute("data-nav") === railName);
@@ -3479,15 +3487,18 @@
     b.addEventListener("click", function () {
       var target = topicMsgsOf(b) || startChat;
       if (!target) return;
-      appendMsg(target, "me", "あなた · たった今", b.getAttribute("data-say"));
+      revealMsg(appendMsg(target, "me", "あなた · たった今", b.getAttribute("data-say")));
       var reply = b.getAttribute("data-reply");
       if (reply) {
         setTimeout(function () {
-          appendMsg(target, "pm", PM_META, reply);
+          revealMsg(appendMsg(target, "pm", PM_META, reply));
         }, 450);
       }
     });
   });
+  function revealMsg(el) {
+    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
   var REPLYBTN_HTML = '<button class="btn ghost iconbtn replybtn" type="button" data-replybtn title="この話題に返信" aria-label="この話題に返信">&#8617;</button>';
   function newTopicCard(title, firstText) {
     var sec = document.createElement("div");
@@ -3501,6 +3512,7 @@
     appendMsg(msgs, "me", "あなた" + (mp ? " · " + mp.name : "") + " · たった今", firstText);
     setTimeout(function () {
       var ack = appendMsg(msgs, "pm", PM_META + (mp ? '<span style="font-weight:400"> · ' + mp.name + '</span>' : ""), "かしこまりました。新しい話題として受け付けました。内容を確認して、この話題の中で続けます。");
+      revealMsg(ack);
       var meta = ack.querySelector(".meta");
       if (meta) meta.insertAdjacentHTML("beforeend", REPLYBTN_HTML);
     }, 450);
@@ -3529,8 +3541,9 @@
           refBtn._targetMsg = composer._replyMsg || msgs.querySelector(".msg");
           var metaEl = sentMsg.querySelector(".meta");
           sentMsg.insertBefore(refBtn, metaEl ? metaEl.nextSibling : null);
+          revealMsg(sentMsg);
           setTimeout(function () {
-            appendMsg(msgs, "pm", PM_META, "かしこまりました。この話題の中で続けます。決めることが出てきたら、ボタンで選べる形にします。");
+            revealMsg(appendMsg(msgs, "pm", PM_META, "かしこまりました。この話題の中で続けます。決めることが出てきたら、ボタンで選べる形にします。"));
           }, 450);
         }
         input.value = "";
@@ -3540,7 +3553,9 @@
       var note = noteId ? document.getElementById(noteId) : null;
       if (note) note.remove();
       var card = newTopicCard(v.length > 42 ? v.slice(0, 42) + "…" : v, v.replace(/</g, "&lt;"));
-      topics.insertBefore(card, topics.firstChild);
+      var solvedAnchor = topics.querySelector(".topicsearch");
+      if (solvedAnchor) topics.insertBefore(card, solvedAnchor); else topics.appendChild(card);
+      revealMsg(card);
       input.value = "";
     });
   }
