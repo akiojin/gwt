@@ -381,7 +381,12 @@ fn owner_restore_placeholder_known_empty(restore: &OwnerSavedSessionRestore) -> 
     })
 }
 
-fn reserve_pm_after_census<T>(
+const CENSUS_UNCERTAIN: &str = "Machine Agent census is uncertain; wait for its next observation";
+
+/// An automatic restore right after a restart can precede the sampler's next
+/// observation of the previous processes. Wait for it inside the launch
+/// deadline instead of failing the restore.
+fn reserve_after_census<T>(
     automatic: bool,
     current: &AtomicBool,
     mut reserve: impl FnMut() -> std::io::Result<T>,
@@ -390,11 +395,11 @@ fn reserve_pm_after_census<T>(
         if !current.load(Ordering::Acquire) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
-                "PM restore cancelled",
+                "Agent restore cancelled",
             ));
         }
         if automatic {
-            gwt_core::operation_deadline::ensure_remaining("PM restore census")?;
+            gwt_core::operation_deadline::ensure_remaining("Agent restore census")?;
         }
         let error = match reserve() {
             Ok(value) => return Ok(value),
@@ -402,8 +407,7 @@ fn reserve_pm_after_census<T>(
         };
         if !automatic
             || error.kind() != std::io::ErrorKind::WouldBlock
-            || error.to_string()
-                != "Machine Agent census is uncertain; wait for its next observation"
+            || error.to_string() != CENSUS_UNCERTAIN
         {
             return Err(error);
         }
@@ -420,8 +424,27 @@ fn reserve_pm_after_census<T>(
         // Reservation failed before commit and released its locks. Keep the
         // same source/token and deadline while the sampler publishes fresh facts.
         std::thread::sleep(std::time::Duration::from_millis(100).min(remaining));
-        gwt_core::operation_deadline::ensure_remaining("PM restore census")?;
+        gwt_core::operation_deadline::ensure_remaining("Agent restore census")?;
     }
+}
+
+/// Member reservations report the registry refusal as text.
+fn reserve_member_after_census<T>(
+    automatic: bool,
+    current: &AtomicBool,
+    mut reserve: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    reserve_after_census(automatic, current, || {
+        reserve().map_err(|detail| {
+            let kind = if detail == CENSUS_UNCERTAIN {
+                std::io::ErrorKind::WouldBlock
+            } else {
+                std::io::ErrorKind::Other
+            };
+            std::io::Error::new(kind, detail)
+        })
+    })
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) fn prepare_owner_saved_session_restore(
@@ -711,7 +734,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             .as_ref()
             .map(|(_, token)| token.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let prepared = reserve_pm_after_census(
+        let prepared = reserve_after_census(
             restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore,
             current,
             || {
@@ -748,15 +771,22 @@ pub(crate) fn prepare_owner_saved_session_restore(
         restore.member_reservation = Some((member.agent_member_id, token));
     } else if let Some(member_root) = member_root {
         let token = uuid::Uuid::new_v4().to_string();
-        let member = crate::agent_names::reserve_project_member_for_session(
-            member_root,
-            sessions_dir,
-            &token,
-            config.linked_issue_number,
-            config.linked_issue_number.and_then(|number| {
-                crate::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
-            }),
-            &restore.source,
+        let spec_number = config.linked_issue_number.and_then(|number| {
+            crate::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
+        });
+        let member = reserve_member_after_census(
+            restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+            current,
+            || {
+                crate::agent_names::reserve_project_member_for_session(
+                    member_root,
+                    sessions_dir,
+                    &token,
+                    config.linked_issue_number,
+                    spec_number,
+                    &restore.source,
+                )
+            },
         )?;
         let reservation = member
             .assignment
@@ -4553,7 +4583,7 @@ mod owner_admission_tests {
         );
         let current = AtomicBool::new(true);
         let mut attempts = 0;
-        let result = reserve_pm_after_census(true, &current, || {
+        let result = reserve_after_census(true, &current, || {
             attempts += 1;
             if attempts == 1 {
                 Err(std::io::Error::new(
@@ -4566,6 +4596,40 @@ mod owner_admission_tests {
         });
         assert_eq!(result.unwrap(), "same reservation");
         assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn automatic_member_restore_waits_for_census_and_keeps_other_refusals() {
+        const UNCERTAIN: &str = "Machine Agent census is uncertain; wait for its next observation";
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+        );
+        let current = AtomicBool::new(true);
+        let mut attempts = 0;
+        let result = reserve_member_after_census(true, &current, || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(UNCERTAIN.to_string())
+            } else {
+                Ok("same reservation")
+            }
+        });
+        assert_eq!(result, Ok("same reservation"));
+        assert_eq!(attempts, 2);
+
+        for (automatic, message) in [
+            (false, UNCERTAIN),
+            (true, "Exact restored Session is unavailable"),
+        ] {
+            let mut attempts = 0;
+            let result: Result<(), String> =
+                reserve_member_after_census(automatic, &current, || {
+                    attempts += 1;
+                    Err(message.to_string())
+                });
+            assert_eq!(result, Err(message.to_string()));
+            assert_eq!(attempts, 1);
+        }
     }
 
     #[test]
@@ -4594,7 +4658,7 @@ mod owner_admission_tests {
                 )
             });
             let mut attempts = 0;
-            let result: std::io::Result<()> = reserve_pm_after_census(automatic, &current, || {
+            let result: std::io::Result<()> = reserve_after_census(automatic, &current, || {
                 attempts += 1;
                 Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, message))
             });
@@ -4608,7 +4672,7 @@ mod owner_admission_tests {
             gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
         );
         let mut attempts = 0;
-        let cancelled: std::io::Result<()> = reserve_pm_after_census(true, &current, || {
+        let cancelled: std::io::Result<()> = reserve_after_census(true, &current, || {
             attempts += 1;
             current.store(false, Ordering::Release);
             Err(std::io::Error::new(
@@ -4626,7 +4690,7 @@ mod owner_admission_tests {
             gwt_core::operation_deadline::now(),
         );
         let mut attempts = 0;
-        let expired: std::io::Result<()> = reserve_pm_after_census(true, &current, || {
+        let expired: std::io::Result<()> = reserve_after_census(true, &current, || {
             attempts += 1;
             Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
