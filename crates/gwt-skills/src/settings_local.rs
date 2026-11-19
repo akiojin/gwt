@@ -1656,6 +1656,15 @@ mod tests {
         assert!(plugin_path.exists());
         let config = fs::read_to_string(config_path).unwrap();
         assert!(config.contains("gwt-hook-bridge"));
+        let value: Value = serde_json::from_str(&config).unwrap();
+        assert!(
+            value.pointer("/commands/ownerDisplay").is_none(),
+            "OpenClaw rejects unknown commands.ownerDisplay and then refuses to enable the hook bridge"
+        );
+        assert_eq!(
+            value.pointer("/plugins/entries/gwt-hook-bridge/enabled"),
+            Some(&Value::Bool(true))
+        );
         let plugin = fs::read_to_string(plugin_path).unwrap();
         assert!(plugin.contains("before_tool_call"));
         assert!(plugin.contains("after_tool_call"));
