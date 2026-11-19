@@ -699,14 +699,32 @@ fn attach_build_artifact_gc(
     status.build_artifact_gc = last_build_artifact_gc_record(project_root);
 }
 
-/// Issue #7694 AC-4: a resident PM whose periodic wake stopped arriving, read
-/// from the record the wake owner writes. Read-only: no record, no field.
+/// Issue #7694 AC-4: a live resident PM that no wake has reached for several
+/// loop intervals. Derived on every read, so it needs nothing from the GUI.
 fn attach_pm_wake_stall(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
 ) {
-    status.pm_wake_stall = crate::pm_registry::load_pm_wake_stall(
-        &crate::pm_registry::pm_wake_stall_path_for_repo_path(project_root),
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let pm_alive = crate::pm_registry::load_pm_prefs(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(project_root),
+    )
+    .ok()
+    .and_then(|prefs| prefs.registration)
+    .and_then(|registration| {
+        gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", registration.session_id)))
+            .ok()
+    })
+    .is_some_and(|session| {
+        crate::session_inventory::observe_session(&session, &sessions_dir)
+            .sessions
+            .iter()
+            .any(|observed| observed.session_id == session.id)
+    });
+    status.pm_wake_stall = crate::pm_registry::observed_pm_wake_stall(
+        project_root,
+        pm_alive,
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
     );
 }
 
@@ -13887,53 +13905,81 @@ mod tests {
         }
     }
 
-    /// Issue #7694 AC-4: a PM that is alive but no longer woken is visible in
-    /// the status the PM and the operator already read, and disappears from it
-    /// once the wake owner clears the record.
+    /// Issue #7694 AC-4: the stall is derived from the PM's registration and
+    /// its last delivery on every read. A record left behind for a PM that is
+    /// not alive, or that has been woken since, is never shown.
     #[test]
     fn issue_monitor_status_reports_a_stalled_pm_periodic_wake() {
+        use crate::pm_registry as pm;
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
-        let status = |repo: &std::path::Path| -> serde_json::Value {
-            let mut env = crate::cli::TestEnv::new(repo.to_path_buf());
-            let mut out = String::new();
-            run(
-                &mut env,
-                IssueCommand::MonitorStatus { project_root: None },
-                &mut out,
-            )
-            .expect("status");
-            serde_json::from_str(out.trim()).expect("status json")
-        };
-        assert!(status(&repo).get("pm_wake_stall").is_none());
-
         let root = issue_monitor_project_root(&crate::cli::TestEnv::new(repo.clone()), None)
             .expect("project root");
-        let path = crate::pm_registry::pm_wake_stall_path_for_repo_path(&root);
-        crate::pm_registry::save_pm_wake_stall(
-            &path,
-            &crate::pm_registry::PmWakeStall {
-                since: "2026-11-18T18:20:43Z".into(),
+        assert_eq!(
+            pm::observed_pm_wake_stall(&root, true, "2026-11-18T19:00:00Z"),
+            None,
+            "no PM is registered"
+        );
+        pm::try_register_pm(
+            &pm::pm_prefs_path_for_repo_path(&root),
+            pm::PmRegistration {
+                session_id: "pm-session".into(),
+                agent_id: "claude".into(),
+                worktree_path: root.join("pm").to_string_lossy().into_owned(),
+                created_at: Some("2026-11-18T18:00:00Z".into()),
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register");
+        pm::record_pm_wake_delivered(&root, "2026-11-18T18:20:43Z").expect("delivery");
+        // What the wake owner recorded before that delivery: an older stall.
+        pm::save_pm_wake_stall(
+            &pm::pm_wake_stall_path_for_repo_path(&root),
+            &pm::PmWakeStall {
+                since: "2026-11-18T18:05:00Z".into(),
                 reason: "held_wake".into(),
-                detail: Some("owner_runtime_busy=true".into()),
+                detail: None,
                 interval_secs: 60,
-                recorded_at: "2026-11-18T18:25:43Z".into(),
+                recorded_at: "2026-11-18T18:10:00Z".into(),
             },
         )
         .expect("stall record");
-        let stalled = status(&repo);
-        assert_eq!(stalled["pm_wake_stall"]["reason"], "held_wake");
-        assert_eq!(stalled["pm_wake_stall"]["since"], "2026-11-18T18:20:43Z");
-        assert_eq!(
-            stalled["pm_wake_stall"]["detail"],
-            "owner_runtime_busy=true"
-        );
-        assert_eq!(stalled["pm_wake_stall"]["interval_secs"], 60);
 
-        crate::pm_registry::clear_pm_wake_stall(&path);
-        assert!(status(&repo).get("pm_wake_stall").is_none());
+        assert_eq!(
+            pm::observed_pm_wake_stall(&root, true, "2026-11-18T18:25:42Z"),
+            None,
+            "wakes are arriving: the older record is not shown"
+        );
+        let stall = pm::observed_pm_wake_stall(&root, true, "2026-11-18T18:25:43Z")
+            .expect("five intervals since the last delivery");
+        assert_eq!(stall.since, "2026-11-18T18:20:43Z");
+        assert_eq!(stall.reason, pm::PM_WAKE_STALL_NOT_EVALUATED);
+        assert_eq!(stall.interval_secs, 60);
+
+        pm::set_pm_paused(&root, true).expect("pause");
+        assert_eq!(
+            pm::observed_pm_wake_stall(&root, true, "2026-11-18T19:00:00Z"),
+            None,
+            "a paused PM is owed no wake"
+        );
+        pm::set_pm_paused(&root, false).expect("resume");
+
+        // The registered session has no live process on this host.
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+        let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
+        assert!(status.get("pm_wake_stall").is_none());
+
         assert!(!crate::pm_registry::pm_wake_stall_is_reportable(
             "2026-11-18T18:20:43Z",
             "2026-11-18T18:25:42Z",

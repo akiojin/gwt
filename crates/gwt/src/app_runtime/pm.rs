@@ -1690,6 +1690,11 @@ impl AppRuntime {
 
     /// A wake reached the PM, or none is owed: the run of missed ticks is over.
     fn clear_pm_periodic_wake_stall(&mut self, project_root: &Path) {
+        // Unconditional: a record left by an earlier process has no in-memory
+        // counterpart here and would otherwise outlive the stall it describes.
+        pm_registry::clear_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(
+            project_root,
+        ));
         let Some(stall) = self
             .project_state_for_root_mut(project_root)
             .and_then(|state| state.pm_agent_idle_wakes.periodic_stall.take())
@@ -1697,9 +1702,6 @@ impl AppRuntime {
             return;
         };
         if stall.reported {
-            pm_registry::clear_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(
-                project_root,
-            ));
             tracing::info!(
                 since = %stall.since,
                 reason = stall.reason,
@@ -2400,9 +2402,6 @@ impl AppRuntime {
                 // Issue #7694: a stall recorded for the previous PM, or by a
                 // process that is gone, says nothing about this registration.
                 self.clear_pm_periodic_wake_stall(project_root);
-                pm_registry::clear_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(
-                    project_root,
-                ));
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to write PM registration after launch");
@@ -4062,6 +4061,159 @@ mod delivery_tests {
             pm_registry::load_pm_wake_stall(&stall_path),
             None,
             "a paused PM is owed no wake"
+        );
+    }
+
+    fn issue_7694_after(instant: &str, secs: i64) -> String {
+        (gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(instant).unwrap()
+            + time::Duration::seconds(secs))
+        .to_rfc3339_seconds()
+    }
+
+    /// Issue #7694 AC-4: the stall is measured from the last delivery to the
+    /// live PM, so it shows when the scheduled completion returns before the
+    /// decision, and when the decision cannot resolve the project at all.
+    #[test]
+    fn issue_7694_stall_is_observed_without_a_periodic_decision() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+        runtime.proxy = AppEventProxy::stub().0;
+        let _capture = PromptCapture::begin(&repo);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        assert_eq!(pm_registry::load_pm_wake_delivered_at(&repo), None);
+
+        runtime
+            .write_pm_wake_prompt(&normal_wake(repo.clone(), window_id.clone()))
+            .unwrap();
+        crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+        let delivered = pm_registry::load_pm_wake_delivered_at(&repo)
+            .expect("the owner stamps the delivery it committed");
+
+        // The scheduled completion returns before the decision: this scan is
+        // not the one in flight. Nothing in the GUI records a reason.
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let events = runtime.issue_monitor_scheduled_scan_prepared_events(
+            crate::app_runtime::PreparedScheduledIssueMonitorScan {
+                project_root: repo.clone(),
+                prefs_stamp: crate::app_runtime::issue_monitor_prefs_metadata_stamp(&prefs_path),
+                prefs_path,
+                now: issue_7694_after(&delivered, 300),
+                source: Err("not the scan in flight".into()),
+                monitor: None,
+                status: None,
+                error: None,
+                standing_durable_work: true,
+            },
+        );
+        assert!(events.is_empty());
+        // The decision itself cannot resolve the project (`Skip::Unavailable`).
+        runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+            &temp.path().join("closed-project"),
+            &monitor,
+            &issue_7694_after(&delivered, 300),
+            true,
+        );
+        assert_eq!(
+            pm_registry::load_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(&repo)),
+            None,
+            "neither path leaves a record of its own"
+        );
+
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&delivered, 299)),
+            None
+        );
+        let stall =
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&delivered, 300))
+                .expect("five intervals without a wake is a stall, whoever failed to tick");
+        assert_eq!(stall.since, delivered);
+        assert_eq!(stall.reason, pm_registry::PM_WAKE_STALL_NOT_EVALUATED);
+        assert_eq!(stall.interval_secs, 60);
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, false, &issue_7694_after(&delivered, 300)),
+            None,
+            "a PM that is not alive is owed no wake"
+        );
+    }
+
+    /// Issue #7694 AC-4: a record written before a restart is carried over as
+    /// the reason while the stall lasts, and is gone once a wake is delivered
+    /// by a process that never reported it.
+    #[test]
+    fn issue_7694_stall_record_of_a_previous_process_ends_with_the_next_delivery() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+        runtime.proxy = AppEventProxy::stub().0;
+        let _capture = PromptCapture::begin(&repo);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        let stall_path = pm_registry::pm_wake_stall_path_for_repo_path(&repo);
+        let start = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+        // The previous process: its ticks keep missing the PM until it records.
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pm_agent_idle_wakes
+            .delivery_in_flight = Some(PmIdleWakeInFlight {
+            window_id: window_id.clone(),
+            permit: Arc::new(AtomicBool::new(true)),
+            dispatched: Arc::new(AtomicBool::new(false)),
+            cancellation: None,
+        });
+        for secs in [0, 300] {
+            runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+                &repo,
+                &monitor,
+                &issue_7694_after(&start, secs),
+                true,
+            );
+        }
+        assert!(pm_registry::load_pm_wake_stall(&stall_path).is_some());
+        // The restart: every in-memory trace of that stall is gone.
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pm_agent_idle_wakes = Default::default();
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&start, 300))
+                .expect("the stall outlives the restart")
+                .reason,
+            "delivery_in_flight"
+        );
+
+        runtime
+            .write_pm_wake_prompt(&normal_wake(repo.clone(), window_id.clone()))
+            .unwrap();
+        crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+
+        assert_eq!(
+            pm_registry::load_pm_wake_stall(&stall_path),
+            None,
+            "a delivered wake removes a record this process never reported"
+        );
+        let delivered = pm_registry::load_pm_wake_delivered_at(&repo).unwrap();
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&delivered, 299)),
+            None
         );
     }
 }

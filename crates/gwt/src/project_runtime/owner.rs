@@ -4170,6 +4170,16 @@ impl OwnerState {
                                 output_seq,
                             ),
                         );
+                        // Issue #7694 AC-4: the delivery clock a stalled wake
+                        // is measured against, stamped where the commit happens.
+                        if matches!(result, Ok(super::pm_delivery::PmWakeWrite::Injected)) {
+                            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+                            if let Err(error) =
+                                crate::pm_registry::record_pm_wake_delivered(&root, &now)
+                            {
+                                tracing::warn!(%error, "PM wake delivery time could not be saved");
+                            }
+                        }
                         let facts = json!({
                             "input_observation":
                                 super::events::OwnerInputObservation::capture(&entry.handle),
