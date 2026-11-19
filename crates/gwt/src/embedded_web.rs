@@ -108,6 +108,9 @@ root_js_modules! {
     "hook-center-panel.js" => "renderHookCenterPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
+    // Issue #7702: IME composition commit gate. app.js imports it at module
+    // top level, so a missing asset 404s and the splash never clears.
+    "terminal-input-commit.js" => "createTerminalInputCommitGate",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",

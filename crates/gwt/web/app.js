@@ -133,6 +133,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         takeTerminalActivationIntent,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
+      // Issue #7702: drop the compositionend echo of an IME commit xterm
+      // already sent from keydown. Registered below, after terminal.open().
+      import { createTerminalInputCommitGate } from "/terminal-input-commit.js";
 
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";
@@ -3356,6 +3359,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
+        const commitGate = createTerminalInputCommitGate();
+        const detachCommitGate = terminal.textarea
+          ? commitGate.attach(terminal.textarea)
+          : () => {};
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const containerBindingsCleanup = attachTerminalContainerBindings(
           windowId,
@@ -3364,6 +3371,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           { readOnly: options.readOnly === true },
         );
         const cleanup = () => {
+          detachCommitGate();
           runtime.initialFitCancel?.();
           terminalMap.get(windowId)?.containerBindingsCleanup?.();
           viewportRefreshCleanup();
@@ -3393,12 +3401,22 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             });
             return;
           }
+          const settled = commitGate.accept(data);
+          if (!settled.forward) {
+            console.debug("[gwt_input_trace:onData:dropped]", {
+              seq: inputTraceSeq,
+              windowId,
+              reason: "ime-echo",
+              wsState,
+            });
+            return;
+          }
           console.debug("[gwt_input_trace:onData]", {
             seq: inputTraceSeq,
             windowId,
             wsState,
           });
-          send({ kind: "terminal_input", id: windowId, data });
+          send({ kind: "terminal_input", id: windowId, data: settled.data });
         });
         const runtime = {
           nativeIdentity,
