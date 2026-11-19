@@ -4797,15 +4797,17 @@ pub fn save_pm_loop_state(path: &Path, state: &PmLoopState) -> io::Result<()> {
 /// periodic wake before the stall is recorded.
 pub const PM_WAKE_STALL_REPORT_INTERVALS: u64 = 5;
 
-/// Issue #7694: a resident PM that is alive but has not received its periodic
-/// wake for several loop intervals. Written once per stall by the GUI that
-/// owns the wake and removed when a wake is delivered, so `issue.monitor.status`
-/// can show it without reaching into that process.
+/// Issue #7694: a resident PM that is alive but has not received a wake for
+/// several loop intervals. `issue.monitor.status` derives it on every read
+/// from the last delivery and the PM's own activity ([`observed_pm_wake_stall`]),
+/// so it shows even when the GUI that owns the wake never evaluates a tick.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmWakeStall {
-    /// When the first undelivered tick of this stall was observed.
+    /// The last wake delivery or PM activity; nothing reached the PM since.
+    /// In the wake owner's own record: its first undelivered tick.
     pub since: String,
-    /// Why the latest tick was skipped or its delivery not committed.
+    /// Why the latest tick was skipped or its delivery not committed, or
+    /// `not_evaluated` when the wake owner recorded no reason for this stall.
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -4850,6 +4852,90 @@ pub fn pm_wake_stall_is_reportable(since: &str, now: &str, interval_secs: u64) -
         }
         _ => false,
     }
+}
+
+/// Issue #7694 AC-4: the reason shown when the wake owner recorded none — its
+/// tick never reached the decision, or the decision could not read the project.
+pub const PM_WAKE_STALL_NOT_EVALUATED: &str = "not_evaluated";
+
+#[derive(Serialize, Deserialize)]
+struct PmWakeDelivered {
+    delivered_at: String,
+}
+
+pub fn pm_wake_delivered_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+        .join("project-state/pm-wake-delivered.json")
+}
+
+/// Stamp the moment a wake of any flavour was committed to the PM pane.
+pub fn record_pm_wake_delivered(repo_path: &Path, now: &str) -> io::Result<()> {
+    let path = pm_wake_delivered_path_for_repo_path(repo_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let scratch = unique_pm_scratch_path(&path);
+    fs::write(
+        &scratch,
+        serde_json::to_string(&PmWakeDelivered {
+            delivered_at: now.to_string(),
+        })?,
+    )?;
+    fs::rename(&scratch, path)
+}
+
+pub fn load_pm_wake_delivered_at(repo_path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(pm_wake_delivered_path_for_repo_path(repo_path)).ok()?;
+    Some(
+        serde_json::from_str::<PmWakeDelivered>(&raw)
+            .ok()?
+            .delivered_at,
+    )
+}
+
+/// Issue #7694 AC-4: whether the live, unpaused PM of `repo_path` has gone
+/// [`PM_WAKE_STALL_REPORT_INTERVALS`] loop intervals without a wake.
+///
+/// The clock starts at the newest of the last delivery, the PM's own activity
+/// and its registration, all of which are written outside the periodic wake
+/// decision. The wake owner's record only contributes the reason, and only
+/// when it belongs to this stall: one left by an earlier process or an earlier
+/// stall is older than the clock and is ignored.
+pub fn observed_pm_wake_stall(repo_path: &Path, pm_alive: bool, now: &str) -> Option<PmWakeStall> {
+    if !pm_alive {
+        return None;
+    }
+    let prefs = load_pm_prefs(&pm_prefs_path_for_repo_path(repo_path)).ok()?;
+    let registration = prefs.registration.filter(|_| !prefs.settings.paused)?;
+    let loop_state =
+        load_pm_loop_state(&pm_loop_state_path_for_repo_path(repo_path)).unwrap_or_default();
+    let parse = |instant: &str| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(instant).ok();
+    let since = [
+        load_pm_wake_delivered_at(repo_path),
+        loop_state.last_continued_at,
+        loop_state.last_user_prompt_at,
+        registration.created_at,
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|instant| Some((parse(&instant)?, instant)))
+    .max_by_key(|(at, _)| *at)?;
+    let interval_secs = prefs.settings.loop_interval_secs_clamped();
+    if !pm_wake_stall_is_reportable(&since.1, now, interval_secs) {
+        return None;
+    }
+    let recorded = load_pm_wake_stall(&pm_wake_stall_path_for_repo_path(repo_path))
+        .filter(|stall| parse(&stall.since).is_some_and(|at| at >= since.0));
+    Some(PmWakeStall {
+        since: since.1,
+        reason: recorded
+            .as_ref()
+            .map_or(PM_WAKE_STALL_NOT_EVALUATED, |stall| stall.reason.as_str())
+            .to_string(),
+        detail: recorded.and_then(|stall| stall.detail),
+        interval_secs,
+        recorded_at: now.to_string(),
+    })
 }
 
 /// Whether `path` is some project's canonical PM worktree.
