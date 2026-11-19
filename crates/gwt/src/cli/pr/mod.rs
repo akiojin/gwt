@@ -306,9 +306,10 @@ fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<
     if let Some(body) = body.as_deref() {
         if let PrCommand::Edit { number, .. } | PrCommand::EditBody { number, .. } = cmd {
             let previous = env.fetch_pr_quarantine_context(*number)?;
-            return Ok(Some(crate::session_launch::preserve_named_pr_author(
-                body,
-                &previous.body,
+            let preserved = crate::session_launch::preserve_named_pr_author(body, &previous.body);
+            return Ok(Some(crate::session_launch::stamp_github_body(
+                &preserved,
+                env.github_writer().as_ref(),
             )));
         }
     }
@@ -806,6 +807,10 @@ pub(super) fn run_with_data<E: CliEnv>(
                         gwt_agent::Session::load(&gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", binding.session_id))).ok()
                     });
                     let mut checked_body = crate::session_launch::with_named_pr_author(body, author_session.as_ref());
+                    checked_body = crate::session_launch::stamp_github_body(
+                        &checked_body,
+                        env.github_writer().as_ref(),
+                    );
                     let mut checked_head = head.clone();
                     if !draft {
                         let worktree = mutation_worktree.as_deref().expect("mutation worktree");
@@ -1062,12 +1067,16 @@ pub(super) fn run_with_data<E: CliEnv>(
         }
         PrCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
+            let body =
+                crate::session_launch::stamp_github_body(&body, env.github_writer().as_ref());
             env.comment_on_pr(number, &body)
                 .map_err(super::io_as_api_error)?;
             out.push_str(&format!("created comment on PR #{number}\n"));
             0
         }
         PrCommand::CommentBody { number, body } => {
+            let body =
+                crate::session_launch::stamp_github_body(&body, env.github_writer().as_ref());
             env.comment_on_pr(number, &body)
                 .map_err(super::io_as_api_error)?;
             out.push_str(&format!("created comment on PR #{number}\n"));
@@ -2764,9 +2773,7 @@ mod tests {
             Some("work/issue-42")
         );
         assert!(!env.pr_create_call_log[0].draft);
-        assert!(env.pr_create_call_log[0]
-            .body
-            .contains("Agent: ミオ (Codex)"));
+        assert!(env.pr_create_call_log[0].body.contains("— ミオ（Codex）"));
         assert!(env
             .client
             .comments(gwt_github::IssueNumber(42))
@@ -3757,7 +3764,7 @@ mod tests {
             .last()
             .unwrap()
             .body
-            .contains("Agent: ミオ (Codex)"));
+            .contains("— ミオ（Codex）"));
         assert!(env
             .client
             .comments(gwt_github::IssueNumber(42))
@@ -5412,8 +5419,97 @@ fn main() -> ExitCode {
         .unwrap()
         .unwrap();
         assert!(body.starts_with("Rewritten description"));
-        assert!(body.contains("Agent: Maya (Codex)"), "{body}");
+        assert!(body.contains("— Maya（Codex）"), "{body}");
         assert!(body.contains("\"phase\":\"pr_author\""), "{body}");
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.trim() == "— Maya（Codex）")
+                .count(),
+            1,
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn pr_edit_and_comment_stamp_a_different_editor_once() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut producer =
+            gwt_agent::Session::new(repo.path(), "work/issue-42", gwt_agent::AgentId::Codex);
+        producer.agent_name = Some("Maya".into());
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        seed_readable_pr_body(&mut env);
+        env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
+            crate::session_launch::with_named_pr_author("Original description", Some(&producer));
+        env.github_writer = Some(crate::session_launch::GithubWriter {
+            name: "テツヤ".to_string(),
+            detail: "Grok Build".to_string(),
+            role: crate::session_launch::GithubWriterRole::Agent,
+            session_id: "editor".to_string(),
+            phase: "write".to_string(),
+        });
+        let body = pr_mutation_body(
+            &mut env,
+            &PrCommand::EditBody {
+                number: 7,
+                base: None,
+                title: None,
+                body: Some("Rewritten description".into()),
+                add_labels: vec![],
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.trim() == "— Maya（Codex）")
+                .count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.trim() == "— テツヤ（Grok Build）")
+                .count(),
+            1,
+            "{body}"
+        );
+        env.pr_quarantine_contexts.get_mut(&7).unwrap().body = body.clone();
+        let resent = pr_mutation_body(
+            &mut env,
+            &PrCommand::EditBody {
+                number: 7,
+                base: None,
+                title: None,
+                body: Some(body.clone()),
+                add_labels: vec![],
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(resent, body);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CommentBody {
+                number: 7,
+                body: "レビューメモ".to_string(),
+            },
+            &mut out,
+        )
+        .expect("pr comment");
+        assert_eq!(code, 0, "{out}");
+        let comment = env.pr_comments.last().expect("stored comment");
+        assert_eq!(comment.0, 7);
+        assert!(comment.1.contains("レビューメモ"));
+        assert_eq!(
+            comment
+                .1
+                .lines()
+                .filter(|line| line.trim() == "— テツヤ（Grok Build）")
+                .count(),
+            1
+        );
     }
 
     #[test]
