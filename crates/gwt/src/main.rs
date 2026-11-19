@@ -2311,6 +2311,9 @@ enum UserEvent {
     IssueMonitorLaunchPrepared(Box<app_runtime::IssueMonitorLaunchPrepared>),
     /// Issue #5379: startup restore admission verdicts from the blocking worker.
     StartupAutoResumeAdmissionPrepared(Box<app_runtime::StartupAutoResumeAdmissionPrepared>),
+    /// Issue #7702: continue GUI work that yielded so queued terminal input
+    /// can run on the next turn.
+    GuiSliceContinue,
     IssueMonitorPreflightRejected(Box<app_runtime::IssueMonitorPreflightRejected>),
     IssueMonitorLaunchFactsPrefetched(Box<app_runtime::IssueMonitorLaunchFactsPrefetched>),
     IssueMonitorLaunchRequest {
@@ -5134,6 +5137,8 @@ mod tests {
             initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
+            pending_frontend_ready_snapshots: Vec::new(),
+            gui_slice_continue_queued: false,
             deferred_issue_monitor_launches: None,
             startup_generation_reaper_pending: false,
             startup_worktree_inventories: HashMap::new(),
@@ -11669,6 +11674,9 @@ fn main() -> std::io::Result<()> {
                     proxy.clone(),
                     |events| clients.dispatch(events),
                 );
+            }
+            Event::UserEvent(UserEvent::GuiSliceContinue) => {
+                clients.dispatch(app.continue_gui_slice());
             }
             Event::UserEvent(UserEvent::IssueMonitorPreflightRejected(completion)) => {
                 clients.dispatch(app.handle_monitor_preflight_rejected(*completion));

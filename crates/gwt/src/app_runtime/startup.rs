@@ -1853,6 +1853,16 @@ impl AppRuntime {
     /// (which the resume queue may already have restarted) is seen as live by
     /// the singleton gate instead of being spawned twice.
     fn startup_pm_ensure_ready_events(&mut self) -> Vec<OutboundEvent> {
+        let mut budget = super::GuiSliceBudget::production();
+        self.startup_pm_ensure_slice(&mut budget)
+    }
+
+    /// Issue #7702: ensure one slice of queued PM tabs, then continue on the
+    /// next event-loop turn so terminal input is not stuck behind the rest.
+    pub(crate) fn startup_pm_ensure_slice(
+        &mut self,
+        budget: &mut super::GuiSliceBudget,
+    ) -> Vec<OutboundEvent> {
         if self.pending_startup_pm_tabs.is_empty() {
             return Vec::new();
         }
@@ -1862,16 +1872,32 @@ impl AppRuntime {
             "PM ensure: surfaces ready, draining queue"
         );
         let mut events = Vec::new();
+        let mut remainder = Vec::new();
+        let mut processed = false;
         for tab_id in tabs {
+            if !budget.allow_another() {
+                remainder.push(tab_id);
+                continue;
+            }
+            budget.record();
+            processed = true;
             events.extend(self.ensure_pm_agent_for_tab(
                 &tab_id,
                 crate::app_runtime::pm::PmEnsureTrigger::Automatic,
             ));
         }
-        for state in self.project_states.values() {
-            for window_id in state.pending_pm_launches.keys() {
-                gwt::perf::startup::track_new_terminal(window_id);
+        if processed {
+            for state in self.project_states.values() {
+                for window_id in state.pending_pm_launches.keys() {
+                    gwt::perf::startup::track_new_terminal(window_id);
+                }
             }
+        }
+        if !remainder.is_empty() {
+            let mut pending = std::mem::take(&mut self.pending_startup_pm_tabs);
+            remainder.append(&mut pending);
+            self.pending_startup_pm_tabs = remainder;
+            self.queue_gui_slice_continue();
         }
         events
     }

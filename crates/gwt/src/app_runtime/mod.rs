@@ -160,7 +160,8 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
         | UserEvent::ApplyUpdateGraceful { .. }
         | UserEvent::UpdateApplyResolutionFailed(_)
         | UserEvent::StartupReady
-        | UserEvent::StartupStopped => AppEventPriority::Foreground,
+        | UserEvent::StartupStopped
+        | UserEvent::GuiSliceContinue => AppEventPriority::Foreground,
         _ => AppEventPriority::Background,
     }
 }
@@ -1067,6 +1068,7 @@ mod frontend_action_log;
 mod knowledge;
 mod launch;
 pub(crate) use launch::LaunchPermissionChecked;
+mod gui_slice;
 mod launch_errors;
 mod loaders;
 mod migration;
@@ -1084,6 +1086,7 @@ mod recovery_center;
 mod runtime_events;
 mod settings_update;
 mod startup;
+pub(crate) use gui_slice::GuiSliceBudget;
 pub(crate) mod terminal_convergence;
 mod title_sync;
 mod ui_trace;
@@ -2185,6 +2188,12 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the frontend is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
+    /// Issue #7702: FrontendReady owner snapshots that did not fit in this
+    /// event-loop slice. A fresh budget emits them on `GuiSliceContinue`.
+    pub(crate) pending_frontend_ready_snapshots: Vec<gui_slice::PendingFrontendSnapshots>,
+    /// Coalesces `UserEvent::GuiSliceContinue` so one slice queues at most one
+    /// continuation and terminal input already queued can run between slices.
+    pub(crate) gui_slice_continue_queued: bool,
     /// Issue #4378 / Issue #4804: hold deliveries until the generation reaper
     /// finishes and surface readiness registers the startup restore inventory.
     pub(crate) deferred_issue_monitor_launches: Option<Vec<DeferredIssueMonitorLaunch>>,
@@ -5208,6 +5217,8 @@ impl AppRuntime {
             initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
+            pending_frontend_ready_snapshots: Vec::new(),
+            gui_slice_continue_queued: false,
             deferred_issue_monitor_launches: None,
             startup_generation_reaper_pending: false,
             startup_worktree_inventories: HashMap::new(),
@@ -13366,6 +13377,9 @@ impl AppRuntime {
         if !self.project_context_is_current(context) {
             return Vec::new();
         }
+        // Issue #7702: the sync view below is one slice. Snapshot requests
+        // that do not fit continue on a fresh budget.
+        let mut slice_budget = GuiSliceBudget::production();
         // Hydration replies only to its requesting client. Establish the first
         // baseline, but leave subsequent changes for the event-loop refresh so
         // other bound clients receive their project-scoped update as well.
@@ -13492,6 +13506,13 @@ impl AppRuntime {
         // every live cleanup here instead, or it would see nothing until the
         // worker happens to emit again.
         events.extend(self.live_branch_cleanup_replies(context, client_id));
+        slice_budget.record();
+        let runtime_snapshot_ids = self.take_frontend_ready_snapshot_ids(
+            client_id,
+            context,
+            runtime_snapshot_ids.into_iter().collect(),
+            &mut slice_budget,
+        );
         for id in runtime_snapshot_ids {
             events.extend(self.request_owner_snapshot(&id, Some(client_id.to_string())));
         }
@@ -17244,7 +17265,7 @@ impl AppRuntime {
         if !self.project_context_is_current(&context) {
             return Vec::new();
         }
-        let panes = match result {
+        let mut panes = match result {
             Ok(panes) => panes,
             Err(error) => {
                 return continue_request
@@ -17268,30 +17289,50 @@ impl AppRuntime {
         let Some(client) = client else {
             return Vec::new();
         };
-        let Some(identity) = client.identity() else {
+        let Some(identity) = client.identity().cloned() else {
             return Vec::new();
         };
         if let Some(connection_id) = connection_id {
-            if !self.project_owner_event_is_current(&context, connection_id, identity) {
+            if !self.project_owner_event_is_current(&context, connection_id, &identity) {
                 return Vec::new();
             }
         } else if self
             .project_state(&context)
             .and_then(|state| state.project_owner_identity.as_ref())
-            .is_some_and(|accepted| accepted != identity)
+            .is_some_and(|accepted| accepted != &identity)
         {
             return Vec::new();
         }
         let mut events = Vec::new();
-        for (mut snapshot, session) in panes {
+        let mut budget = GuiSliceBudget::production();
+        panes.reverse();
+        while let Some((mut snapshot, session)) = panes.pop() {
+            if !budget.allow_another() {
+                panes.push((snapshot, session));
+                panes.reverse();
+                self.proxy
+                    .send(UserEvent::RemoteOwnerInventoryComplete(Box::new(
+                        RemoteOwnerInventoryComplete {
+                            context,
+                            connection_id,
+                            client: Some(client),
+                            focus_owner_pane,
+                            status_revisions,
+                            continue_request,
+                            result: Ok(panes),
+                        },
+                    )));
+                return events;
+            }
+            budget.record();
             let captured = status_revisions.iter().any(|(id, incarnation, _, owner)| {
-                id == &snapshot.id && *incarnation == snapshot.incarnation && owner == identity
+                id == &snapshot.id && *incarnation == snapshot.incarnation && owner == &identity
             });
             if captured
                 && !self.runtimes.values().any(|runtime| {
                     runtime.owner_pane_id == snapshot.id
                         && runtime.incarnation == snapshot.incarnation
-                        && &runtime.owner_identity == identity
+                        && runtime.owner_identity == identity
                 })
             {
                 // This exact owner projection was removed after the inventory request began.
@@ -17359,7 +17400,7 @@ impl AppRuntime {
                 }
             };
             if let Some(runtime) = self.runtimes.get(&window_id).filter(|runtime| {
-                runtime.owner_identity == *identity && runtime.incarnation == snapshot.incarnation
+                runtime.owner_identity == identity && runtime.incarnation == snapshot.incarnation
             }) {
                 if snapshot.screen_seq < runtime.screen_seq {
                     continue;
@@ -17367,7 +17408,9 @@ impl AppRuntime {
                 let captured = status_revisions
                     .iter()
                     .find(|(id, incarnation, _, owner)| {
-                        id == &owner_id && *incarnation == snapshot.incarnation && owner == identity
+                        id == &owner_id
+                            && *incarnation == snapshot.incarnation
+                            && owner == &identity
                     })
                     .map(|(_, _, revision, _)| *revision);
                 if captured != Some(runtime.status_revision) {

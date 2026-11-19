@@ -1,5 +1,35 @@
 use super::*;
 
+fn install_queued_board_loads(runtime: &mut AppRuntime) -> BlockingTestTaskQueue {
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    tasks
+}
+
+fn board_load_replies(runtime: &AppRuntime, tasks: &BlockingTestTaskQueue) -> Vec<OutboundEvent> {
+    drain_queued_blocking_tasks(tasks);
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("sample runtime records events on a stub proxy");
+    };
+    let recorded = recorded.lock().expect("recorded events");
+    recorded
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(events) => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| {
+            matches!(
+                event.event,
+                BackendEvent::BoardEntries { .. }
+                    | BackendEvent::BoardHistoryPage { .. }
+                    | BackendEvent::BoardError { .. }
+            )
+        })
+        .collect()
+}
+
 fn board_notice_owner_fixture(
     temp: &tempfile::TempDir,
     agent_id: &str,
@@ -572,15 +602,18 @@ fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let tasks = install_queued_board_loads(&mut runtime);
     let window_id = combined_window_id("tab-1", "board-1");
 
-    let events = runtime.handle_frontend_event(
+    let immediate = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::LoadBoard {
             id: window_id.clone(),
             all: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events = board_load_replies(&runtime, &tasks);
 
     assert!(matches!(
         &events[..],
@@ -682,15 +715,18 @@ fn app_runtime_load_board_defaults_to_current_workspace_audience() {
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let tasks = install_queued_board_loads(&mut runtime);
     let window_id = combined_window_id("tab-1", "board-1");
 
-    let events = runtime.handle_frontend_event(
+    let immediate = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::LoadBoard {
             id: window_id.clone(),
             all: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events = board_load_replies(&runtime, &tasks);
 
     assert!(matches!(
         &events[..],
@@ -736,9 +772,10 @@ fn app_runtime_load_board_history_replies_with_older_page() {
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let tasks = install_queued_board_loads(&mut runtime);
     let window_id = combined_window_id("tab-1", "board-1");
 
-    let events = runtime.handle_frontend_event(
+    let immediate = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::LoadBoardHistory {
             id: window_id.clone(),
@@ -747,6 +784,8 @@ fn app_runtime_load_board_history_replies_with_older_page() {
             all: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events = board_load_replies(&runtime, &tasks);
 
     assert!(matches!(
         &events[..],

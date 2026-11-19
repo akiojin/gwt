@@ -30,7 +30,8 @@ use gwt_core::{
 use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
 
 use super::{
-    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent, WindowPreset,
+    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent, UserEvent,
+    WindowPreset,
 };
 
 pub(super) fn gui_default_board_scope_for_project(
@@ -505,6 +506,98 @@ impl BoardBodyHtmlCache {
     }
 }
 
+fn board_snapshot_events(
+    project_root: &Path,
+    client_id: &str,
+    id: &str,
+    all: bool,
+) -> Vec<OutboundEvent> {
+    let scope = match board_read_scope(project_root, all) {
+        Ok(scope) => scope,
+        Err(error) => return vec![board_read_error(client_id, id, error)],
+    };
+    let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
+        gwt::board_provider::load_snapshot(project_root)
+    } else {
+        gwt::board_provider::load_snapshot_for_scope(project_root, &scope)
+    };
+    match snapshot_result {
+        Ok(snapshot) => {
+            let mut entries = snapshot.board.entries;
+            attach_board_body_html(&mut entries);
+            vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardEntries {
+                    id: id.to_string(),
+                    entries,
+                    has_more_before: snapshot.board.has_more_before,
+                },
+            )]
+        }
+        Err(error) => vec![board_read_error(client_id, id, error.to_string())],
+    }
+}
+
+fn board_history_events(
+    project_root: &Path,
+    client_id: &str,
+    id: &str,
+    before_entry_id: Option<&str>,
+    limit: usize,
+    all: bool,
+) -> Vec<OutboundEvent> {
+    let scope = match board_read_scope(project_root, all) {
+        Ok(scope) => scope,
+        Err(error) => return vec![board_read_error(client_id, id, error)],
+    };
+    let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
+        gwt::board_provider::load_entries_before(project_root, before_entry_id, limit)
+    } else {
+        gwt::board_provider::load_entries_before_for_scope(
+            project_root,
+            before_entry_id,
+            limit,
+            &scope,
+        )
+    };
+    match page_result {
+        Ok(page) => {
+            let mut entries = page.entries;
+            attach_board_body_html(&mut entries);
+            vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardHistoryPage {
+                    id: id.to_string(),
+                    entries,
+                    has_more_before: page.has_more_before,
+                },
+            )]
+        }
+        Err(error) => vec![board_read_error(client_id, id, error.to_string())],
+    }
+}
+
+fn board_read_scope(
+    project_root: &Path,
+    all: bool,
+) -> Result<coordination::BoardAudienceScope, String> {
+    if all {
+        Ok(coordination::BoardAudienceScope::All)
+    } else {
+        gui_default_board_scope_for_project(project_root).map_err(|error| error.to_string())
+    }
+}
+
+fn board_read_error(client_id: &str, id: &str, message: String) -> OutboundEvent {
+    OutboundEvent::reply(
+        client_id,
+        BackendEvent::BoardError {
+            id: id.to_string(),
+            message,
+        },
+    )
+}
+
 impl AppRuntime {
     pub(crate) fn load_board_events(
         &mut self,
@@ -554,49 +647,13 @@ impl AppRuntime {
         } else {
             self.board_all_view_windows.remove(id);
         }
-
-        let scope = if all {
-            gwt_core::coordination::BoardAudienceScope::All
-        } else {
-            match gui_default_board_scope_for_project(&project_root) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::BoardError {
-                            id: id.to_string(),
-                            message: error.to_string(),
-                        },
-                    )];
-                }
-            }
-        };
-        let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt::board_provider::load_snapshot(&project_root)
-        } else {
-            gwt::board_provider::load_snapshot_for_scope(&project_root, &scope)
-        };
-        match snapshot_result {
-            Ok(snapshot) => {
-                let mut entries = snapshot.board.entries;
-                attach_board_body_html(&mut entries);
-                vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardEntries {
-                        id: id.to_string(),
-                        entries,
-                        has_more_before: snapshot.board.has_more_before,
-                    },
-                )]
-            }
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )],
-        }
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let task_client = client_id.clone();
+        let task_id = id.clone();
+        self.spawn_board_read(&client_id, &id, move || {
+            board_snapshot_events(&project_root, &task_client, &task_id, all)
+        })
     }
 
     pub(crate) fn load_board_history_events(
@@ -649,51 +706,39 @@ impl AppRuntime {
         } else {
             self.board_all_view_windows.remove(id);
         }
-
-        let scope = if all {
-            gwt_core::coordination::BoardAudienceScope::All
-        } else {
-            match gui_default_board_scope_for_project(&project_root) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::BoardError {
-                            id: id.to_string(),
-                            message: error.to_string(),
-                        },
-                    )];
-                }
-            }
-        };
-        let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt::board_provider::load_entries_before(&project_root, before_entry_id, limit)
-        } else {
-            gwt::board_provider::load_entries_before_for_scope(
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let before_entry_id = before_entry_id.map(str::to_string);
+        let task_client = client_id.clone();
+        let task_id = id.clone();
+        self.spawn_board_read(&client_id, &id, move || {
+            board_history_events(
                 &project_root,
-                before_entry_id,
+                &task_client,
+                &task_id,
+                before_entry_id.as_deref(),
                 limit,
-                &scope,
+                all,
             )
-        };
-        match page_result {
-            Ok(page) => {
-                let mut entries = page.entries;
-                attach_board_body_html(&mut entries);
-                vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardHistoryPage {
-                        id: id.to_string(),
-                        entries,
-                        has_more_before: page.has_more_before,
-                    },
-                )]
-            }
+        })
+    }
+
+    /// Issue #7702: disk read and HTML render stay off the GUI thread. The
+    /// caller registers `board_all_view_windows` before this spawn.
+    fn spawn_board_read<F>(&self, client_id: &str, id: &str, read: F) -> Vec<OutboundEvent>
+    where
+        F: FnOnce() -> Vec<OutboundEvent> + Send + 'static,
+    {
+        let proxy = self.proxy.clone();
+        match self.blocking_tasks.try_spawn(move || {
+            proxy.send(UserEvent::Dispatch(read()));
+        }) {
+            Ok(()) => Vec::new(),
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BoardError {
                     id: id.to_string(),
-                    message: error.to_string(),
+                    message: error,
                 },
             )],
         }
