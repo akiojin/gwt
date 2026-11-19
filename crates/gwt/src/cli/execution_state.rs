@@ -5485,7 +5485,29 @@ pub fn with_current_active_execution_binding_lease_wait<T>(
     with_current_execution_binding_lease_wait(
         sessions_dir,
         expected,
+        None,
         session_wait,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+/// Lease the exact Active binding for the remainder of an activation wait.
+///
+/// The default owner write lease gives up after 2s. Activation publishes
+/// Current while it still holds that lease, so an in-flight pane request must
+/// use the same activation budget instead of the short cap.
+pub(crate) fn with_current_active_execution_binding_activation_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    wait: Duration,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_execution_binding_lease_wait(
+        sessions_dir,
+        expected,
+        Some(wait),
+        wait,
         CurrentExecutionBindingAuthority::ActiveMutation,
         operation,
     )
@@ -5504,6 +5526,7 @@ pub(crate) fn with_current_pr_mutation_execution_binding_lease<T>(
     with_current_execution_binding_lease_wait(
         sessions_dir,
         expected,
+        None,
         ACTIVE_BINDING_LEASE_WAIT,
         CurrentExecutionBindingAuthority::PrMutation,
         operation,
@@ -5520,6 +5543,7 @@ pub(crate) fn with_current_ci_pr_creation_binding_lease<T>(
     with_current_execution_binding_lease_wait(
         sessions_dir,
         expected,
+        None,
         ACTIVE_BINDING_LEASE_WAIT,
         CurrentExecutionBindingAuthority::CiPrCreation,
         operation,
@@ -5529,6 +5553,7 @@ pub(crate) fn with_current_ci_pr_creation_binding_lease<T>(
 fn with_current_execution_binding_lease_wait<T>(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionBinding,
+    owner_wait: Option<Duration>,
     session_wait: Duration,
     authority: CurrentExecutionBindingAuthority,
     operation: impl FnOnce() -> T,
@@ -5568,7 +5593,7 @@ fn with_current_execution_binding_lease_wait<T>(
         Err(error) => return Err(error),
     };
 
-    with_resolved_generation_owner_lease(&context, |context| {
+    let run = |context: &GenerationTransactionContext| {
         gwt_agent::session::with_named_session_lease_wait(
             sessions_dir,
             &expected.session_id,
@@ -5596,7 +5621,19 @@ fn with_current_execution_binding_lease_wait<T>(
                 Ok(Some(operation()))
             },
         )
-    })
+    };
+    if let Some(wait) = owner_wait {
+        crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+            &context.owner_dir,
+            wait,
+            || {
+                context.validate_unchanged()?;
+                run(&context)
+            },
+        )
+    } else {
+        with_resolved_generation_owner_lease(&context, run)
+    }
 }
 
 fn wait_subject_owner(
@@ -28253,6 +28290,86 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retried, Some("retried"));
+    }
+
+    /// Issue #7704: an in-flight pane request must still become Current when
+    /// activation keeps the owner lease past the 2s write-lease cap.
+    #[test]
+    fn in_flight_pane_authority_waits_out_owner_lease_beyond_write_lease_cap() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let identity = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, "session-original", identity);
+        let expected = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join("session-original.toml"),
+        )
+        .unwrap()
+        .execution_binding
+        .unwrap();
+        let principal = crate::agent_capability::AgentSessionPrincipal::for_test_bound(
+            dir.path(),
+            "session-original",
+            expected.clone(),
+        )
+        .expect("bound producing principal");
+        let owner_dir = super::generation_owner_dir(dir.path(), owner).unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease_for_resolved_dir(&owner_dir, || {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+        held_rx
+            // test-hygiene: allow-wall-clock-deadline Hang guard until the fixture holds the owner lease.
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("owner lease holder");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let task = runtime.spawn(async move {
+            let started = std::time::Instant::now();
+            let authority =
+                crate::agent_capability::durable_agent_execution_authority_with_lease_async(
+                    principal,
+                )
+                .await;
+            (authority, started.elapsed())
+        });
+        // The default owner write lease gives up at 2s. Hold past that cap, then
+        // release as the explicit activation-complete signal.
+        std::thread::sleep(std::time::Duration::from_millis(3500));
+        release_tx.send(()).unwrap();
+        let (authority, waited) = runtime.block_on(task).unwrap();
+        assert_eq!(
+            authority,
+            crate::agent_capability::AgentDurableAuthority::Current,
+            "in-flight activation must outwait the 2s owner-lease cap"
+        );
+        assert!(
+            waited >= std::time::Duration::from_secs(2),
+            "the request returned before the owner lease outlasted the write-lease cap: {waited:?}"
+        );
+        holder.join().unwrap();
     }
 
     #[test]

@@ -19,22 +19,31 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REMOTE_TRACKING_FETCH_MAX_ATTEMPTS: usize = 3;
 const REMOTE_TRACKING_FETCH_RETRY_DELAY: Duration = Duration::from_millis(150);
 
-/// Background remote-branch publications still in flight (Issue #7670).
-static PENDING_REMOTE_BRANCH_PUBLICATIONS: std::sync::Mutex<Vec<JoinHandle<()>>> =
+/// Background remote-branch publications still in flight (Issue #7670). Each
+/// thread yields `Err("<branch>: <error>")` when its publication failed.
+type RemoteBranchPublication = JoinHandle<std::result::Result<(), String>>;
+static PENDING_REMOTE_BRANCH_PUBLICATIONS: std::sync::Mutex<Vec<RemoteBranchPublication>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Block until every background remote-branch publication started so far has
-/// finished. Launches never call this; it lets a caller that needs the remote
-/// branch (or a test) observe the publication instead of guessing its timing.
-pub fn wait_for_remote_branch_publications() {
+/// finished, with no time limit, and return the failures among them. Launches
+/// never call this; it lets a caller that needs the remote branch (or a test)
+/// observe the publication instead of guessing its timing. A publication that
+/// had already finished when a later one started is no longer tracked, so a
+/// caller still checks the remote branch itself (Issue #7714).
+pub fn wait_for_remote_branch_publications() -> Vec<String> {
     let pending = std::mem::take(
         &mut *PENDING_REMOTE_BRANCH_PUBLICATIONS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    for publication in pending {
-        let _ = publication.join();
-    }
+    pending
+        .into_iter()
+        .filter_map(|publication| match publication.join() {
+            Ok(outcome) => outcome.err(),
+            Err(_) => Some("remote branch publication panicked".to_string()),
+        })
+        .collect()
 }
 
 /// Information about a single worktree.
@@ -1164,12 +1173,18 @@ impl WorktreeManager {
                     pushed.and_then(|()| manager.fetch_remote_branch_tracking_ref(&branch));
                 let fetch_ms = fetch_started.elapsed().as_secs_f64() * 1000.0;
                 match result {
-                    Ok(()) => tracing::info!(target: "gwt.launch.timing", branch = %branch,
-                        base = %base_remote_ref, push_ms, fetch_ms,
-                        "remote work branch published after launch"),
-                    Err(error) => tracing::warn!(target: "gwt.launch.timing", branch = %branch,
-                        base = %base_remote_ref, push_ms, fetch_ms, %error,
-                        "remote work branch publication failed; the branch's first push creates it"),
+                    Ok(()) => {
+                        tracing::info!(target: "gwt.launch.timing", branch = %branch,
+                            base = %base_remote_ref, push_ms, fetch_ms,
+                            "remote work branch published after launch");
+                        Ok(())
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "gwt.launch.timing", branch = %branch,
+                            base = %base_remote_ref, push_ms, fetch_ms, %error,
+                            "remote work branch publication failed; the branch's first push creates it");
+                        Err(format!("{branch}: {error}"))
+                    }
                 }
             });
         match spawned {

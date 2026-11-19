@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.172.0] - 2026-11-19
+
+### Bug Fixes
+
+- **test:** 背景 publication の待ち合わせを env lock 下で行い失敗内容を返す
+- Activation 中の owner lease 待ちを 10 秒 budget に合わせる
+- **ci:** InRelease の fd 待ち・TLS 切断と索引なし install をミラー障害として扱う
+- **gui:** 送信キューに Issues inbox を最新 1 件だけ残す
+
+### Features
+
+- **github:** Gwtd の Issue と PR 書き込みに担当者名を付ける
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7714 の作業状態を記録
+- **work:** Issue #7717 の作業状態を記録
+- **work:** Issue #5561 の作業状態を記録
+
 ## [9.171.4] - 2026-11-19
 
 ### Bug Fixes
