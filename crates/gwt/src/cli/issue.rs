@@ -153,6 +153,8 @@ pub(super) fn run_with_data<E: CliEnv>(
         } => {
             guard_pm_owner_check(env.repo_path(), None)?;
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
+            let body =
+                crate::session_launch::stamp_github_body(&body, env.github_writer().as_ref());
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             super::intake_outcome::auto_record_issue_operation(
                 env.repo_path(),
@@ -172,6 +174,8 @@ pub(super) fn run_with_data<E: CliEnv>(
         } => {
             guard_pm_owner_check(env.repo_path(), owner_check.as_ref())?;
             guard_autonomous_acceptance_block(&labels, &body)?;
+            let body =
+                crate::session_launch::stamp_github_body(&body, env.github_writer().as_ref());
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
             let lineage_error = if super::pm::caller_is_registered_pm(env.repo_path()) {
                 owner_check
@@ -6924,6 +6928,8 @@ fn run_issue_edit<E: CliEnv>(
         guard_autonomous_acceptance_block(effective_labels, &source)?;
     }
 
+    let body = body
+        .map(|body| crate::session_launch::stamp_github_body(&body, env.github_writer().as_ref()));
     let fields = gwt_github::client::IssueFieldsPatch {
         title,
         body,
@@ -7257,7 +7263,8 @@ fn run_issue_comment<E: CliEnv>(
     body: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let comment = env.client().create_comment(IssueNumber(number), body)?;
+    let body = crate::session_launch::stamp_github_body(body, env.github_writer().as_ref());
+    let comment = env.client().create_comment(IssueNumber(number), &body)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
         "issue.comment",
@@ -9759,6 +9766,97 @@ mod tests {
 
         assert_eq!(code, 0, "{out}");
         assert_eq!(fetched(&env, 7).body, "Repaired body");
+    }
+
+    fn tetsuya_writer() -> crate::session_launch::GithubWriter {
+        crate::session_launch::GithubWriter {
+            name: "テツヤ".to_string(),
+            detail: "Grok Build".to_string(),
+            role: crate::session_launch::GithubWriterRole::Agent,
+            session_id: "session-7707".to_string(),
+            phase: "write".to_string(),
+        }
+    }
+
+    #[test]
+    fn issue_writes_stamp_the_agent_once_across_create_comment_and_edit() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        env.github_writer = Some(tetsuya_writer());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "署名付き".to_string(),
+                body: "作成本文".to_string(),
+                labels: vec!["bug".to_string()],
+                owner_check: None,
+            },
+            &mut out,
+        )
+        .expect("create");
+        assert_eq!(code, 0, "{out}");
+        let created = fetched(&env, 8);
+        let body = created.body.clone();
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.trim() == "— テツヤ（Grok Build）")
+                .count(),
+            1,
+            "{body}"
+        );
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CommentBody {
+                number: 7,
+                body: "コメント".to_string(),
+            },
+            &mut out,
+        )
+        .expect("comment");
+        assert_eq!(code, 0, "{out}");
+        let comment = fetched(&env, 7).comments.pop().expect("comment");
+        assert!(comment.body.contains("コメント"));
+        assert_eq!(
+            comment
+                .body
+                .lines()
+                .filter(|line| line.trim() == "— テツヤ（Grok Build）")
+                .count(),
+            1
+        );
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CommentBody {
+                number: 7,
+                body: comment.body.clone(),
+            },
+            &mut out,
+        )
+        .expect("resend comment");
+        assert_eq!(code, 0, "{out}");
+        let resent = fetched(&env, 7).comments.pop().expect("resent");
+        assert_eq!(resent.body, comment.body);
+
+        let mut out = String::new();
+        let code = run(&mut env, edit_body(7, "編集本文"), &mut out).expect("edit");
+        assert_eq!(code, 0, "{out}");
+        let edited = fetched(&env, 7);
+        assert!(edited.body.starts_with("編集本文"));
+        let body = edited.body.clone();
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.trim() == "— テツヤ（Grok Build）")
+                .count(),
+            1,
+            "{body}"
+        );
+        let mut out = String::new();
+        let code = run(&mut env, edit_body(7, &edited.body), &mut out).expect("reedit");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).body, edited.body);
     }
 
     /// Issue #3865 AC-5: a missing Issue, a permission failure, and a network

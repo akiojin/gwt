@@ -132,7 +132,10 @@ pub fn render_settlement_comment(
         }
     }
     body.push_str("\nManaged by gwt Issues.\n");
-    body
+    crate::session_launch::stamp_github_body(
+        &body,
+        Some(&crate::session_launch::issues_github_writer()),
+    )
 }
 
 /// Shared delivery check for merge settlements. A conflict is advisory:
@@ -502,6 +505,32 @@ mod tests {
             kind: RepositoryIssueKind::Plain,
             updated_at: UpdatedAt::new("2026-09-01T00:00:00Z"),
         });
+    }
+
+    #[test]
+    fn settlement_comment_names_gwt_issues_once() {
+        let body = render_settlement_comment(
+            42,
+            7,
+            Some("abc"),
+            &MergedIssueSettlementAction::Close { delegated: false },
+        );
+        assert!(body.contains("gwt Issues が Issue #42 を close します"));
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.trim() == "— gwt Issues")
+                .count(),
+            1,
+            "{body}"
+        );
+        assert!(body.contains("\"role\":\"issues\""));
+        assert_eq!(
+            crate::session_launch::stamp_github_body(
+                &body,
+                Some(&crate::session_launch::issues_github_writer())
+            ),
+            body
+        );
     }
 
     #[test]
