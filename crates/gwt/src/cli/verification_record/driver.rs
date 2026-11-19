@@ -10,6 +10,48 @@ use serde::{Deserialize, Serialize};
 
 const WINDOWS_ARTIFACT_LOCK_RECOVERY: &str = "\nWindows artifact lock: a running process may be holding Cargo's gwtd.exe output open. Identify the holder and stop it only if it is your own process. Run `cargo build -p gwt --bin gwtd` without a manual verification lease, then invoke verify.run from a SHA256-verified copy of that checkout build outside all Cargo target directories.\n";
 
+/// Cargo reports this when `gwtd.exe` is still a running image. Windows
+/// refuses the delete (`os error 5`) and also reports sharing violations.
+#[cfg(windows)]
+pub(super) fn locked_gwtd_image_path(output: &str) -> Option<std::path::PathBuf> {
+    if !["(os error 5)", "(os error 32)", "(os error 33)"]
+        .iter()
+        .any(|code| output.contains(code))
+    {
+        return None;
+    }
+    output.lines().find_map(|line| {
+        let path = line.split_once("failed to remove file ")?.1;
+        let path = path.trim().trim_matches(['`', '\'', '"']);
+        let path = std::path::Path::new(path);
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|file| file.eq_ignore_ascii_case("gwtd.exe"))
+            .then(|| path.to_path_buf())
+    })
+}
+
+/// Move a running image aside. Delete fails with os error 5; rename does not.
+#[cfg(windows)]
+pub(super) fn park_running_image(path: &Path) -> io::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| io::Error::other("running gwtd image has no directory"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("gwtd.exe");
+    let parked = parent.join(format!(
+        ".{file_name}.parked-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    artifact_io("rename", &[path, &parked], || {
+        std::fs::rename(path, &parked)
+    })?;
+    Ok(parked)
+}
+
 pub(super) fn relink_failure_hint(exit_code: i32, output: &str) -> &'static str {
     if cfg!(windows)
         && exit_code != 0

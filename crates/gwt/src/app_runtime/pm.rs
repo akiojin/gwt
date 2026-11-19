@@ -73,6 +73,48 @@ pub(crate) struct AgentIdleWakes {
     retry_scheduled: bool,
     delivery_in_flight: Option<PmIdleWakeInFlight>,
     failed_delivery: Option<(PmWakeDelivery, u8)>,
+    periodic_stall: Option<PmPeriodicWakeStall>,
+}
+
+/// Issue #7694: the current run of periodic ticks that did not reach the PM.
+struct PmPeriodicWakeStall {
+    since: String,
+    reason: &'static str,
+    detail: Option<String>,
+    reported: bool,
+}
+
+/// Issue #7694 AC-3: why one periodic tick produced no wake. Every variant
+/// used to be an indistinguishable silent `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PmPeriodicWakeSkip {
+    /// The project is closed or its PM settings cannot be read.
+    Unavailable,
+    /// Paused, unregistered, or working: no wake is owed.
+    NotOwed,
+    /// The previous wake's own stamp still covers this tick.
+    WithinInterval,
+    DeliveryInFlight,
+    HeldWake,
+    NoLivePane,
+    InputNotQuiet,
+    PaneBusy,
+    LoopStateUnwritable,
+}
+
+impl PmPeriodicWakeSkip {
+    /// The recorded reason, or `None` when the tick says nothing about a stall.
+    fn stall_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Unavailable | Self::NotOwed | Self::WithinInterval => None,
+            Self::DeliveryInFlight => Some("delivery_in_flight"),
+            Self::HeldWake => Some("held_wake"),
+            Self::NoLivePane => Some("no_live_pane"),
+            Self::InputNotQuiet => Some("input_not_quiet"),
+            Self::PaneBusy => Some("pane_busy"),
+            Self::LoopStateUnwritable => Some("loop_state_unwritable"),
+        }
+    }
 }
 
 impl PmWakeDecision {
@@ -159,6 +201,8 @@ pub(crate) struct PmWakeDelivery {
     incarnation: u64,
     owner_identity: gwt::daemon_subscriber::ProjectOwnerIdentity,
     pub(super) result: Result<PmWakeWrite, String>,
+    /// Issue #7694: what the owner observed when it did not commit the wake.
+    detail: Option<String>,
 }
 
 impl std::fmt::Debug for PmWakeDelivery {
@@ -1401,6 +1445,7 @@ impl AppRuntime {
             now,
             None,
         )
+        .ok()
     }
 
     fn pm_periodic_wake_decision_for_monitor_with_standing_work_at(
@@ -1409,31 +1454,39 @@ impl AppRuntime {
         _monitor: &gwt::IssueMonitorState,
         now: &str,
         _standing_durable_work: Option<bool>,
-    ) -> Option<PmWakeDecision> {
+    ) -> Result<PmWakeDecision, PmPeriodicWakeSkip> {
+        use PmPeriodicWakeSkip as Skip;
         if self
-            .project_state_for_root(project_root)?
+            .project_state_for_root(project_root)
+            .ok_or(Skip::Unavailable)?
             .pm_agent_idle_wakes
             .delivery_in_flight
             .is_some()
         {
-            return None;
+            return Err(Skip::DeliveryInFlight);
         }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
-        let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
+        let prefs = pm_registry::load_pm_prefs(&prefs_path).map_err(|_| Skip::Unavailable)?;
         if prefs.settings.paused {
-            return None;
+            return Err(Skip::NotOwed);
         }
         if self.retry_held_pm_wake(project_root) {
-            return None;
+            return Err(Skip::HeldWake);
         }
-        let registration = prefs.registration?;
-        let window_id = self.live_pm_window_id(&registration.session_id)?;
+        let registration = prefs.registration.ok_or(Skip::NotOwed)?;
+        let window_id = self
+            .live_pm_window_id(&registration.session_id)
+            .ok_or(Skip::NoLivePane)?;
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
         let periodic_input = match self.runtimes.get(&window_id) {
             Some(runtime) => PmPeriodicWakeInput {
                 session_id: registration.session_id,
                 incarnation: Some(runtime.incarnation),
-                revision: Some(runtime.quiet_input_revision(Duration::from_secs(interval_secs))?),
+                revision: Some(
+                    runtime
+                        .quiet_input_revision(Duration::from_secs(interval_secs))
+                        .ok_or(Skip::InputNotQuiet)?,
+                ),
             },
             None => PmPeriodicWakeInput {
                 session_id: registration.session_id,
@@ -1443,10 +1496,25 @@ impl AppRuntime {
         };
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
-        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
-            || self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now)
-        {
-            return None;
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
+            // A PM that is working or talking to its user is owed nothing; a
+            // tick covered only by the previous wake's stamp proves neither.
+            let working = !pm_wake_loop_is_quiet(
+                &pm_registry::PmLoopState {
+                    last_wake_at: None,
+                    ..loop_state
+                },
+                interval_secs,
+                now,
+            );
+            return Err(if working {
+                Skip::NotOwed
+            } else {
+                Skip::WithinInterval
+            });
+        }
+        if self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now) {
+            return Err(Skip::PaneBusy);
         }
         let wake_id = Some(uuid::Uuid::new_v4().to_string());
         if let Err(error) = pm_registry::save_pm_loop_state(
@@ -1458,9 +1526,9 @@ impl AppRuntime {
             },
         ) {
             tracing::warn!(%error, "PM periodic wake could not re-arm the loop budget");
-            return None;
+            return Err(Skip::LoopStateUnwritable);
         }
-        Some(PmWakeDecision {
+        Ok(PmWakeDecision {
             periodic_input: Some(periodic_input),
             project_root: project_root.to_path_buf(),
             wake_id,
@@ -1511,27 +1579,42 @@ impl AppRuntime {
         now: &str,
         standing_durable_work: Option<bool>,
     ) -> Vec<OutboundEvent> {
-        let Some(decision) = self.pm_periodic_wake_decision_for_monitor_with_standing_work_at(
+        let decision = match self.pm_periodic_wake_decision_for_monitor_with_standing_work_at(
             project_root,
             monitor,
             now,
             standing_durable_work,
-        ) else {
-            return Vec::new();
+        ) {
+            Ok(decision) => decision,
+            Err(PmPeriodicWakeSkip::NotOwed) => {
+                self.clear_pm_periodic_wake_stall(project_root);
+                return Vec::new();
+            }
+            Err(skip) => {
+                if let Some(reason) = skip.stall_reason() {
+                    self.note_pm_periodic_wake_stall(project_root, reason, None, now);
+                }
+                return Vec::new();
+            }
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(PmWakeWrite::Queued | PmWakeWrite::Discarded) => {}
+            Ok(PmWakeWrite::Queued) => {}
+            Ok(PmWakeWrite::Discarded) => {
+                self.note_pm_periodic_wake_stall(project_root, "delivery_discarded", None, now);
+            }
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake re-armed the resident PM from the scheduled snapshot"
                 );
+                self.clear_pm_periodic_wake_stall(project_root);
             }
             Ok(PmWakeWrite::Deferred | PmWakeWrite::Unconfirmed) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake deferred until the PM composer is empty"
                 );
+                self.note_pm_periodic_wake_stall(project_root, "delivery_deferred", None, now);
             }
             Err(error) => {
                 tracing::warn!(
@@ -1539,9 +1622,93 @@ impl AppRuntime {
                     window_id = %decision.window_id,
                     "PM periodic wake prompt injection failed"
                 );
+                self.note_pm_periodic_wake_stall(project_root, "delivery_failed", None, now);
             }
         }
         Vec::new()
+    }
+
+    /// Issue #7694 AC-3/AC-4: one more tick did not reach the live PM. The
+    /// first tick of a run starts the clock; once the run has lasted several
+    /// loop intervals it is logged and recorded exactly once, with its reason.
+    fn note_pm_periodic_wake_stall(
+        &mut self,
+        project_root: &Path,
+        reason: &'static str,
+        detail: Option<&str>,
+        now: &str,
+    ) {
+        let Some(state) = self.project_state_for_root_mut(project_root) else {
+            return;
+        };
+        let stall = state
+            .pm_agent_idle_wakes
+            .periodic_stall
+            .get_or_insert_with(|| PmPeriodicWakeStall {
+                since: now.to_string(),
+                reason,
+                detail: None,
+                reported: false,
+            });
+        stall.reason = reason;
+        if let Some(detail) = detail {
+            stall.detail = Some(detail.to_string());
+        }
+        if stall.reported {
+            return;
+        }
+        let interval_secs =
+            pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(project_root))
+                .map(|prefs| prefs.settings.loop_interval_secs_clamped())
+                .unwrap_or(pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS);
+        if !pm_registry::pm_wake_stall_is_reportable(&stall.since, now, interval_secs) {
+            return;
+        }
+        stall.reported = true;
+        let record = pm_registry::PmWakeStall {
+            since: stall.since.clone(),
+            reason: reason.to_string(),
+            detail: stall.detail.clone(),
+            interval_secs,
+            recorded_at: now.to_string(),
+        };
+        tracing::warn!(
+            reason,
+            detail = ?record.detail,
+            since = %record.since,
+            interval_secs,
+            project_root = %project_root.display(),
+            "PM periodic wake has not reached the live PM for several loop intervals"
+        );
+        if let Err(error) = pm_registry::save_pm_wake_stall(
+            &pm_registry::pm_wake_stall_path_for_repo_path(project_root),
+            &record,
+        ) {
+            tracing::warn!(%error, "PM periodic wake stall record could not be saved");
+        }
+    }
+
+    /// A wake reached the PM, or none is owed: the run of missed ticks is over.
+    fn clear_pm_periodic_wake_stall(&mut self, project_root: &Path) {
+        // Unconditional: a record left by an earlier process has no in-memory
+        // counterpart here and would otherwise outlive the stall it describes.
+        pm_registry::clear_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(
+            project_root,
+        ));
+        let Some(stall) = self
+            .project_state_for_root_mut(project_root)
+            .and_then(|state| state.pm_agent_idle_wakes.periodic_stall.take())
+        else {
+            return;
+        };
+        if stall.reported {
+            tracing::info!(
+                since = %stall.since,
+                reason = stall.reason,
+                project_root = %project_root.display(),
+                "PM periodic wake stall ended"
+            );
+        }
     }
 
     #[cfg(test)]
@@ -1654,6 +1821,7 @@ impl AppRuntime {
                         incarnation: runtime.incarnation,
                         owner_identity: runtime.owner_identity.clone(),
                         result: Err(error.clone()),
+                        detail: None,
                     });
                     return Ok(PmWakeWrite::Deferred);
                 }
@@ -1782,6 +1950,7 @@ impl AppRuntime {
         let worker_decision = decision.clone();
         let worker_context = context.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
+            let mut detail = None;
             let result = (|| {
                 if let Some((permit, dispatched)) = &idle_permit {
                     dispatched.store(true, Ordering::Release);
@@ -1814,6 +1983,17 @@ impl AppRuntime {
                         },
                     },
                 ))?;
+                detail = value.get("facts").map(|facts| {
+                    format!(
+                        "owner_runtime_busy={} owner_input={} sent_revision={:?}",
+                        facts["runtime_busy"],
+                        facts["input_observation"],
+                        worker_decision
+                            .periodic_input
+                            .as_ref()
+                            .and_then(|input| input.revision),
+                    )
+                });
                 serde_json::from_value(
                     value
                         .get("status")
@@ -1829,6 +2009,7 @@ impl AppRuntime {
                 incarnation,
                 owner_identity,
                 result,
+                detail,
             }));
         });
         if spawn.is_err() && decision.idle_notifications.is_empty() {
@@ -1886,6 +2067,30 @@ impl AppRuntime {
             .delivery_in_flight = None;
         if !same_pane {
             return;
+        }
+        // Issue #7694: the owner's verdict is the other half of a missed tick.
+        let project_root = delivery.decision.project_root.clone();
+        match &delivery.result {
+            Ok(PmWakeWrite::Injected) => self.clear_pm_periodic_wake_stall(&project_root),
+            Ok(PmWakeWrite::Queued) => {}
+            outcome => {
+                let reason = match outcome {
+                    Ok(PmWakeWrite::Discarded) => "delivery_discarded",
+                    Ok(PmWakeWrite::Deferred) => "delivery_deferred",
+                    Ok(PmWakeWrite::Unconfirmed) => "delivery_unconfirmed",
+                    _ => "delivery_failed",
+                };
+                let detail = match outcome {
+                    Err(error) => Some(error.clone()),
+                    _ => delivery.detail.clone(),
+                };
+                self.note_pm_periodic_wake_stall(
+                    &project_root,
+                    reason,
+                    detail.as_deref(),
+                    &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
+                );
+            }
         }
         if matches!(
             delivery.result,
@@ -2194,6 +2399,9 @@ impl AppRuntime {
                     }
                 }
                 self.sync_pm_session_cache(project_root, prefs.registration.as_ref());
+                // Issue #7694: a stall recorded for the previous PM, or by a
+                // process that is gone, says nothing about this registration.
+                self.clear_pm_periodic_wake_stall(project_root);
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to write PM registration after launch");
@@ -2849,6 +3057,7 @@ mod delivery_tests {
                 incarnation,
                 owner_identity,
                 result: Ok(PmWakeWrite::Injected),
+                detail: None,
             });
             assert_eq!(
                 pm_registry::load_pm_loop_state(&loop_path).unwrap(),
@@ -3630,6 +3839,381 @@ mod delivery_tests {
             capture.prompts().len() - before_resume,
             1,
             "Resume must deliver one fresh reconciliation instead of both old and new wakes"
+        );
+    }
+
+    /// Run queued workers and apply their wake completions until both settle.
+    fn drain_wake_deliveries(
+        runtime: &mut AppRuntime,
+        tasks: &BlockingTestTaskQueue,
+        recorded: &std::sync::Arc<std::sync::Mutex<Vec<UserEvent>>>,
+    ) -> Vec<Result<PmWakeWrite, String>> {
+        let mut results = Vec::new();
+        loop {
+            let queued = std::mem::take(&mut *tasks.lock().unwrap());
+            if queued.is_empty() {
+                return results;
+            }
+            for task in queued {
+                task();
+            }
+            for event in std::mem::take(&mut *recorded.lock().unwrap()) {
+                if let Some(UserEvent::PmWakeDeliveryComplete(delivery)) =
+                    runtime.accept_project_completion(event)
+                {
+                    results.push(delivery.result.clone());
+                    runtime.pm_wake_delivery_complete(delivery);
+                }
+            }
+        }
+    }
+
+    /// Issue #7694 AC-1: a PM pane adopted after an update restart starts from
+    /// empty in-memory wake state, inherits the loop stamp of the wake that
+    /// failed before the restart, and is written to by producers other than
+    /// this GUI (an Agent's `pane.send`). The next quiet tick must reach it.
+    #[test]
+    fn issue_7694_restored_pm_receives_its_periodic_wake_without_a_human() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        // The durable residue of the wake held before the restart.
+        pm_registry::save_pm_loop_state(
+            &pm_registry::pm_loop_state_path_for_repo_path(&repo),
+            &pm_registry::PmLoopState {
+                last_wake_at: Some("2026-10-10T00:00:00Z".into()),
+                last_wake_id: Some("held-before-restart".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let (proxy, recorded) = AppEventProxy::stub();
+        runtime.proxy = proxy;
+        let capture = PromptCapture::begin(&repo);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        // test-hygiene: allow-wall-clock-deadline Epoch for the injected ScopedOperationClock only; no real-time ordering assertion.
+        let start = std::time::Instant::now() - Duration::from_secs(10_000);
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+        let owner = runtime.test_project_owners[&repo].clone();
+        crate::app_runtime::tests::owner_fixture_block_on(owner.set_operation_clock(Some(start)))
+            .unwrap();
+        let (owner_pane_id, incarnation) = {
+            let pane = &runtime.runtimes[&window_id];
+            (pane.owner_pane_id.clone(), pane.incarnation)
+        };
+        crate::app_runtime::tests::owner_fixture_block_on(owner.command(
+            gwt::project_runtime::events::OwnerCommand::SendInput {
+                id: owner_pane_id,
+                incarnation,
+                text: "report from an agent\r".into(),
+            },
+        ))
+        .expect("the owner accepts input from a producer other than this GUI");
+        let later = start + Duration::from_secs(3600);
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(later);
+        crate::app_runtime::tests::owner_fixture_block_on(owner.set_operation_clock(Some(later)))
+            .unwrap();
+
+        runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+            &repo,
+            &monitor,
+            "2026-10-10T01:00:00Z",
+            true,
+        );
+        let results = drain_wake_deliveries(&mut runtime, &tasks, &recorded);
+
+        assert_eq!(
+            capture.prompts().len(),
+            1,
+            "the tick after the restart must reach the PM without a human touching the pane: {results:?}"
+        );
+    }
+
+    /// Issue #7694 AC-2: a wake that failed twice is held "until owner/pane
+    /// replacement or GUI restart". The restored PM is that replacement, so
+    /// the held wake must be delivered instead of blocking every later tick.
+    #[test]
+    fn issue_7694_wake_held_before_the_restart_reaches_the_replacement_pane() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let (proxy, recorded) = AppEventProxy::stub();
+        runtime.proxy = proxy;
+        let capture = PromptCapture::begin(&repo);
+        let held = normal_wake(repo.clone(), window_id.clone());
+        let context = runtime.test_context();
+        let (owner_pane_id, incarnation, owner_identity) = {
+            let pane = &runtime.runtimes[&window_id];
+            (
+                pane.owner_pane_id.clone(),
+                pane.incarnation,
+                pane.owner_identity.clone(),
+            )
+        };
+        // Two failures against the pane that existed before the restart.
+        for _ in 0..2 {
+            runtime.hold_failed_pm_wake(PmWakeDelivery {
+                context: context.clone(),
+                decision: held.clone(),
+                owner_pane_id: owner_pane_id.clone(),
+                incarnation: incarnation - 1,
+                owner_identity: owner_identity.clone(),
+                result: Err("Project execution owner identity changed".into()),
+                detail: None,
+            });
+        }
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+
+        runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+            &repo,
+            &monitor,
+            "2026-10-10T01:00:00Z",
+            true,
+        );
+        let results = drain_wake_deliveries(&mut runtime, &tasks, &recorded);
+
+        assert_eq!(
+            capture.prompts(),
+            vec!["WORKER-WAKE\r"],
+            "the held wake must reach the replacement pane: {results:?}"
+        );
+    }
+
+    /// Issue #7694 AC-3/AC-4: ticks that keep missing a live PM are recorded
+    /// once, with the reason, after several loop intervals — and the record
+    /// goes away when no wake is owed any more.
+    #[test]
+    fn issue_7694_missed_periodic_ticks_are_recorded_once_with_their_reason() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        let stall_path = pm_registry::pm_wake_stall_path_for_repo_path(&repo);
+        // A delivery that never completes: the residue the Issue could not see.
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pm_agent_idle_wakes
+            .delivery_in_flight = Some(PmIdleWakeInFlight {
+            window_id: window_id.clone(),
+            permit: Arc::new(AtomicBool::new(true)),
+            dispatched: Arc::new(AtomicBool::new(false)),
+            cancellation: None,
+        });
+        let tick = |runtime: &mut AppRuntime, now: &str| {
+            runtime.pm_periodic_wake_events_for_prepared_monitor_at(&repo, &monitor, now, true);
+        };
+
+        tick(&mut runtime, "2026-10-10T01:00:00Z");
+        tick(&mut runtime, "2026-10-10T01:04:59Z");
+        assert_eq!(
+            pm_registry::load_pm_wake_stall(&stall_path),
+            None,
+            "a few missed ticks are not yet a stall"
+        );
+        tick(&mut runtime, "2026-10-10T01:05:00Z");
+        let recorded = pm_registry::load_pm_wake_stall(&stall_path).expect("the stall is recorded");
+        assert_eq!(recorded.reason, "delivery_in_flight");
+        assert_eq!(recorded.since, "2026-10-10T01:00:00Z");
+        assert_eq!(recorded.interval_secs, 60);
+        tick(&mut runtime, "2026-10-10T02:00:00Z");
+        assert_eq!(
+            pm_registry::load_pm_wake_stall(&stall_path),
+            Some(recorded),
+            "one stall is recorded once"
+        );
+
+        pm_registry::set_pm_paused(&repo, true).unwrap();
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pm_agent_idle_wakes
+            .delivery_in_flight = None;
+        tick(&mut runtime, "2026-10-10T02:01:00Z");
+        assert_eq!(
+            pm_registry::load_pm_wake_stall(&stall_path),
+            None,
+            "a paused PM is owed no wake"
+        );
+    }
+
+    fn issue_7694_after(instant: &str, secs: i64) -> String {
+        (gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(instant).unwrap()
+            + time::Duration::seconds(secs))
+        .to_rfc3339_seconds()
+    }
+
+    /// Issue #7694 AC-4: the stall is measured from the last delivery to the
+    /// live PM, so it shows when the scheduled completion returns before the
+    /// decision, and when the decision cannot resolve the project at all.
+    #[test]
+    fn issue_7694_stall_is_observed_without_a_periodic_decision() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+        runtime.proxy = AppEventProxy::stub().0;
+        let _capture = PromptCapture::begin(&repo);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        assert_eq!(pm_registry::load_pm_wake_delivered_at(&repo), None);
+
+        runtime
+            .write_pm_wake_prompt(&normal_wake(repo.clone(), window_id.clone()))
+            .unwrap();
+        crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+        let delivered = pm_registry::load_pm_wake_delivered_at(&repo)
+            .expect("the owner stamps the delivery it committed");
+
+        // The scheduled completion returns before the decision: this scan is
+        // not the one in flight. Nothing in the GUI records a reason.
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let events = runtime.issue_monitor_scheduled_scan_prepared_events(
+            crate::app_runtime::PreparedScheduledIssueMonitorScan {
+                project_root: repo.clone(),
+                prefs_stamp: crate::app_runtime::issue_monitor_prefs_metadata_stamp(&prefs_path),
+                prefs_path,
+                now: issue_7694_after(&delivered, 300),
+                source: Err("not the scan in flight".into()),
+                monitor: None,
+                status: None,
+                error: None,
+                standing_durable_work: true,
+            },
+        );
+        assert!(events.is_empty());
+        // The decision itself cannot resolve the project (`Skip::Unavailable`).
+        runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+            &temp.path().join("closed-project"),
+            &monitor,
+            &issue_7694_after(&delivered, 300),
+            true,
+        );
+        assert_eq!(
+            pm_registry::load_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(&repo)),
+            None,
+            "neither path leaves a record of its own"
+        );
+
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&delivered, 299)),
+            None
+        );
+        let stall =
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&delivered, 300))
+                .expect("five intervals without a wake is a stall, whoever failed to tick");
+        assert_eq!(stall.since, delivered);
+        assert_eq!(stall.reason, pm_registry::PM_WAKE_STALL_NOT_EVALUATED);
+        assert_eq!(stall.interval_secs, 60);
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, false, &issue_7694_after(&delivered, 300)),
+            None,
+            "a PM that is not alive is owed no wake"
+        );
+    }
+
+    /// Issue #7694 AC-4: a record written before a restart is carried over as
+    /// the reason while the stall lasts, and is gone once a wake is delivered
+    /// by a process that never reported it.
+    #[test]
+    fn issue_7694_stall_record_of_a_previous_process_ends_with_the_next_delivery() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+        runtime.proxy = AppEventProxy::stub().0;
+        let _capture = PromptCapture::begin(&repo);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        let stall_path = pm_registry::pm_wake_stall_path_for_repo_path(&repo);
+        let start = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+        // The previous process: its ticks keep missing the PM until it records.
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pm_agent_idle_wakes
+            .delivery_in_flight = Some(PmIdleWakeInFlight {
+            window_id: window_id.clone(),
+            permit: Arc::new(AtomicBool::new(true)),
+            dispatched: Arc::new(AtomicBool::new(false)),
+            cancellation: None,
+        });
+        for secs in [0, 300] {
+            runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+                &repo,
+                &monitor,
+                &issue_7694_after(&start, secs),
+                true,
+            );
+        }
+        assert!(pm_registry::load_pm_wake_stall(&stall_path).is_some());
+        // The restart: every in-memory trace of that stall is gone.
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pm_agent_idle_wakes = Default::default();
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&start, 300))
+                .expect("the stall outlives the restart")
+                .reason,
+            "delivery_in_flight"
+        );
+
+        runtime
+            .write_pm_wake_prompt(&normal_wake(repo.clone(), window_id.clone()))
+            .unwrap();
+        crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
+
+        assert_eq!(
+            pm_registry::load_pm_wake_stall(&stall_path),
+            None,
+            "a delivered wake removes a record this process never reported"
+        );
+        let delivered = pm_registry::load_pm_wake_delivered_at(&repo).unwrap();
+        assert_eq!(
+            pm_registry::observed_pm_wake_stall(&repo, true, &issue_7694_after(&delivered, 299)),
+            None
         );
     }
 }

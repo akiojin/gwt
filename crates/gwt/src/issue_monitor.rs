@@ -4554,6 +4554,12 @@ pub struct IssueMonitorAgentStatus {
     /// `None` in daemon projections and before the first run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_artifact_gc: Option<crate::worktree::gc::BuildArtifactGcRecord>,
+    /// Issue #7694 AC-4: the resident PM is alive but its periodic wake has
+    /// not been delivered for several loop intervals. Filled in by the
+    /// `issue.monitor.status` surface from the record the wake owner writes;
+    /// `None` while wakes arrive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pm_wake_stall: Option<crate::pm_registry::PmWakeStall>,
     /// Issue #4087 AC-1: the Issue cache full-refresh cadence — when it last
     /// completed and how far past its TTL it is — so a stopped refresh is
     /// read from the same snapshot as `scan_stall` instead of inferred from
@@ -5426,6 +5432,10 @@ pub struct AutonomousIssueSummary {
     /// yet, when the dispatch was refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_dispatch_hold: Option<AutonomousReviewDispatchHold>,
+    /// Issue #7697 AC-4: why this Issue's PR is not being merged yet, while
+    /// its current head has no PASS verdict from the independent review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_hold: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -6802,6 +6812,45 @@ impl AutonomousIssueRecord {
             && self.reviewed_sha.is_some())
         .then_some(self.last_failure_message.as_deref())
         .flatten()
+    }
+
+    /// Issue #7697: whether the monitor has not authorized a merge of this
+    /// record's PR. Only a PASS for the head under review authorizes one, so
+    /// an implementation that is still producing or correcting the head and a
+    /// review without a PASS both keep the PR unmerged.
+    fn awaits_review_pass(&self) -> bool {
+        match self.phase {
+            AutonomousPhase::Implementing => true,
+            AutonomousPhase::Reviewing => self.review_passed != Some(true),
+            _ => false,
+        }
+    }
+
+    /// Issue #7697 AC-4: the reason shown while `awaits_review_pass`
+    /// holds a known PR. `None` when no PR or review is known for the record.
+    pub fn merge_hold_reason(&self) -> Option<String> {
+        if !self.awaits_review_pass() {
+            return None;
+        }
+        let pr = self
+            .pr_number
+            .map_or_else(|| "the PR".to_string(), |pr| format!("PR #{pr}"));
+        let hold = format!(
+            "{pr} is not merged until its head has a PASS verdict from the independent review"
+        );
+        match (self.review_passed, self.reviewed_sha.as_deref()) {
+            (Some(false), Some(sha)) => Some(format!("{hold}: the review of {sha} returned FAIL")),
+            (Some(true), Some(sha)) => Some(format!(
+                "{hold}: the reviewed head {sha} is being corrected and the new head needs its own review"
+            )),
+            (None, Some(sha)) if self.phase == AutonomousPhase::Reviewing => {
+                Some(format!("{hold}: the review of {sha} has no verdict yet"))
+            }
+            _ => self
+                .review_dispatch_hold
+                .as_ref()
+                .map(|dispatch| format!("{hold}: the review is not dispatched: {}", dispatch.reason)),
+        }
     }
 
     pub fn tier_input(&self) -> u32 {
@@ -15938,6 +15987,7 @@ impl IssueMonitorState {
                         needs_human_kind: needs_human.then_some(record.needs_human_kind).flatten(),
                         steering: record.steering.clone(),
                         review_dispatch_hold: record.review_dispatch_hold.clone(),
+                        merge_hold: record.merge_hold_reason(),
                         pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
                             handoff_id: handoff.handoff_id.clone(),
                             question: handoff.question.clone(),
@@ -16475,6 +16525,7 @@ impl IssueMonitorState {
             memory_pressure: None,
             spotlight: None,
             build_artifact_gc: None,
+            pm_wake_stall: None,
             failure_surge,
             launch_failures,
             candidate_pool_degradation: self.candidate_pool_degradation.clone(),
@@ -18311,6 +18362,59 @@ impl IssueMonitorState {
         );
     }
 
+    /// Issue #7697: keep a PR unmerged while its head has no PASS verdict.
+    ///
+    /// The monitor arms auto-merge itself, and only after the gate passes.
+    /// Anything else that requests auto-merge earlier (a repository workflow,
+    /// a person) would let required CI land the head before the review is
+    /// back, so the caller names a PR it observed with auto-merge requested
+    /// and this queues one disarm for it. Returns whether the hold applies.
+    ///
+    /// A pending arm of the same PR is left to settle first: it is bound to
+    /// the reviewed SHA and compensates itself when the head has moved.
+    pub fn hold_auto_merge_until_review_pass(&mut self, issue_number: u64, pr_number: u64) -> bool {
+        if !self
+            .autonomous_record(issue_number)
+            .is_some_and(AutonomousIssueRecord::awaits_review_pass)
+            || self.pending_effects.iter().any(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ArmAutoMerge {
+                        issue_number: pending_issue,
+                        pr_number: pending_pr,
+                        ..
+                    } if pending_issue == issue_number && pending_pr == pr_number
+                )
+            })
+        {
+            return false;
+        }
+        ensure_auto_merge_disarm_effect(
+            &mut self.pending_effects,
+            self.effect_authority_epoch,
+            &format!("review-hold:{issue_number}:{pr_number}"),
+            issue_number,
+            pr_number,
+        );
+        true
+    }
+
+    /// Issue #7697: the gate passed and is about to arm this PR itself, so a
+    /// hold that has not been submitted yet must not disarm that arm.
+    pub fn release_review_merge_hold(&mut self, issue_number: u64, pr_number: u64) {
+        let hold = format!("review-hold:{issue_number}:{pr_number}");
+        self.pending_effects.retain(|effect| {
+            effect.state != IssueMonitorEffectState::Prepared
+                || !matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        compensates_effect_id,
+                        ..
+                    } if *compensates_effect_id == hold
+                )
+        });
+    }
+
     /// Issue #4117: live independent review windows, ordered by Issue.
     pub fn review_windows(&self) -> Vec<IssueMonitorReviewWindow> {
         self.review_windows.values().cloned().collect()
@@ -19067,25 +19171,12 @@ impl IssueMonitorState {
                         }
                     }
                     None => {
-                        if pending_review_dispatches.iter().any(|dispatch| {
-                            dispatch.issue_number == *issue_number
-                                && dispatch.pr_number == window.pr_number
-                        }) {
-                            // A queued request has not begun its spawn grace.
-                            (true, None)
-                        } else if rfc3339_elapsed_secs(&window.dispatched_at, now)
-                            .is_none_or(|elapsed| elapsed < REVIEW_WINDOW_SPAWN_GRACE_SECS)
-                        {
-                            (true, None)
-                        } else {
-                            (
-                                false,
-                                Some(format!(
-                                    "review window dispatched at {} never appeared within {REVIEW_WINDOW_SPAWN_GRACE_SECS}s",
-                                    window.dispatched_at
-                                )),
-                            )
-                        }
+                        let expired = unbound_review_reservation_expiry(
+                            pending_review_dispatches,
+                            window,
+                            now,
+                        );
+                        (expired.is_none(), expired)
                     }
                 };
                 if let Some(reason) = reason {
@@ -19094,16 +19185,55 @@ impl IssueMonitorState {
                 alive
             });
         for (issue_number, reason, window_id) in failed {
-            self.record_review_failure(issue_number, reason, now);
-            // Issue #4117 AC-7: a pane that exited without a verdict is still
-            // on the canvas; close it (a vanished one is a no-op for the GUI).
-            if let Some(window_id) = window_id {
-                self.request_review_pane_close(
-                    issue_number,
-                    window_id,
-                    IssueMonitorIdleKind::BindingDead,
-                );
-            }
+            self.fail_released_review_window(issue_number, reason, window_id, now);
+        }
+    }
+
+    /// Issue #7688: release review reservations whose window never appeared,
+    /// on the scan's clock. `reconcile_review_windows` runs only when
+    /// a canvas arrives, and a canvas is not guaranteed to arrive: with a
+    /// native owner the GUI publishes none. A reservation must not wait for
+    /// one to give its slot back.
+    pub fn expire_unbound_review_reservations(&mut self, now: &str) {
+        let pending_review_dispatches = &self.pending_review_dispatches;
+        let expired = self
+            .review_windows
+            .iter()
+            .filter(|(_, window)| window.window_id.is_none())
+            .filter_map(|(issue_number, window)| {
+                unbound_review_reservation_expiry(pending_review_dispatches, window, now)
+                    .map(|reason| (*issue_number, reason))
+            })
+            .collect::<Vec<_>>();
+        for (issue_number, reason) in expired {
+            self.review_windows.remove(&issue_number);
+            self.fail_released_review_window(issue_number, reason, None, now);
+        }
+    }
+
+    fn fail_released_review_window(
+        &mut self,
+        issue_number: u64,
+        reason: String,
+        window_id: Option<String>,
+        now: &str,
+    ) {
+        // The ladder records nothing once the review has ended another way,
+        // so the release itself is always logged.
+        tracing::warn!(
+            issue = issue_number,
+            reason = %reason,
+            "Issues: independent review reservation released"
+        );
+        self.record_review_failure(issue_number, reason, now);
+        // Issue #4117 AC-7: a pane that exited without a verdict is still
+        // on the canvas; close it (a vanished one is a no-op for the GUI).
+        if let Some(window_id) = window_id {
+            self.request_review_pane_close(
+                issue_number,
+                window_id,
+                IssueMonitorIdleKind::BindingDead,
+            );
         }
     }
 
@@ -28219,6 +28349,38 @@ fn matching_live_launch_owner(owners: &BTreeMap<String, u64>, window_id: &str) -
     matches.next().is_none().then_some(*owner)
 }
 
+/// Why a review reservation with no window must give its slot back, if it
+/// must. A request still queued for the GUI has not begun its spawn grace
+/// (Issue #5062). Issue #7688: a dispatch time that cannot be read cannot
+/// keep the reservation either; only an unreadable `now` defers the decision
+/// to the next clock.
+fn unbound_review_reservation_expiry(
+    pending_review_dispatches: &VecDeque<AutonomousReviewDispatch>,
+    window: &IssueMonitorReviewWindow,
+    now: &str,
+) -> Option<String> {
+    if pending_review_dispatches.iter().any(|dispatch| {
+        dispatch.issue_number == window.issue_number && dispatch.pr_number == window.pr_number
+    }) {
+        return None;
+    }
+    parse_rfc3339_utc(now)?;
+    if parse_rfc3339_utc(&window.dispatched_at).is_none() {
+        return Some(format!(
+            "review window has no readable dispatch time ({:?}) and never appeared",
+            window.dispatched_at
+        ));
+    }
+    rfc3339_elapsed_secs(&window.dispatched_at, now)
+        .is_some_and(|elapsed| elapsed >= REVIEW_WINDOW_SPAWN_GRACE_SECS)
+        .then(|| {
+            format!(
+                "review window dispatched at {} never appeared within {REVIEW_WINDOW_SPAWN_GRACE_SECS}s",
+                window.dispatched_at
+            )
+        })
+}
+
 fn issue_monitor_window_ids_match(stored: &str, incoming: &str) -> bool {
     if stored == incoming {
         return true;
@@ -29638,6 +29800,7 @@ mod tests {
                 memory_pressure: None,
                 spotlight: None,
                 build_artifact_gc: None,
+                pm_wake_stall: None,
                 needs_human_fleet: None,
                 provider_usage: None,
                 issue_cache: None,
@@ -53018,6 +53181,149 @@ mod tests {
             .count()
     }
 
+    fn issue_7697_merge_hold(monitor: &IssueMonitorState) -> Option<String> {
+        monitor
+            .status_view()
+            .autonomous_issues
+            .into_iter()
+            .find(|row| row.issue_number == 7)
+            .and_then(|row| row.merge_hold)
+    }
+
+    fn issue_7697_arms(monitor: &IssueMonitorState) -> usize {
+        monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ArmAutoMerge { .. }
+                )
+            })
+            .count()
+    }
+
+    /// Issue #7697 AC-1/AC-3: an auto-merge requested on a PR whose current
+    /// head has no PASS verdict is disarmed, before and after the review is
+    /// dispatched and again after the head moves. Only a PASS for the head
+    /// under review lifts the hold.
+    #[test]
+    fn issue_7697_auto_merge_is_held_until_the_head_has_a_pass_verdict() {
+        use crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA;
+        let pass_raw =
+            format!(r#"{{"schema":"{REVIEW_VERDICT_SCHEMA}","overall":"pass","criteria":[]}}"#);
+
+        // The implementation opened the PR; its review is not dispatched yet.
+        let mut pending = autonomous_state();
+        pending.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        assert!(pending.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&pending), 1);
+        assert!(pending.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&pending), 1, "one disarm per PR");
+
+        // Dispatched, no verdict yet.
+        let mut reviewing = autonomous_state();
+        reviewing.begin_review(7, 99, "abc123");
+        assert!(reviewing.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&reviewing), 1);
+        assert_eq!(issue_7697_arms(&reviewing), 0);
+        // Once the gate passes, a hold that was never submitted is withdrawn
+        // so it cannot undo the gate's own arm.
+        reviewing.record_review_verdict(7, true);
+        reviewing.release_review_merge_hold(7, 99);
+        assert_eq!(review_fail_disarms(&reviewing), 0);
+
+        // A PASS for the head under review ends the hold.
+        let mut passed = autonomous_state();
+        passed.begin_review(7, 99, "abc123");
+        assert_eq!(
+            passed.apply_review_verdict(7, "abc123", &pass_raw),
+            Some(true)
+        );
+        assert!(!passed.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&passed), 0);
+
+        // AC-3: the head moved. The old head's verdict is not accepted for
+        // the new one, and the hold is back until the new head passes.
+        passed.begin_review(7, 99, "def456");
+        assert_eq!(passed.apply_review_verdict(7, "abc123", &pass_raw), None);
+        assert!(passed.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&passed), 1);
+        assert_eq!(issue_7697_arms(&passed), 0);
+
+        // The monitor's own delivery and unknown Issues are left alone.
+        let mut delivering = autonomous_state();
+        delivering.begin_review(7, 99, "abc123");
+        delivering.record_review_verdict(7, true);
+        delivering.begin_delivering(7);
+        assert!(!delivering.hold_auto_merge_until_review_pass(7, 99));
+        assert!(!autonomous_state().hold_auto_merge_until_review_pass(7, 99));
+    }
+
+    /// Issue #7697 AC-2: a FAIL verdict, and a review that never produced a
+    /// verdict up to the attempt cap, both keep the PR unmerged with a reason.
+    #[test]
+    fn issue_7697_failed_or_missing_review_keeps_the_merge_held_with_a_reason() {
+        let mut failed = autonomous_state();
+        failed.begin_review(7, 99, "abc123");
+        failed.record_review_verdict(7, false);
+        assert!(failed.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&failed), 1);
+        assert_eq!(issue_7697_arms(&failed), 0);
+        let reason = issue_7697_merge_hold(&failed).expect("a FAIL holds the merge");
+        assert!(
+            reason.contains("PR #99") && reason.contains("FAIL"),
+            "{reason}"
+        );
+
+        let mut silent = autonomous_state();
+        let max = silent.autonomous_tuning.max_attempts;
+        for _ in 0..max {
+            silent.begin_review(7, 99, "abc123");
+            silent.record_review_failure(
+                7,
+                "review window closed without a verdict",
+                "2026-11-19T00:00:00Z",
+            );
+        }
+        let record = silent.autonomous_record(7).expect("record");
+        assert!(
+            record
+                .steering
+                .as_ref()
+                .is_some_and(|steering| steering.reason.contains("dispatch stops")),
+            "the exhausted review asks the PM to steer"
+        );
+        assert!(silent.hold_auto_merge_until_review_pass(7, 99));
+        assert_eq!(review_fail_disarms(&silent), 1);
+        assert_eq!(issue_7697_arms(&silent), 0);
+        let reason = issue_7697_merge_hold(&silent).expect("no verdict holds the merge");
+        assert!(reason.contains("not dispatched"), "{reason}");
+    }
+
+    /// Issue #7697 AC-4: `issue.monitor.status` says that the merge is waiting
+    /// for the review, and stops saying so once the head has passed.
+    #[test]
+    fn issue_7697_status_names_the_merge_hold_while_the_review_is_pending() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        let reason = issue_7697_merge_hold(&monitor).expect("review pending");
+        assert!(
+            reason.contains("PR #99") && reason.contains("abc123") && reason.contains("no verdict"),
+            "{reason}"
+        );
+        let json = serde_json::to_value(monitor.status_view()).expect("status json");
+        assert_eq!(
+            json["autonomous_issues"][0]["merge_hold"].as_str(),
+            Some(reason.as_str())
+        );
+
+        monitor.record_review_verdict(7, true);
+        assert_eq!(issue_7697_merge_hold(&monitor), None);
+        monitor.begin_delivering(7);
+        assert_eq!(issue_7697_merge_hold(&monitor), None);
+    }
+
     #[test]
     fn autonomous_loop_fields_survive_prefs_roundtrip() {
         let mut monitor = autonomous_state();
@@ -58943,6 +59249,119 @@ mod tests {
             )],
         ));
         assert!(monitor.review_windows().is_empty());
+    }
+
+    /// Issue #7688 AC-1/AC-2: the 2026-11-14 shape. The review window started
+    /// and vanished without the daemon ever receiving a canvas that showed it,
+    /// and no later canvas arrived. Reconciliation lived only in snapshot
+    /// ingestion, so the reservation outlived its spawn grace and held a slot.
+    #[test]
+    fn issue_7688_unobserved_review_reservation_expires_on_the_scan_clock() {
+        let scan = |monitor: &mut IssueMonitorState, now: &str| {
+            crate::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                monitor,
+                &settlements(&[
+                    (41, IssueMonitorExecutionSettlement::Active),
+                    (42, IssueMonitorExecutionSettlement::Active),
+                ]),
+                &BTreeMap::new(),
+                now,
+                now,
+                IssueMonitorIdleReconciliation::default(),
+            );
+        };
+        let implementations = || {
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Running, false),
+            ]
+        };
+        let mut monitor =
+            autonomous_launched_cohort(&[(41, "tab-1::impl-41"), (42, "tab-1::impl-42")]);
+        monitor.set_max_active_agents(3);
+        monitor.record_window_snapshot(idle_snapshot("2026-09-07T03:59:00Z", implementations()));
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+            .expect("review dispatch is admitted");
+
+        // A request still queued for the GUI has not begun its spawn grace.
+        scan(&mut monitor, "2026-09-07T04:10:00Z");
+        assert_eq!(monitor.review_windows().len(), 1);
+
+        assert_eq!(
+            monitor
+                .take_pending_review_dispatches_at("2026-09-07T04:10:00Z")
+                .len(),
+            1
+        );
+        // The only canvas after the spawn is the one published when the
+        // review window closed: it is already gone and the grace has not run out.
+        monitor.record_window_snapshot(idle_snapshot("2026-09-07T04:12:05Z", implementations()));
+        scan(&mut monitor, "2026-09-07T04:12:10Z");
+        assert_eq!(monitor.review_windows().len(), 1);
+        assert!(monitor
+            .review_dispatch_hold(42, 420, None, "2026-09-07T04:12:10Z")
+            .is_some_and(|hold| hold.reason.starts_with("max_active reached (3/3")));
+
+        // No further canvas arrives. The next scan past the grace releases it.
+        scan(&mut monitor, "2026-09-07T04:15:30Z");
+        assert!(monitor.review_windows().is_empty());
+        assert_eq!(monitor.occupied_slot_count(), 2);
+        assert_eq!(
+            monitor.review_dispatch_hold(42, 420, None, "2026-09-07T04:15:30Z"),
+            None
+        );
+        let attempts = review_attempts_of(&monitor, 41).expect("the release is recorded");
+        assert_eq!(attempts.count, 1);
+        assert!(
+            attempts.last_error.contains("never appeared within 300s"),
+            "{}",
+            attempts.last_error
+        );
+    }
+
+    /// Issue #7688 AC-3: a live review window binds whether the canvas names
+    /// it by the GUI alias or by the native owner's pane id.
+    #[test]
+    fn issue_7688_live_review_window_binds_under_gui_alias_and_owner_ids() {
+        let bound_as = |tab: &str, window_id: &str, from_owner: bool| {
+            let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+            monitor.set_max_active_agents(2);
+            monitor
+                .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+                .expect("review dispatch is admitted");
+            let snapshot = IssueMonitorWindowSnapshot {
+                project_tab_id: tab.to_string(),
+                observed_at: "2026-09-07T04:00:30Z".to_string(),
+                windows: vec![idle_observation(
+                    window_id,
+                    Some(41),
+                    WindowState::Running,
+                    true,
+                )],
+            };
+            if from_owner {
+                // The daemon scan samples its native owner with no tab list.
+                monitor.record_window_snapshot_from_host(snapshot, 4242, 1, BTreeSet::new());
+            } else {
+                monitor
+                    .record_window_snapshot_for_tabs(snapshot, BTreeSet::from([tab.to_string()]));
+            }
+            monitor.review_windows()[0].window_id.clone()
+        };
+        assert_eq!(
+            bound_as("project-52bf", "project-52bf::agent-5", false).as_deref(),
+            Some("project-52bf::agent-5")
+        );
+        assert_eq!(
+            bound_as(
+                "99a8660247f5bc49",
+                "99a8660247f5bc49::project-pane-fe79",
+                true
+            )
+            .as_deref(),
+            Some("99a8660247f5bc49::project-pane-fe79")
+        );
     }
 
     // ---------------------------------------------------------------------

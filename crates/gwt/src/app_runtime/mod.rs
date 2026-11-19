@@ -16566,6 +16566,19 @@ impl AppRuntime {
                         .as_ref()
                         .map(|refusal| startup::RestoreRefusal::from_owner_code(&refusal.code))
                         .unwrap_or(startup::RestoreRefusal::LaunchNotStarted);
+                    if restore_feedback.is_some() {
+                        // `launch_not_started` alone cannot tell a census wait
+                        // from an owner refusal after the fact (Issue #7592).
+                        tracing::info!(
+                            target: "gwt.restore.admission",
+                            window_id = %window_id,
+                            code = restore_refusal
+                                .as_ref()
+                                .map_or("launch_error", |refusal| refusal.code.as_str()),
+                            detail = %Self::user_facing_launch_error_detail(&error),
+                            "session restore launch failed"
+                        );
+                    }
                     self.record_restore_window_outcome(&window_id, Err(refusal_reason));
                     self.restore_launch_windows.remove(&window_id);
                     // A policy refusal is not a failed process launch. Retain its

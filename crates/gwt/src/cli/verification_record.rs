@@ -3611,6 +3611,74 @@ fn gwtd_artifact_restore_command(worktree: &Path, command: &str) -> Result<Optio
     )))
 }
 
+/// Effective commands, the index where appended restorations start, and
+/// (arming command, restoration command) pairs.
+type RestorationMatrix = (Vec<String>, usize, Vec<(String, String)>);
+
+/// Append operational gwtd restoration after the matrix, unless a registered
+/// command already rebuilds that same unarmed artifact after its last arming
+/// test. That registered command then serves as the restoration, so it still
+/// runs after a failure and no unregistered duplicate waits for admission once
+/// every registered command has passed (Issue #7318).
+fn matrix_with_gwtd_restoration(
+    worktree: &Path,
+    commands: &[String],
+) -> Result<RestorationMatrix, VerificationError> {
+    let mut restoration_by_command: Vec<(String, String)> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    for command in commands {
+        let mut covered = Vec::new();
+        for restoration in &pending {
+            if is_explicit_gwtd_restoration(worktree, command, restoration)? {
+                covered.push(restoration.clone());
+            }
+        }
+        for restoration in covered {
+            pending.retain(|pending| pending != &restoration);
+            for (_, mapped) in restoration_by_command.iter_mut() {
+                if *mapped == restoration {
+                    *mapped = command.clone();
+                }
+            }
+        }
+        for restoration in gwtd_artifact_restoration(worktree, std::slice::from_ref(command))? {
+            if !pending.contains(&restoration) {
+                pending.push(restoration.clone());
+            }
+            restoration_by_command.push((command.clone(), restoration));
+        }
+    }
+    let mut effective_commands = commands.to_vec();
+    let restoration_start = effective_commands.len();
+    effective_commands.extend(pending);
+    Ok((
+        effective_commands,
+        restoration_start,
+        restoration_by_command,
+    ))
+}
+
+/// A plain `cargo build -p gwt --bin gwtd [--target-dir DIR]` resolving to the
+/// restoration's target rebuilds the same unarmed artifact.
+fn is_explicit_gwtd_restoration(
+    worktree: &Path,
+    command: &str,
+    restoration: &str,
+) -> Result<bool, String> {
+    let Ok((assignments, args)) = split_command_line(command).and_then(take_env_assignments) else {
+        return Ok(false);
+    };
+    let plain = ["cargo", "build", "-p", "gwt", "--bin", "gwtd"];
+    let shape = args.len() >= plain.len()
+        && args[..plain.len()].iter().map(String::as_str).eq(plain)
+        && (args.len() == plain.len()
+            || (args.len() == plain.len() + 2 && args[plain.len()] == "--target-dir"));
+    if !assignments.is_empty() || !shape {
+        return Ok(false);
+    }
+    Ok(gwtd_artifact_restore_command(worktree, command)?.as_deref() == Some(restoration))
+}
+
 /// Identify this repository without comparing another project's HEAD to gwt's.
 pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
     let manifest =
@@ -3681,15 +3749,32 @@ fn restore_gwtd_after_deferral_cancellable(
         }
         Err(error) => return format!("gwtd artifact restoration: failed: {error}"),
     };
-    match execute_command_with_artifact_guard_cancellable(
-        worktree, &command, true, None, host, None, artifacts, check,
-    ) {
+    let run = |command: &str| {
+        execute_command_with_artifact_guard_cancellable(
+            worktree, command, true, None, host, None, artifacts, check,
+        )
+    };
+    let report = |command: &str, result| match result {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
             "gwtd artifact restoration: failed (`{command}`, exit {code}); \
              restore from the checkout root before GitHub operations: {output}"
         ),
         Err(error) => format!("gwtd artifact restoration: failed (`{command}`): {error}"),
+    };
+    match run(&command) {
+        Ok((code, signal, output, streams)) if code != 0 => {
+            // Issue #7319: Cargo cannot delete a running gwtd.exe (os error 5).
+            // Rename frees the output path; the holder keeps the parked image.
+            #[cfg(windows)]
+            if let Some(locked) = driver::locked_gwtd_image_path(&output) {
+                if driver::park_running_image(&locked).is_ok() {
+                    return report(&command, run(&command));
+                }
+            }
+            report(&command, Ok((code, signal, output, streams)))
+        }
+        other => report(&command, other),
     }
 }
 
@@ -4815,18 +4900,8 @@ where
             .to_string()
             .into());
     }
-    // Keep operational artifact restoration at the end of the matrix.
-    let mut effective_commands = commands.to_vec();
-    let restoration_start = effective_commands.len();
-    let mut restoration_by_command = Vec::new();
-    for command in commands {
-        for restoration in gwtd_artifact_restoration(worktree, std::slice::from_ref(command))? {
-            if !effective_commands[restoration_start..].contains(&restoration) {
-                effective_commands.push(restoration.clone());
-            }
-            restoration_by_command.push((command.clone(), restoration));
-        }
-    }
+    let (effective_commands, restoration_start, restoration_by_command) =
+        matrix_with_gwtd_restoration(worktree, commands)?;
     let commands = effective_commands.as_slice();
     let request = authority.map(|authority| {
         continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
@@ -5145,10 +5220,9 @@ where
         }
         let command = &commands[index];
         if failed_raw.is_some()
-            && (index < restoration_start
-                || !restoration_by_command.iter().any(|(source, restoration)| {
-                    restoration == command && results.iter().any(|result| &result.command == source)
-                }))
+            && !restoration_by_command.iter().any(|(source, restoration)| {
+                restoration == command && results.iter().any(|result| &result.command == source)
+            })
         {
             skipped_after_failure.push(command.clone());
             continue;
@@ -5233,7 +5307,7 @@ where
         .then(|| nextest::Capture::new(worktree))
         .transpose()?;
         let execution_command = match &nextest_capture {
-            Some(capture) => format!("{command} --config-file \"{}\"", capture.arguments()[1]),
+            Some(capture) => nextest::with_config_file(command, &capture.arguments()[1]),
             None => command.clone(),
         };
         let command_started = std::time::Instant::now();
@@ -9780,6 +9854,47 @@ mod tests {
     }
 
     #[test]
+    fn explicit_trailing_gwtd_build_serves_as_the_restoration() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _target = ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        let test = "cargo test -p gwt --lib --target-dir target".to_string();
+        let build = "cargo build -p gwt --bin gwtd --target-dir target".to_string();
+
+        // Issue #7318: the registered trailing build is the restoration.
+        let commands = [test.clone(), build.clone()];
+        let (effective, start, by_command) =
+            matrix_with_gwtd_restoration(dir.path(), &commands).unwrap();
+        assert_eq!(effective, commands.to_vec());
+        assert_eq!(start, 2);
+        assert_eq!(by_command, vec![(test.clone(), build.clone())]);
+
+        // A build before the arming test does not restore its artifact.
+        let commands = [build.clone(), test.clone()];
+        let (effective, start, by_command) =
+            matrix_with_gwtd_restoration(dir.path(), &commands).unwrap();
+        assert_eq!(effective.len(), 3);
+        assert_eq!(start, 2);
+        assert_eq!(by_command, vec![(test, effective[2].clone())]);
+    }
+
+    #[test]
     fn isolated_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -9956,6 +10071,90 @@ fn default_integration_test_builds_a_guarded_binary() {
         );
         assert!(recovery.contains("gwtd.rs"), "{recovery}");
         assert_eq!(load(dir.path()).unwrap().unwrap(), persisted);
+    }
+
+    /// Issue #7319: after admission deferral, restoration runs
+    /// `cargo build -p gwt --bin gwtd`. Windows refuses to delete a running
+    /// `gwtd.exe` with os error 5. The holder must stay alive and the new
+    /// executable must still be published.
+    #[cfg(windows)]
+    #[test]
+    fn deferred_restoration_replaces_a_running_gwtd_image() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", &target);
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src/bin")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        let source = package.join("src/bin/gwtd.rs");
+        fs::write(
+            &source,
+            "fn main() {\n    \
+             if std::env::args().any(|arg| arg == \"--hold\") {\n        \
+             let mut byte = [0u8; 1];\n        \
+             let _ = std::io::Read::read(&mut std::io::stdin(), &mut byte);\n    \
+             }\n}\n",
+        )
+        .unwrap();
+        let built = gwt_core::process::hidden_command("cargo")
+            .args(["build", "-p", "gwt", "--bin", "gwtd", "--offline"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(built.success(), "fixture gwtd build failed");
+        let exe = target.join("debug").join("gwtd.exe");
+        struct HolderKill(std::process::Child);
+        impl Drop for HolderKill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut holder = HolderKill(
+            gwt_core::process::hidden_command(&exe)
+                .arg("--hold")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        fs::write(&source, "fn main() { println!(\"operational\"); }\n").unwrap();
+
+        let restored = restore_gwtd_after_deferral_cancellable(
+            dir.path(),
+            "cargo test -p gwt --bin gwtd",
+            &VerificationHost::Inherit,
+            None,
+            None,
+        );
+
+        assert!(
+            restored.contains("gwtd artifact restoration: restored"),
+            "{restored}"
+        );
+        assert!(!restored.contains("os error 5"), "{restored}");
+        assert!(holder.0.try_wait().unwrap().is_none(), "holder exited");
+        let output = gwt_core::process::hidden_command(&exe).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "operational"
+        );
     }
 
     // Issue #5094 AC-2: fail-fast still restores the operational gwtd.

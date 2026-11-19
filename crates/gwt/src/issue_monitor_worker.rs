@@ -1583,6 +1583,8 @@ pub fn reconcile_issue_monitor_windows_with_observations(
     monitor.reconcile_observed_launch_bindings(live_launch_owners, observed_at, now);
     monitor.reconcile_cancelled_claim_phases(settlements, now);
     monitor.recover_stuck_autonomous(now);
+    // Issue #7688: a scan with no canvas still ends an unspawned review.
+    monitor.expire_unbound_review_reservations(now);
     let mut outcome = monitor.reconcile_idle_windows(settlements, now);
     outcome.released.extend(terminal.released);
     outcome.requeued.extend(terminal.requeued);
@@ -2103,7 +2105,7 @@ type OpenPrLaunchObservations = (
 );
 
 pub(crate) type OpenPrInventoryReadback =
-    Result<std::collections::HashMap<String, u64>, IssueMonitorScanFailure>;
+    Result<gwt_git::pr_status::OpenPrInventory, IssueMonitorScanFailure>;
 
 /// Issue #4157: discover related PRs once, then read only PRs belonging to
 /// candidates this terminal could admit. Existing in-flight ownership is not
@@ -2188,7 +2190,7 @@ fn load_open_pr_launch_observations(
         repo_path,
         "open-pr-inventory",
         run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-            gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
+            gwt_git::pr_status::try_fetch_open_pr_inventory_for_monitor(repo_path)
         }),
     );
     observe_inventory(&branches);
@@ -2241,7 +2243,7 @@ fn load_open_pr_launch_observations(
                 branches
                     .as_ref()
                     .ok()
-                    .and_then(|branches| branches.get(&branch))
+                    .and_then(|inventory| inventory.numbers_by_branch.get(&branch))
                     .copied(),
             );
             if let Some(hold) = prefs
@@ -3617,6 +3619,10 @@ pub(crate) fn try_advance_autonomous_in_flight_with_inventory(
         &mut degradations,
         previously_read,
     );
+    if let Some(inventory) = &open_prs {
+        hold_unreviewed_auto_merges(monitor, inventory);
+    }
+    let open_prs = open_prs.map(|inventory| inventory.numbers_by_branch);
     for issue_number in in_flight {
         // The branch this candidate's readbacks are about, named up front so a
         // failure can say which one went unknown even when it failed before the
@@ -3665,6 +3671,38 @@ pub(crate) fn try_advance_autonomous_in_flight_with_inventory(
     Ok(degradations)
 }
 
+/// Issue #7697: disarm every auto-merge the inventory shows on a PR whose
+/// head the monitor has not passed. The PR is the one bound to the review, or
+/// the open PR of the launch branch while the review is still to be dispatched.
+fn hold_unreviewed_auto_merges(
+    monitor: &mut IssueMonitorState,
+    inventory: &gwt_git::pr_status::OpenPrInventory,
+) {
+    for issue_number in monitor.autonomous_in_flight_issues() {
+        let Some(record) = monitor.autonomous_record(issue_number) else {
+            continue;
+        };
+        let pr = match record.phase {
+            crate::AutonomousPhase::Reviewing => record.pr_number,
+            _ => monitor
+                .inbox_item(issue_number)
+                .and_then(|item| item.launch_plan.as_ref())
+                .and_then(|plan| inventory.numbers_by_branch.get(&plan.branch_name))
+                .copied(),
+        };
+        let Some(pr) = pr.filter(|pr| inventory.auto_merge_requested.contains(pr)) else {
+            continue;
+        };
+        if monitor.hold_auto_merge_until_review_pass(issue_number, pr) {
+            tracing::warn!(
+                issue = issue_number,
+                pr,
+                "Issues: auto-merge was requested before the independent review passed; disarming"
+            );
+        }
+    }
+}
+
 /// The launch branch a candidate's readbacks address, falling back to the issue
 /// itself when no launch plan has been recorded yet.
 fn autonomous_readback_target(monitor: &IssueMonitorState, issue_number: u64) -> Option<String> {
@@ -3690,7 +3728,7 @@ fn read_open_pr_inventory(
     repo_path: &Path,
     degradations: &mut Vec<IssueMonitorScanDegradation>,
     previously_read: Option<&OpenPrInventoryReadback>,
-) -> Option<std::collections::HashMap<String, u64>> {
+) -> Option<gwt_git::pr_status::OpenPrInventory> {
     let implementing = in_flight
         .iter()
         .filter(|issue_number| {
@@ -3700,7 +3738,10 @@ fn read_open_pr_inventory(
         })
         .count();
     if implementing == 0 {
-        return None;
+        // Issue #7697: a review in flight only needs the inventory for its
+        // merge hold, so it reuses the one this scan already read and never
+        // costs a request of its own.
+        return previously_read.and_then(|inventory| inventory.as_ref().ok().cloned());
     }
     let target = Some(if implementing == 1 {
         "1 implementing candidate".to_string()
@@ -3720,7 +3761,7 @@ fn read_open_pr_inventory(
             return None;
         }
         run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-            gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
+            gwt_git::pr_status::try_fetch_open_pr_inventory_for_monitor(repo_path)
         })
     };
     match inventory {
@@ -4060,6 +4101,7 @@ fn advance_one_autonomous_issue(
                     // driver persists Prepared, fences Attempting in a
                     // second transaction, then the serialized executor owns
                     // the remote mutation and result reconciliation.
+                    monitor.release_review_merge_hold(issue_number, pr);
                     let epoch = monitor.effect_authority_epoch();
                     monitor.prepare_effect(crate::PendingIssueMonitorEffect {
                         effect_id: format!(
@@ -10135,6 +10177,67 @@ exit 1
             "fresh readiness does not revoke a running implementation"
         );
         assert_eq!(running.active_count(), 1);
+    }
+
+    /// Issue #7697 AC-1: a scan disarms an auto-merge that something else
+    /// requested on a PR whose review has not passed — before the review is
+    /// dispatched and while it runs — and leaves a passed or unarmed PR alone.
+    #[test]
+    fn issue_7697_scan_holds_auto_merge_requested_before_a_pass_verdict() {
+        use crate::{
+            AutonomousPhase, IssueMonitorConfig, IssueMonitorEffectPayload, IssueMonitorIssue,
+            IssueMonitorIssueState, IssueMonitorPrefs,
+        };
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let issue = IssueMonitorIssue {
+            author_login: None,
+            number: 50,
+            title: "t".to_string(),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        };
+        let branch = crate::issue_monitor::issue_monitor_launch_plan(&issue).branch_name;
+        monitor.record_claimed(issue, "claim-50");
+        // 50: PR open, review not dispatched. 51: dispatched, no verdict.
+        // 52: passed. 53: no verdict, but nothing requested auto-merge.
+        monitor.set_autonomous_phase(50, AutonomousPhase::Implementing);
+        monitor.begin_review(51, 510, "sha51");
+        monitor.begin_review(52, 520, "sha52");
+        monitor.record_review_verdict(52, true);
+        monitor.begin_review(53, 530, "sha53");
+        let inventory = gwt_git::pr_status::OpenPrInventory {
+            numbers_by_branch: [(branch, 500)].into_iter().collect(),
+            auto_merge_requested: [500, 510, 520].into_iter().collect(),
+        };
+
+        hold_unreviewed_auto_merges(&mut monitor, &inventory);
+
+        let mut disarmed = Vec::new();
+        for effect in monitor.pending_effects() {
+            match &effect.payload {
+                IssueMonitorEffectPayload::DisarmAutoMerge {
+                    issue_number,
+                    pr_number,
+                    ..
+                } => disarmed.push((*issue_number, *pr_number)),
+                IssueMonitorEffectPayload::ArmAutoMerge { .. } => {
+                    panic!("no PR is armed before its review passes")
+                }
+                _ => {}
+            }
+        }
+        disarmed.sort_unstable();
+        assert_eq!(disarmed, [(50, 500), (51, 510)]);
     }
 
     #[test]
