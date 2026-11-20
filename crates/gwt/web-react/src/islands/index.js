@@ -13,6 +13,7 @@ import { ExecutionEnvironments } from "../surfaces/ExecutionEnvironments.jsx";
 import { AppFooter, AppFooterPm, AppHeader, AppHeaderNav } from "../surfaces/AppChrome.jsx";
 import { ProjectExecutionEnvironments } from "../surfaces/ProjectExecutionEnvironments.jsx";
 import { HomeConversation } from "../surfaces/HomeConversation.jsx";
+import { AgentHistoryPlans } from "../surfaces/AgentHistoryPlans.jsx";
 
 const islands = Object.freeze({
   "workspace-state-notice": WorkspaceStateNotice,
@@ -27,6 +28,7 @@ const islands = Object.freeze({
   "app-footer-pm": AppFooterPm,
   "project-execution-environments": ProjectExecutionEnvironments,
   "home-conversation": HomeConversation,
+  "agent-history-plans": AgentHistoryPlans,
 });
 
 export function mountIsland(name, container, props) {

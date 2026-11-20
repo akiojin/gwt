@@ -1098,3 +1098,47 @@ test("ledger row controls keep Operator tokens and touch targets", () => {
   const block = styles.match(/\.roster-order[^{]*\{[^}]*\}/g).join("\n");
   assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
 });
+
+// Issue #7649 (SPEC #7007 T-031): history and planned assignments belong to
+// the project's agents screen. The ledger shows neither.
+const historyAndPlans = surface => ({
+  pastTab: surface.element.querySelector(".roster-tabs"),
+  past: surface.element.querySelector(".roster-past"),
+  plans: surface.element.querySelector(".roster-plans"),
+  current: surface.element.querySelector(".roster-current-work"),
+  history: surface.element.querySelector(".roster-history:not(.roster-saved-settings):not(.roster-current-work)"),
+  project: surface.element.querySelector(".agent-history-plans-host"),
+});
+
+test("AC-3: the ledger shows no history, current work or planned assignments", async () => {
+  const f = await fixture({ schedule: planned() });
+  assert.equal(f.surface.element.dataset.view, "project");
+  f.surface.element.querySelector('[data-tab="past"]').click();
+  f.surface.setView("ledger");
+  assert.equal(f.surface.element.dataset.view, "ledger");
+  assert.equal(f.surface.element.querySelector("h2").textContent, "Agents");
+  for (const [name, node] of Object.entries(historyAndPlans(f.surface))) {
+    assert.ok(node, `${name} exists`);
+    assert.equal(node.hidden, true, `${name} is hidden in the ledger`);
+  }
+  assert.equal(f.surface.element.querySelector(".roster-team").hidden, false, "the ledger always shows the member list");
+  assert.ok(f.surface.element.querySelector(".roster-saved-settings"), "saved settings stay in the ledger");
+  assert.equal(f.surface.element.querySelector(".roster-saved-settings").hidden, false);
+  assert.match(styles, /\.agents-surface \[hidden\],[^{]*\{ display: none !important; \}/, "hidden parts take no space");
+});
+
+test("AC-1/AC-2: the project's agents screen lists every member's history and the assignment plan", async () => {
+  const f = await fixture({ schedule: planned() });
+  f.surface.setView("ledger"); f.surface.setView("project");
+  assert.equal(f.surface.element.querySelector("h2").textContent, "Agent history & plans");
+  for (const [name, node] of Object.entries(historyAndPlans(f.surface))) assert.equal(node.hidden, name === "past", `${name} follows the project view`);
+  const host = f.surface.element.querySelector(".agent-history-plans-host");
+  assert.equal(host.closest(".roster-team") !== null, true);
+  const rows = [...host.querySelectorAll('table[aria-label="Agent history"] tbody tr')].map(row => row.dataset.sessionId);
+  assert.deepEqual(rows, ["s2", "s0"]);
+  assert.equal(host.querySelector('tr[data-session-id="s0"]').dataset.role, "pm");
+  assert.match(host.querySelector('tr[data-session-id="s0"]').textContent, /recorded-model/);
+  assert.deepEqual([...host.querySelectorAll('[aria-label="Planned assignments"] li')].map(item => `${item.dataset.memberId}:${item.dataset.issueNumber}`),
+    ["m1:5002", "m1:5003", "m1:5004"]);
+  f.surface.dispose();
+});

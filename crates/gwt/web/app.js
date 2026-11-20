@@ -257,7 +257,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           notifications: () => notificationCenter.toggle(),
           // Issue #7639: the project list is the Projects view of the page at `/`.
           projects: () => window.location.assign(HUB_PROJECTS_URL_PATH),
-          agents: () => openSurface("agents"),
+          agents: () => openAgents("ledger"),
           environments: () => openExecutionEnvironments(),
           settings: () => openSurface("settings"),
         },
@@ -2957,8 +2957,19 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       // Rail selection follows the active layout pane.
       function selectSurface(surface) {
-        applySurfaceSelection(document, surface);
-        appChrome.setActiveSurface(surface);
+        // Issue #7649: the header's Agents is the ledger and the rail's Agents
+        // is the project's agents screen; only the one showing is marked.
+        const ledger = surface === "agents" && agentsSurface?.view === "ledger";
+        applySurfaceSelection(document, ledger ? null : surface);
+        appChrome.setActiveSurface(surface === "agents" && !ledger ? null : surface);
+      }
+
+      // Issue #7649: `view` is "ledger" (members, order, Project Manager) or
+      // "project" (the ledger's members with this project's history and plans).
+      function openAgents(view) {
+        agentsSurface?.setView(view);
+        openSurface("agents");
+        syncSurfaceRail();
       }
 
       function syncSurfaceRail() {
@@ -6021,7 +6032,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           return terminal ? createTerminalTextPreview({ document, terminal, container: root, ...options }) : () => {};
         },
         onSelectMember: (memberId) => {
-          openSurface("agents");
+          openAgents("project");
           agentsSurface.selectMember(memberId);
         },
         getTelemetry: () => worksTelemetryModel.read(),
@@ -6149,7 +6160,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
       // Issue #7646: the header and Application settings both lead to the ledger.
-      document.addEventListener("agents:open", () => openSurface("agents"));
+      document.addEventListener("agents:open", () => openAgents("ledger"));
       // Issue #7648: Execution environments is the one screen that shows
       // provider usage, reset times and limit state, opened from the top bar.
       const executionEnvironments = createExecutionEnvironments({
@@ -6216,7 +6227,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           if (splitSurfaces.containsWindow(id) || (worksHost && worksSurface.isVisible(id))) scheduleTerminalFit(id, true);
         }
       });
-      installSurfaceRail(document, { openSurface });
+      installSurfaceRail(document, { openSurface: surface => surface === "agents" ? openAgents("project") : openSurface(surface) });
       launchWizardVisibilityModel.subscribe(model => model.open, open => {
         if (open) openSurface("works");
       });

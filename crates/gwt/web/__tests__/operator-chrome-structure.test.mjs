@@ -4953,5 +4953,7 @@ test("window navigation publishes the selected pane without changing layout", ()
 // the entry into the shared header's nav (app-chrome.test.mjs).
 test("Issue #7646: the shared header opens the agent ledger", () => {
   assert.equal(document.getElementById("open-agents-button"), null, "the old top-bar entry is gone");
-  assert.match(appSource, /agents: \(\) => openSurface\("agents"\),/);
+  assert.match(appSource, /agents: \(\) => openAgents\("ledger"\),/);
+  // Issue #7649: the rail's Agents is the project's agents screen.
+  assert.match(appSource, /surface === "agents" \? openAgents\("project"\) : openSurface\(surface\)/);
 });

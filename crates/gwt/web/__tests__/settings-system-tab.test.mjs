@@ -1919,7 +1919,7 @@ test("Works loads its saved output line count on reconnect without a Settings mo
 test("Issue #7646: Application settings link to the agent ledger without editing it", () => {
   assert.match(settingsSource, /dataset\.action = "open-agent-ledger"/);
   assert.match(settingsSource, /CustomEvent\("agents:open"\)/);
-  assert.match(appSource, /addEventListener\("agents:open", \(\) => openSurface\("agents"\)\)/);
+  assert.match(appSource, /addEventListener\("agents:open", \(\) => openAgents\("ledger"\)\)/);
   assert.doesNotMatch(settingsSource, /kind:\s*"(add|rest|activate|rename|move|remove|select_pm|set_pm_eligibility)"/,
     "Settings sends no member change");
 });
