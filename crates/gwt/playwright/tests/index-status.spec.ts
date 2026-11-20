@@ -230,7 +230,7 @@ test("live backend replays fresh index health after reconnect and completes offl
     }, status.project_root);
     expect(burst.unchanged).toBe(true);
     expect(burst.renders).toEqual({ summary: 1, table: 1 });
-    expect(burst.summary).toContain("2 ready");
+    expect(burst.summary).toContain("Ready 2/9");
     expect(burst.table).toContain("50 docs");
     expect(burst.focusPreserved).toBe(true);
     await testInfo.attach("index-health-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
@@ -246,7 +246,7 @@ test("live backend replays fresh index health after reconnect and completes offl
     try {
       await expect(reconnected.table.locator("tr[data-scope='issues']")).toContainText("51 docs", { timeout: 1000 });
       expect(Date.now() - fallbackStarted).toBeLessThan(1000);
-      await expect(reconnected.root.locator(".index-search-health-summary")).toContainText("1 ready");
+      await expect(reconnected.root.locator(".index-search-health-summary")).toContainText("Ready 1/9");
       await expect(reconnected.root.locator(".index-search-input")).toBeFocused();
     } finally {
       await page.evaluate(() => { window.requestAnimationFrame = (window as any).__indexRestoreRaf; });
@@ -335,7 +335,7 @@ test.describe("Project Index status surface", () => {
         specs: { healthy: true, repair_required: false, document_count: 6 },
       }, worktrees: {},
     }));
-    await expect(root.locator(".index-search-health-summary")).toContainText("2 ready");
+    await expect(root.locator(".index-search-health-summary")).toContainText("Ready 2/9");
     await expect(table.locator("tr[data-scope='specs'] .settings-index-cell.ready")).toHaveCount(1);
     await root.locator("[data-index-tab='health']").click();
     await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
@@ -415,8 +415,16 @@ test.describe("Project Index status surface", () => {
 
     const summary = panel.locator("[data-role='index-search-health-summary']");
     await expect(summary).toBeVisible({ timeout: 10_000 });
-    await expect(summary).toContainText("1 ready");
-    await expect(summary).toContainText("2 degraded");
+    await expect(summary).toContainText("Ready 1/9");
+    await expect(summary).toContainText("8 need attention");
+    // Issue #7729 AC-3 (SPEC #7007 item 15): the search offers the nine scopes
+    // the health summary counts, files and docs outside the default selection.
+    const chips = panel.locator(".index-scope-button");
+    await expect(chips).toHaveText(["Issues", "SPECs", "Board", "Discussions", "Work", "Reports", "Memory", "Files", "Docs"]);
+    await expect(panel.locator('.index-scope-button[aria-pressed="true"]')).toHaveCount(7);
+    await expect(panel.locator('.index-scope-button[data-scope="files"]')).toHaveAttribute("aria-pressed", "false");
+    await expect(panel.locator('.index-scope-button[data-scope="files-docs"]')).toHaveAttribute("aria-pressed", "false");
+    await expect(summary).toContainText("board (status unavailable)");
     await expect(summary).toContainText("specs");
     await expect(summary).toContainText("files · develop");
     await expect(panel.locator(".settings-index-rebuild")).toHaveCount(0);
@@ -472,7 +480,7 @@ test.describe("Project Index status surface", () => {
     await page.evaluate(() => {
       window.__gwtFixtureWebSocket.flushRefreshStatus();
     });
-    await expect(summary).toContainText("1 ready", { timeout: 10_000 });
+    await expect(summary).toContainText("Ready 1/9", { timeout: 10_000 });
   });
 
   test("Index window Health scope-row Rebuild all dispatches without worktree_hash", async ({ page }) => {
@@ -618,7 +626,7 @@ test.describe("Project Index status surface", () => {
     );
     expect(reportRebuild).toEqual({ kind: "rebuild_index_cell", project_root: "/fixture", scope: "reports" });
     await root.locator("[data-index-tab='search']").click();
-    await expect(root.locator("[data-role='index-search-health-summary']")).toContainText("2 ready");
+    await expect(root.locator("[data-role='index-search-health-summary']")).toContainText("Ready 2/9");
     await expect(root.locator(".index-scope-button[data-scope='reports']")).toHaveAttribute("aria-pressed", "true");
     await root.locator(".index-search-input").fill("release decision");
     const request = await page.waitForFunction(() =>
