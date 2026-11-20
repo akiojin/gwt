@@ -293,6 +293,10 @@
 .roster-history small { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--color-text-muted); }
 .roster-history button { text-align: start; color: var(--color-link); }
 .roster-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Issue 7646: ledger order and deletion controls on every member row. */
+.roster-order { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
+.roster-order-position { min-width: var(--space-5); color: var(--color-text-muted); font-size: var(--type-xs); font-variant-numeric: tabular-nums; text-align: center; }
+.roster-order button { font-size: var(--type-xs); }
 .agents-surface .roster-add { display: flex; align-items: center; gap: var(--space-3); width: 100%; margin-top: var(--space-2); padding: var(--space-3); border-style: dashed; text-align: start; color: var(--color-text-muted); }
 .roster-add > span { display: grid; place-items: center; flex-shrink: 0; width: 40px; height: 40px; border: 1px dashed currentColor; border-radius: var(--radius-pill); font-size: var(--type-xl); }
 .roster-past-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); }

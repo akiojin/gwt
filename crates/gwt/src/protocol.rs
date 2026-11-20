@@ -6063,6 +6063,9 @@ mod tests {
             serde_json::json!({"kind":"rest","member_id":"member-1"}),
             serde_json::json!({"kind":"activate","member_id":"member-1"}),
             serde_json::json!({"kind":"rename","member_id":"member-1","name":"Maple"}),
+            serde_json::json!({"kind":"move","member_id":"member-1","direction":"up"}),
+            serde_json::json!({"kind":"move","member_id":"member-1","direction":"down"}),
+            serde_json::json!({"kind":"remove","member_id":"member-1"}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
                 "kind":"agent_roster", "action":action, "expected_revision":3
