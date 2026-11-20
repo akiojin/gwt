@@ -247,9 +247,9 @@ pub use issue_monitor::{
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
-    search_knowledge_bridge, search_knowledge_bridge_outcome, update_knowledge_phase,
-    KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
-    KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
+    search_knowledge_bridge, search_knowledge_bridge_outcome, set_knowledge_autonomous_target,
+    update_knowledge_phase, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
+    KnowledgeKind, KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
     KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry, KnowledgeWorkRefView,
 };
 pub use launch_wizard::{

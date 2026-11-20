@@ -1009,6 +1009,15 @@ pub enum FrontendEvent {
         issue_number: u64,
         target_phase: Option<String>,
     },
+    /// Issue #7729 AC-1: include an Issue in, or exclude it from, autonomous
+    /// runs from the Issue detail. Answered by
+    /// [`BackendEvent::KnowledgeBridgePhaseUpdated`] with the fresh entry.
+    SetIssueAutonomousTarget {
+        id: String,
+        request_id: u64,
+        issue_number: u64,
+        enabled: bool,
+    },
     RunBranchCleanup {
         id: String,
         branches: Vec<String>,
@@ -1293,10 +1302,6 @@ pub enum FrontendEvent {
         title: String,
         #[serde(default)]
         launch: bool,
-        /// SPEC #3885 T-033 (FR-022): the "+ New" popover's auto-merge
-        /// checkbox; `true` creates the Issue with the `auto-merge` label.
-        #[serde(default)]
-        auto_merge: bool,
     },
     IssueMonitorLaunchNow {
         issue_number: u64,

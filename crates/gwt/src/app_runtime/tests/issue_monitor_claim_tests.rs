@@ -6066,7 +6066,6 @@ fn app_runtime_quick_register_issue_creates_cache_entry_without_queue_admission(
         FrontendEvent::QuickRegisterIssue {
             title: "Investigate Intake registration".to_string(),
             launch: false,
-            auto_merge: false,
         },
     );
 
@@ -6127,10 +6126,10 @@ fn app_runtime_quick_register_issue_creates_cache_entry_without_queue_admission(
         .all(|queue| queue.entries.is_empty()));
 }
 
-// SPEC #3885 T-033 (FR-022): the "+ New" popover's auto-merge checkbox labels
-// the Issue at creation time.
+// Issue #7729 AC-1: registration no longer labels the Issue. `auto-merge` is
+// the PR-side mark; autonomy is opted into from the Issue detail.
 #[test]
-fn app_runtime_quick_register_issue_applies_the_auto_merge_label() {
+fn app_runtime_quick_register_issue_creates_the_issue_without_labels() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6158,14 +6157,13 @@ fn app_runtime_quick_register_issue_applies_the_auto_merge_label() {
         FrontendEvent::QuickRegisterIssue {
             title: "Ship the popover".to_string(),
             launch: false,
-            auto_merge: true,
         },
     );
 
     let cached = Cache::new(issue_cache_root(&repo))
         .load_entry(IssueNumber(1))
         .expect("quick issue written to cache");
-    assert_eq!(cached.snapshot.labels, vec!["auto-merge".to_string()]);
+    assert!(cached.snapshot.labels.is_empty());
 }
 
 #[test]
@@ -6192,7 +6190,6 @@ fn app_runtime_quick_register_issue_permission_error_includes_reason_and_fallbac
         FrontendEvent::QuickRegisterIssue {
             title: "Investigate Intake registration".to_string(),
             launch: false,
-            auto_merge: false,
         },
     );
 

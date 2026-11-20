@@ -196,6 +196,13 @@ pub struct KnowledgeListItem {
     /// always grouped into the Backlog column and are not draggable.
     #[serde(default)]
     pub is_spec: bool,
+    /// Issue #7729 AC-1: whether the Monitor's per-Issue autonomy opt-in holds
+    /// for this entry, decided by [`crate::issue_monitor::labels_opt_into_autonomy`].
+    #[serde(default)]
+    pub autonomous_target: bool,
+    /// The label that carries the opt-in, for the screen to name as a note.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub autonomous_target_label: String,
     /// SPEC-3885 FR-018: owning SPEC number derived from the body's
     /// `## Related SPECs` section, so the Issue list can nest a child row under
     /// its parent SPEC row. `None` when the body declares no owner.
@@ -768,27 +775,103 @@ where
             ));
         }
     }
+    let target_label = target_phase.map(|value| format!("phase/{value}"));
+    write_knowledge_label_change(
+        repo_path,
+        issue_number,
+        |labels| {
+            let remove = labels
+                .iter()
+                .filter(|label| {
+                    label.starts_with("phase/") && Some(label.as_str()) != target_label.as_deref()
+                })
+                .cloned()
+                .collect();
+            let add = target_label
+                .iter()
+                .filter(|target| !labels.contains(target))
+                .cloned()
+                .collect();
+            (add, remove)
+        },
+        label_writer,
+    )
+}
+
+/// Issue #7729 AC-1: include an Issue in, or exclude it from, autonomous
+/// runs. The per-Issue opt-in is the `auto-merge` label the Monitor's
+/// two-stage gate reads, so the write is that one label and nothing else.
+pub fn set_knowledge_autonomous_target(
+    repo_path: &Path,
+    issue_number: u64,
+    enabled: bool,
+) -> Result<KnowledgeListItem, String> {
+    set_knowledge_autonomous_target_with_label_writer(
+        repo_path,
+        issue_number,
+        enabled,
+        |labels_to_add, labels_to_remove| {
+            crate::issue_cache::write_issue_labels_via_gh(
+                repo_path,
+                issue_number,
+                labels_to_add,
+                labels_to_remove,
+            )
+        },
+    )
+}
+
+pub(crate) fn set_knowledge_autonomous_target_with_label_writer<F>(
+    repo_path: &Path,
+    issue_number: u64,
+    enabled: bool,
+    label_writer: F,
+) -> Result<KnowledgeListItem, String>
+where
+    F: FnOnce(&[String], &[String]) -> Result<(), String>,
+{
+    let opt_in = crate::issue_monitor::AUTO_MERGE_LABEL;
+    write_knowledge_label_change(
+        repo_path,
+        issue_number,
+        |labels| {
+            let included = crate::issue_monitor::labels_opt_into_autonomy(labels);
+            match (enabled, included) {
+                (true, false) => (vec![opt_in.to_string()], Vec::new()),
+                (false, true) => (
+                    Vec::new(),
+                    labels
+                        .iter()
+                        .filter(|label| label.eq_ignore_ascii_case(opt_in))
+                        .cloned()
+                        .collect(),
+                ),
+                _ => (Vec::new(), Vec::new()),
+            }
+        },
+        label_writer,
+    )
+}
+
+/// Write one label change to GitHub and the local Issue cache, and return the
+/// rebuilt list item. `plan` reads the cached labels and names what to add and
+/// what to remove; an empty plan writes nothing.
+fn write_knowledge_label_change<P, F>(
+    repo_path: &Path,
+    issue_number: u64,
+    plan: P,
+    label_writer: F,
+) -> Result<KnowledgeListItem, String>
+where
+    P: FnOnce(&[String]) -> (Vec<String>, Vec<String>),
+    F: FnOnce(&[String], &[String]) -> Result<(), String>,
+{
     let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
     let cache = Cache::new(cache_root);
     let entry = cache
         .load_entry(gwt_github::IssueNumber(issue_number))
         .ok_or_else(|| format!("Issue #{issue_number} not in local cache"))?;
-    let target_label = target_phase.map(|value| format!("phase/{value}"));
-    let labels_to_remove: Vec<String> = entry
-        .snapshot
-        .labels
-        .iter()
-        .filter(|label| {
-            label.starts_with("phase/") && Some(label.as_str()) != target_label.as_deref()
-        })
-        .cloned()
-        .collect();
-    let labels_to_add: Vec<String> = target_label
-        .as_ref()
-        .filter(|target| !entry.snapshot.labels.iter().any(|label| label == *target))
-        .cloned()
-        .into_iter()
-        .collect();
+    let (labels_to_add, labels_to_remove) = plan(&entry.snapshot.labels);
     if !labels_to_add.is_empty() || !labels_to_remove.is_empty() {
         label_writer(&labels_to_add, &labels_to_remove)?;
     }
@@ -806,7 +889,7 @@ where
     }
     cache
         .apply_phase_change(gwt_github::IssueNumber(issue_number), updated_labels)
-        .map_err(|error| format!("apply phase change to cache: {error}"))?;
+        .map_err(|error| format!("apply label change to cache: {error}"))?;
     let refreshed = cache
         .load_entry(gwt_github::IssueNumber(issue_number))
         .ok_or_else(|| format!("Issue #{issue_number} disappeared after cache update"))?;
@@ -1069,6 +1152,8 @@ fn issue_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
+        autonomous_target: crate::issue_monitor::labels_opt_into_autonomy(&entry.labels),
+        autonomous_target_label: crate::issue_monitor::AUTO_MERGE_LABEL.to_string(),
         parent_spec: parent_spec_from_body(&entry.body),
         monitor_state: None,
         queue_position: None,
@@ -3217,6 +3302,56 @@ exit 1\n",
     // tests use `update_knowledge_phase_with_label_writer` to inject a
     // closure that captures (and optionally fails) the gh CLI call so
     // we don't need a live `gh` binary on the test runner.
+
+    #[test]
+    fn issue_7729_autonomous_target_toggles_only_the_opt_in_label() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("cache root");
+        Cache::new(cache_root)
+            .write_snapshot(&issue_snapshot(
+                7729,
+                "Issue",
+                "Body",
+                &["bug", "phase/draft"],
+                IssueState::Open,
+            ))
+            .expect("write snapshot");
+        let writes: std::cell::RefCell<Vec<(Vec<String>, Vec<String>)>> = Default::default();
+        let record = |add: &[String], remove: &[String]| {
+            writes.borrow_mut().push((add.to_vec(), remove.to_vec()));
+            Ok(())
+        };
+
+        let included = set_knowledge_autonomous_target_with_label_writer(&repo, 7729, true, record)
+            .expect("include");
+        assert_eq!(included.labels, ["bug", "phase/draft", "auto-merge"]);
+        assert!(included.autonomous_target);
+        assert_eq!(included.autonomous_target_label, "auto-merge");
+        // Already included: nothing is written again.
+        set_knowledge_autonomous_target_with_label_writer(&repo, 7729, true, record)
+            .expect("include twice");
+        let excluded =
+            set_knowledge_autonomous_target_with_label_writer(&repo, 7729, false, record)
+                .expect("exclude");
+        assert_eq!(excluded.labels, ["bug", "phase/draft"]);
+        assert!(!excluded.autonomous_target);
+
+        assert_eq!(
+            writes.into_inner(),
+            vec![
+                (vec!["auto-merge".to_string()], Vec::new()),
+                (Vec::new(), vec!["auto-merge".to_string()]),
+            ]
+        );
+    }
 
     #[test]
     fn update_knowledge_phase_replaces_existing_phase_label() {

@@ -240,8 +240,10 @@ test("AC-24: + New opens a modal-primitive popover that registers and launches",
   assert.ok(dialog.querySelector(".modal-footer"));
 
   const title = dialog.querySelector('[data-role="issue-new-title"]');
-  const autoMerge = dialog.querySelector('[data-role="issue-new-auto-merge"]');
-  assert.equal(autoMerge.type, "checkbox");
+  // Issue #7729 AC-1: auto-merge is the PR-side mark, not a registration option.
+  assert.equal(dialog.querySelector('[data-role="issue-new-auto-merge"]'), null);
+  assert.equal(dialog.querySelector('input[type="checkbox"]'), null);
+  assert.doesNotMatch(dialog.textContent, /auto-merge/i);
 
   // An empty title sends nothing.
   const before = sent.length;
@@ -249,13 +251,11 @@ test("AC-24: + New opens a modal-primitive popover that registers and launches",
   assert.equal(sent.length, before);
 
   title.value = "  Investigate flaky release gate  ";
-  autoMerge.checked = true;
   dialog.querySelector('[data-action="issue-new-register-launch"]').click();
   assert.deepEqual(sent.at(-1), {
     kind: "quick_register_issue",
     title: "Investigate flaky release gate",
     launch: true,
-    auto_merge: true,
   });
   assert.equal(backdrop.classList.contains("open"), false, "the popover closes");
 
@@ -267,7 +267,6 @@ test("AC-24: + New opens a modal-primitive popover that registers and launches",
     kind: "quick_register_issue",
     title: "Plain register",
     launch: false,
-    auto_merge: false,
   });
 });
 
@@ -510,6 +509,123 @@ test("Issue #5284: capacity uses a linked badge and Operator tokens without an o
   assert.match(block, /var\(--space-/);
   assert.match(block, /var\(--type-/);
   assert.doesNotMatch(block, /#[\da-f]{3,8}\b|\brgba?\(|\bposition:\s*(?:fixed|absolute)/i);
+});
+
+// --- Issue #7729 (SPEC #7007 N-2) ------------------------------------------
+
+function selectDetail(state, number, extra = {}) {
+  state.selectedNumber = number;
+  state.previewHidden = false;
+  state.detail = { number, title: `Issue ${number}`, state: "open", labels: [], sections: [], related_works: [], ...extra };
+}
+
+test("Issue #7729 AC-1: the detail changes the priority and the autonomous target", async (t) => {
+  const { body, sent, surface, state } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  // The backend reports the Monitor's decision and the label that carries it.
+  const target = { autonomous_target: false, autonomous_target_label: "auto-merge" };
+  state.entries = [entry(10, "queued", { queue_position: 1 }), entry(11, "queued", { queue_position: 2, ...target }), entry(12, null)];
+  state.baseEntries = state.entries.slice();
+  selectDetail(state, 11);
+  surface.renderKnowledgeBridge("win-1");
+
+  const operations = () => body.querySelector(".issue-detail-operations");
+  assert.equal(operations().getAttribute("aria-label"), "Issue #11 operations");
+  const priority = operations().querySelector('[data-operation="priority"]');
+  assert.match(priority.textContent, /Position 2 of 2 in the launch queue/);
+  assert.deepEqual(
+    [...priority.querySelectorAll("[data-action]")].map(node => [node.dataset.action, node.disabled]),
+    [["move-to-top", false], ["move-up", false], ["move-down", true]],
+  );
+  priority.querySelector('[data-action="move-up"]').click();
+  assert.deepEqual(sent.at(-1), { kind: "issue_monitor_queue_move", issue_number: 11, position: 0 });
+
+  const autonomous = () => operations().querySelector('[data-operation="autonomous"]');
+  assert.match(autonomous().textContent, /Autonomous target/);
+  assert.match(autonomous().textContent, /Not included · Label: auto-merge/);
+  const include = autonomous().querySelector('[data-action="set-autonomous-target"]');
+  assert.equal(include.textContent, "Include");
+  assert.equal(include.getAttribute("aria-label"), "Include Issue #11 in autonomous runs");
+  include.click();
+  const request = sent.at(-1);
+  assert.deepEqual({ ...request, request_id: 0 }, {
+    kind: "set_issue_autonomous_target", id: "win-1", request_id: 0, issue_number: 11, enabled: true,
+  });
+  assert.equal(autonomous().querySelector("[data-action]").disabled, true, "one write at a time");
+
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_bridge_phase_updated", id: "win-1", request_id: request.request_id, issue_number: 11,
+    result: { kind: "ok", fresh_entry: entry(11, "queued", { queue_position: 2, ...target, autonomous_target: true }) },
+  });
+  assert.match(autonomous().textContent, /Included · Label: auto-merge/);
+  assert.doesNotMatch(autonomous().textContent, /Not included/);
+  const exclude = autonomous().querySelector('[data-action="set-autonomous-target"]');
+  assert.equal(exclude.textContent, "Exclude");
+  assert.equal(exclude.disabled, false);
+  exclude.click();
+  assert.equal(sent.at(-1).enabled, false);
+
+  // An Issue outside the queue is offered the way in, in the same place.
+  selectDetail(state, 12);
+  surface.renderKnowledgeBridge("win-1");
+  // A label alone is never read here: with no decision reported, nothing is offered.
+  assert.match(autonomous().textContent, /Not reported yet/);
+  assert.equal(autonomous().querySelector("[data-action]").disabled, true);
+  const backlog = operations().querySelector('[data-operation="priority"]');
+  assert.match(backlog.textContent, /Not in the launch queue/);
+  backlog.querySelector('[data-action="queue-push"]').click();
+  assert.deepEqual(sent.at(-1), { kind: "issue_monitor_queue_push", issue_numbers: [12] });
+});
+
+test("Issue #7729 AC-1: the screen names no label of its own for the autonomous target", () => {
+  const source = readFileSync(resolve(here, "../knowledge-kanban-surface.js"), "utf8");
+  const operations = source.slice(source.indexOf("function renderIssueDetailOperations("),
+    source.indexOf("function syncIssuePreviewVisibility("));
+  assert.match(operations, /entry\.autonomous_target === true/);
+  assert.doesNotMatch(operations, /auto-merge/);
+  assert.doesNotMatch(operations, /issueEntryHasLabel/);
+});
+
+test("Issue #7729 AC-2: the detail opens the current terminal and reaches past sessions", async (t) => {
+  const agent = { id: "agent-11", status: "running", linked_issue_number: 11, preset: "agent", session_id: "s-live" };
+  const focused = [];
+  const agentActivityModel = createUiStateStore({ byIssue: { 11: [{ window_id: agent.id, session_id: agent.session_id }] } },
+    { scheduleFrame: run => { run(); return () => {}; } });
+  const { body, surface, state } = await makeFixture({
+    windows: [agent],
+    surface: { agentActivityModel, focusWindowLocally: id => focused.push(id), launchPending: { isPending: () => false } },
+  });
+  t.after(() => { surface.clearKnowledgeBridgeState("win-1"); agentActivityModel.dispose(); });
+  state.entries = [entry(11, "launched"), entry(12, null)];
+  state.baseEntries = state.entries.slice();
+  selectDetail(state, 11, { related_works: [{ id: "work-1", title: "Work", agents: [{
+    agent_id: "codex", session_id: "s-live", sessions: [
+      { agent_session_id: "conv-current", is_active: true },
+      { agent_session_id: "conv-older", is_active: false },
+      { agent_session_id: "conv-oldest", is_active: false },
+    ] }] }] });
+  surface.renderKnowledgeBridge("win-1");
+
+  const sessions = body.querySelector('.issue-detail-operations [data-operation="sessions"]');
+  const open = sessions.querySelector('[data-action="open-window"]');
+  assert.equal(open.textContent, "Open terminal");
+  open.click();
+  assert.deepEqual(focused, ["agent-11"]);
+  assert.match(sessions.textContent, /Current session · 2 past sessions/);
+  const past = sessions.querySelector('[data-action="show-past-sessions"]');
+  const related = body.querySelector(".knowledge-related-works");
+  let revealed = 0;
+  related.scrollIntoView = () => { revealed += 1; };
+  past.click();
+  assert.equal(revealed, 1);
+  assert.equal(related.getAttribute("tabindex"), "-1");
+  assert.equal(body.querySelectorAll(".knowledge-related-session").length, 3);
+
+  selectDetail(state, 12);
+  surface.renderKnowledgeBridge("win-1");
+  const idle = body.querySelector('.issue-detail-operations [data-operation="sessions"]');
+  assert.match(idle.textContent, /No current session · No past sessions/);
+  assert.equal(idle.querySelector("[data-action]"), null);
 });
 
 test("queue detail provenance follows authoritative terminal queue", async (t) => {

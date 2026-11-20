@@ -413,6 +413,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .window(id)
             .target(issue_number.to_string())
             .mode(target_phase.as_deref().unwrap_or("backlog")),
+        FrontendEvent::SetIssueAutonomousTarget {
+            id,
+            issue_number,
+            enabled,
+            ..
+        } => FrontendUserActionLog::new("set_issue_autonomous_target", "knowledge")
+            .window(id)
+            .target(issue_number.to_string())
+            .mode(if *enabled { "include" } else { "exclude" }),
         FrontendEvent::RebuildIndexCell {
             project_root,
             scope,

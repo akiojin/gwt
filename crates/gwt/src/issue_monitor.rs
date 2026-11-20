@@ -7025,8 +7025,14 @@ pub const AUTO_MERGE_LABEL: &str = "auto-merge";
 
 /// Whether `issue` carries the [`AUTO_MERGE_LABEL`] (case-insensitive).
 pub fn issue_has_auto_merge_label(issue: &IssueMonitorIssue) -> bool {
-    issue
-        .labels
+    labels_opt_into_autonomy(&issue.labels)
+}
+
+/// The per-Issue half of the two-stage autonomy opt-in, read from a label
+/// list. The Monitor's gate and the Issue detail (Issue #7729 AC-1) both ask
+/// this one function, so the screen can never name a different mark.
+pub fn labels_opt_into_autonomy(labels: &[String]) -> bool {
+    labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case(AUTO_MERGE_LABEL))
 }
