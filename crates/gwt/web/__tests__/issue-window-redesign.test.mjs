@@ -607,7 +607,9 @@ test("Issue #7729 AC-2: the detail opens the current terminal and reaches past s
   surface.renderKnowledgeBridge("win-1");
 
   const sessions = body.querySelector('.issue-detail-operations [data-operation="sessions"]');
-  const open = sessions.querySelector('[data-action="open-window"]');
+  const open = sessions.querySelector('[data-action="open-terminal"]');
+  assert.equal(body.querySelectorAll('.knowledge-detail-pane [data-action="open-window"]').length, 1,
+    "the action band keeps the only open-window control");
   assert.equal(open.textContent, "Open terminal");
   open.click();
   assert.deepEqual(focused, ["agent-11"]);

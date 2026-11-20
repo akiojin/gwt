@@ -4490,6 +4490,8 @@ export function createKnowledgeKanbanSurface({
             : `${past} past session${past === 1 ? "" : "s"}`}`);
         if (live) {
           const open = issueRowActionButton("open-window", context);
+          // Its own id: the action band above already carries "open-window".
+          open.dataset.action = "open-terminal";
           open.textContent = "Open terminal";
           open.setAttribute("aria-label", `Open the terminal of the current session for Issue #${number}`);
           sessions.actions.appendChild(open);
