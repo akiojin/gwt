@@ -8688,7 +8688,7 @@ fn select_issue_monitor_profiles_with_codex_config(
 ) -> gwt::LaunchProfileSelection {
     select_issue_monitor_profiles_excluding(
         pool,
-        |profile| codex_config_exclusion(profile, config_error),
+        |profile, _| codex_config_exclusion(profile, config_error),
         select,
     )
 }
@@ -8705,13 +8705,20 @@ fn codex_config_exclusion(
 /// Issue #7741: why a candidate cannot start a session right now. A
 /// candidate whose tool is signed out is passed over for the next execution
 /// environment instead of failing the launch.
+///
+/// Sign-in is read only when the pool offers another candidate to move on
+/// to. A lone candidate is checked once, where the launch is prepared, as it
+/// always was.
 fn issue_monitor_candidate_exclusion(
     profile: &gwt::IssueMonitorLaunchProfile,
+    pool_size: usize,
     codex_config_error: Option<&str>,
     auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
 ) -> Option<String> {
     codex_config_exclusion(profile, codex_config_error).or_else(|| {
-        (auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated)
+        (pool_size > 1
+            && auth_probe(&profile.agent_id)
+                == gwt::issue_monitor::ProviderAuthState::Unauthenticated)
             .then(|| gwt::issue_monitor::provider_unauthenticated_message(&profile.agent_id))
     })
 }
@@ -8738,10 +8745,13 @@ fn issue_monitor_no_candidate_error(
 /// excluded ones as skipped with their reason and the pool's own indexes.
 fn select_issue_monitor_profiles_excluding(
     pool: &[gwt::IssueMonitorLaunchProfile],
-    exclusion: impl Fn(&gwt::IssueMonitorLaunchProfile) -> Option<String>,
+    exclusion: impl Fn(&gwt::IssueMonitorLaunchProfile, usize) -> Option<String>,
     select: impl FnOnce(&[gwt::IssueMonitorLaunchProfile]) -> gwt::LaunchProfileSelection,
 ) -> gwt::LaunchProfileSelection {
-    let reasons: Vec<_> = pool.iter().map(&exclusion).collect();
+    let reasons: Vec<_> = pool
+        .iter()
+        .map(|profile| exclusion(profile, pool.len()))
+        .collect();
     if reasons.iter().all(Option::is_none) {
         return select(pool);
     }
@@ -9036,8 +9046,8 @@ fn issue_monitor_owner_launch_profile_choice(
 ) -> Result<IssueMonitorLaunchProfileChoice, String> {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
-    let exclusion = |profile: &gwt::IssueMonitorLaunchProfile| {
-        issue_monitor_candidate_exclusion(profile, codex_config_error, auth_probe)
+    let exclusion = |profile: &gwt::IssueMonitorLaunchProfile, pool_size: usize| {
+        issue_monitor_candidate_exclusion(profile, pool_size, codex_config_error, auth_probe)
     };
     if !prefs.launch_auto {
         let pool = prefs.registered_launch_profiles_for_issue(issue_number);
@@ -9103,8 +9113,8 @@ fn issue_monitor_owner_launch_profile_choice(
         &available,
         issue_number,
         linked_issue_kind == gwt::LinkedIssueKind::Spec,
-        |profile| {
-            let reason = exclusion(profile);
+        |profile, pool_size| {
+            let reason = exclusion(profile, pool_size);
             if let Some(reason) = &reason {
                 unauthenticated.borrow_mut().push(gwt::LaunchProfileSkip {
                     index: 0,
@@ -9178,7 +9188,7 @@ pub(super) fn select_issue_monitor_automatic_profile(
         available,
         issue_number,
         is_spec,
-        |profile| codex_config_exclusion(profile, codex_config_error),
+        |profile, _| codex_config_exclusion(profile, codex_config_error),
         now,
     )
 }
@@ -9188,7 +9198,7 @@ fn select_issue_monitor_automatic_profile_excluding(
     available: &[String],
     issue_number: u64,
     is_spec: bool,
-    exclusion: impl Fn(&gwt::IssueMonitorLaunchProfile) -> Option<String>,
+    exclusion: impl Fn(&gwt::IssueMonitorLaunchProfile, usize) -> Option<String>,
     now: &str,
 ) -> Option<gwt::issue_monitor::IssueMonitorTierSelection> {
     let holds = prefs.launch_admission_provider_quota_holds();
