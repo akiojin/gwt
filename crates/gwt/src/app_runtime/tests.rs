@@ -13084,6 +13084,8 @@ mod terminal_approval_tests;
 #[cfg(test)]
 mod terminal_lifecycle_tests;
 #[cfg(test)]
+mod themes_tests;
+#[cfg(test)]
 mod ui_trace_attachment_tests;
 #[cfg(test)]
 mod window_expiry_startup_tests;

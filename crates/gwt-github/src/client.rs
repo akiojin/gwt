@@ -350,6 +350,51 @@ pub trait IssueClient: Send + Sync {
     ) -> Result<IssueSnapshot, ApiError>;
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError>;
+
+    /// List the themes of the repository: open Issues that have sub-issues,
+    /// with GitHub's own sub-issue totals (Issue #7643).
+    fn list_themes(&self) -> Result<ThemeListing, ApiError> {
+        Err(ApiError::Unexpected("list themes unsupported".into()))
+    }
+
+    /// Delete an Issue for good. GitHub allows this only to repository
+    /// administrators; its sub-issues are kept and lose their parent.
+    fn delete_issue(&self, _number: IssueNumber) -> Result<(), ApiError> {
+        Err(ApiError::Unexpected("delete issue unsupported".into()))
+    }
+}
+
+/// One theme: an open Issue that has sub-issues (Issue #7643).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeIssue {
+    pub number: IssueNumber,
+    pub title: String,
+    pub body: String,
+    pub url: String,
+    /// GitHub's sub-issue summary: every sub-issue, and the completed ones.
+    pub sub_issues_total: u64,
+    pub sub_issues_completed: u64,
+    pub sub_issues: Vec<ThemeSubIssue>,
+}
+
+/// One Issue under a theme.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeSubIssue {
+    pub number: IssueNumber,
+    pub title: String,
+    pub state: IssueState,
+    pub url: String,
+    /// Whether the sub-issue lives in the theme's own repository. A sub-issue
+    /// of another repository shares no number space with this one.
+    pub in_repository: bool,
+}
+
+/// The themes of a repository.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThemeListing {
+    pub themes: Vec<ThemeIssue>,
+    /// The repository has more open Issues than one listing reads.
+    pub truncated: bool,
 }
 
 /// Explicit GitHub repository identity used by owner-resolution operations.

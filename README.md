@@ -30,7 +30,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
+- **Operator workspace** — switch between Themes, Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
 - **Execution environments** — open Environments from the header to see what
   your agents run on. Accounts shows each provider account's usage, reset
@@ -2546,7 +2546,8 @@ an entry removes its copied policy on the next refresh.
 
 ## Surface Navigation
 
-- Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
+- Select **Themes**, **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
+- **Themes** lists the themes of the project: GitHub Issues that have sub-issues. Each row shows how many issues are under the theme and how many are completed, as GitHub reports them. Select a theme to see its issues, and select an issue to open it in Issues. **Issues completed today** counts the closes gwt took in today. **Delete theme** deletes the theme's GitHub Issue after a confirmation; the issues under it are kept. Deleting needs admin access to the repository.
 - Open **Logs**, **Index**, and **Profile** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Use the Command Palette for all-stop; individual agent stop/restart remain available through the existing controls.
 - Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
 - **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.

@@ -220,6 +220,7 @@ root_js_modules! {
     // list. app.js imports this at module top level, so the asset
     // MUST be registered or the ES module load 404s and the splash hangs.
     "project-execution-environments.js" => "renderProjectExecutionEnvironments",
+    "project-themes.js" => "createProjectThemes",
     // SPEC #7007 T-014 — typed window command error presentation.
     // app.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.

@@ -585,6 +585,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("delete_execution_environment", "execution_environments")
                 .target(environment_id.clone())
         }
+        FrontendEvent::DeleteTheme { number, .. } => {
+            FrontendUserActionLog::new("delete_theme", "themes").target(number.to_string())
+        }
         FrontendEvent::SetProjectExecutionEnvironments { .. } => FrontendUserActionLog::new(
             "set_project_execution_environments",
             "execution_environments",
@@ -838,6 +841,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadHomeConversation { .. }
+        | FrontendEvent::LoadThemes { .. }
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles

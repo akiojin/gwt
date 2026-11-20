@@ -1178,8 +1178,11 @@ body::after {
     min-height: 44px;
   }
 
+  /* Six entries to a 390px row: with Themes in the rail (Issue 7643) the
+     64px entries of the wider strip would wrap into a third row. */
   .op-rail .op-rail__surface,
   #op-pm-entry {
+    width: 60px;
     padding-block: var(--space-1);
   }
 }
@@ -6279,6 +6282,47 @@ button.workspace-board-ref:focus-visible {
 .pm-conversation-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .pm-conversation-log { position: relative; flex: 1; min-height: 0; }
 .pm-conversation-log[hidden] { display: none; }
+
+/* Issue 7643 (SPEC 7007 T-025): Themes screen. */
+.project-themes { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-4) var(--space-5); color: var(--color-text); background: var(--color-surface); font-family: var(--font-body); font-size: var(--type-sm); }
+.project-themes :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.project-themes button { max-width: 100%; padding: var(--space-1) var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; cursor: pointer; }
+.project-themes button:hover { background: var(--color-surface-elevated); }
+.project-themes button:disabled { color: var(--color-text-muted); border-color: var(--color-border); cursor: not-allowed; }
+.project-themes a { color: var(--color-link); }
+.project-themes__header h1 { margin: 0; font-size: var(--type-xl); }
+.project-themes__header h1:focus { outline: none; }
+.project-themes__lead { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
+.project-themes__meta { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.project-themes button.project-themes__back { margin-bottom: var(--space-2); padding: 0; border: 0; background: transparent; color: var(--color-link); }
+.project-themes__stats { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; }
+.project-themes__stats > div { display: flex; flex-direction: column; min-width: 9rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.project-themes__stats dd { margin: 0; color: var(--color-text-strong); font-size: var(--type-xl); font-variant-numeric: tabular-nums; }
+.project-themes__stats dt { color: var(--color-text-muted); font-size: var(--type-xs); }
+.project-themes__status { min-height: var(--space-4); margin: 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.project-themes__error { margin: 0; color: var(--color-state-blocked); }
+.project-themes__hint { margin: 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.project-themes__list { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.project-themes .project-themes__row { display: flex; align-items: center; gap: var(--space-3); width: 100%; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface-elevated); text-align: left; text-decoration: none; cursor: pointer; }
+.project-themes .project-themes__row:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+.project-themes__row-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.project-themes__row-title { color: var(--color-text-strong); font-size: var(--type-md); }
+.project-themes__bar { width: 100%; max-width: 20rem; height: var(--space-1); margin-top: var(--space-2); overflow: hidden; border-radius: var(--radius-sm); background: var(--color-border-strong); }
+.project-themes__bar > i { display: block; height: 100%; background: var(--color-state-success); }
+.project-themes__badge { flex-shrink: 0; padding: 0 var(--space-2); border: 1px solid currentColor; border-radius: var(--radius-sm); color: var(--color-text-muted); font-size: var(--type-xs); }
+.project-themes__badge[data-status="in_progress"], .project-themes__badge[data-status="open"] { color: var(--color-state-active); }
+.project-themes__badge[data-status="almost_done"], .project-themes__badge[data-status="completed"] { color: var(--color-state-success); }
+.project-themes__chevron { flex-shrink: 0; color: var(--color-text-muted); }
+.project-themes__empty { padding: var(--space-3); border: 1px dashed var(--color-border-strong); border-radius: var(--radius-sm); }
+.project-themes__empty h2 { margin: 0; font-size: var(--type-lg); }
+.project-themes__empty p { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
+.project-themes__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.project-themes__group { display: flex; flex-direction: column; gap: var(--space-2); }
+.project-themes__group h2 { margin: var(--space-2) 0 0; font-size: var(--type-md); }
+.project-themes__group > p { margin: 0; }
+.project-themes__progress { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.project-themes button.project-themes__danger:not(:disabled) { color: var(--color-state-blocked); }
+.modal-body .project-themes__error { margin-top: var(--space-2); }
 
 /* Issue 7648 (SPEC 7007 T-030): Execution environments screen. */
 .exec-env { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-4) var(--space-5); color: var(--color-text); background: var(--color-surface); font-family: var(--font-body); font-size: var(--type-sm); }

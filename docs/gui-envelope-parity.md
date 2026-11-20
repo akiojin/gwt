@@ -138,6 +138,8 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `SetAutoApplyUpdates` | 対応 | `update.settings.set` | アプリ全体の自動更新適用を変更する。envelope は既存の承認契約を使う。 |
 | `GetIssueMonitorProfiles` | 対応 | `issue.monitor.profiles` | 保存済みの Issues 起動プロファイルを取得する。 |
 | `IssueMonitorProfilesSet` | 対応 | `issue.monitor.profiles.set` | Issues が使う起動プロファイル群を更新する。 |
+| `LoadThemes` | 読み取り | — | テーマ画面に出す、プロジェクトのテーマ（sub-issue を持つ Issue）と今日の完了数を読む（Issue #7643）。 |
+| `DeleteTheme` | 対象外 | — | テーマの GitHub Issue を削除する。テーマ画面の確認ダイアログを経る操作に限る（Issue #7643）。 |
 | `GetExecutionEnvironments` | 読み取り | — | 実行環境の定義、アカウント、開いているプロジェクトの優先度リストを取得する。 |
 | `AddExecutionEnvironment` | 対象外 | — | アカウントと経由ツールの組をホストに登録する。実行環境の画面からの操作に限る（Issue #7741）。 |
 | `UpdateExecutionEnvironment` | 対象外 | — | 実行環境の名前と実行時指定を変更する。実行環境の画面からの操作に限る（Issue #7741）。 |
