@@ -1151,7 +1151,7 @@ export function createSettingsSurface({
       const settingsWindowBodies = new Set();
       const hookDoctorModel = createUiStateStore({}, { scheduleFrame });
       let nextHookDoctorRequest = 0;
-      function requestHookDoctor(projectRoot, repair = false, recovering = false) {
+      function requestHookDoctor(projectRoot, repair = false, recovering = false, userHookChange = null) {
         if (!projectRoot || projectRoot !== activeProjectTab()?.project_root) return;
         const current = hookDoctorModel.read()[projectRoot];
         if (repair && hookRepairUnavailableReason(current)) return;
@@ -1161,10 +1161,14 @@ export function createSettingsSurface({
           report: null, error: null, requestId, pending: true, repairRequested: repair,
           lastRepairOutcome: repair ? "unknown" : current?.lastRepairOutcome ?? null,
         } }));
-        const result = send({ kind: "get_hook_doctor", request_id: requestId, repair });
-        if (repair && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+        const result = send(userHookChange
+          ? { kind: "update_user_hooks", request_id: requestId, change: userHookChange }
+          : { kind: "get_hook_doctor", request_id: requestId, repair });
+        if ((repair || userHookChange) && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
           ...state[projectRoot], pending: false,
-          error: "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically.",
+          error: repair
+            ? "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically."
+            : "The hook change could not be confirmed on this connection. Reconnect and refresh the audit; the change will not be retried automatically.",
         } }));
       }
       function applyHookDoctorEvent(event) {
@@ -1188,6 +1192,7 @@ export function createSettingsSurface({
           renderHookCenterPanel(panel, {
             projectRoot: root, state: state[root], available: Boolean(root && root === activeProjectTab()?.project_root),
             onRefresh: () => requestHookDoctor(root), onRepair: () => requestHookDoctor(root, true),
+            onChangeUserHook: change => requestHookDoctor(root, false, false, change),
           });
         }
       }

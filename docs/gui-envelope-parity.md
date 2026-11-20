@@ -135,6 +135,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `SetIssueMonitorAutonomousMode` | 対応 | `issue.monitor.config.set` | プロジェクトの自動実行モードを切り替える。 |
 | `GetUpdateSettings` | 対応 | `update.settings.status` | 更新の適用設定と現在の状態を取得する。 |
 | `GetHookDoctor` | 対応 | `hook.doctor` | プロジェクトの hook を診断し、明示された場合に修復する。 |
+| `UpdateUserHooks` | 一部対応 | `hook.doctor` | 登録済みフックの監査結果は同じ診断で読める。スクリプトの登録と削除は、利用者が画面で明示した操作に限る。 |
 | `SetAutoApplyUpdates` | 対応 | `update.settings.set` | アプリ全体の自動更新適用を変更する。envelope は既存の承認契約を使う。 |
 | `GetIssueMonitorProfiles` | 対応 | `issue.monitor.profiles` | 保存済みの Issues 起動プロファイルを取得する。 |
 | `IssueMonitorProfilesSet` | 対応 | `issue.monitor.profiles.set` | Issues が使う起動プロファイル群を更新する。 |

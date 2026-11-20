@@ -11432,6 +11432,7 @@ impl AppRuntime {
         client_id: ClientId,
         request_id: u64,
         repair: bool,
+        user_hook_change: Option<gwt::user_hooks::UserHookChange>,
     ) -> Vec<OutboundEvent> {
         let project_root = context.project_root.clone();
         if !self
@@ -11464,9 +11465,16 @@ impl AppRuntime {
             // This is a project audit, not an observation of the GUI parent's
             // agent Session or its runtime sidecar.
             input.runtime_state_path = None;
+            // A refused change is reported inside the audit so the screen
+            // keeps the audit it was showing.
+            let change_error = user_hook_change
+                .and_then(|change| gwt::user_hooks::apply(&worker_root, change).err());
             let (report, error) =
                 match gwt::cli::hook::health::read_hook_doctor(&input, repair, None) {
-                    Ok(report) => (Some(report), None),
+                    Ok(mut report) => {
+                        report["user_hooks"]["change_error"] = change_error.into();
+                        (Some(report), None)
+                    }
                     Err(error) => (None, Some(error.to_string())),
                 };
             drop(flight);
@@ -11868,7 +11876,8 @@ impl AppRuntime {
                     self.update_settings_event(None),
                 )]
             }
-            FrontendEvent::GetHookDoctor { request_id, .. } => vec![OutboundEvent::reply(
+            FrontendEvent::GetHookDoctor { request_id, .. }
+            | FrontendEvent::UpdateUserHooks { request_id, .. } => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::HookDoctor {
                     project_root: String::new(),
@@ -13264,7 +13273,10 @@ impl AppRuntime {
                 self.update_settings_event(Some(&context.project_root)),
             )],
             FrontendEvent::GetHookDoctor { request_id, repair } => {
-                self.spawn_hook_doctor(context, client_id, request_id, repair)
+                self.spawn_hook_doctor(context, client_id, request_id, repair, None)
+            }
+            FrontendEvent::UpdateUserHooks { request_id, change } => {
+                self.spawn_hook_doctor(context, client_id, request_id, false, Some(change))
             }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),

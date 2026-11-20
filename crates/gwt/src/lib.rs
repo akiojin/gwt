@@ -102,6 +102,7 @@ pub mod themes;
 pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
+pub mod user_hooks;
 pub mod web_protocol_enums;
 pub mod window_registry;
 pub mod window_state;

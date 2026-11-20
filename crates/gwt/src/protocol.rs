@@ -1196,6 +1196,12 @@ pub enum FrontendEvent {
         #[serde(default)]
         repair: bool,
     },
+    /// Issue #7730: register or remove one of the user's own hooks, then
+    /// answer with the same audit as [`FrontendEvent::GetHookDoctor`].
+    UpdateUserHooks {
+        request_id: u64,
+        change: crate::user_hooks::UserHookChange,
+    },
     /// GUI-only app-wide update preference shared by projects and the Hub.
     SetAutoApplyUpdates {
         enabled: bool,

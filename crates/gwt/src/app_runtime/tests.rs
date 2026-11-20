@@ -1359,6 +1359,95 @@ fn hook_center_uses_connection_project_and_preserves_failed_repair() {
     drain_queued_blocking_tasks(&tasks);
 }
 
+/// Issue #7730: a hook registered from the Hook Center is in the audit that
+/// answers the request, and a refused registration keeps the audit.
+#[test]
+fn hook_center_registers_a_user_hook_into_the_project_audit() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    init_repo(&project);
+    let script = project.join("notify.sh");
+    fs::write(&script, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let tabs = vec![sample_project_tab(
+        "p",
+        "P",
+        project.clone(),
+        ProjectKind::Git,
+        &[],
+    )];
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), tabs, Some("p"));
+    let context = runtime.project_context_for_root(&project).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut user_hooks = |request_id: u64, event: serde_json::Value| {
+        events.lock().unwrap().clear();
+        let immediate = runtime.handle_frontend_event_for_project(
+            &context,
+            "client".to_string(),
+            serde_json::from_value(event).expect("Hook Center request is supported"),
+        );
+        assert!(
+            immediate.is_empty(),
+            "the change runs off the UI event loop"
+        );
+        drain_queued_blocking_tasks(&tasks);
+        let recorded = events.lock().unwrap();
+        let reply = recorded
+            .iter()
+            .find_map(|event| {
+                let UserEvent::Dispatch(dispatched) = recorded_project_payload(event) else {
+                    return None;
+                };
+                dispatched.iter().find_map(|outbound| {
+                    let wire = serde_json::to_value(&outbound.event).unwrap();
+                    (wire["kind"] == "hook_doctor" && wire["request_id"] == request_id)
+                        .then_some(wire)
+                })
+            })
+            .expect("correlated Doctor reply");
+        assert!(reply["error"].is_null(), "{reply}");
+        reply["report"]["user_hooks"].clone()
+    };
+    let registered = user_hooks(
+        773001,
+        serde_json::json!({
+            "kind": "update_user_hooks", "request_id": 773001,
+            "change": { "action": "register", "timing": "stop", "script": "notify.sh" }
+        }),
+    );
+    let listed = serde_json::json!([{
+        "timing": "stop", "script": script.to_string_lossy(), "state": "ready"
+    }]);
+    assert_eq!(registered["hooks"], listed);
+    assert!(registered["change_error"].is_null());
+
+    let refused = user_hooks(
+        773002,
+        serde_json::json!({
+            "kind": "update_user_hooks", "request_id": 773002,
+            "change": { "action": "register", "timing": "session_start", "script": "missing.sh" }
+        }),
+    );
+    assert!(refused["change_error"]
+        .as_str()
+        .is_some_and(|error| error.starts_with("No file exists at ")));
+    assert_eq!(refused["hooks"], listed);
+
+    // A plain audit lists the registered hook too.
+    let audited = user_hooks(
+        773003,
+        serde_json::json!({ "kind": "get_hook_doctor", "request_id": 773003 }),
+    );
+    assert_eq!(audited["hooks"], listed);
+}
+
 pub(super) fn sample_runtime(
     temp_root: &Path,
     tabs: Vec<ProjectTabRuntime>,
