@@ -67,7 +67,9 @@ test("user and agent copy uses the Issues name across shipped surfaces", () => {
   const oldName = new RegExp(["issue", "monitor"].join("\\s+"), "i");
   const paths = execFileSync("git", ["ls-files", "-z", "--",
     "*.rs", "*.md", "*.js", "*.mjs", "*.ts", "*.html", "*.css", "*.py", "*.ps1", "*.yml",
-    ":(exclude).gwt/**"], { cwd: root, encoding: "utf8" })
+    // Issue #7745: design records quote the wording of their time; they are
+    // not shipped copy, so they are not rewritten to the current name.
+    ":(exclude).gwt/**", ":(exclude)docs/design/**"], { cwd: root, encoding: "utf8" })
     .split("\0")
     .filter((path) => /\.(?:rs|md|js|mjs|ts|html|css|py|ps1|yml)$/.test(path));
   const remaining = paths.filter((path) => oldName.test(readFileSync(resolve(root, path), "utf8")));

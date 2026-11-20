@@ -41,6 +41,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
       import { createExecutionEnvironments } from "/execution-environments.js";
+      import { renderProjectExecutionEnvironments } from "/project-execution-environments.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
@@ -478,6 +479,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
       const worksTelemetryModel = createUiStateStore({ sessions: [] });
       const sessionUsageModel = createUiStateStore([]);
+      // Issue #7741: the execution environment definitions and the last refusal.
+      const executionEnvironmentsModel = createUiStateStore({ view: null, refusal: null });
       let routeProjectMissing = false;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
@@ -4745,6 +4748,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,
         applyIssueMonitorProfiles,
+        applyExecutionEnvironments,
+        applyExecutionEnvironmentError,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
         applyAgentBackendsReceiveEvent,
@@ -4780,6 +4785,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         getIndexStatus,
         onOpenAgents: () => pmSettingsPanel.openAgents(),
         rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
+        renderProjectEnvironments: renderProjectExecutionEnvironments,
       });
 
       function ensureWindow(windowData) {
@@ -5514,6 +5520,14 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           case "issue_monitor_profiles":
             applyIssueMonitorProfiles(event);
             break;
+          case "execution_environments":
+            applyExecutionEnvironments(event.view);
+            executionEnvironmentsModel.update(state => ({ ...state, view: event.view }));
+            break;
+          case "execution_environment_error":
+            applyExecutionEnvironmentError(event);
+            executionEnvironmentsModel.update(state => ({ ...state, refusal: { message: event.message } }));
+            break;
           case "issue_monitor_profiles_write_failed":
             applyIssueMonitorProfilesError(event);
             break;
@@ -6105,7 +6119,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // Issue #7648: Execution environments is the one screen that shows
       // provider usage, reset times and limit state, opened from the top bar.
       const executionEnvironments = createExecutionEnvironments({
-        document, usageModel, supportedAgentsModel, renderAccountUsage,
+        document, usageModel, supportedAgentsModel, renderAccountUsage, send,
+        definitionsModel: executionEnvironmentsModel,
         onOpenToolManagement: () => document.dispatchEvent(
           new CustomEvent("settings:open", { detail: { target: "supported-agents" } })),
         onSetUsageCollection: (provider, enabled) => {
@@ -6119,7 +6134,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         executionEnvironments.element.hidden = !host;
         const targetHost = host || document.querySelector(".surface-area");
         if (executionEnvironments.element.parentElement !== targetHost) targetHost.appendChild(executionEnvironments.element);
-        if (host && changed) send({ kind: "list_supported_agents" });
+        if (host && changed) {
+          send({ kind: "list_supported_agents" });
+          executionEnvironments.reload();
+        }
       }
       function openExecutionEnvironments(view = "environments") {
         executionEnvironments.open(view);

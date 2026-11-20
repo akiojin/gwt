@@ -1177,6 +1177,35 @@ pub enum FrontendEvent {
     },
     /// Read the current project's complete saved launch profile pool.
     GetIssueMonitorProfiles,
+    /// Issue #7741: read the execution environments, their accounts, and the
+    /// current project's priority list. Response is
+    /// [`BackendEvent::ExecutionEnvironments`].
+    GetExecutionEnvironments,
+    /// Register an account reached through a tool that reads its own settings.
+    AddExecutionEnvironment {
+        account_id: String,
+        via_tool: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Rename an environment or change its runtime options. A change takes
+    /// effect from the next session.
+    UpdateExecutionEnvironment {
+        environment_id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        runtime: Option<crate::execution_environments::RuntimeOptions>,
+    },
+    /// Delete an environment and take it off every project's list.
+    DeleteExecutionEnvironment {
+        environment_id: String,
+    },
+    /// Replace the current project's available execution environments. The
+    /// order is the priority.
+    SetProjectExecutionEnvironments {
+        environment_ids: Vec<String>,
+    },
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         /// Legacy clients may still send this retired setting; ignore it.
@@ -2485,6 +2514,89 @@ pub struct AgentWorkFactsView {
     pub warning_count: Option<usize>,
 }
 
+/// Issue #7741: an account an execution environment belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionAccountView {
+    pub id: String,
+    pub name: String,
+    pub tool: String,
+    pub tool_name: String,
+}
+
+/// A project that has an execution environment on its list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentProjectView {
+    pub project_root: String,
+    pub title: String,
+    /// 1-based priority of the environment in that project.
+    pub priority: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentView {
+    pub id: String,
+    pub name: String,
+    pub kind: crate::execution_environments::EnvironmentKind,
+    pub account_id: String,
+    pub account_name: String,
+    pub via_tool: String,
+    pub via_tool_name: String,
+    pub runtime: crate::execution_environments::RuntimeOptions,
+    /// Whether the tool sessions start with is installed on this machine.
+    pub tool_installed: bool,
+    /// Why Delete is disabled, when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_blocked_reason: Option<String>,
+    /// Why the runtime options are read-only, when they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_read_only_reason: Option<String>,
+    /// What the tool's own settings file says, for a read-only environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_settings: Option<crate::execution_environments::ToolSettings>,
+    pub projects: Vec<ExecutionEnvironmentProjectView>,
+}
+
+/// One account and tool pair the Add screen offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentViaOptionView {
+    pub account_id: String,
+    pub via_tool: String,
+    pub via_tool_name: String,
+    /// Why this pair cannot be registered, when it cannot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectExecutionEnvironmentView {
+    pub environment_id: String,
+    pub tool: String,
+    pub tool_name: String,
+    /// The environment's name, or `None` when the project launches this tool
+    /// without a registered environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// The current project's available execution environments, in priority order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectExecutionEnvironmentsView {
+    pub project_root: String,
+    /// `false` while the list is still the one derived from the project's
+    /// launch candidates and has never been saved.
+    pub saved: bool,
+    pub entries: Vec<ProjectExecutionEnvironmentView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentsView {
+    pub accounts: Vec<ExecutionAccountView>,
+    pub environments: Vec<ExecutionEnvironmentView>,
+    pub via_options: Vec<ExecutionEnvironmentViaOptionView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectExecutionEnvironmentsView>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -2825,6 +2937,18 @@ pub enum BackendEvent {
         choices: crate::launch_wizard::IssueMonitorProfileChoices,
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
+    },
+    /// Issue #7741: the execution environments as the screens show them.
+    ExecutionEnvironments {
+        view: Box<ExecutionEnvironmentsView>,
+    },
+    /// An execution environment request was refused. `message` says why and
+    /// what to do instead.
+    ExecutionEnvironmentError {
+        message: String,
+        /// The project whose settings sent the request, when one did.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_root: Option<String>,
     },
     /// Client-scoped failure for the exact Settings candidate save.
     IssueMonitorProfilesWriteFailed {
@@ -4251,6 +4375,8 @@ impl BackendEvent {
             BackendEvent::PmLaunchProfileResult { .. } => "pm_launch_profile_result",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
+            BackendEvent::ExecutionEnvironments { .. } => "execution_environments",
+            BackendEvent::ExecutionEnvironmentError { .. } => "execution_environment_error",
             BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
                 "issue_monitor_profiles_write_failed"
             }

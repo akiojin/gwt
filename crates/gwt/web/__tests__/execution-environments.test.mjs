@@ -74,16 +74,44 @@ test("a full Codex subscription distinguishes available credits from an exhauste
   assert.equal(out.usage, "100% used");
 });
 
-test("an environment needs an installed tool and takes its availability from the account", () => {
+// Issue #7741: environments are the backend's definitions; usage belongs to
+// the account and is shown on the environment that runs the account's own tool.
+const definition = (id, extra = {}) => ({
+  id, name: `${id} name`, kind: "set", account_id: id, account_name: `${id} account`,
+  via_tool: id, via_tool_name: id === "claude" ? "Claude Code" : "Codex",
+  runtime: {}, tool_installed: true, projects: [], ...extra,
+});
+const view = (...environments) => ({
+  accounts: [{ id: "claude", tool: "claude", name: "Claude Code 1" }, { id: "codex", tool: "codex", name: "Codex 1" }],
+  environments,
+});
+
+test("an environment row joins its definition with the account's usage and the tool's version", () => {
   const snapshot = { accounts: [claude({ limit_reached: true }), codex()] };
-  const rows = environmentRows(snapshot, agents);
-  assert.deepEqual(rows.map(row => [row.id, row.via, row.toolVersion, row.availability, row.members]), [
-    ["claude_code", "Claude Code", "2.1.3", "limit", 1],
-    ["codex", "Codex", "0.164.0", "available", 1],
+  const rows = environmentRows(view(definition("claude"), definition("codex")), snapshot, agents);
+  assert.deepEqual(rows.map(row => [row.id, row.via, row.toolVersion, row.availability, row.usageProvider]), [
+    ["claude", "Claude Code", "2.1.3", "limit", "claude_code"],
+    ["codex", "Codex", "0.164.0", "available", "codex"],
   ]);
   assert.equal(rows[1].updateAvailable, true);
-  const missing = environmentRows(snapshot, [{ ...agents[0], installed: false }, agents[1]]);
-  assert.deepEqual(missing.map(row => row.id), ["codex"]);
-  assert.equal(environmentRows(snapshot, null).length, 2, "an unknown install state is not a missing tool");
-  assert.equal(environmentRows({ accounts: [codex({ state: { kind: "no_data" }, windows: [] })] }, agents)[0].availability, "unknown");
+  assert.equal(rows[0].account.usage, "58% used");
+  assert.deepEqual(environmentRows(null, snapshot, agents), [], "nothing is shown before the definitions arrive");
+});
+
+test("an environment keeps its row when its tool is missing or reports no usage", () => {
+  const through = definition("claude:hermes", {
+    kind: "via", account_id: "claude", via_tool: "hermes", via_tool_name: "Hermes Agent",
+    runtime_read_only_reason: "Hermes Agent reads these from its own settings file.",
+    tool_settings: { path: "/home/.hermes/config.yaml", values: [{ label: "Model", value: "glm-4.6" }] },
+    projects: [{ project_root: "/p/alpha", title: "alpha", priority: 1 }],
+  });
+  const rows = environmentRows(
+    view(definition("claude", { tool_installed: false, delete_blocked_reason: "Created with the account." }), through, definition("codex")),
+    { accounts: [claude(), codex({ state: { kind: "no_data" }, windows: [] })] }, agents);
+  assert.deepEqual(rows.map(row => row.availability), ["not_installed", "unknown", "unknown"]);
+  assert.equal(rows[0].deleteBlockedReason, "Created with the account.");
+  assert.equal(rows[1].account, null, "the account's usage is not repeated on another tool");
+  assert.equal(rows[1].readOnlyReason, "Hermes Agent reads these from its own settings file.");
+  assert.equal(rows[1].toolSettings.values[0].value, "glm-4.6");
+  assert.deepEqual(rows[1].projects.map(project => project.title), ["alpha"]);
 });

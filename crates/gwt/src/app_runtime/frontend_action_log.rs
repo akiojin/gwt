@@ -573,6 +573,22 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("list_agent_backends", "agent_backends")
                 .agent(agent.as_str())
         }
+        FrontendEvent::AddExecutionEnvironment { via_tool, .. } => {
+            FrontendUserActionLog::new("add_execution_environment", "execution_environments")
+                .agent(via_tool)
+        }
+        FrontendEvent::UpdateExecutionEnvironment { environment_id, .. } => {
+            FrontendUserActionLog::new("update_execution_environment", "execution_environments")
+                .target(environment_id.clone())
+        }
+        FrontendEvent::DeleteExecutionEnvironment { environment_id } => {
+            FrontendUserActionLog::new("delete_execution_environment", "execution_environments")
+                .target(environment_id.clone())
+        }
+        FrontendEvent::SetProjectExecutionEnvironments { .. } => FrontendUserActionLog::new(
+            "set_project_execution_environments",
+            "execution_environments",
+        ),
         FrontendEvent::AddAgentBackend { agent, profile } => {
             FrontendUserActionLog::new("add_agent_backend", "agent_backends")
                 .agent(agent.as_str())
@@ -821,6 +837,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
+        | FrontendEvent::GetExecutionEnvironments
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }

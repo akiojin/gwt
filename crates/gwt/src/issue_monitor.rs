@@ -58,7 +58,9 @@ pub use tiers::{
     IssueMonitorTierProfileProjection, IssueMonitorTierRecord, IssueMonitorTierSelection,
     IssueMonitorTierSelectionProjection,
 };
+mod environments;
 mod quota;
+pub use environments::{normalize_project_execution_environments, ProjectExecutionEnvironment};
 pub(crate) use quota::provider_quota_reset_label;
 use quota::{PROVIDER_QUOTA_UNKNOWN_RESET_AT, PROVIDER_QUOTA_UNKNOWN_RESET_LABEL};
 
@@ -1103,6 +1105,11 @@ pub struct IssueMonitorPrefs {
     pub terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     #[serde(default)]
     pub terminal_queue_auto_refill_limit: usize,
+    /// Issue #7741: the execution environments this project may use, in
+    /// priority order. Empty means the list was never saved; launches then
+    /// choose exactly as they did before the list existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_environments: Vec<ProjectExecutionEnvironment>,
     /// One-shot, project-scoped migration marker. The serde default is
     /// intentionally the numeric default (0) for pre-migration JSON, while
     /// [`Default`] uses the current version for genuinely fresh projects.
@@ -1439,6 +1446,7 @@ impl Default for IssueMonitorPrefs {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            execution_environments: Vec::new(),
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
@@ -1563,6 +1571,7 @@ impl IssueMonitorPrefs {
             "launch_tiers": self.launch_tiers,
             "terminal_queue_auto_refill": self.terminal_queue_auto_refill,
             "terminal_queue_auto_refill_limit": self.terminal_queue_auto_refill_limit,
+            "execution_environments": self.execution_environments,
             "urgent_queue_limit": self.urgent_queue.limit,
             "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
                 "version": drain.version,
@@ -1600,7 +1609,7 @@ impl IssueMonitorPrefs {
             .first()
             .filter(|profile| profile.agent_member_id.is_some())
         else {
-            return pool;
+            return self.environment_candidates(pool);
         };
         let host = crate::process::current_hostname();
         let delivery_member = self
@@ -1617,7 +1626,7 @@ impl IssueMonitorPrefs {
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
         // Issue #7027: every planned member launches with its own registered
         // tool, so an idle member of another pooled tool can take queued work.
-        let tool = normalize_issue_monitor_provider(
+        let planned_tool = normalize_issue_monitor_provider(
             &scheduled
                 .and_then(|id| {
                     pool.iter()
@@ -1626,6 +1635,42 @@ impl IssueMonitorPrefs {
                 .unwrap_or(primary)
                 .agent_id,
         );
+        let members_for = |tool: &Option<String>| -> Vec<IssueMonitorLaunchProfile> {
+            self.registered_members_for_tool(&pool, tool, scheduled, issue_number)
+        };
+        // Issue #7741: a saved environment list decides which tools the
+        // project uses. A planned agent keeps its own tool; unplanned work
+        // takes the first environment some agent can run and that is not held.
+        let Some(tools) = self.environment_tools() else {
+            return members_for(&planned_tool);
+        };
+        if scheduled.is_some() {
+            return if planned_tool
+                .as_ref()
+                .is_some_and(|tool| tools.contains(tool))
+            {
+                members_for(&planned_tool)
+            } else {
+                Vec::new()
+            };
+        }
+        let tool = self.environment_tool_for_unplanned_issue(&tools, |tool| {
+            !members_for(&Some(tool.to_string())).is_empty()
+        });
+        if tool.is_none() {
+            return Vec::new();
+        }
+        members_for(&tool)
+    }
+
+    fn registered_members_for_tool(
+        &self,
+        pool: &[IssueMonitorLaunchProfile],
+        tool: &Option<String>,
+        scheduled: Option<&str>,
+        issue_number: u64,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let tool = tool.clone();
         pool.iter()
             .filter(|profile| {
                 normalize_issue_monitor_provider(&profile.agent_id) == tool
@@ -5594,6 +5639,8 @@ pub struct IssueMonitorState {
     #[serde(default)]
     terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     terminal_queue_auto_refill_limit: usize,
+    #[serde(default)]
+    execution_environments: Vec<ProjectExecutionEnvironment>,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
     /// [`IssueMonitorPrefs::launch_profile_pool`]).
     #[serde(default)]
@@ -8970,6 +9017,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            execution_environments: Vec::new(),
             launch_profiles: Vec::new(),
             launch_auto: false,
             launch_tiers: Vec::new(),
@@ -9078,6 +9126,7 @@ impl IssueMonitorState {
         state.terminal_queue_auto_refill = prefs.terminal_queue_auto_refill;
         state.terminal_queue_exclusions = prefs.terminal_queue_exclusions;
         state.terminal_queue_auto_refill_limit = prefs.terminal_queue_auto_refill_limit;
+        state.execution_environments = prefs.execution_environments;
         state.last_scan_at = prefs.last_scan_at;
         state.last_scan_error = prefs.last_scan_error;
         state.agent_blackout_since = prefs.agent_blackout_since;
@@ -9274,6 +9323,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
             terminal_queue_exclusions: self.terminal_queue_exclusions.clone(),
             terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
+            execution_environments: self.execution_environments.clone(),
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profiles.first().cloned(),
@@ -12708,6 +12758,7 @@ impl IssueMonitorState {
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
         self.terminal_queue_auto_refill_limit = disk.terminal_queue_auto_refill_limit;
+        self.execution_environments = disk.execution_environments.clone();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.apply_terminal_queue_retirements();
         for entry in urgent_proposals {

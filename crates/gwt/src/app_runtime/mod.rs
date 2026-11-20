@@ -1051,6 +1051,7 @@ enum WorktreeFormProjection {
     Resolve,
 }
 
+mod execution_environments;
 mod issue_monitor_delivery_ack;
 mod issue_monitor_list;
 mod issue_monitor_profiles;
@@ -11820,6 +11821,13 @@ impl AppRuntime {
                 self.spawn_backend_connection_probe(client_id, base_url, api_key);
                 Vec::new()
             }
+            event @ (FrontendEvent::GetExecutionEnvironments
+            | FrontendEvent::AddExecutionEnvironment { .. }
+            | FrontendEvent::UpdateExecutionEnvironment { .. }
+            | FrontendEvent::DeleteExecutionEnvironment { .. }
+            | FrontendEvent::SetProjectExecutionEnvironments { .. }) => {
+                self.execution_environment_events(&client_id, None, event)
+            }
             FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
                 client_id,
                 gwt::agent_backend_dispatch::list_event(agent),
@@ -13189,6 +13197,13 @@ impl AppRuntime {
             FrontendEvent::TestBackendConnection { base_url, api_key } => {
                 self.spawn_backend_connection_probe(client_id, base_url, api_key);
                 Vec::new()
+            }
+            event @ (FrontendEvent::GetExecutionEnvironments
+            | FrontendEvent::AddExecutionEnvironment { .. }
+            | FrontendEvent::UpdateExecutionEnvironment { .. }
+            | FrontendEvent::DeleteExecutionEnvironment { .. }
+            | FrontendEvent::SetProjectExecutionEnvironments { .. }) => {
+                self.execution_environment_events(&client_id, Some(context), event)
             }
             FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
                 client_id,
