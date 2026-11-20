@@ -937,6 +937,10 @@ body::after {
 
 /* Issue #6476: keep every top-bar action reachable on phone-sized screens.
    Let the chrome row grow when the existing controls wrap. */
+.arrange-button__short {
+  display: none;
+}
+
 /* Issue 7646: the bar gained the agent ledger entry. Below 900px the brand
    prefix yields its room so the actions never overflow the page. */
 @media (max-width: 900px) {
@@ -976,6 +980,17 @@ body::after {
 
   .project-actions .op-theme-toggle {
     height: auto;
+  }
+
+  /* Issue 7648: with the ledger and environments entries the bar took a third
+     row of a phone screen. The environments entry shows its short label here;
+     its accessible name stays "Execution environments". */
+  .arrange-button__long {
+    display: none;
+  }
+
+  .arrange-button__short {
+    display: inline;
   }
 
   /* T-005r: each rail group wrapped on its own, so the strip took three
