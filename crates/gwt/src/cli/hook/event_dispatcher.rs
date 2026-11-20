@@ -111,6 +111,13 @@ fn handle_with_observation(
         });
         append_boundary_advisory(output, event, advisory)
     });
+    // Issue #7730: start the user's registered scripts once gwt's own handling
+    // let the event through. A Stop that gwt blocks is not a stop.
+    if matches!(&result, Ok(output) if !matches!(output, HookOutput::StopBlock { .. })) {
+        run_value(event, "user-hooks", || {
+            crate::user_hooks::run_for_event(worktree_root, event)
+        });
+    }
     let additional_context_bytes = result
         .as_ref()
         .ok()

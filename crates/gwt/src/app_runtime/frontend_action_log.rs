@@ -634,6 +634,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 "audit"
             })
         }
+        FrontendEvent::UpdateUserHooks { change, .. } => {
+            FrontendUserActionLog::new("update_user_hooks", "settings").mode(match change {
+                gwt::user_hooks::UserHookChange::Register { .. } => "register",
+                gwt::user_hooks::UserHookChange::Remove { .. } => "remove",
+            })
+        }
         FrontendEvent::GetBoardAuthStatus => {
             FrontendUserActionLog::new("get_board_auth_status", "settings")
         }

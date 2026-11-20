@@ -979,7 +979,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "delete_theme"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
-            (message.kind === "get_hook_doctor" && message.repair === true)) {
+            (message.kind === "get_hook_doctor" && message.repair === true) || message.kind === "update_user_hooks") {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }

@@ -2030,6 +2030,17 @@ reconnect. A lost repair reply leaves the outcome Unknown; a read-only refresh
 does not confirm completion. The latest audit and last repair outcome are shown
 separately.
 
+**Your hooks** in the same Hook Center lists the scripts you registered for the
+project and registers a new one from a timing (**Session start** or **Stop**)
+and a script location. A location is absolute, starts with `~/`, or is relative
+to the project; the script must exist and be executable. gwt starts a
+registered script when an agent session starts or an agent stops, in the
+agent's working directory, with `GWT_HOOK_TIMING` set to `session_start` or
+`stop`, and does not wait for it. A Stop that gwt blocks does not start it.
+Registered hooks are part of the audit: a script that is missing or no longer
+executable is reported and is not started. Registrations are saved on this
+computer under `~/.gwt/projects/`, not in the repository.
+
 If an agent stop or pane close reports unread Board evidence, read the bodies
 in that same agent session with JSON operation `board.show` and
 `params:{"all":true}`, then retry. Automatic reminders do not acknowledge a
