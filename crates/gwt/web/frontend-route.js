@@ -25,6 +25,8 @@ export function projectUrlPath(projectKey) {
 }
 
 export const HUB_URL_PATH = "/";
+// Issue #7639: `/` opens on Home; this link opens its Projects view.
+export const HUB_PROJECTS_URL_PATH = "/?view=projects";
 
 // The WebSocket scope is derived from the route, never from page state:
 // a Project tab always reconnects to the same Project.
@@ -58,7 +60,11 @@ export function renderRouteNotFound(doc) {
   main.append(title, copy, home);
   doc.body.className = "route-body";
   // Issue #7740: every page carries the shared header and footer.
-  const page = createAppChrome({ document: doc }).mountPage();
+  const view = doc.defaultView;
+  const page = createAppChrome({ document: doc, handlers: {
+    pm: () => view.location.assign(HUB_URL_PATH),
+    projects: () => view.location.assign(HUB_PROJECTS_URL_PATH),
+  } }).mountPage();
   doc.body.replaceChildren(page.header, main, page.footer);
   return main;
 }

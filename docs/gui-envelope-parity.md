@@ -78,6 +78,8 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `RestartWindow` | 対象外 | — | 現在のウィンドウと出力履歴を保って保存済みペインを再開する。 |
 | `TerminalInput` | 一部対応 | `pane.send` | 自分のペインに一行を送信できる。GUI の対話的な端末入力はキー入力や改行をそのまま扱う。 |
 | `LoadPmConversation` | 読み取り | — | 正規 PM ペインに結び付く会話の履歴を表示用に読む。 |
+| `LoadHomeConversation` | 読み取り | — | ホームの会話に出す、開いている各プロジェクトの PM の判断レポートを読む。 |
+| `HomePmSend` | 対象外 | — | ホームからプロジェクトを指定して、そのプロジェクトの登録済み PM ペインへ文を送る。宛先のセッションはホストが解決する。 |
 | `LoadPmReports` | 一部対応 | `pm.report.list` | 永続化された PM レポートを取得できる。GUI は現在の PM ペインと表示 revision に応じた差分も返す。 |
 | `LoadPmRequestTask` | 対応 | `pm.request_tasks.read` | PM への依頼タスクとその詳細を取得する。 |
 | `ReopenPmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 再開するドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |

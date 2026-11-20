@@ -1,9 +1,11 @@
 /* Issue #4538 AC-1 / AC-3 — Hub picker and route not-found in a real
  * browser with a deterministic WebSocket backend (no live gwt required).
+ * Issue #7639: the picker is the Projects view of the page at `/`; Home, its
+ * other view, is covered by home-conversation.spec.ts.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { HUB_URL, ORIGIN_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
-import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { HUB_PROJECTS_URL, HUB_URL, ORIGIN_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt, liveGwtProjectsUrl, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "Alpha", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind: "git" };
@@ -112,7 +114,7 @@ test("live isolated Hub opens a manual path and acknowledges an already-open Pro
         if (JSON.parse(String(payload)).kind === "project_opened") openedEvents += 1;
       } catch { /* Ignore non-JSON frames. */ }
     }));
-    await page.goto(new URL("/", base!).href);
+    await page.goto(liveGwtProjectsUrl(base!));
     await expect(page.locator("[data-hub]")).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     await page.getByText("Enter folder path…", { exact: true }).click();
@@ -223,7 +225,7 @@ test.describe("Project Hub and routes", () => {
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
     await installRouteBackend(page);
-    await page.goto(new URL("/", base || ORIGIN_URL).href);
+    await page.goto(new URL("/?view=projects", base || ORIGIN_URL).href);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const control = page.locator('[data-hub-action="open-folder"]');
     await expect(control).toBeVisible();
@@ -418,7 +420,7 @@ test.describe("Project Hub and routes", () => {
     await page.screenshot({ path: testInfo.outputPath("project-not-found-state.png") });
     await view.getByRole('link', { name: 'Go to Hub' }).click();
     await expect(page.locator('[data-hub]')).toBeVisible();
-    await expect(page).toHaveTitle('gwt — Hub');
+    await expect(page).toHaveTitle('gwt — Home');
     expect(errors).toEqual([]);
   });
 
@@ -459,7 +461,7 @@ test.describe("Project Hub and routes", () => {
     const errors = collectBrowserErrors(page);
     await installEmbeddedRoutes(page);
     await installRouteBackend(page);
-    await page.goto(HUB_URL);
+    await page.goto(HUB_PROJECTS_URL);
     const open = page.locator('[data-hub-action="open-folder"]');
     await open.click();
     await expect(open).toHaveText("Choosing folder…");
@@ -493,8 +495,8 @@ test.describe("Project Hub and routes", () => {
     const errors = collectBrowserErrors(page);
     await installEmbeddedRoutes(page);
     await installRouteBackend(page);
-    await page.goto(HUB_URL);
-    await expect(page).toHaveTitle("gwt — Hub");
+    await page.goto(HUB_PROJECTS_URL);
+    await expect(page).toHaveTitle("gwt — Home");
     await expect(page.locator("[data-hub]")).toBeVisible();
     for (const selector of ["#app", "#project-tabs", "#op-rail", ".workspace-window", "#project-switcher-button"]) {
       await expect(page.locator(selector)).toHaveCount(0);
@@ -622,21 +624,11 @@ test.describe("shared header and footer", () => {
     await page.getByRole("button", { name: "Close notifications", exact: true }).click();
     await expect(page.locator("#notification-center")).toBeHidden();
 
-    // AC-2: a destination without a screen is shown, disabled, and says why.
-    const projects = entry(page, "projects");
-    await expect(projects).toBeVisible();
-    await expect(projects).toHaveAttribute("aria-disabled", "true");
-    const sentBefore = (await sentKinds(page)).length;
-    // Playwright treats aria-disabled as not actionable; a user can still press it.
-    await projects.click({ force: true });
-    const reason = page.locator('.app-head-popover[role="status"]');
-    await expect(reason).toBeVisible();
-    await expect(reason).toHaveText("This screen is not available yet.");
-    await expect(reason).toBeInViewport({ ratio: 1 });
-    expect((await sentKinds(page)).length).toBe(sentBefore);
+    // Every destination has a screen on a project page (Issue #7639 gave
+    // Projects its own); the disabled entry and its reason are covered on the
+    // page at `/` below.
+    for (const id of destinations) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
     await page.screenshot({ path: testInfo.outputPath("shared-header-project.png") });
-    await page.locator(".surface-area").click({ position: { x: 5, y: 5 } });
-    await expect(reason).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 
@@ -700,11 +692,13 @@ test.describe("shared header and footer", () => {
     }
     // Scrolling the row dismisses the popover, so let the reset above settle first.
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    // A disabled entry still explains itself on a phone, inside the viewport.
-    await entry(page, "projects").click({ force: true });
-    await expect(page.locator('.app-head-popover[role="status"]')).toBeInViewport({ ratio: 1 });
     await page.setViewportSize({ width: 1360, height: 900 });
     await expect(page.locator(".app-head")).toHaveCSS("height", "44px");
+    // Issue #7639: Projects opens the project list, the Projects view of `/`.
+    await entry(page, "projects").click();
+    await expect(page).toHaveURL(/\/\?view=projects$/);
+    await expect(page.locator("[data-hub-projects]")).toBeVisible();
+    await expect(entry(page, "projects")).toHaveAttribute("aria-current", "page");
     expect(errors).toEqual([]);
   });
 
@@ -716,10 +710,12 @@ test.describe("shared header and footer", () => {
       expect(await page.locator(".app-head__nav > [data-destination]").evaluateAll(nodes =>
         nodes.map(node => (node as HTMLElement).dataset.destination))).toEqual(destinations);
       await expect(page.locator("footer.app-foot .app-foot__pm")).toHaveText("PM: —");
-      // No project is open here: the entries stay, disabled, with the reason.
-      for (const id of ["pm", "notifications", "agents", "environments"]) {
+      // No project is open here: the entries that need one stay, disabled,
+      // with the reason. Home and Projects need none (Issue #7639).
+      for (const id of ["notifications", "agents", "environments"]) {
         await expect(entry(page, id)).toHaveAttribute("aria-disabled", "true");
       }
+      for (const id of ["pm", "projects"]) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
       await entry(page, "agents").click({ force: true });
       await expect(page.locator('.app-head-popover[role="status"]')).toHaveText("Open a project to use this.");
       await entry(page, "menu").click();
@@ -728,6 +724,14 @@ test.describe("shared header and footer", () => {
       await expect(settings).toContainText("Open a project to use this.");
       await page.keyboard.press("Escape");
       await page.setViewportSize({ width: 390, height: 844 });
+      // A disabled entry still explains itself on a phone, inside the viewport.
+      // Scrolling the row dismisses the popover, so bring the entry into view first.
+      await entry(page, "agents").scrollIntoViewIfNeeded();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await entry(page, "agents").click({ force: true });
+      await expect(page.locator('.app-head-popover[role="status"]')).toBeInViewport({ ratio: 1 });
+      await entry(page, "agents").click({ force: true });
+      await page.locator(".app-head__row").evaluate(row => { row.scrollLeft = 0; });
       const header = (await page.locator(".app-head").boundingBox())!;
       const row = (await page.locator(".app-head__row").boundingBox())!;
       expect(header.height).toBeLessThanOrEqual(104);

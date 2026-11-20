@@ -17,6 +17,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
+        HUB_PROJECTS_URL_PATH,
         parseFrontendRoute,
         projectUrlPath,
         renderRouteNotFound,
@@ -254,6 +255,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         handlers: {
           pm: () => openPmDecisions(),
           notifications: () => notificationCenter.toggle(),
+          // Issue #7639: the project list is the Projects view of the page at `/`.
+          projects: () => window.location.assign(HUB_PROJECTS_URL_PATH),
           agents: () => openSurface("agents"),
           environments: () => openExecutionEnvironments(),
           settings: () => openSurface("settings"),

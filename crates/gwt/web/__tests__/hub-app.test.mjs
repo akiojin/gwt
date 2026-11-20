@@ -1,5 +1,7 @@
-// Issue #4538 AC-3: the Hub at `/` is a picker only — Open Folder, Clone,
-// Recent, and open Projects — with path-free, new-tab Project links.
+// Issue #4538 AC-3: the picker at `/` — Open Folder, Clone, Recent, and open
+// Projects — with path-free, new-tab Project links. Since Issue #7639 it is
+// the Projects view of that page; Home (home-conversation.test.mjs) is the
+// other view.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -24,7 +26,11 @@ function fixture(action = "", popupBlocked = false) {
       sockets.push(this);
     }
     addEventListener(kind, handler) { this.handlers[kind] = handler; }
-    send(raw) { this.sent.push(JSON.parse(raw)); }
+    // Home's periodic decisions read is covered by home-conversation.test.mjs.
+    send(raw) {
+      const message = JSON.parse(raw);
+      if (message.kind !== "load_home_conversation") this.sent.push(message);
+    }
     open() { this.readyState = 1; this.handlers.open(); }
     deliver(event) { this.handlers.message({ data: JSON.stringify(event) }); }
   }
@@ -35,6 +41,8 @@ function fixture(action = "", popupBlocked = false) {
     WebSocket: FakeSocket,
     setTimeout: (callback) => { timers.push(callback); return timers.length; },
     clearTimeout() {},
+    setInterval: () => 1,
+    clearInterval() {},
     open(url, target) {
       assert.equal(url, "about:blank");
       assert.equal(target, "_blank");
@@ -52,9 +60,14 @@ function hubState(projects, recent = []) {
   return { kind: "hub_state", hub: { app_version: "9.9.9", projects, recent_projects: recent } };
 }
 
-test("Hub replaces the Project workspace with a picker only", () => {
-  const { document, sockets } = fixture();
-  assert.equal(document.title, "gwt — Hub");
+test("the page at / never carries the Project workspace, and its Projects view is the picker", () => {
+  const { app, document, sockets } = fixture();
+  assert.equal(document.title, "gwt — Home");
+  assert.equal(document.querySelector("[data-hub]").dataset.hubView, "home");
+  assert.equal(document.querySelector("[data-hub-projects]").hidden, true, "the picker is not part of Home");
+  app.showView("projects");
+  assert.equal(document.querySelector("[data-hub-projects]").hidden, false);
+  assert.equal(document.querySelector("[data-hub] > .react-island").hidden, true);
   for (const selector of ["#app", "#project-tabs", ".project-tab", "#workspace", "#op-rail", "#project-switcher-button"]) {
     assert.equal(document.querySelector(selector), null, `${selector} must not exist on the Hub`);
   }
@@ -88,6 +101,33 @@ test("open and recent Projects are path-free links that open a new tab", () => {
   const pending = document.querySelector('[data-hub-list="recent"] .is-pending');
   assert.equal(pending.textContent, "Gamma");
   assert.equal(pending.getAttribute("href"), null, "an unresolved Recent entry is not a link");
+});
+
+test("Projects are found by name", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  const many = Array.from({ length: 20 }, (_, index) => ({
+    id: `tab-${index}`, project_key: index.toString(16).padStart(16, "0"), title: `Project ${index + 1}`, kind: "git",
+  }));
+  sockets[0].deliver(hubState(many, [{ path: "/Users/me/keiba", title: "KeibaDB", kind: "git", project_key: projectB.project_key }]));
+  const open = () => [...document.querySelectorAll('[data-hub-list="open"] a')].map(link => link.textContent);
+  assert.equal(open().length, 20);
+  const search = document.querySelector("[data-hub-search]");
+  search.value = "project 2";
+  search.dispatchEvent(new document.defaultView.Event("input"));
+  assert.deepEqual(open(), ["Project 2", "Project 20"]);
+  assert.equal(document.querySelector('[data-hub-list="recent"]').textContent, "No project matches.");
+  search.value = "keiba";
+  search.dispatchEvent(new document.defaultView.Event("input"));
+  assert.deepEqual(open(), []);
+  assert.equal(document.querySelector('[data-hub-list="recent"] a').textContent, "KeibaDB");
+});
+
+test("an action link lands on the Projects view", () => {
+  for (const action of ["?action=clone", "?action=open-folder", "?view=projects"]) {
+    assert.equal(fixture(action).document.querySelector("[data-hub]").dataset.hubView, "projects", action);
+  }
+  assert.equal(fixture("?view=unknown").document.querySelector("[data-hub]").dataset.hubView, "home");
 });
 
 test("empty catalog states are explicit", () => {

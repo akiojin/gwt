@@ -237,8 +237,18 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
 Hub のタイトルと favicon は固定です。
 
-ルート URL `http://127.0.0.1:<port>/` は **Hub** です。Open Folder、Clone from
-GitHub、Recent projects、開いているプロジェクトの一覧を表示します。各プロジェクトは
+ルート URL `http://127.0.0.1:<port>/` は **Hub** です。開くと **Home**（Project
+Manager との会話）が表示されます。開いている各プロジェクトの Project Manager が
+待っている判断が、古いものを上にしてメッセージとして並びます。メッセージ内の
+ボタンで答えるか、下部の入力欄から返信すると、そのプロジェクトの Project Manager
+へ届きます。新しいメッセージの宛先は `@プロジェクト名` で指定するか、複数の
+プロジェクトを開いている場合は入力欄の横の一覧から選びます。Home にプロジェクトの
+内容は表示しません。プロジェクトがまだ無い場合は、Import from GitHub、Open a
+folder、Clone from a URL を案内します。
+
+ヘッダーの **Projects** でプロジェクト一覧を開きます。Open Folder、Clone from
+GitHub、Recent projects、開いているプロジェクトの一覧を表示し、名前で検索できます。
+`http://127.0.0.1:<port>/?view=projects` で直接開けます。各プロジェクトは
 固有の URL `http://127.0.0.1:<port>/p/<project-hash>` を持ち、プロジェクトへの
 リンクは新しいブラウザタブで開くため、1 つのブラウザタブには 1 つのプロジェクトが
 表示されます。異なるプロジェクトのウィンドウと起動ダイアログは独立し、同じ

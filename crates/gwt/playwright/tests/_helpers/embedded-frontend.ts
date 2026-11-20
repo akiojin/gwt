@@ -18,6 +18,8 @@ export const ORIGIN_URL = "http://gwt-playwright.local/";
 export const APP_PROJECT_KEY = "0123456789abcdef";
 export const APP_URL = `${ORIGIN_URL}p/${APP_PROJECT_KEY}`;
 export const HUB_URL = ORIGIN_URL;
+// Issue #7639: `/` opens on Home; the picker is its Projects view.
+export const HUB_PROJECTS_URL = `${ORIGIN_URL}?view=projects`;
 
 const ROOT_MODULES = new Set([
   "app.js",
@@ -34,6 +36,8 @@ const ROOT_MODULES = new Set([
   "execution-environments.js",
   // Issue #7740 — shared header and footer imported by app.js, hub-app.js and frontend-route.js.
   "app-chrome.js",
+  // Issue #7639 — Home conversation host imported by hub-app.js.
+  "home-conversation.js",
   "project-execution-environments.js",
   // SPEC #7007 T-014 — typed window command error presentation imported by app.js.
   "window-command-error.js",
