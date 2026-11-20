@@ -1225,7 +1225,9 @@ Autonomous モードはループ全体を無人で実行します: 適格 Issue 
 opt-in** が必要です:
 
 1. Issue サーフェスの `Autonomous` トグルを有効化（プロジェクト単位）。
-2. 自律処理したい各 Issue に `auto-merge` ラベルを付与。
+2. 自律処理したい各 Issue を対象に含める。Issue の詳細を開き、Operations の
+   Autonomous target で `Include` を選ぶ（`auto-merge` ラベルが付く。ラベルを
+   直接付けてもよい）。
 
 さらに、機械検証可能な受け入れ基準（本文の `## Acceptance Criteria`
 チェックリスト）があり、ベースブランチの protection ルールが検証可能で、

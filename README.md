@@ -1347,7 +1347,9 @@ implementation → independent review → strong automated gate → auto-merge. 
 is **off by default** and requires a **two-stage opt-in**:
 
 1. Enable the `Autonomous` toggle in the Issue surface toolbar (per project).
-2. Label each issue you want handled autonomously with `auto-merge`.
+2. Include each issue you want handled autonomously: open the issue's detail
+   and choose `Include` under Operations → Autonomous target. This adds the
+   `auto-merge` label, which you can also add yourself.
 
 An issue additionally qualifies only when it has machine-checkable acceptance
 criteria (an `## Acceptance Criteria` checklist in the body), the base
