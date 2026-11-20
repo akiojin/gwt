@@ -680,22 +680,24 @@ test('Q&A separates safe question text from the Markdown answer and copies both'
   assert.deepEqual(copied, [`Q: ${qa.question}\n\nA:\n${qa.body}`]);
 });
 
-test('decision Reports display and copy numbered choices without changing the stored body', async () => {
-  const { root, update, copied, model } = fixture();
+// SPEC #7007 T-023: decision data is drawn only by Decide and the PM
+// conversation, so Reports lists every other kind and never a decision.
+test('Reports never lists a decision report and leaves its stored body unchanged', () => {
+  const { root, update, model } = fixture();
   const incoming = structuredReport('decision');
   incoming.kind = 'decision';
   incoming.structured.summary.decision = { question: 'Which recovery?', recommendation: 'Retry',
     reason: 'The work is saved', options: ['Retry — run again', 'Wait — keep state',
       'Inspect <logs> — gather evidence', 'Cancel — stop'] };
-  const expected = 'Ready\nNext: Check delivery\nDecision: Which recovery?\nRecommended: Retry (The work is saved)\n1. Retry — run again\n2. Wait — keep state\n3. Inspect <logs> — gather evidence\n4. Cancel — stop\nReply with the option number, or Other: your own answer.';
-  update([incoming]);
-  const article = root.querySelector('article');
-  assert.equal(article.querySelector('.pm-chat__text').textContent, expected);
-  assert.equal(article.querySelector('logs'), null, 'choices remain literal text');
-  article.querySelector('[aria-label="Copy report"]').click();
-  await Promise.resolve();
-  assert.deepEqual(copied, [`${expected}\n\n**All checks passed.**\n\n- https://example.com/issues/3431`]);
-  assert.equal(model.readPmWindowState().windows.pm.reports[0].body, incoming.body);
+  update([structuredReport('progress-1'), incoming]);
+  const transcript = root.querySelector('.pm-chat__transcript');
+  assert.deepEqual([...transcript.querySelectorAll('article')].map(row => row.dataset.reportId), ['progress-1']);
+  assert.equal(transcript.querySelector('.pm-chat__decision-controls'), null, 'Reports offers no answer controls');
+  assert.doesNotMatch(transcript.textContent, /Which recovery\?/);
+  assert.equal(root.querySelectorAll('.task-decisions__card').length, 1, 'the decision waits in Decide');
+  const stored = model.readPmWindowState().windows.pm.reports[1];
+  assert.equal(stored.body, incoming.body);
+  assert.equal(stored.content.body, 'Ready\nNext: Check delivery\nDecision: Which recovery?\nRecommended: Retry (The work is saved)\n1. Retry — run again\n2. Wait — keep state\n3. Inspect <logs> — gather evidence\n4. Cancel — stop\nReply with the option number, or Other: your own answer.');
 });
 
 test('structured Reports show a compact overview and copy all expandable details and references', async () => {
@@ -769,7 +771,7 @@ test('structured disclosure follows report identity across polling and filters w
   const body = root.querySelector('.pm-chat__body');
   Object.defineProperties(body, { clientHeight: { value: 100 }, scrollHeight: { value: 2000 } });
   const first = structuredReport('first');
-  const second = { ...structuredReport('second'), kind: 'decision' };
+  const second = { ...structuredReport('second'), kind: 'blocker' };
   update([first]);
   const opened = root.querySelector('article details');
   assert.ok(opened, 'typed report has a disclosure to open');
@@ -785,7 +787,7 @@ test('structured disclosure follows report identity across polling and filters w
     select.querySelector(`option[value="${kind}"]`).selected = true;
     select.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));
   };
-  choose('decision');
+  choose('blocker');
   choose('all');
   details = root.querySelectorAll('article details');
   assert.equal(details[0].hasAttribute('open'), true, 'filtering retains the state by report id');
@@ -807,25 +809,23 @@ test('report kind filter retains its selection on polling and hides with the exe
   assert.ok(select, 'Reports must offer a report kind selector');
   assert.match(select.closest('label').textContent, /^Report kind/);
   assert.deepEqual(Array.from(select.options, option => [option.value, option.textContent]), [
-    ['all', 'All reports'], ['qa', 'Q&A'], ['progress', 'Progress'], ['decision', 'Decision'], ['blocker', 'Blocker'],
-  ]);
+    ['all', 'All reports'], ['qa', 'Q&A'], ['progress', 'Progress'], ['blocker', 'Blocker'],
+  ], 'decisions are not a Reports kind');
   const choose = kind => {
     select.querySelector(`option[value="${kind}"]`).selected = true;
     select.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));
   };
   choose('qa');
-  assert.equal(root.querySelectorAll('article').length, 1);
+  assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 1);
   assert.ok(root.querySelector('.pm-chat__question'));
   update([...history, { ...report('follow-up'), kind: 'qa', question: 'What next?' }]);
   assert.equal(select.value, 'qa');
-  assert.equal(root.querySelectorAll('article').length, 2);
-  for (const kind of ['progress', 'decision']) {
-    choose(kind);
-    assert.equal(root.querySelectorAll('article').length, 1);
-    assert.equal(root.querySelector('.pm-chat__author span').textContent, kind);
-  }
+  assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 2);
+  choose('progress');
+  assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 1);
+  assert.equal(root.querySelector('.pm-chat__author span').textContent, 'progress');
   choose('blocker');
-  assert.equal(root.querySelectorAll('article').length, 0);
+  assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 0);
   assert.match(root.querySelector('.pm-chat__body [role="status"]').textContent, /No Blocker reports yet/);
   [...root.querySelectorAll('.pm-chat__toolbar button')].find(button => button.textContent === 'Execution log').click();
   assert.equal(select.closest('.pm-chat__body').hidden, true);
@@ -833,7 +833,7 @@ test('report kind filter retains its selection on polling and hides with the exe
   assert.equal(select.value, 'blocker');
   assert.equal(select.closest('.pm-chat__body').hidden, false);
   choose('all');
-  assert.equal(root.querySelectorAll('article').length, 4);
+  assert.equal(root.querySelectorAll('.pm-chat__transcript article').length, 3, 'the decision report is not listed');
 });
 
 test('Reports starts at the tail, follows new reports and preserves history across hidden updates (Issue #6235)', () => {
@@ -1675,26 +1675,37 @@ const decisionReport = (id = 'decision-1') => ({ ...structuredReport(id), kind: 
         options: ['Use the shorter message', 'Keep the detailed message'] } },
     details: '', refs: [] } });
 
-test('Chat and Reports share Decide answer pending, failure, retry and confirmed state', () => {
+const chatDecision = (root, id = 'decision-1') =>
+  root.querySelector(`.pm-chat__conversation .pm-chat__decision[data-decision-id="${id}"]`);
+
+// SPEC #7007 T-023 AC-1 / AC-2: a waiting decision is drawn by Decide and by
+// the PM conversation only, and both settle the same decision.
+test('Decide and the PM conversation share answer pending, failure, retry and confirmed state', () => {
   const { root, model, view, update, sent } = fixture();
   const incoming = decisionReport();
   incoming.structured.summary.decision.options = ['Use <short> wording', 'Keep the detailed message',
     'Inspect the saved evidence', 'Wait for another report'];
   update([incoming]);
   view.showChat();
-  const region = root.querySelector('section[aria-label="Decision reports"]');
-  assert.ok(region, 'Chat labels its report-derived decisions separately from native messages');
-  assert.ok(region.closest('.pm-chat__conversation'), 'decisions stay in the Chat scrolling area');
-  const chatControls = () => region.querySelector('[data-decision-id="decision-1"] .pm-chat__decision-controls');
-  const reportControls = () => root.querySelector('[data-report-id="decision-1"] .pm-chat__decision-controls');
-  assert.ok(chatControls(), 'Chat exposes the saved decision controls');
-  assert.ok(reportControls(), 'Reports exposes the same decision controls');
-  for (const controls of [chatControls(), reportControls()]) {
-    assert.deepEqual([...controls.querySelectorAll('.pm-chat__decision-option')].map(button => button.textContent),
-      incoming.structured.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
-    assert.equal(controls.querySelector('short'), null, 'option labels are literal text');
-    assert.match(controls.textContent, /Recommended: Use the shorter message/);
-  }
+  assert.equal(root.querySelector('section[aria-label="Decision reports"]'), null,
+    'the separate report section is gone from Chat');
+  assert.equal(root.querySelector('.pm-chat__transcript .pm-chat__decision-controls'), null,
+    'Reports draws no decision');
+  assert.equal(root.querySelectorAll('[data-decision-id="decision-1"]').length, 2,
+    'the decision is drawn exactly twice: Decide and the conversation');
+  const message = chatDecision(root);
+  assert.ok(message.classList.contains('pm-chat__bubble--assistant'), 'the decision reads as a PM message');
+  assert.match(message.querySelector('.pm-chat__decision-meta').textContent, /Decision waiting/);
+  assert.deepEqual([...message.querySelectorAll('.pm-chat__decision-text p')].map(node => node.textContent), [
+    'The launch error task is waiting for a wording choice.',
+    'Which recovery message should the agent use?',
+    'I recommend: Use the shorter message. It names the next step without internal terms.',
+    'The task stays stopped until you choose.',
+  ]);
+  const chatControls = () => chatDecision(root).querySelector('.pm-chat__decision-controls');
+  assert.deepEqual([...chatControls().querySelectorAll('.pm-chat__decision-option')].map(button => button.textContent),
+    incoming.structured.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
+  assert.equal(chatControls().querySelector('short'), null, 'option labels are literal text');
   const draft = root.querySelector('.pm-chat__draft');
   draft.value = 'Keep my unfinished request';
   const option = chatControls().querySelectorAll('.pm-chat__decision-option')[1];
@@ -1705,107 +1716,156 @@ test('Chat and Reports share Decide answer pending, failure, retry and confirmed
   assert.equal(sent.length, 1);
   assert.equal(sent[0].text,
     'Answer to "Which recovery message should the agent use?": 2. Keep the detailed message\r');
-  for (const controls of [chatControls(), reportControls()]) {
-    assert.ok([...controls.querySelectorAll('button')].every(button => button.disabled));
-    assert.match(controls.querySelector('[role="status"]').textContent, /Sending/);
-  }
-  assert.ok(chatControls().querySelectorAll('.pm-chat__decision-option')[1] === option,
-    'pending state keeps the keyboard-selected option node');
+  assert.ok([...chatControls().querySelectorAll('button')].every(button => button.disabled));
+  assert.match(chatControls().querySelector('[role="status"]').textContent, /Sending/);
   root.querySelector('.task-decisions__option').click();
   assert.equal(sent.length, 1, 'switching surfaces cannot duplicate an in-flight answer');
   model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[0].request_id,
     ok: false, error: 'The PM pane refused the message.' });
-  for (const controls of [chatControls(), reportControls()]) {
-    assert.match(controls.querySelector('[role="alert"]').textContent, /The PM pane refused the message/);
-    assert.equal(controls.querySelector('.pm-chat__decision-option').disabled, false);
-  }
+  assert.match(chatControls().querySelector('[role="alert"]').textContent, /The PM pane refused the message/);
+  assert.equal(chatControls().querySelector('.pm-chat__decision-option').disabled, false);
   assert.ok(chatControls().querySelectorAll('.pm-chat__decision-option')[1] === option,
     'a failed answer leaves the original option available for keyboard retry');
   assert.match(root.querySelector('.task-decisions__card').textContent, /The PM pane refused the message/);
-  const retry = reportControls().querySelector('.pm-chat__decision-option');
+  const retry = chatControls().querySelector('.pm-chat__decision-option');
   let focused = retry;
   Object.defineProperty(root.ownerDocument, 'activeElement', { configurable: true, get: () => focused });
   retry.click();
   assert.equal(sent.length, 2, 'an explicit choice retries the failed answer');
   assert.doesNotMatch(chatControls().textContent, /Answer sent/);
-  const confirmedStatus = reportControls().querySelector('[role="status"]');
+  const confirmedStatus = chatControls().querySelector('[role="status"]');
   confirmedStatus.focus = () => { focused = confirmedStatus; };
   model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[1].request_id,
     ok: true });
-  for (const controls of [chatControls(), reportControls()]) {
-    assert.match(controls.querySelector('[role="status"]').textContent, /Answer sent: Use <short> wording/);
-    assert.equal(controls.querySelectorAll('button').length, 0);
-  }
+  assert.match(chatControls().querySelector('[role="status"]').textContent, /Answer sent: Use <short> wording/);
+  assert.equal(chatControls().querySelectorAll('button').length, 0);
+  assert.match(chatDecision(root).querySelector('.pm-chat__decision-meta').textContent, /Decision answered/);
   assert.match(root.querySelector('.task-decisions__card').textContent, /Answer sent: Use <short> wording/);
   assert.ok(focused === confirmedStatus, 'confirmation moves focus from the removed option to its status');
   assert.equal(draft.value, 'Keep my unfinished request', 'a choice send never clears an unrelated composer draft');
   assert.equal(model.readPmWindowState().windows.pm.reports[0].body, incoming.body);
 });
 
-test('Other opens Chat without sending or overwriting the draft', () => {
-  const { root, view, update, sent } = fixture();
+// A free-form reply is an answer too: it is recorded against the decision
+// it replies to, and the waiting count follows.
+test('A free-form reply answers the decision it targets and updates the waiting count', () => {
+  const { root, model, view, update, sent, waiting } = fixture();
   update([decisionReport(), { ...report('untyped'), kind: 'decision', body: 'Approve the release note wording?' }]);
+  assert.equal(waiting.at(-1).waiting, 2);
   const draft = root.querySelector('.pm-chat__draft');
   draft.value = 'My own unfinished answer';
   let focused = false;
   draft.focus = () => { focused = true; };
-  const controls = root.querySelector('[data-report-id="decision-1"] .pm-chat__decision-controls');
-  assert.ok(controls, 'a structured Report offers a free reply');
-  const reply = [...controls.querySelectorAll('button')].find(button => button.textContent === 'Other: reply in chat');
-  assert.ok(reply);
-  reply.click();
-  assert.equal(view.isChatVisible(), true);
-  assert.equal(focused, true, 'the existing composer receives focus');
-  assert.equal(draft.value, 'My own unfinished answer');
-  assert.equal(sent.length, 0);
-  const untypedControls = root.querySelectorAll('[data-decision-id="untyped"] .pm-chat__decision-controls, [data-report-id="untyped"] .pm-chat__decision-controls');
-  assert.equal(untypedControls.length, 2);
-  for (const controls of untypedControls) {
-    assert.equal(controls.querySelectorAll('.pm-chat__decision-option').length, 0,
+  const chip = root.querySelector('.pm-chat__reply-target');
+  assert.equal(chip.hidden, true, 'the composer starts without a reply target');
+  for (const id of ['untyped']) {
+    assert.equal(chatDecision(root, id).querySelectorAll('.pm-chat__decision-option').length, 0,
       'a report without a typed packet never invents options');
   }
-  root.querySelector('.pm-chat__composer').dispatchEvent(new root.ownerDocument.defaultView.Event('submit'));
-  assert.equal(sent[0].text, 'My own unfinished answer\r');
-  assert.equal(draft.value, 'My own unfinished answer', 'the free reply stays in its existing draft until confirmed');
+  view.showDecisions();
+  const card = root.querySelector('.task-decisions__card[data-decision-id="decision-1"]');
+  [...card.querySelectorAll('button')].find(button => button.textContent === 'Reply in chat').click();
+  assert.equal(view.isChatVisible(), true);
+  assert.equal(focused, true, 'the existing composer receives focus');
+  assert.equal(draft.value, 'My own unfinished answer', 'opening the reply keeps the draft');
+  assert.equal(sent.length, 0, 'the reply path never sends by itself');
+  assert.equal(chip.hidden, false);
+  assert.match(chip.textContent, /Replying to: Which recovery message should the agent use\?/);
+  const submit = () => root.querySelector('.pm-chat__composer')
+    .dispatchEvent(new root.ownerDocument.defaultView.Event('submit'));
+  submit();
+  assert.equal(sent[0].text,
+    'Answer to "Which recovery message should the agent use?": My own unfinished answer\r');
+  assert.equal(draft.value, 'My own unfinished answer', 'the reply stays in the draft until confirmed');
+  assert.equal(waiting.at(-1).waiting, 2, 'an unconfirmed reply does not settle the decision');
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[0].request_id, ok: true });
+  assert.match(chatDecision(root).textContent, /Answer sent: My own unfinished answer/);
+  assert.match(card.textContent, /Answer sent: My own unfinished answer/);
+  assert.equal(waiting.at(-1).waiting, 1, 'the free-form answer leaves one decision waiting');
+  assert.deepEqual(waiting.at(-1).ids, ['untyped']);
+  assert.equal(chip.hidden, true, 'the reply target clears with the answer');
+  assert.equal(draft.value, '');
+  [...chatDecision(root, 'untyped').querySelectorAll('button')]
+    .find(button => button.textContent === 'Other: write a reply').click();
+  assert.match(chip.textContent, /Replying to: Approve the release note wording\?/);
+  chip.querySelector('button').click();
+  assert.equal(chip.hidden, true, 'Cancel reply returns the composer to a plain message');
+  draft.value = 'A new request';
+  submit();
+  assert.equal(sent[1].text, 'A new request\r');
+  assert.equal(waiting.at(-1).waiting, 1, 'a plain message answers nothing');
 });
 
-test('Decision controls follow same-report updates and reset on PM rebind while native messages keep their order', () => {
+// "Decide later" postpones without settling: the decision keeps waiting at
+// the end of the queue on both surfaces and the waiting count is unchanged.
+test('Decide later moves a decision to the end of the queue without changing the waiting count', () => {
+  const { root, model, view, update, sent, waiting } = fixture();
+  update([decisionReport('decision-1'), decisionReport('decision-2')]);
+  view.showDecisions();
+  const decideOrder = () => [...root.querySelectorAll('.task-decisions__card')].map(card => card.dataset.decisionId);
+  const chatOrder = () => [...root.querySelectorAll('.pm-chat__conversation .pm-chat__decision')]
+    .map(node => node.dataset.decisionId);
+  assert.deepEqual(decideOrder(), ['decision-2', 'decision-1']);
+  assert.deepEqual(chatOrder(), ['decision-2', 'decision-1']);
+  const later = card => [...card.querySelectorAll('button')].find(button => button.textContent === 'Decide later');
+  later(root.querySelector('.task-decisions__card')).click();
+  assert.equal(sent.length, 0, 'deferring sends nothing to the PM');
+  assert.deepEqual(decideOrder(), ['decision-1', 'decision-2'], 'the next decision comes first in Decide');
+  assert.deepEqual(chatOrder(), ['decision-1', 'decision-2'], 'the conversation follows the same queue');
+  assert.equal(waiting.at(-1).waiting, 2, 'a deferred decision is still waiting');
+  assert.equal(root.querySelector('.task-decisions__count').textContent, '2 decisions waiting');
+  assert.match(root.querySelector('.task-decisions__notice').textContent, /Kept waiting and moved to the end of the queue/);
+  assert.match(root.querySelector('.task-decisions__card[data-decision-id="decision-2"] .task-decisions__chip').textContent, /Deferred/);
+  assert.match(chatDecision(root, 'decision-2').querySelector('.pm-chat__decision-meta').textContent, /Deferred/);
+  later(chatDecision(root, 'decision-1')).click();
+  assert.deepEqual(decideOrder(), ['decision-2', 'decision-1'], 'deferring from the conversation reorders Decide too');
+  assert.equal(waiting.at(-1).waiting, 2);
+  root.querySelector('.task-decisions__card[data-decision-id="decision-1"] .task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  assert.equal(waiting.at(-1).waiting, 1, 'a deferred decision can still be answered');
+  assert.deepEqual(waiting.at(-1).ids, ['decision-2']);
+  assert.equal(root.querySelector('.task-decisions__count').textContent, '1 decision waiting');
+  later(root.querySelector('.task-decisions__card[data-decision-id="decision-2"]')).click();
+  assert.match(root.querySelector('.task-decisions__notice').textContent, /No other decision is waiting/);
+  assert.equal(waiting.at(-1).waiting, 1);
+});
+
+test('Decision messages follow same-report updates and reset on PM rebind while native messages keep their order', () => {
   const { root, model, update } = fixture();
   const incoming = decisionReport();
   update([incoming]);
-  const region = root.querySelector('section[aria-label="Decision reports"]');
-  assert.ok(region, 'the report-derived Chat region exists');
+  const message = chatDecision(root);
+  assert.ok(message, 'the decision is part of the conversation');
   model.applyPmWindowReceiveEvent(conversation([{ id: 'a1', role: 'assistant', text: 'Native PM message' },
     { id: 'u1', role: 'user', text: 'Native user message' }]));
-  assert.equal(root.querySelector('section[aria-label="Decision reports"]'), region,
-    'native conversation updates keep the decision section attached');
-  assert.deepEqual([...root.querySelectorAll('.pm-chat__bubble')].map(node => node.dataset.messageId), ['a1', 'u1']);
-  assert.equal(region.closest('.pm-chat__bubble'), null);
+  assert.equal(chatDecision(root), message, 'native conversation updates keep the decision message attached');
+  assert.deepEqual([...root.querySelectorAll('.pm-chat__conversation > *')]
+    .map(node => node.dataset.messageId || node.dataset.decisionId), ['a1', 'u1', 'decision-1']);
   const changed = decisionReport();
   changed.structured.summary.decision.options.push('Ask the reviewer');
   update([changed]);
-  for (const controls of root.querySelectorAll('.pm-chat__decision-controls')) {
-    assert.equal(controls.querySelectorAll('.pm-chat__decision-option').length, 3);
-  }
-  root.querySelector('[data-report-id="decision-1"] .pm-chat__decision-option').click();
+  assert.equal(chatDecision(root).querySelectorAll('.pm-chat__decision-option').length, 3);
+  chatDecision(root).querySelector('.pm-chat__decision-option').click();
   model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
   model.bindPmWindowState('pm', 'replacement');
-  assert.equal(region.querySelector('[data-decision-id]'), null, 'a rebind removes the previous report decisions');
+  assert.equal(root.querySelector('.pm-chat__conversation [data-decision-id]'), null,
+    'a rebind removes the previous decisions');
   update([incoming]);
-  assert.doesNotMatch(region.textContent, /Answer sent/);
-  assert.equal(region.querySelectorAll('.pm-chat__decision-option').length, 2,
+  assert.doesNotMatch(chatDecision(root).textContent, /Answer sent/);
+  assert.equal(chatDecision(root).querySelectorAll('.pm-chat__decision-option').length, 2,
     'the same report is actionable in its new Session');
-  assert.equal(root.querySelectorAll('.pm-chat__bubble').length, 0);
+  assert.equal(root.querySelectorAll('.pm-chat__bubble[data-message-id]').length, 0);
 });
 
-test('Report decision controls use Operator layout tokens and wrap long option buttons', async () => {
+test('Decision message controls use Operator layout tokens and wrap long option buttons', async () => {
   const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
   const rule = name => css.match(new RegExp(`\\.${name}\\s*\\{([^}]*)\\}`))?.[1] || '';
   assert.match(rule('pm-chat__decision-controls'), /gap:\s*var\(--space-/);
   assert.match(rule('pm-chat__decision-options'), /flex-wrap:\s*wrap/);
   assert.match(rule('pm-chat__decision-option'), /white-space:\s*normal/);
   assert.match(rule('pm-chat__decision-option'), /overflow-wrap:\s*anywhere/);
-  for (const name of ['pm-chat__decision-reports', 'pm-chat__decision-controls', 'pm-chat__decision-options', 'pm-chat__decision-option']) {
+  for (const name of ['pm-chat__decision-meta', 'pm-chat__reply-target', 'pm-chat__decision-controls', 'pm-chat__decision-options', 'pm-chat__decision-option']) {
+    assert.ok(rule(name), `${name} is styled`);
     assert.doesNotMatch(rule(name), /#[0-9a-f]{3,8}\b|rgba?\(|position:\s*(fixed|absolute)/i, name);
   }
 });
