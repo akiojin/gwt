@@ -5780,6 +5780,7 @@ body {
 
 /* Issue 4079 AC-2 — which pool candidate an Agent Settings save writes.
    (No `#` before the number: the token audits scan this block for hex colors.) */
+.launch-environment,
 .launch-pool-impact {
   display: flex;
   flex-direction: column;
@@ -5791,8 +5792,15 @@ body {
   background: var(--color-surface-raised, var(--color-surface));
 }
 
+.launch-environment__title,
 .launch-pool-impact__title {
   color: var(--color-text-strong);
+}
+
+/* Issue 7652 — the note under the agent settings that says a launch's choices
+   are overrides for that launch. */
+.launch-override-note {
+  margin-top: 10px;
 }
 
 /* Issue 4911 — Issues settings form repeats the Agent Settings

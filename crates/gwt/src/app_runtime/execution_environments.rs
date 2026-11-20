@@ -146,6 +146,69 @@ pub(crate) fn execution_environments_view(
     }
 }
 
+/// Issue #7652 (SPEC #7007 items 243 and 251): the execution environment a
+/// manual launch with `tool` runs on, its place on the project's list, and
+/// why each entry ahead of it is not the one used.
+pub(crate) fn launch_wizard_environment_view(
+    store: &Store,
+    prefs: &gwt::IssueMonitorPrefs,
+    tool: &str,
+    installed: &dyn Fn(&str) -> bool,
+) -> Option<gwt::LaunchWizardExecutionEnvironmentView> {
+    let agent = gwt_agent::resolve_agent_id(tool)?;
+    let (_, list) = environments::project_list(store, prefs);
+    let position = list
+        .iter()
+        .position(|entry| gwt_agent::resolve_agent_id(&entry.tool).as_ref() == Some(&agent));
+    let environment = match position {
+        Some(index) => store.environment(&list[index].environment_id),
+        None => store.environment_for_tool(tool),
+    };
+    if position.is_none() && environment.is_none() {
+        return None;
+    }
+    let chosen = tool_name(tool);
+    // A tool the project launches without a registered environment keeps its
+    // place on the list under its own name.
+    let entry_name = |entry: &ProjectExecutionEnvironment| {
+        store
+            .environment(&entry.environment_id)
+            .map_or_else(|| tool_name(&entry.tool), |found| found.name.clone())
+    };
+    let skipped = list[..position.unwrap_or(0)]
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| gwt::LaunchWizardSkippedEnvironmentView {
+            priority: index + 1,
+            name: entry_name(entry),
+            reason: if installed(&entry.tool) {
+                format!("{chosen} was chosen for this launch.")
+            } else {
+                format!(
+                    "{} is not installed on this machine.",
+                    tool_name(&entry.tool)
+                )
+            },
+        })
+        .collect();
+    Some(gwt::LaunchWizardExecutionEnvironmentView {
+        name: environment.map_or_else(|| chosen.clone(), |found| found.name.clone()),
+        via_tool_name: chosen,
+        priority: position.map(|index| index + 1),
+        list_len: list.len(),
+        note: match position {
+            Some(0) => "First on this project's list.".to_string(),
+            Some(index) => format!(
+                "Number {} of {} on this project's list.",
+                index + 1,
+                list.len()
+            ),
+            None => "Not on this project's list. It is used for this launch only.".to_string(),
+        },
+        skipped,
+    })
+}
+
 /// The list a project saves for `environment_ids`, in that order. An id is an
 /// environment, or a tool the project already launches without one.
 pub(crate) fn project_list_for_ids(
@@ -235,7 +298,7 @@ impl AppRuntime {
             .collect()
     }
 
-    fn installed_tools(&self) -> Vec<String> {
+    pub(super) fn installed_tools(&self) -> Vec<String> {
         self.launch_wizard_cache
             .agent_options()
             .into_iter()
@@ -465,6 +528,57 @@ mod tests {
                 }],
             },
         )
+    }
+
+    #[test]
+    fn a_launch_names_its_environment_its_place_and_why_earlier_ones_are_not_used() {
+        let wizard = |saved: &[(&str, &str)], tool: &str| {
+            let project = project("gwt", &["claude", "codex"], saved);
+            launch_wizard_environment_view(&store(), &project.prefs, tool, &|tool| tool != "hermes")
+        };
+
+        // The head of the list has nothing ahead of it.
+        let head = wizard(&[], "claude").unwrap();
+        assert_eq!(head.name, "Claude Code 1");
+        assert_eq!(head.via_tool_name, "Claude Code");
+        assert_eq!((head.priority, head.list_len), (Some(1), 2));
+        assert!(head.skipped.is_empty());
+        assert!(head.note.contains("First"), "{}", head.note);
+
+        // A later entry names every entry ahead of it with its reason.
+        let saved = [
+            ("claude:hermes", "hermes"),
+            ("claude", "claude"),
+            ("codex", "codex"),
+        ];
+        let third = wizard(&saved, "codex").unwrap();
+        assert_eq!((third.priority, third.list_len), (Some(3), 3));
+        assert!(third.note.contains("3 of 3"), "{}", third.note);
+        let skipped: Vec<_> = third
+            .skipped
+            .iter()
+            .map(|entry| (entry.priority, entry.name.as_str()))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                (1, "Claude Code 1 (via Hermes Agent)"),
+                (2, "Claude Code 1")
+            ]
+        );
+        assert!(third.skipped[0].reason.contains("not installed"));
+        assert!(third.skipped[1].reason.contains("Codex was chosen"));
+
+        // A tool off the list still launches, and says so.
+        let off = wizard(&[("claude", "claude")], "codex").unwrap();
+        assert_eq!((off.priority, off.list_len), (None, 1));
+        assert_eq!(off.name, "Codex 1");
+        assert!(off.note.contains("Not on this project's list"));
+        assert!(off.skipped.is_empty());
+
+        // A tool with no environment anywhere shows nothing.
+        assert!(wizard(&[], "my-custom-agent").is_none());
+        assert!(wizard(&[("claude", "claude")], "openclaw").is_none());
     }
 
     #[test]

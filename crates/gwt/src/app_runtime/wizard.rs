@@ -1607,6 +1607,43 @@ impl AppRuntime {
                         Some(self.agent_settings_sets_view(&sets, &session.wizard));
                 }
             }
+        } else if view.selected_launch_target == "agent" {
+            // Issue #7652: a launch that starts an agent names the execution
+            // environment it runs on. Definitions or settings that cannot be
+            // read leave the row out, so they never stop a launch.
+            let root = &session.project_context.project_root;
+            let prefs =
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root));
+            if let (Ok(store), Ok(prefs)) = (gwt::execution_environments::load(), prefs) {
+                let installed = self.installed_tools();
+                view.execution_environment =
+                    super::execution_environments::launch_wizard_environment_view(
+                        &store,
+                        &prefs,
+                        &view.selected_agent_id,
+                        &|tool| {
+                            gwt_agent::resolve_agent_id(tool).is_some_and(|agent| {
+                                installed.iter().any(|id| {
+                                    gwt_agent::resolve_agent_id(id).as_ref() == Some(&agent)
+                                })
+                            })
+                        },
+                    );
+            }
+            if let Some(environment) = view.execution_environment.as_ref() {
+                let after_agent = view
+                    .launch_summary
+                    .iter()
+                    .position(|item| item.label == "Agent")
+                    .map_or(view.launch_summary.len(), |index| index + 1);
+                view.launch_summary.insert(
+                    after_agent,
+                    gwt::LaunchWizardSummaryView {
+                        label: "Execution environment".to_string(),
+                        value: format!("{} · {}", environment.name, environment.note),
+                    },
+                );
+            }
         }
         view
     }

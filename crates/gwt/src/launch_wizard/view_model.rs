@@ -169,6 +169,7 @@ impl LaunchWizardState {
             selected_reasoning: self.reasoning.clone(),
             runtime_target_options: runtime_target_options_view(),
             selected_runtime_target: runtime_target_value(self.runtime_target).to_string(),
+            runtime_target_note: show_runtime_confirmation.then(|| self.runtime_target_note()),
             windows_shell_options: windows_shell_options_view(),
             selected_windows_shell: self
                 .windows_shell_for_launch()
@@ -212,6 +213,7 @@ impl LaunchWizardState {
             // Agent Settings form.
             issue_monitor_pool_impact: None,
             issue_monitor_pool: None,
+            execution_environment: None,
             hermes_provider: self.hermes_provider.clone(),
             hermes_provider_options: self.hermes_choices.providers.clone(),
             hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
@@ -525,6 +527,28 @@ impl LaunchWizardState {
                 color: None,
             })
             .collect()
+    }
+
+    /// Issue #7652 (SPEC #7007 item 197): say whether the place the session
+    /// runs is the one this project used last, or a change made here.
+    fn runtime_target_note(&self) -> String {
+        if !self.has_docker_workflow() {
+            return "This project has no Docker setup, so the session runs on the host."
+                .to_string();
+        }
+        match self.previous_profiles.repo_local() {
+            Some(previous) if previous.runtime_target == self.runtime_target => {
+                "Inherited from the last launch in this project.".to_string()
+            }
+            Some(previous) => format!(
+                "Changed from the last launch in this project ({}).",
+                match previous.runtime_target {
+                    gwt_agent::LaunchRuntimeTarget::Host => "Host",
+                    gwt_agent::LaunchRuntimeTarget::Docker => "Docker",
+                }
+            ),
+            None => "No earlier launch in this project, so this is the default.".to_string(),
+        }
     }
 
     fn launch_summary_view(&self) -> Vec<LaunchWizardSummaryView> {
@@ -2393,6 +2417,65 @@ mod tests {
             },
             other => panic!("expected quick start launch completion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_runtime_step_says_where_the_place_to_run_comes_from() {
+        let previous = |target| {
+            LaunchWizardPreviousProfiles::default().with_repo_local(Some(
+                LaunchWizardPreviousProfile {
+                    agent_id: "codex".to_string(),
+                    model: None,
+                    reasoning: None,
+                    session_mode: Default::default(),
+                    skip_permissions: false,
+                    fast_mode: false,
+                    codex_speed: Default::default(),
+                    runtime_target: target,
+                    docker_service: None,
+                    docker_lifecycle_intent: Default::default(),
+                    windows_shell: None,
+                    hermes: Default::default(),
+                },
+            ))
+        };
+        let note = |docker: bool, profiles: LaunchWizardPreviousProfiles| {
+            let mut ctx = context(branch("feature/current"), "feature/current");
+            if docker {
+                ctx.docker_context = Some(DockerWizardContext {
+                    services: vec!["app".to_string()],
+                    suggested_service: Some("app".to_string()),
+                });
+            }
+            let mut state = LaunchWizardState::open_with_previous_profiles(
+                ctx,
+                sample_agent_options(),
+                Vec::new(),
+                profiles,
+            );
+            let before = state.view();
+            assert!(
+                before.show_runtime_confirmation || before.runtime_target_note.is_none(),
+                "the note belongs to the runtime step"
+            );
+            state.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+            state.runtime_target_note()
+        };
+
+        // Item 197 (1): without a Docker setup the host is the only place.
+        assert!(
+            note(false, previous(gwt_agent::LaunchRuntimeTarget::Docker))
+                .contains("no Docker setup")
+        );
+        // Item 197 (3): the project's last value is inherited ...
+        assert!(note(true, previous(gwt_agent::LaunchRuntimeTarget::Host)).contains("Inherited"));
+        // ... and a different choice is named as a change from it.
+        let changed = note(true, previous(gwt_agent::LaunchRuntimeTarget::Docker));
+        assert!(
+            changed.contains("Changed") && changed.contains("Docker"),
+            "{changed}"
+        );
+        assert!(note(true, Default::default()).contains("default"));
     }
 
     #[test]
