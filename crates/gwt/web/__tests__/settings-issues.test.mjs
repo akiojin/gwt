@@ -703,7 +703,7 @@ test("Agents Settings binds registered members and keeps tool choices fixed", ()
   assert.equal(panel.querySelector('[aria-label="Move up Birch"]').textContent, "Move up Birch");
   assert.ok(panel.querySelector('[aria-label="Remove Birch"]'));
 
-  assert.deepEqual(sent.at(-1).profiles[0], { agent_member_id: "b", agent_id: "codex", docker_service: null, prefer_for: [], session_mode: "Normal", runtime_target: "Host", windows_shell: null, skip_permissions: false, fast_mode: false });
+  assert.deepEqual(sent.at(-1).profiles[0], { agent_member_id: "b", agent_id: "codex", docker_service: null, docker_lifecycle_intent: "Connect", prefer_for: [], session_mode: "Normal", runtime_target: "Host", runtime_inherit: false, windows_shell: null, skip_permissions: false, fast_mode: false });
   selectValue(member, "c"); member.dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(sent.at(-1).profiles[0].agent_id, "claude");
   assert.equal(Object.hasOwn(sent.at(-1).profiles[0], "model"), false);
@@ -726,6 +726,53 @@ test("Agents Settings preserves unavailable and resting members without provider
   assert.match(panel.querySelector('[data-agent-member-id="missing"]').textContent, /unavailable/i);
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="agent_member_id"]').value, "missing");
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-member-tuning-field="model"]').disabled, true);
+});
+
+test("Issue #7729 AC-4: a candidate names Inherit, Host or Docker, its service and its lifecycle", () => {
+  const { document, Event } = parseHTML('<section id="docker"></section><section id="plain"></section>');
+  const panel = document.getElementById("docker"), plain = document.getElementById("plain"), sent = [];
+  const render = load("renderAgentsSettingsPanel");
+  const change = (control, value) => { selectValue(control, value); control.dispatchEvent(new Event("change", { bubbles: true })); };
+  render(panel, { profiles: [{ agent_member_id: "m-codex", agent_id: "codex", runtime_target: "Docker", docker_service: "worker", docker_lifecycle_intent: "Restart" }],
+    choices: candidateChoices, send: message => sent.push(message) });
+  const runtime = panel.querySelector('[data-profile-field="runtime_target"]');
+  assert.equal(runtime.getAttribute("aria-label"), "Runs on codex");
+  assert.deepEqual([...runtime.options].map(option => [option.value, option.textContent]),
+    [["Inherit", "Inherit (this project's last launch)"], ["Host", "Host"], ["Docker", "Docker"]]);
+  assert.equal(runtime.value, "Docker");
+  const service = panel.querySelector('[data-profile-field="docker_service"]');
+  const lifecycle = panel.querySelector('[data-profile-field="docker_lifecycle_intent"]');
+  assert.deepEqual([...lifecycle.options].map(option => [option.value, option.textContent]), [
+    ["Connect", "Connect only"], ["Start", "Start then launch"], ["Restart", "Restart then launch"],
+    ["Recreate", "Recreate then launch"], ["CreateAndStart", "Create and start then launch"],
+  ]);
+  assert.equal(lifecycle.value, "Restart");
+  assert.equal(service.closest("label").hidden, false);
+  assert.equal(lifecycle.closest("label").hidden, false);
+
+  change(lifecycle, "Recreate");
+  assert.deepEqual([sent.at(-1).profiles[0].runtime_target, sent.at(-1).profiles[0].runtime_inherit,
+    sent.at(-1).profiles[0].docker_service, sent.at(-1).profiles[0].docker_lifecycle_intent], ["Docker", false, "worker", "Recreate"]);
+
+  change(runtime, "Inherit");
+  assert.equal(sent.at(-1).profiles[0].runtime_inherit, true);
+  assert.equal(sent.at(-1).profiles[0].runtime_target, "Docker", "the place it last named is kept for the day it stops inheriting");
+  assert.equal(service.closest("label").hidden, true, "an inheriting candidate names no service");
+  assert.equal(lifecycle.closest("label").hidden, true);
+  assert.match(panel.querySelector("[data-profile-runtime-note]").textContent, /where this project's last launch ran/);
+
+  // Item 197 (1): without a Docker setup, Docker is not offered at all.
+  render(plain, { profiles: [{ agent_member_id: "m-codex", agent_id: "codex", runtime_inherit: true, runtime_target: "Host" },
+    { agent_member_id: "m-claude", agent_id: "claude", runtime_target: "Docker", docker_service: "gone" }],
+    choices: { ...candidateChoices, docker_services: [], default_docker_service: null }, send: message => sent.push(message) });
+  const [inherit, saved] = plain.querySelectorAll('[data-profile-field="runtime_target"]');
+  assert.deepEqual([...inherit.options].map(option => option.value), ["Inherit", "Host"]);
+  assert.equal(inherit.value, "Inherit");
+  assert.equal(plain.querySelector('[data-profile-field="docker_service"]').closest("label").hidden, true);
+  // Item 197 (2): a saved Docker choice is shown as saved, and the fallback is named.
+  assert.deepEqual([...saved.options].map(option => option.value), ["Inherit", "Host", "Docker"]);
+  assert.equal(saved.value, "Docker");
+  assert.match(plain.querySelectorAll("[data-profile-runtime-note]")[1].textContent, /no Docker setup.*host/i);
 });
 
 test("candidate vector omits implementation tuning even when inherited from its saved profile", () => {

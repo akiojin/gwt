@@ -9114,7 +9114,11 @@ fn issue_monitor_owner_launch_profile_choice(
                     "No eligible Issues launch candidate: every provider is held",
                 )
             })?;
-            let profile = with_environment_runtime(&prefs, pool[index].clone(), false);
+            let profile = with_environment_runtime(
+                &prefs,
+                with_inherited_runtime(cache, project_root, pool[index].clone()),
+                false,
+            );
             return Ok(IssueMonitorLaunchProfileChoice {
                 profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
                     profile.clone().into(),
@@ -9170,7 +9174,11 @@ fn issue_monitor_owner_launch_profile_choice(
             "No eligible Issues automatic tier candidate",
         )
     })?;
-    let profile = with_environment_runtime(&prefs, selection.profile, true);
+    let profile = with_environment_runtime(
+        &prefs,
+        with_inherited_runtime(cache, project_root, selection.profile),
+        true,
+    );
     Ok(IssueMonitorLaunchProfileChoice {
         profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.clone().into())),
         selected_agent_member_id: profile.agent_member_id.clone(),
@@ -9178,6 +9186,20 @@ fn issue_monitor_owner_launch_profile_choice(
         skipped: selection.skipped,
         tier: Some(selection.tier),
     })
+}
+
+/// Issue #7729 AC-4 (SPEC #7007 item 197): a candidate that inherits its place
+/// runs where this project's last launch ran. The session history is read
+/// only for such a candidate.
+fn with_inherited_runtime(
+    cache: &LaunchWizardMemoryCache,
+    project_root: &Path,
+    mut profile: gwt::IssueMonitorLaunchProfile,
+) -> gwt::IssueMonitorLaunchProfile {
+    if profile.runtime_inherit {
+        profile.resolve_inherited_runtime(cache.previous_profiles(project_root).repo_local());
+    }
+    profile
 }
 
 /// Issue #7741: start the candidate with the runtime options of the execution
@@ -9280,7 +9302,11 @@ fn issue_monitor_launch_profile_choice(
                     (0, Vec::new())
                 }
             };
-            let profile = with_environment_runtime(&prefs, pool[index].clone(), false);
+            let profile = with_environment_runtime(
+                &prefs,
+                with_inherited_runtime(cache, project_root, pool[index].clone()),
+                false,
+            );
             return IssueMonitorLaunchProfileChoice {
                 profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
                     profile.clone().into(),

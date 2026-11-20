@@ -390,7 +390,7 @@ function renderCandidateSaveError(panel, event) {
     feedback.textContent = event.message;
     feedback.dataset.kind = "error";
     feedback.setAttribute("role", "alert");
-    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|docker_lifecycle_intent|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
     const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
     const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
     const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
@@ -432,7 +432,8 @@ function reconcileCandidateSave(panel, event) {
       if (input.type === "checkbox") input.checked = profile[key] === true;
       else {
         const saved = key === "prefer_for" ? (profile[key] || []).join(", ")
-          : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+          : key === "runtime_target" && profile.runtime_inherit ? "Inherit"
+            : String(profile[key] ?? ({ session_mode: "Normal", runtime_target: "Host", docker_lifecycle_intent: "Connect" }[key] || ""));
         if (input.localName === "select") {
           if (![...input.options].some(option => option.value === saved)) {
             const option = panel.ownerDocument.createElement("option");
@@ -718,6 +719,10 @@ export function renderAgentsSettingsPanel(panel, options) {
         : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
           : input.value.trim() || null;
     }
+    // Issue #7729 AC-4: "Inherit" is a choice of its own, not a third place.
+    // The place the candidate last named stays saved under it.
+    next.runtime_inherit = next.runtime_target === "Inherit";
+    if (next.runtime_inherit) next.runtime_target = profile.runtime_target || "Host";
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === next.agent_member_id);
     if (member) next.agent_id = member.agent_id;
     if (repair && staleTool) {
@@ -788,13 +793,26 @@ export function renderAgentsSettingsPanel(panel, options) {
     let previousTool = provider(profile.agent_id);
     const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(selectedMember()?.agent_id || profile.agent_id));
     const initial = capabilities();
+    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
+    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
+    // Issue #7729 AC-4 (SPEC #7007 item 197): where the candidate runs. Docker
+    // is offered only in a project that has a Docker setup; a saved Docker
+    // choice stays visible, and the launch falls back to the host.
+    const dockerAvailable = (choices?.docker_services || []).length > 0;
+    const runtime = field(row, "Runs on", "runtime_target", profile.runtime_inherit ? "Inherit" : profile.runtime_target || "Host", "text", [
+      { value: "Inherit", label: "Inherit (this project's last launch)" }, "Host", ...(dockerAvailable ? ["Docker"] : []),
+    ]);
     const docker = field(row, "Docker service", "docker_service", profile.docker_service ?? "", "text", [
       { value: "", label: choices?.default_docker_service ? `Auto (${choices.default_docker_service})` : "Auto" },
       ...(choices?.docker_services || []),
     ]);
-    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
-    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
-    const runtime = field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
+    const lifecycle = field(row, "Docker lifecycle", "docker_lifecycle_intent", profile.docker_lifecycle_intent || "Connect", "text", [
+      { value: "Connect", label: "Connect only" }, { value: "Start", label: "Start then launch" },
+      { value: "Restart", label: "Restart then launch" }, { value: "Recreate", label: "Recreate then launch" },
+      { value: "CreateAndStart", label: "Create and start then launch" },
+    ]);
+    const runtimeNote = document.createElement("p"); runtimeNote.className = "settings-help"; runtimeNote.dataset.profileRuntimeNote = "";
+    runtimeNote.setAttribute("role", "status"); row.append(runtimeNote);
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
@@ -842,8 +860,14 @@ export function renderAgentsSettingsPanel(panel, options) {
       syncTuning();
       skip.disabled = !entry?.supports_skip_permissions;
       fast.disabled = !entry?.supports_fast_mode;
-      docker.disabled = runtime.value !== "Docker";
-      shell.disabled = runtime.value === "Docker" || !choices?.windows_shell_supported;
+      const onDocker = runtime.value === "Docker";
+      docker.disabled = lifecycle.disabled = !onDocker;
+      docker.closest("label").hidden = lifecycle.closest("label").hidden = !onDocker;
+      runtimeNote.textContent = runtime.value === "Inherit"
+        ? "Runs where this project's last launch ran. With no earlier launch, it runs on the host."
+        : onDocker && !dockerAvailable ? "This project has no Docker setup, so launches run on the host." : "";
+      runtimeNote.hidden = !runtimeNote.textContent;
+      shell.disabled = onDocker || !choices?.windows_shell_supported;
     };
     row.updateCandidateChoices();
     for (const [direction, offset] of [["up", -1], ["down", 1]]) {

@@ -2370,6 +2370,8 @@ struct IssueMonitorLaunchProfileRepr {
     #[serde(default)]
     codex_fast_mode: bool,
     #[serde(default)]
+    runtime_inherit: bool,
+    #[serde(default)]
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
     docker_service: Option<String>,
@@ -2400,6 +2402,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
             skip_permissions: repr.skip_permissions,
             fast_mode: repr.fast_mode || legacy_fast_mode,
             codex_speed: repr.codex_speed,
+            runtime_inherit: repr.runtime_inherit,
             runtime_target: repr.runtime_target,
             docker_service: repr.docker_service,
             docker_lifecycle_intent: repr.docker_lifecycle_intent,
@@ -2433,6 +2436,13 @@ pub struct IssueMonitorLaunchProfile {
     /// Explicit Codex speed; old boolean settings intentionally remain Off.
     #[serde(default)]
     pub codex_speed: gwt_agent::CodexSpeed,
+    /// Issue #7729 AC-4 (SPEC #7007 item 197 (4)): the candidate does not
+    /// name where it runs. A launch then runs where this project's last
+    /// launch ran, and the three fields below are only what the form last
+    /// showed. See [`Self::resolve_inherited_runtime`]. Always written, so a
+    /// sparse `profiles.set` can carry the saved choice over like any field.
+    #[serde(default)]
+    pub runtime_inherit: bool,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -2463,11 +2473,38 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             // decide a Claude profile's Fast Mode.
             fast_mode: config.fast_mode,
             codex_speed: config.codex_speed,
+            runtime_inherit: false,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
             windows_shell: config.windows_shell,
             prefer_for: Vec::new(),
+        }
+    }
+}
+
+impl IssueMonitorLaunchProfile {
+    /// Issue #7729 AC-4 (item 197 (3) and (4)): settle where an inheriting
+    /// candidate runs before it starts a session. `previous` is this
+    /// project's last launch; with none, the candidate runs on the host. A
+    /// candidate that names its place is left as it is. The launch still
+    /// falls back to the host when it asks for Docker in a project that has
+    /// no Docker setup (item 197 (2)).
+    pub fn resolve_inherited_runtime(&mut self, previous: Option<&LaunchWizardPreviousProfile>) {
+        if !self.runtime_inherit {
+            return;
+        }
+        match previous {
+            Some(previous) => {
+                self.runtime_target = previous.runtime_target;
+                self.docker_service = previous.docker_service.clone();
+                self.docker_lifecycle_intent = previous.docker_lifecycle_intent;
+            }
+            None => {
+                self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+                self.docker_service = None;
+                self.docker_lifecycle_intent = Default::default();
+            }
         }
     }
 }
@@ -2655,7 +2692,7 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 14] = [
     "agent_member_id",
     "model",
     "reasoning",
@@ -2664,6 +2701,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
     "skip_permissions",
     "fast_mode",
     "codex_speed",
+    "runtime_inherit",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -30358,6 +30396,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -31912,6 +31951,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -32424,6 +32464,7 @@ mod tests {
                 skip_permissions: false,
                 fast_mode: false,
                 codex_speed: gwt_agent::CodexSpeed::Off,
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -33135,6 +33176,62 @@ mod tests {
             "routing tags describe a candidate, not the head slot, so a switch drops them"
         );
         assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+    }
+
+    #[test]
+    fn issue_7729_candidate_runtime_inherit_persists_and_resolves_from_the_last_launch() {
+        // SPEC #7007 item 197 (4): a candidate names Host, Docker, or neither.
+        let explicit = test_launch_profile("codex");
+        assert_eq!(
+            serde_json::to_value(&explicit).unwrap()["runtime_inherit"],
+            false
+        );
+        let legacy: IssueMonitorLaunchProfile =
+            serde_json::from_value(serde_json::json!({"agent_id": "codex"})).unwrap();
+        assert!(
+            !legacy.runtime_inherit,
+            "a pool saved before this field names its place"
+        );
+        let mut inherit = test_launch_profile("codex");
+        inherit.runtime_inherit = true;
+        let saved = serde_json::to_value(&inherit).unwrap();
+        assert_eq!(saved["runtime_inherit"], true);
+        let restored: IssueMonitorLaunchProfile = serde_json::from_value(saved).unwrap();
+        assert!(restored.runtime_inherit);
+
+        // Item 197 (3): it runs where the project's last launch ran.
+        let mut docker = test_launch_profile("claude");
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        docker.docker_service = Some("app".to_string());
+        docker.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        let previous: LaunchWizardPreviousProfile = docker.into();
+        let mut resolved = restored.clone();
+        resolved.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(
+            resolved.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(resolved.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            resolved.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+
+        // No earlier launch: the host, whatever the form last showed.
+        let mut first = restored;
+        first.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        first.docker_service = Some("stale".to_string());
+        first.resolve_inherited_runtime(None);
+        assert_eq!(first.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+        assert_eq!(first.docker_service, None);
+
+        // A candidate that names its place ignores the last launch.
+        let mut host = explicit;
+        host.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(host.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+
+        // A reorder written without the field keeps the saved choice.
+        assert!(ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS.contains(&"runtime_inherit"));
     }
 
     #[test]

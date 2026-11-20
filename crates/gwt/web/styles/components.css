@@ -4917,6 +4917,11 @@ button.workspace-board-ref:focus-visible {
   min-width: 0;
 }
 
+/* Issue #7729: a field that does not apply (Docker options off Docker) leaves the form. */
+:root[data-theme] .settings-field[hidden] {
+  display: none;
+}
+
 :root[data-theme] [data-settings-issues-controls] .settings-field {
   grid-template-columns: 140px minmax(0, 1fr);
   min-height: 32px;

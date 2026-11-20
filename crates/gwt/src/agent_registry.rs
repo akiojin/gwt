@@ -4032,6 +4032,7 @@ pub fn member_profile(
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
