@@ -37,6 +37,7 @@ pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod disk_space;
 pub mod error_report;
+pub mod execution_environments;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_resources;
@@ -199,8 +200,8 @@ pub use issue_monitor::{
     mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,
     mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
-    pending_autonomous_handoff_resumption_from_prefs, persist_issue_monitor_authority_fence,
-    persist_legacy_issue_monitor_shutdown_revoke_fence,
+    normalize_project_execution_environments, pending_autonomous_handoff_resumption_from_prefs,
+    persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
     prepare_autonomous_handoff_delivery_from_prefs,
     preserve_answered_handoff_resume_strategy_from_prefs,
     record_autonomous_handoff_delivery_failure_from_prefs, record_autonomous_question_handoff,
@@ -238,9 +239,9 @@ pub use issue_monitor::{
     IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
     IssueReadinessFailure, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
     MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
-    UPDATE_DRAIN_RELEASE_OPERATION,
+    PendingIssueMonitorEffect, ProjectExecutionEnvironment, AUTONOMOUS_WAIT_MAX_SECS,
+    IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    STRANDED_LAUNCHED_ROW_GRACE_SECS, UPDATE_DRAIN_RELEASE_OPERATION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
