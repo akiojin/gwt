@@ -1804,10 +1804,14 @@ mod tests {
         );
 
         fs::write(markers.join("release"), "").expect("release the push");
-        let failed_publications = gwt_git::worktree::wait_for_remote_branch_publications();
+        // Issue #7723: wait for this launch's own publication only. The launch
+        // registers it under the main worktree root it resolved.
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main worktree root");
+        let publication =
+            gwt_git::WorktreeManager::new(main_repo).wait_for_remote_branch_publication(branch);
         assert!(
-            failed_publications.is_empty(),
-            "the background publication failed: {failed_publications:?}"
+            publication.is_ok(),
+            "the background publication failed: {publication:?}"
         );
         assert!(
             markers.join("started").exists(),
