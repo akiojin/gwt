@@ -4612,6 +4612,13 @@ pub struct IssueMonitorAgentStatus {
     /// instead of the queue head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_occupancy: Option<IssueMonitorSlotOccupancy>,
+    /// Issue #7733 AC-2: how this host's terminal queue is measured against
+    /// the Auto-refill limit. `counted` and `uncounted` together are exactly
+    /// the membership `issue.monitor.queue.list` reports, so an empty `queue`
+    /// next to a populated terminal queue is explained member by member.
+    /// Absent from a publisher that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_queue_refill: Option<IssueMonitorTerminalQueueRefill>,
 }
 
 impl IssueMonitorAgentStatus {
@@ -4621,6 +4628,47 @@ impl IssueMonitorAgentStatus {
             view.needs_human_count = self.needs_human_count;
         }
     }
+}
+
+/// Issue #7733 AC-2: the terminal queue measured against the Auto-refill limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTerminalQueueRefill {
+    pub enabled: bool,
+    pub limit: usize,
+    /// Members that use Auto-refill capacity, in queue order.
+    pub counted: Vec<u64>,
+    /// Members that cannot launch and therefore use no capacity.
+    pub uncounted: Vec<IssueMonitorRefillUncounted>,
+    /// Why Auto-refill adds nothing now, or `null` while it has capacity.
+    pub hold: Option<IssueMonitorRefillHold>,
+}
+
+/// Issue #7733 AC-2: one terminal queue member outside the Auto-refill count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorRefillUncounted {
+    pub issue_number: u64,
+    pub reason: IssueMonitorRefillExemption,
+}
+
+/// Issue #7733: why a terminal queue member uses no Auto-refill capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorRefillExemption {
+    LabelExcluded,
+    /// Issue #7508: delivery is parked on an open PR.
+    OpenPrHold,
+    AwaitingMeasurement,
+    AwaitingVerification,
+    NeedsHuman,
+}
+
+/// Issue #7733 AC-2: the gate that keeps Auto-refill from adding an Issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorRefillHold {
+    Disabled,
+    /// `counted` already fills `limit`.
+    LimitReached,
 }
 
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
@@ -16544,6 +16592,7 @@ impl IssueMonitorState {
                 Some(IssueMonitorStallReason::MaxActiveSaturated)
             )
             .then(|| self.slot_occupancy()),
+            terminal_queue_refill: Some(self.terminal_queue_refill()),
         }
     }
 
@@ -20368,6 +20417,88 @@ impl IssueMonitorState {
         adopted
     }
 
+    /// Issues whose launch, claim, or pane is live. Auto-refill never
+    /// displaces them, and a hold recorded beside one is not yet a wait.
+    fn refill_launch_protected(&self) -> BTreeSet<u64> {
+        self.active_issue_numbers()
+            .into_iter()
+            .chain(self.pending_claim_issue_numbers())
+            .chain(self.launched_windows.keys().copied())
+            .chain(self.process_held_issues.iter().copied())
+            .chain(
+                self.pending_launches
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .chain(
+                self.pending_launch_deliveries
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .collect()
+    }
+
+    /// Issue #7733: a member that cannot launch uses no Auto-refill capacity.
+    /// It keeps its membership, so its wait stays visible and an explicit
+    /// return to the queue needs no re-admission.
+    fn refill_exemption(
+        &self,
+        number: u64,
+        launch_protected: &BTreeSet<u64>,
+    ) -> Option<IssueMonitorRefillExemption> {
+        use IssueMonitorRefillExemption as Exemption;
+        if self.label_excluded_issues.contains(&number) {
+            return Some(Exemption::LabelExcluded);
+        }
+        if launch_protected.contains(&number) {
+            return None;
+        }
+        if self
+            .open_pr_observations
+            .get(&number)
+            .is_some_and(|observation| observation.hold.is_some())
+        {
+            return Some(Exemption::OpenPrHold);
+        }
+        match self.inbox_item(number)?.state {
+            MonitorInboxState::AwaitingMeasurement => Some(Exemption::AwaitingMeasurement),
+            MonitorInboxState::AwaitingVerification => Some(Exemption::AwaitingVerification),
+            MonitorInboxState::NeedsHuman => Some(Exemption::NeedsHuman),
+            _ => None,
+        }
+    }
+
+    /// Issue #7733 AC-2: the same measurement Auto-refill applies, for status.
+    fn terminal_queue_refill(&self) -> IssueMonitorTerminalQueueRefill {
+        let launch_protected = self.refill_launch_protected();
+        let mut counted = Vec::new();
+        let mut uncounted = Vec::new();
+        for issue_number in self.stored_local_terminal_queue_numbers() {
+            match self.refill_exemption(issue_number, &launch_protected) {
+                Some(reason) => uncounted.push(IssueMonitorRefillUncounted {
+                    issue_number,
+                    reason,
+                }),
+                None => counted.push(issue_number),
+            }
+        }
+        let enabled = self.terminal_queue_auto_refill && self.terminal_queue_auto_refill_limit > 0;
+        let hold = if !enabled {
+            Some(IssueMonitorRefillHold::Disabled)
+        } else if counted.len() >= self.terminal_queue_auto_refill_limit {
+            Some(IssueMonitorRefillHold::LimitReached)
+        } else {
+            None
+        };
+        IssueMonitorTerminalQueueRefill {
+            enabled,
+            limit: self.terminal_queue_auto_refill_limit,
+            counted,
+            uncounted,
+            hold,
+        }
+    }
+
     pub fn auto_refill_terminal_queue(&mut self, candidates: &[u64], now: &str) -> usize {
         if !self.terminal_queue_auto_refill || self.terminal_queue_auto_refill_limit == 0 {
             return 0;
@@ -20392,29 +20523,11 @@ impl IssueMonitorState {
         let host = crate::process::current_hostname();
         // Reordering may replace only an unstarted automatic selection. A
         // claim, pane, delivery, or urgent assignment retains its admission.
-        let mut protected = self
-            .active_issue_numbers()
-            .into_iter()
-            .chain(self.pending_claim_issue_numbers())
-            .chain(self.launched_windows.keys().copied())
-            .chain(self.process_held_issues.iter().copied())
-            .chain(
-                self.pending_launches
-                    .iter()
-                    .map(|launch| launch.issue_number),
-            )
-            .chain(
-                self.pending_launch_deliveries
-                    .iter()
-                    .map(|launch| launch.issue_number),
-            )
-            .collect::<BTreeSet<_>>();
-        let parked = self
-            .open_pr_observations
-            .iter()
-            .filter_map(|(&number, observation)| {
-                (observation.hold.is_some() && !protected.contains(&number)).then_some(number)
-            })
+        let mut protected = self.refill_launch_protected();
+        // Issue #7733: a member that cannot launch holds no refill capacity.
+        let exempt = self
+            .stored_local_terminal_queue_numbers()
+            .filter(|number| self.refill_exemption(*number, &protected).is_some())
             .collect::<BTreeSet<_>>();
         protected.extend(
             self.autonomous_records
@@ -20441,10 +20554,7 @@ impl IssueMonitorState {
         let mut eligible_len = queue
             .entries
             .iter()
-            .filter(|entry| {
-                !self.label_excluded_issues.contains(&entry.number)
-                    && !parked.contains(&entry.number)
-            })
+            .filter(|entry| !exempt.contains(&entry.number))
             .count();
         let mut displaced = Vec::new();
         for number in &candidates {
@@ -20461,8 +20571,7 @@ impl IssueMonitorState {
                     .filter(|(_, entry)| {
                         entry.queued_by == "auto-refill"
                             && !protected.contains(&entry.number)
-                            && !parked.contains(&entry.number)
-                            && !self.label_excluded_issues.contains(&entry.number)
+                            && !exempt.contains(&entry.number)
                             && rank(&entry.number) > rank(number)
                     })
                     .max_by_key(|(_, entry)| rank(&entry.number))
@@ -29813,6 +29922,13 @@ mod tests {
                 stall_reason: Some(IssueMonitorStallReason::GuiDisconnected),
                 gui_action: Some("Open the gwt window for this project".to_string()),
                 slot_occupancy: None,
+                terminal_queue_refill: Some(IssueMonitorTerminalQueueRefill {
+                    enabled: false,
+                    limit: 0,
+                    counted: vec![42],
+                    uncounted: Vec::new(),
+                    hold: Some(IssueMonitorRefillHold::Disabled),
+                }),
             }
         );
     }
@@ -51785,6 +51901,64 @@ mod tests {
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2]);
         assert_eq!(monitor.auto_refill_terminal_queue(&[3], now), 0);
         assert!(monitor.open_pr_launch_held(1));
+    }
+
+    #[test]
+    fn issue_7733_external_waits_do_not_consume_auto_refill_capacity() {
+        let now = "2026-11-20T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        let waiting = |number| {
+            let mut candidate = issue(number);
+            candidate.body = Some(
+                "## Acceptance Criteria\n- [ ] AC-1: verify release [release-verification]\n"
+                    .into(),
+            );
+            candidate
+        };
+        let candidates = [waiting(1), waiting(2), waiting(3), issue(4), issue(5)];
+        monitor.terminal_queue_push(&[1, 2, 3], "launch_now", now);
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        for number in [1, 2, 3] {
+            monitor.record_merged_issue_settlement(
+                number,
+                number + 100,
+                Some("aaa".into()),
+                MergedIssueSettlementAction::AwaitVerification {
+                    unmet: vec!["AC-1".into()],
+                },
+                now,
+            );
+            assert_eq!(
+                monitor.inbox_item(number).unwrap().state,
+                MonitorInboxState::AwaitingVerification
+            );
+        }
+        let held = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(held.counted, Vec::<u64>::new());
+        assert_eq!(held.hold, None);
+
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(monitor.queue, VecDeque::from([4, 5]));
+        assert_eq!(monitor.claim_probe_plan(usize::MAX).1, vec![4, 5]);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.limit, 2);
+        assert_eq!(refill.counted, vec![4, 5]);
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::LimitReached));
+        assert_eq!(
+            refill
+                .uncounted
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [1, 2, 3].map(|number| (number, IssueMonitorRefillExemption::AwaitingVerification))
+        );
     }
 
     #[test]
