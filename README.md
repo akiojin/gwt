@@ -38,6 +38,15 @@ Issues, SPECs, search, and Board context rather than from branch management.
   enabled Usage credits, Codex's `Using credits` balance and observed
   credits/hour, and the Claude account usage opt-in. Missing limits show `—`.
   Tools are installed and updated in Settings → Supported Agents.
+  An environment is an account plus the tool agents reach it through. A tool
+  that signs in to its own account (Claude Code, Codex, …) gets its environment
+  automatically; add one for an account reached through Hermes Agent, OpenClaw,
+  or OpenCode. Edit an environment to set its model, Skip permissions, and Fast
+  mode — changes apply from the next session. Tools that read their own
+  settings file show those values read-only. In Settings → Issues execution
+  settings, **Available execution environments** lists the ones a project
+  uses in priority order: a session starts on the first one that can be used,
+  skipping one that is held by a limit or signed out.
 
 ## Install
 

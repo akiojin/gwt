@@ -3,18 +3,21 @@ import { useStoreSelector } from "../store/useStoreSelector.js";
 import { focusElement } from "../hosts/focus.js";
 import { fillLegacySlot } from "../hosts/legacy-slot.js";
 import { localTimeLabel } from "./time-labels.js";
+import { AddEnvironment, DeleteEnvironment, EditEnvironment } from "./ExecutionEnvironmentForms.jsx";
 
-// Execution environments (Issue #7648, SPEC #7007 T-030). The landing view
-// lists the environments agents run on; Accounts is the one place usage,
-// reset times and limit state are shown, once per account; every account
-// row opens its detail. The store carries rows the host derived from the
-// provider usage snapshot and the tool catalog — nothing is invented here.
+// Execution environments (Issue #7648, SPEC #7007 T-030; Issue #7741). The
+// landing view lists the environments agents run on, as the backend defines
+// them; Accounts is the one place usage, reset times and limit state are
+// shown, once per account. The store carries rows the host derived from the
+// definitions, the provider usage snapshot and the tool catalog — nothing is
+// invented here.
 const selectModel = state => state;
 
 const AVAILABILITY_LABELS = {
   available: "Available",
   limit: "Limit reached",
   unknown: "Usage unknown",
+  not_installed: "Tool not installed",
 };
 
 function UsageLine({ account }) {
@@ -46,17 +49,24 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
       <div className="exec-env__header">
         <p className="exec-env__eyebrow">What your agents run on</p>
         <h1 ref={headingRef} tabIndex={-1}>Execution environments</h1>
-        <p className="exec-env__lead">Each environment pairs a provider account with the tool agents reach it through.</p>
+        <p className="exec-env__lead">
+          Each environment pairs an account with the tool agents reach it through. Projects choose which ones they use,
+          and in what order, in their settings.
+        </p>
       </div>
+      <div className="exec-env__actions">
+        <button type="button" className="exec-env__primary" onClick={() => onNavigate("add")}>Add an execution environment</button>
+      </div>
+      {model.error ? <p className="exec-env__error" role="alert">{model.error}</p> : null}
       {environments.length === 0 ? (
         <div className="exec-env__empty">
           <h2>{model.loaded ? "No execution environments yet" : "Loading execution environments…"}</h2>
-          <p>An environment appears once its tool is installed and its account reports usage.</p>
+          <p>An environment is created when a tool that signs in to its own account is installed on this device.</p>
         </div>
       ) : (
         <ul className="exec-env__list" aria-label="Execution environments">
           {environments.map(environment => (
-            <li className="exec-env__card" key={environment.id} data-environment={environment.id} data-availability={environment.availability}>
+            <li className="exec-env__card" key={environment.id} data-environment={environment.id} data-kind={environment.kind} data-availability={environment.availability}>
               <div className="exec-env__card-head">
                 <h2>{environment.name}</h2>
                 <span className={`exec-env__chip exec-env__chip--${environment.availability}`}>
@@ -64,22 +74,45 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
                 </span>
               </div>
               <p className="exec-env__meta">
-                {environment.vendor ? `Provider ${environment.vendor} · ` : ""}
-                {`Via ${environment.via}`}
+                {`Account ${environment.accountName || "unknown"} · Via ${environment.via}`}
                 {environment.toolVersion ? ` ${environment.toolVersion}` : ""}
-                {` · ${environment.members} account`}
+                {environment.projects.length === 0
+                  ? " · Not on any project's list"
+                  : ` · Used by ${environment.projects.map(project => project.title).join(", ")}`}
               </p>
-              <UsageLine account={environment.account} />
+              {environment.account ? <UsageLine account={environment.account} /> : (
+                <p className="exec-env__usage">
+                  {environment.kind === "set" ? "No usage data yet" : `${environment.via} uses the provider in its own settings; usage is not reported here.`}
+                </p>
+              )}
               <div className="exec-env__actions">
-                <button type="button" aria-label={`Open the ${environment.name} account`} onClick={() => onNavigate("account", environment.id)}>
-                  Open account
+                <button type="button" aria-label={`${environment.readOnlyReason ? "Details for" : "Edit"} ${environment.name}`} onClick={() => onNavigate("edit", environment.id)}>
+                  {environment.readOnlyReason ? "Details" : "Edit"}
                 </button>
+                {environment.usageProvider ? (
+                  <button type="button" aria-label={`Open the ${environment.accountName} account`} onClick={() => onNavigate("account", environment.usageProvider)}>
+                    Open account
+                  </button>
+                ) : null}
                 {environment.updateAvailable ? (
                   <button type="button" aria-label={`Update ${environment.via} in Tool management`} onClick={onOpenToolManagement}>
                     Tool update available
                   </button>
                 ) : null}
+                <button
+                  type="button"
+                  className="exec-env__danger"
+                  aria-label={`Delete ${environment.name}`}
+                  disabled={Boolean(environment.deleteBlockedReason)}
+                  aria-describedby={environment.deleteBlockedReason ? `exec-env-delete-${environment.id}` : undefined}
+                  onClick={() => onNavigate("delete", environment.id)}
+                >
+                  Delete
+                </button>
               </div>
+              {environment.deleteBlockedReason ? (
+                <p className="exec-env__reason" id={`exec-env-delete-${environment.id}`}>{environment.deleteBlockedReason}</p>
+              ) : null}
             </li>
           ))}
         </ul>
@@ -205,19 +238,23 @@ export function ExecutionEnvironments({
   onNavigate = () => {},
   onOpenToolManagement = () => {},
   onSetUsageCollection = () => {},
+  onAdd = () => {},
+  onUpdate = () => {},
+  onDelete = () => {},
 }) {
   const model = useStoreSelector(store, selectModel, { frame: true }) || {};
-  const view = model.view || { name: "environments", provider: null };
+  const view = model.view || { name: "environments", key: null };
   const headingRef = useRef(null);
   const shownRef = useRef(null);
-  const viewKey = `${view.name}:${view.provider || ""}`;
+  const viewKey = `${view.name}:${view.key || ""}`;
   // Moving between views replaces the whole body, so keyboard focus follows
   // to the new heading. The first render leaves focus where the user had it.
   useEffect(() => {
     if (shownRef.current !== null && shownRef.current !== viewKey) focusElement(headingRef.current);
     shownRef.current = viewKey;
   }, [viewKey]);
-  const account = (model.accounts || []).find(item => item.provider === view.provider) || null;
+  const account = (model.accounts || []).find(item => item.provider === view.key) || null;
+  const environment = (model.environments || []).find(item => item.id === view.key) || null;
   return (
     <section className="exec-env" aria-label="Execution environments" data-view={view.name}>
       {view.name === "accounts" ? (
@@ -231,6 +268,12 @@ export function ExecutionEnvironments({
           renderAccountUsage={renderAccountUsage}
           onSetUsageCollection={onSetUsageCollection}
         />
+      ) : view.name === "add" ? (
+        <AddEnvironment model={model} headingRef={headingRef} onNavigate={onNavigate} onAdd={onAdd} />
+      ) : view.name === "edit" ? (
+        <EditEnvironment model={model} environment={environment} headingRef={headingRef} onNavigate={onNavigate} onUpdate={onUpdate} />
+      ) : view.name === "delete" ? (
+        <DeleteEnvironment model={model} environment={environment} headingRef={headingRef} onNavigate={onNavigate} onDelete={onDelete} />
       ) : (
         <Environments model={model} headingRef={headingRef} onNavigate={onNavigate} onOpenToolManagement={onOpenToolManagement} />
       )}

@@ -47,18 +47,20 @@ test.describe("Execution environments", () => {
     await expect(cards).toHaveCount(2);
     const codex = surface(page).locator('[data-environment="codex"]');
     await expect(codex).toContainText("Available");
-    await expect(codex).toContainText("Provider OpenAI · Via Codex · 1 account");
+    await expect(codex).toContainText("Account Codex 1 · Via Codex");
     await expect(codex).toContainText("96% used · resets");
     await expect(codex.locator(".exec-env__usage")).toHaveAttribute("data-severity", "danger");
     await expect(codex.locator("time")).toHaveAttribute("datetime", "2030-01-02T03:04:05Z");
-    const claude = surface(page).locator('[data-environment="claude_code"]');
+    const claude = surface(page).locator('[data-environment="claude"]');
     await expect(claude).toContainText("80% used");
     await expect(claude.locator(".exec-env__usage")).toHaveAttribute("data-severity", "warning");
 
     // A limit reported by the backend reaches the environment row as it is.
     await emitProviderUsage(page, [{ provider: "codex", plan: "pro", limit_reached: true,
       windows: [{ kind: "weekly", used_percent: 100, resets_at: "2030-01-06T03:04:05Z" }], state: { kind: "ok" } }]);
-    await expect(cards).toHaveCount(1);
+    // An environment is a definition: it stays when its account stops reporting usage.
+    await expect(cards).toHaveCount(2);
+    await expect(claude).toHaveAttribute("data-availability", "unknown");
     await expect(codex).toHaveAttribute("data-availability", "limit");
     await expect(codex.locator(".exec-env__chip")).toHaveText("Limit reached");
     await expect(codex).toContainText("100% used · resets");
@@ -119,7 +121,7 @@ test.describe("Execution environments", () => {
     const errors = captureUsageErrors(page);
     await open(page);
     await page.locator('.app-head [data-destination="environments"]').click();
-    await surface(page).getByRole("button", { name: "Open the Claude Code account" }).click();
+    await surface(page).getByRole("button", { name: "Open the Claude Code 1 account" }).click();
     const checkbox = surface(page).getByRole("checkbox", { name: "Show Claude Code account usage" });
     await expect(checkbox).toBeChecked();
     await checkbox.focus();
@@ -153,6 +155,158 @@ test.describe("Execution environments", () => {
     // Tool management stays in Settings; the screen only links to it.
     await surface(page).getByRole("button", { name: "Tool management" }).click();
     await expect(page.getByRole("tab", { name: "Supported Agents" })).toHaveAttribute("aria-selected", "true");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+});
+
+/* Issue #7741 (SPEC #7007 items 77-82) — the environments are definitions
+ * that can be registered through a tool, edited and deleted, and a project
+ * chooses the ones it uses in priority order. Runs in Chromium dark and light.
+ */
+test.describe("Execution environment definitions", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+  test.beforeEach(async ({ page }, info) => {
+    await installUsageTheme(page, info.project.name.includes("light") ? "light" : "dark");
+  });
+  const surface = (page: any) => page.locator(".exec-env");
+  const sent = (page: any, kind: string) =>
+    page.evaluate((kind: string) => (window as any).__sentMessages.filter((message: any) => message.kind === kind), kind);
+  async function open(page: any, withSettings = false) {
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page, withSettings);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
+  }
+
+  test("an environment is registered through a tool, shown read-only, and deleted with its projects named (AC-1, AC-3, AC-4)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    const cards = surface(page).locator("[data-environment]");
+    await expect(cards).toHaveCount(2);
+
+    // An account's own environment came with the account: Delete is there, disabled, with the reason.
+    const own = surface(page).locator('[data-environment="claude"]');
+    await expect(own).toHaveAttribute("data-kind", "set");
+    const ownDelete = own.getByRole("button", { name: "Delete Claude Code 1" });
+    await expect(ownDelete).toBeDisabled();
+    await expect(own).toContainText("It is deleted when the account is deleted.");
+    await expect(own).toContainText("Used by Usage Fixture");
+
+    await surface(page).getByRole("button", { name: "Add an execution environment" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Add an execution environment" })).toBeFocused();
+    const tool = surface(page).getByLabel("Tool to go through");
+    await expect(tool).toHaveValue("hermes");
+    await expect(tool.locator('option[value="opencode"]')).toHaveAttribute("disabled", "");
+    await expect(surface(page).locator('[data-blocked-tool="opencode"]')).toContainText("OpenCode is not installed");
+    await expect(surface(page).getByLabel("Name")).toHaveValue("Claude Code 1 (via Hermes Agent)");
+    await page.screenshot({ path: info.outputPath("environment-add.png"), fullPage: true });
+    await surface(page).getByRole("button", { name: "Register" }).click();
+
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Execution environments" })).toBeFocused();
+    await expect(cards).toHaveCount(3);
+    const through = surface(page).locator('[data-environment="claude:hermes"]');
+    await expect(through).toHaveAttribute("data-kind", "via");
+    await expect(through).toContainText("Account Claude Code 1 · Via Hermes Agent");
+    await expect(through).toContainText("Not on any project's list");
+    expect(await sent(page, "add_execution_environment")).toEqual([
+      { kind: "add_execution_environment", account_id: "claude", via_tool: "hermes", name: "Claude Code 1 (via Hermes Agent)" },
+    ]);
+
+    // Its runtime options are the tool's own: shown, never editable.
+    await through.getByRole("button", { name: "Details for Claude Code 1 (via Hermes Agent)" }).click();
+    await expect(surface(page).getByRole("checkbox")).toHaveCount(0);
+    const settings = surface(page).getByRole("region", { name: "Current settings" });
+    await expect(settings).toContainText("zai");
+    await expect(settings).toContainText("glm-4.6");
+    await expect(settings).toContainText("reads these from its own settings file");
+    await page.screenshot({ path: info.outputPath("environment-read-only.png"), fullPage: true });
+
+    // Once a project lists it, the confirmation names that project.
+    await surface(page).getByRole("button", { name: "← Execution environments" }).click();
+    await page.evaluate(() => (window as any).__setProjectEnvironments(["codex", "claude:hermes"]));
+    await expect(through).toContainText("Used by Usage Fixture");
+    await through.getByRole("button", { name: "Delete Claude Code 1 (via Hermes Agent)" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Delete this execution environment?" })).toBeFocused();
+    await expect(surface(page).locator('[data-project="Usage Fixture"]')).toContainText("priority 2");
+    await expect(surface(page)).toContainText("The Claude Code 1 account and its other environments stay.");
+    await page.screenshot({ path: info.outputPath("environment-delete.png"), fullPage: true });
+    await surface(page).getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(cards).toHaveCount(2);
+    await expect(through).toHaveCount(0);
+    const overflow = await page.evaluate(() =>
+      document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+    expect(overflow, "no horizontal page overflow").toBe(false);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("runtime options of an account's own environment are saved as they change (AC-3)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    await surface(page).getByRole("button", { name: "Edit Claude Code 1" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Edit Claude Code 1" })).toBeFocused();
+    await expect(surface(page)).toContainText("take effect from the next session");
+
+    const fast = surface(page).getByRole("checkbox", { name: "Fast mode" });
+    await fast.click();
+    await expect(surface(page).getByRole("status")).toHaveText("Saved");
+    await expect(fast).toBeChecked();
+    const model = surface(page).getByLabel("Model");
+    await model.fill("sonnet");
+    await model.press("Enter");
+    await expect(surface(page).getByRole("status")).toHaveText("Saved");
+    expect(await sent(page, "update_execution_environment")).toEqual([
+      { kind: "update_execution_environment", environment_id: "claude", runtime: { model: null, skip_permissions: false, fast_mode: true } },
+      { kind: "update_execution_environment", environment_id: "claude", runtime: { model: "sonnet", skip_permissions: false, fast_mode: true } },
+    ]);
+    await expect(surface(page).getByRole("button", { name: "Delete", exact: true })).toBeDisabled();
+    await page.screenshot({ path: info.outputPath("environment-edit.png"), fullPage: true });
+
+    // The saved values are what the screen shows when it is opened again.
+    await surface(page).getByRole("button", { name: "← Execution environments" }).click();
+    await surface(page).getByRole("button", { name: "Edit Claude Code 1" }).click();
+    await expect(surface(page).getByLabel("Model")).toHaveValue("sonnet");
+    await expect(surface(page).getByRole("checkbox", { name: "Fast mode" })).toBeChecked();
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("a project reorders, removes and adds its available execution environments (AC-2)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page, true);
+    await page.locator('[data-settings-tab="issues"]').click();
+    const list = page.locator("[data-settings-environments]");
+    const names = list.locator(".project-environments__name");
+    await expect(names).toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    await expect(list).toContainText("This is the order the project launches with today.");
+    await expect(list.getByRole("button", { name: "Move up Codex 1" })).toBeDisabled();
+    await page.screenshot({ path: info.outputPath("project-environments.png"), fullPage: true });
+
+    await list.getByRole("button", { name: "Move down Codex 1" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1", "2. Codex 1"]);
+    await expect(list).not.toContainText("launches with today");
+
+    await list.getByRole("button", { name: "Remove Codex 1" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1"]);
+    // The last one cannot be removed, and the row says why.
+    await expect(list.getByRole("button", { name: "Remove Claude Code 1" })).toBeDisabled();
+    await expect(list).toContainText("Keep at least one.");
+
+    await expect(list.getByLabel("Add an execution environment")).toHaveValue("codex");
+    await list.getByRole("button", { name: "Add to the end" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1", "2. Codex 1"]);
+    await expect(list).toContainText("Every execution environment is already on the list.");
+    expect(await sent(page, "set_project_execution_environments")).toEqual([
+      { kind: "set_project_execution_environments", environment_ids: ["claude", "codex"] },
+      { kind: "set_project_execution_environments", environment_ids: ["claude"] },
+      { kind: "set_project_execution_environments", environment_ids: ["claude", "codex"] },
+    ]);
+
+    await list.getByRole("button", { name: "Manage execution environments" }).click();
+    await expect(page.locator(".exec-env").getByRole("heading", { level: 1, name: "Execution environments" })).toBeVisible();
     expect(errors, "zero console/page errors").toEqual([]);
   });
 });
@@ -275,6 +429,98 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
       consumption: [],
     };
 
+    // Issue #7741: the execution environment definitions and this project's
+    // priority list, kept the way the backend keeps them.
+    const TOOL_NAMES: Record<string, string> = {
+      claude: "Claude Code", codex: "Codex", hermes: "Hermes Agent", openclaw: "OpenClaw", opencode: "OpenCode",
+    };
+    const environmentState = {
+      accounts: [
+        { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1" },
+        { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1" },
+      ],
+      environments: [
+        { id: "claude", name: "Claude Code 1", account_id: "claude", via_tool: "claude", runtime: {} as any },
+        { id: "codex", name: "Codex 1", account_id: "codex", via_tool: "codex", runtime: {} as any },
+      ],
+      saved: false,
+      list: ["codex", "claude"],
+    };
+    const environmentsView = () => {
+      const environments = environmentState.environments.map(environment => {
+        const own = environment.account_id === environment.via_tool;
+        const priority = environmentState.list.indexOf(environment.id);
+        return {
+          ...environment,
+          kind: own ? "set" : "via",
+          account_name: environmentState.accounts.find(account => account.id === environment.account_id)!.name,
+          via_tool_name: TOOL_NAMES[environment.via_tool],
+          tool_installed: true,
+          delete_blocked_reason: own ? "Created with the account. It is deleted when the account is deleted." : undefined,
+          runtime_read_only_reason: own ? undefined
+            : `${TOOL_NAMES[environment.via_tool]} reads these from its own settings file. Change them there.`,
+          tool_settings: own ? undefined : { path: "/home/fixture/.hermes/config.yaml",
+            values: [{ label: "Provider", value: "zai" }, { label: "Model", value: "glm-4.6" }] },
+          projects: priority < 0 ? [] : [{ project_root: "/fixture", title: "Usage Fixture", priority: priority + 1 }],
+        };
+      });
+      return {
+        kind: "execution_environments",
+        view: {
+          accounts: environmentState.accounts,
+          environments,
+          via_options: environmentState.accounts.flatMap(account => ["hermes", "openclaw", "opencode"].map(tool => {
+            const taken = environmentState.environments.find(environment => environment.via_tool === tool);
+            return {
+              account_id: account.id, via_tool: tool, via_tool_name: TOOL_NAMES[tool],
+              blocked_reason: taken ? `${TOOL_NAMES[tool]} is already registered as "${taken.name}". It uses the provider set in its own settings.`
+                : tool === "opencode" ? "OpenCode is not installed. Install it in Tool management." : undefined,
+            };
+          })),
+          project: {
+            project_root: "/fixture", saved: environmentState.saved,
+            entries: environmentState.list.map(id => {
+              const environment = environmentState.environments.find(item => item.id === id)!;
+              return { environment_id: id, tool: environment.via_tool, tool_name: TOOL_NAMES[environment.via_tool], name: environment.name };
+            }),
+          },
+        },
+      };
+    };
+    const sentMessages: any[] = [];
+    (window as any).__sentMessages = sentMessages;
+    // Answer one execution environment request; `null` when it is not one.
+    const answerEnvironmentRequest = (message: any): unknown => {
+      switch (message?.kind) {
+        case "get_execution_environments":
+          break;
+        case "add_execution_environment":
+          environmentState.environments.push({
+            id: `${message.account_id}:${message.via_tool}`, name: message.name,
+            account_id: message.account_id, via_tool: message.via_tool, runtime: {},
+          });
+          break;
+        case "update_execution_environment": {
+          const environment = environmentState.environments.find(item => item.id === message.environment_id);
+          if (!environment) return { kind: "execution_environment_error", message: "This execution environment no longer exists." };
+          if (message.name) environment.name = message.name;
+          if (message.runtime) environment.runtime = message.runtime;
+          break;
+        }
+        case "delete_execution_environment":
+          environmentState.environments = environmentState.environments.filter(item => item.id !== message.environment_id);
+          environmentState.list = environmentState.list.filter(id => id !== message.environment_id);
+          break;
+        case "set_project_execution_environments":
+          environmentState.list = message.environment_ids;
+          environmentState.saved = true;
+          break;
+        default:
+          return null;
+      }
+      return environmentsView();
+    };
+
     let socketRef: FixtureWebSocket | null = null;
 
     class FixtureWebSocket extends EventTarget {
@@ -301,6 +547,9 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
         } catch {
           return;
         }
+        sentMessages.push(message);
+        const answer = answerEnvironmentRequest(message);
+        if (answer) this.emit(answer);
         if (message?.kind === "frontend_ready") {
           this.emit(workspaceState);
           this.emit(usageSnapshot);
@@ -337,6 +586,11 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
         sessions,
         consumption: [],
       });
+    };
+    (window as any).__setProjectEnvironments = (ids: string[]) => {
+      environmentState.list = ids;
+      environmentState.saved = true;
+      socketRef?.emit(environmentsView());
     };
     (window as any).__emitWorkspaceStateNotice = (notice: unknown) => {
       socketRef?.emit({ kind: "workspace_state_notice", notice });

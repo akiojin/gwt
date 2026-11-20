@@ -3580,6 +3580,8 @@ enum IssueMonitorControl {
         enabled: bool,
         limit: usize,
     },
+    /// Issue #7741: replace the project's available execution environments.
+    ExecutionEnvironments(Vec<crate::issue_monitor::ProjectExecutionEnvironment>),
     TierSet {
         issue_number: u64,
         tier: u8,
@@ -4807,6 +4809,10 @@ fn apply_routine_issue_monitor_control(
         } => monitor.terminal_queue_move(issue_number, position, &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()),
         IssueMonitorControl::TerminalQueueAutoRefill { enabled, limit } => {
             monitor.set_terminal_queue_auto_refill(enabled, limit);
+            true
+        }
+        IssueMonitorControl::ExecutionEnvironments(list) => {
+            monitor.set_execution_environments(list);
             true
         }
         IssueMonitorControl::TerminalQueueRemove(issue_numbers) => {
@@ -7738,6 +7744,11 @@ fn decode_issue_monitor_control_in_repo(
                     enabled: refill.get("enabled")?.as_bool()?,
                     limit: usize::try_from(refill.get("limit")?.as_u64()?).ok()?,
                 });
+            }
+            if let Some(list) = payload.get("execution_environments") {
+                return serde_json::from_value(list.clone())
+                    .ok()
+                    .map(IssueMonitorControl::ExecutionEnvironments);
             }
             if let Some(tier) = payload.get("tier_set") {
                 let issue_number = tier.get("number")?.as_u64()?;

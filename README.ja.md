@@ -35,6 +35,14 @@ Agent workspace を materialize するために worktree を使いますが、�
   有効な Usage credits、Codex の `Using credits` 残高と観測した 1 時間あたりの
   クレジット消費量、Claude アカウント枠の有効化を扱います。未提供の枠は `—` と表示します。
   ツール本体の導入と更新は Settings → Supported Agents で行います。
+  実行環境は、アカウントと、そのアカウントを使う経由ツールの組です。自分の
+  アカウントでサインインするツール（Claude Code、Codex など）の実行環境は自動で
+  作られます。Hermes Agent / OpenClaw / OpenCode 経由で使う組は追加で登録できます。
+  実行環境の編集では、モデル・Skip permissions・Fast mode を設定でき、次に始まる
+  セッションから反映されます。自身の設定ファイルを読むツールの値は読み取り専用で
+  表示します。Settings → Issues execution settings の **Available execution
+  environments** には、プロジェクトが使う実行環境を優先度順に並べます。セッションは
+  使える最初の実行環境で始まり、制限で保留中のものや未サインインのものは飛ばします。
 
 ## インストール
 

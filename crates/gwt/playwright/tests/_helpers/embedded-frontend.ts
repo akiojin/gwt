@@ -34,6 +34,7 @@ const ROOT_MODULES = new Set([
   "execution-environments.js",
   // Issue #7740 — shared header and footer imported by app.js, hub-app.js and frontend-route.js.
   "app-chrome.js",
+  "project-execution-environments.js",
   // SPEC #7007 T-014 — typed window command error presentation imported by app.js.
   "window-command-error.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.

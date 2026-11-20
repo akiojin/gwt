@@ -212,6 +212,10 @@ root_js_modules! {
     // hub-app.js and frontend-route.js import this at module top level, so
     // the asset MUST be registered or the ES module load 404s.
     "app-chrome.js" => "createAppChrome",
+    // Issue #7741 — host of a project's available execution environments
+    // list. app.js imports this at module top level, so the asset
+    // MUST be registered or the ES module load 404s and the splash hangs.
+    "project-execution-environments.js" => "renderProjectExecutionEnvironments",
     // SPEC #7007 T-014 — typed window command error presentation.
     // app.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.

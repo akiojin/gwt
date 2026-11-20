@@ -6310,3 +6310,27 @@ button.workspace-board-ref:focus-visible {
 .exec-env__detail { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
 .exec-env__usage-slot > .op-usage-card:first-child { padding-top: 0; border-top: 0; }
 .exec-env__hint { margin: var(--space-2) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.exec-env button:disabled { color: var(--color-text-muted); border-color: var(--color-border); cursor: not-allowed; }
+.exec-env button:disabled:hover { background: var(--color-surface); }
+.exec-env button.exec-env__danger:not(:disabled) { color: var(--color-state-blocked); }
+.exec-env button.exec-env__primary:not(:disabled) { border-color: var(--color-link); color: var(--color-link); }
+.exec-env__reason { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.exec-env__error { margin: var(--space-2) 0 0; color: var(--color-state-blocked); }
+.exec-env__status { min-height: var(--space-4); margin: 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.exec-env__form { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.exec-env__field { display: flex; flex-direction: column; gap: var(--space-1); max-width: 32rem; }
+.exec-env__field > span { color: var(--color-text-muted); font-size: var(--type-xs); }
+.exec-env__field input, .exec-env__field select { max-width: 100%; padding: var(--space-1) var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; }
+.exec-env__reasons { margin: 0; padding-left: var(--space-4); color: var(--color-text-muted); font-size: var(--type-xs); }
+.exec-env__facts { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; }
+.exec-env__facts > div { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.exec-env__facts dt { min-width: 6rem; color: var(--color-text-muted); }
+.exec-env__facts dd { margin: 0; }
+.project-environments__list { display: flex; flex-direction: column; gap: var(--space-2); margin: 0 0 var(--space-2); padding: 0; list-style: none; }
+.project-environments__item { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.project-environments__text { display: flex; flex-direction: column; min-width: 0; }
+.project-environments__actions, .project-environments__add { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2); }
+.project-environments__reason { flex-basis: 100%; margin: 0; }
+:root[data-theme] [data-settings-environments] .settings-section { max-width: none; margin-block: var(--space-3); margin-inline: 0; font-family: var(--font-body); font-size: var(--type-sm); }
+:root[data-theme] .project-environments button:disabled { color: var(--color-text-muted); border-color: var(--color-border); background: transparent; cursor: not-allowed; }
+.exec-env .settings-toggle { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
