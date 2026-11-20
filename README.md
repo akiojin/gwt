@@ -32,13 +32,12 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Provider usage** — USAGE shows Claude's Fable and Opus weekly limits together.
-  Missing limits show `—`; cached readings are marked `stale`. Hover for shared
-  account limits, reset times, and enabled Usage credits with utilization,
-  used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
-  When Codex's subscription quota is full and credits remain, USAGE shows
-  `Using credits` and the balance. The popover shows the observed credits/hour
-  after two readings from the same account; an initial reading has no rate.
+- **Execution environments** — open Environments from the top bar to see what
+  your agents run on. Accounts shows each provider account's usage, reset
+  times, and limit state in one place; an account's detail adds every window,
+  enabled Usage credits, Codex's `Using credits` balance and observed
+  credits/hour, and the Claude account usage opt-in. Missing limits show `—`.
+  Tools are installed and updated in Settings → Supported Agents.
 
 ## Install
 

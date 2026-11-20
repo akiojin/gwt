@@ -159,7 +159,7 @@ body::after {
      and never overlays surface windows. Issue 4777 T-1 widens it to 64px so
      each surface entry carries a visible label under its icon. */
   grid-template-columns: 64px 1fr;
-  grid-template-rows: 44px 1fr var(--usage-strip-row-size, 28px);
+  grid-template-rows: 44px 1fr 28px;
   grid-template-areas:
     "projectbar projectbar"
     "rail surface"
@@ -887,7 +887,7 @@ body::after {
 @media (max-width: 860px) {
   #app {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 44px auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
+    grid-template-rows: 44px auto minmax(0, 1fr) 28px;
     grid-template-areas:
       "projectbar"
       "rail"
@@ -937,6 +937,10 @@ body::after {
 
 /* Issue #6476: keep every top-bar action reachable on phone-sized screens.
    Let the chrome row grow when the existing controls wrap. */
+.arrange-button__short {
+  display: none;
+}
+
 /* Issue 7646: the bar gained the agent ledger entry. Below 900px the brand
    prefix yields its room so the actions never overflow the page. */
 @media (max-width: 900px) {
@@ -947,7 +951,7 @@ body::after {
 
 @media (max-width: 600px) {
   #app {
-    grid-template-rows: auto auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
+    grid-template-rows: auto auto minmax(0, 1fr) 28px;
   }
 
   .project-bar {
@@ -976,6 +980,17 @@ body::after {
 
   .project-actions .op-theme-toggle {
     height: auto;
+  }
+
+  /* Issue 7648: with the ledger and environments entries the bar took a third
+     row of a phone screen. The environments entry shows its short label here;
+     its accessible name stays "Execution environments". */
+  .arrange-button__long {
+    display: none;
+  }
+
+  .arrange-button__short {
+    display: inline;
   }
 
   /* T-005r: each rail group wrapped on its own, so the strip took three
@@ -5112,157 +5127,9 @@ button.workspace-board-ref:focus-visible {
 /* Provider usage & rate limits (SPEC-2970)                            */
 /* ------------------------------------------------------------------ */
 
-#app:has(#op-strip-usage:not([hidden])) {
-  --usage-strip-row-size: auto;
-}
-
-.op-status-strip:has(> #op-strip-usage:not([hidden])) {
-  flex-wrap: wrap;
-  min-height: 28px;
-}
-
-.op-status-strip__cell--usage {
-  display: inline-flex;
-  flex: 0 1 56ch;
-  flex-wrap: wrap;
-  inline-size: 56ch;
-  max-inline-size: 100%;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
-  padding: 0 2px;
-  white-space: nowrap;
-  overflow: visible;
-}
-
-/* Stable per-provider summary chips in the status strip (no rotation). */
-.op-usage-sum {
-  display: inline-flex;
-  flex: 0 0 7ch;
-  inline-size: 7ch;
-  align-items: baseline;
-  gap: 3px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-
-.op-usage-sum--models {
-  flex: 0 1 auto;
-  flex-wrap: wrap;
-  inline-size: auto;
-  min-inline-size: 0;
-  max-inline-size: 100%;
-}
-
-.op-usage-sum--credits {
-  flex: 0 1 auto;
-  inline-size: auto;
-  min-inline-size: 0;
-  max-inline-size: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.op-usage-model {
-  white-space: nowrap;
-  color: var(--color-status-strip-fg);
-}
-
-.op-usage-model[data-severity="warning"] {
-  color: var(--color-state-needs-input);
-}
-
-.op-usage-model[data-severity="danger"] {
-  color: var(--color-state-blocked);
-}
-
-.op-usage-stale {
-  color: var(--color-status-strip-fg);
-  font-weight: 400;
-}
-
-.op-usage-sum[data-severity="normal"] {
-  color: var(--color-status-strip-fg);
-}
-
-.op-usage-sum[data-severity="warning"] {
-  color: var(--color-state-needs-input);
-}
-
-.op-usage-sum[data-severity="danger"] {
-  color: var(--color-state-blocked);
-}
-
-.op-usage-sum[data-limit="true"] {
-  color: var(--color-state-blocked);
-}
-
-.op-usage-more {
-  flex: 0 0 3ch;
-  inline-size: 3ch;
-  color: var(--color-status-strip-fg);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.op-status-strip__cell--usage:hover .op-usage-sum,
-.op-status-strip__cell--usage:focus-visible .op-usage-sum {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-/* Consolidated hover popover (everything at once, anchored above the strip). */
-.op-usage-hover {
-  position: fixed;
-  z-index: var(--z-popover);
-  width: min(440px, 92vw);
-  max-height: 70vh;
-  overflow: auto;
-  padding: var(--space-3, 12px);
-  background: var(--color-surface-elevated, #1c1f26);
-  color: var(--color-text, #e7e9ee);
-  border: 1px solid var(--color-border, rgba(127, 127, 127, 0.4));
-  border-radius: var(--radius-md, 8px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-}
-
-.op-usage-hover__head {
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-
-.op-usage-hover__subhead {
-  margin: 10px 0 4px;
-  font-size: var(--type-xs, 0.72rem);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--color-text-muted, #9aa0ad);
-}
-
-.op-usage-hover__cons {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: var(--type-sm, 0.85rem);
-  font-variant-numeric: tabular-nums;
-  padding: 1px 0;
-}
-
-.op-usage-hover__consname {
-  color: var(--color-text-muted, #9aa0ad);
-}
-
-.op-usage-hover__hint {
-  margin-top: 10px;
-  font-size: var(--type-xs, 0.72rem);
-  color: var(--color-text-muted, #9aa0ad);
-  text-align: right;
-}
-
+/* Issue 7648: usage, reset times and limits are shown only on the Execution
+   environments screen. The status-strip cell and its hover popover are gone;
+   the cards below are drawn into that screen's account detail. */
 /* Provider cards (SPEC-2970 UX redesign) — group one provider's data together
    for readability: header, rate-limit windows, consumption grid, sparkline. */
 .op-usage-card {
@@ -5327,26 +5194,6 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-text-muted, #9aa0ad);
   font-style: italic;
   padding: 2px 0;
-}
-
-.op-usage-card__reason--action {
-  appearance: none;
-  -webkit-appearance: none;
-  font-style: normal;
-  font-family: var(--font-mono, inherit);
-  font-size: var(--type-xs, 0.72rem);
-  letter-spacing: var(--tracking-mono, 0.02em);
-  border: 1px solid var(--color-accent, #6fb1ff);
-  background: transparent;
-  color: var(--color-accent, #6fb1ff);
-  border-radius: 999px;
-  padding: 2px 12px;
-  cursor: pointer;
-}
-
-.op-usage-card__reason--action:hover {
-  background: var(--color-accent, #6fb1ff);
-  color: var(--color-button-fg, #0b0d10);
 }
 
 /* Rate-limit windows: label | bar | % | reset, aligned columns. */
@@ -6013,10 +5860,11 @@ button.workspace-board-ref:focus-visible {
 
 /* Keep persistence diagnostics in the shell layout, above every workspace surface. */
 #app:has(> .react-island > .workspace-state-notice) {
-  grid-template-rows: 44px auto 1fr var(--usage-strip-row-size, 28px);
+  grid-template-rows: 44px auto 1fr 28px;
   grid-template-areas: "projectbar projectbar" "notice notice" "rail surface" "strip strip";
 }
 .react-island { display: contents; }
+.react-island[hidden] { display: none; }
 .workspace-state-notice {
   grid-area: notice;
   display: flex;
@@ -6043,13 +5891,13 @@ button.workspace-board-ref:focus-visible {
 .workspace-state-notice button:focus-visible { outline: 2px solid var(--color-focus-ring); }
 @media (max-width: 860px) {
   #app:has(> .react-island > .workspace-state-notice) {
-    grid-template-rows: 44px auto auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
+    grid-template-rows: 44px auto auto minmax(0, 1fr) 28px;
     grid-template-areas: "projectbar" "notice" "rail" "surface" "strip";
   }
 }
 @media (max-width: 600px) {
   #app:has(> .react-island > .workspace-state-notice) {
-    grid-template-rows: auto auto auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);
+    grid-template-rows: auto auto auto minmax(0, 1fr) 28px;
   }
   .workspace-state-notice span {
     max-height: 25vh;
@@ -6270,3 +6118,34 @@ button.workspace-board-ref:focus-visible {
 .pm-conversation-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .pm-conversation-log { position: relative; flex: 1; min-height: 0; }
 .pm-conversation-log[hidden] { display: none; }
+
+/* Issue 7648 (SPEC 7007 T-030): Execution environments screen. */
+.exec-env { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-4) var(--space-5); color: var(--color-text); background: var(--color-surface); font-family: var(--font-body); font-size: var(--type-sm); }
+.exec-env :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.exec-env button { max-width: 100%; padding: var(--space-1) var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; cursor: pointer; }
+.exec-env button:hover { background: var(--color-surface-elevated); }
+.exec-env__header h1 { margin: 0; font-size: var(--type-xl); }
+.exec-env__header h1:focus { outline: none; }
+.exec-env__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+.exec-env__lead { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
+.exec-env button.exec-env__back { margin-bottom: var(--space-2); padding: 0; border: 0; background: transparent; color: var(--color-link); }
+.exec-env__empty h2 { margin: 0; font-size: var(--type-lg); }
+.exec-env__empty p { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
+.exec-env__list { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.exec-env__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.exec-env__card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
+.exec-env__card-head h2 { margin: 0; font-size: var(--type-md); }
+.exec-env__chip { flex-shrink: 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.exec-env__chip--available { color: var(--color-state-done); }
+.exec-env__chip--limit { color: var(--color-state-blocked); }
+.exec-env__meta { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.exec-env__usage { margin: var(--space-1) 0 0; font-variant-numeric: tabular-nums; }
+.exec-env__usage[data-severity="warning"] { color: var(--color-state-needs-input); }
+.exec-env__usage[data-severity="danger"] { color: var(--color-state-blocked); }
+.exec-env__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+.exec-env__manage h2, .exec-env__detail h2 { margin: 0 0 var(--space-2); font-size: var(--type-md); }
+.exec-env__manage-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); margin-top: var(--space-2); }
+.exec-env__manage-row p { margin: 0; color: var(--color-text-muted); }
+.exec-env__detail { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.exec-env__usage-slot > .op-usage-card:first-child { padding-top: 0; border-top: 0; }
+.exec-env__hint { margin: var(--space-2) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }

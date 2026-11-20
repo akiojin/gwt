@@ -30,6 +30,8 @@ const ROOT_MODULES = new Set([
   "task-progress.js",
   // SPEC #7007 — task-centered Log island host imported by pm-chat.js and app.js.
   "task-log.js",
+  // Issue #7648 — Execution environments island host imported by app.js.
+  "execution-environments.js",
   // SPEC #7007 T-014 — typed window command error presentation imported by app.js.
   "window-command-error.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
