@@ -1088,6 +1088,7 @@ mod recovery_center;
 mod runtime_events;
 mod settings_update;
 mod startup;
+mod themes;
 pub(crate) use gui_slice::GuiSliceBudget;
 pub(crate) mod terminal_convergence;
 mod title_sync;
@@ -13224,6 +13225,12 @@ impl AppRuntime {
             | FrontendEvent::DeleteExecutionEnvironment { .. }
             | FrontendEvent::SetProjectExecutionEnvironments { .. }) => {
                 self.execution_environment_events(&client_id, Some(context), event)
+            }
+            FrontendEvent::LoadThemes { request_id } => {
+                self.theme_events(client_id, context, request_id, None)
+            }
+            FrontendEvent::DeleteTheme { number, request_id } => {
+                self.theme_events(client_id, context, request_id, Some(number))
             }
             FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
                 client_id,

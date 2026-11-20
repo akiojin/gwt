@@ -39,6 +39,7 @@ const ROOT_MODULES = new Set([
   // Issue #7639 — Home conversation host imported by hub-app.js.
   "home-conversation.js",
   "project-execution-environments.js",
+  "project-themes.js",
   // SPEC #7007 T-014 — typed window command error presentation imported by app.js.
   "window-command-error.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.

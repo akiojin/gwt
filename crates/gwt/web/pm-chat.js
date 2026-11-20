@@ -590,10 +590,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   // Derive the Home island state from the same window snapshot the other
   // views read, so every surface reports the same numbers (SPEC #7007 AC-6).
   // Unknown stays unknown: decisions are counted only once reports have
-  // loaded, and no completed-today source exists yet, so it stays null.
+  // loaded. What was completed today is shown on the Themes screen, never
+  // on this entry screen (Issue 7643).
   function renderHome(state, decisions) {
     const overview = state?.requestTasks ?? null;
-    taskHome.receive({ overview, decisionsWaiting: decisions.waiting, completedToday: null,
+    taskHome.receive({ overview, decisionsWaiting: decisions.waiting,
       stale: Boolean(state?.requestTasksError) && overview !== null });
   }
   // Progress reads the same snapshot: the request-task overview plus the

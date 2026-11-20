@@ -42,6 +42,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
       import { createExecutionEnvironments } from "/execution-environments.js";
+      import { createProjectThemes } from "/project-themes.js";
       import { createAppChrome } from "/app-chrome.js";
       import { renderProjectExecutionEnvironments } from "/project-execution-environments.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
@@ -499,6 +500,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const sessionUsageModel = createUiStateStore([]);
       // Issue #7741: the execution environment definitions and the last refusal.
       const executionEnvironmentsModel = createUiStateStore({ view: null, refusal: null });
+      // Issue #7643: the last answer to a Themes screen request.
+      const themeRepliesModel = createUiStateStore({ reply: null });
       let routeProjectMissing = false;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
@@ -973,7 +976,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "delete_theme"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
@@ -5559,6 +5562,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             applyExecutionEnvironments(event.view);
             executionEnvironmentsModel.update(state => ({ ...state, view: event.view }));
             break;
+          case "themes":
+          case "theme_error":
+            themeRepliesModel.update(() => ({ reply: event }));
+            break;
           case "execution_environment_error":
             applyExecutionEnvironmentError(event);
             executionEnvironmentsModel.update(state => ({ ...state, refusal: { message: event.message } }));
@@ -6189,6 +6196,23 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         openSurface("environments");
       }
       document.addEventListener("environments:open", event => openExecutionEnvironments(event.detail?.view));
+      // Issue #7643: Themes groups the project's Issues; opened from the rail.
+      const projectThemes = createProjectThemes({
+        document, send, repliesModel: themeRepliesModel, // An issue under a theme opens in the Issues screen, like an Issue link
+        // in a window header.
+        onOpenIssue: number => runIssueWindowHeaderAction("open-issue", { linked_issue_number: number }),
+      });
+      const themesElement = projectThemes.element;
+      themesElement.hidden = true;
+      document.querySelector(".surface-area").appendChild(themesElement);
+      function setThemesHost(host) {
+        const changed = themesElement.hidden === Boolean(host);
+        themesElement.hidden = !host;
+        const targetHost = host || document.querySelector(".surface-area");
+        if (themesElement.parentElement !== targetHost) targetHost.appendChild(themesElement);
+        // Progress is GitHub's, read each time the screen opens.
+        if (host && changed) projectThemes.reload();
+      }
       // Telemetry updates keep the current native terminal host.
       worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
@@ -6200,6 +6224,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onWorksHost: setWorksHost,
         onAgentsHost: setRosterHost,
         onEnvironmentsHost: setEnvironmentsHost,
+        onThemesHost: setThemesHost,
 
         openSurface: (surface) => {
           const preset = surface === "issues" ? "issue" : surface;

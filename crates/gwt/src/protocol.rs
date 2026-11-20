@@ -801,6 +801,18 @@ pub enum FrontendEvent {
         text: String,
         request_id: u64,
     },
+    /// Issue #7643: read the themes of this project (Issues that have
+    /// sub-issues) and what was completed today, for the Themes screen.
+    LoadThemes {
+        request_id: u64,
+    },
+    /// Issue #7643: delete one theme. The host closes the GitHub Issue as not
+    /// planned, only when the number names a current theme; the screen
+    /// confirms first.
+    DeleteTheme {
+        number: u64,
+        request_id: u64,
+    },
     /// Read explicitly posted reports for the registered PM window.
     LoadPmReports {
         id: String,
@@ -3010,6 +3022,18 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
     },
+    /// Issue #7643: client-scoped reply to [`FrontendEvent::LoadThemes`] and
+    /// to a [`FrontendEvent::DeleteTheme`] that went through.
+    Themes {
+        request_id: u64,
+        view: Box<crate::themes::ThemesView>,
+    },
+    /// Issue #7643: a theme request was refused. `message` says why and what
+    /// to do instead.
+    ThemeError {
+        request_id: u64,
+        message: String,
+    },
     /// Issue #7741: the execution environments as the screens show them.
     ExecutionEnvironments {
         view: Box<ExecutionEnvironmentsView>,
@@ -3754,6 +3778,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "themes",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "theme_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "workspace_state_notice",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::PreserveOrder,
@@ -4453,6 +4487,8 @@ impl BackendEvent {
             BackendEvent::PmLaunchProfileResult { .. } => "pm_launch_profile_result",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
+            BackendEvent::Themes { .. } => "themes",
+            BackendEvent::ThemeError { .. } => "theme_error",
             BackendEvent::ExecutionEnvironments { .. } => "execution_environments",
             BackendEvent::ExecutionEnvironmentError { .. } => "execution_environment_error",
             BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {

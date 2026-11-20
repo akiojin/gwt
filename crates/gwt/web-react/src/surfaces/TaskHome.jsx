@@ -2,7 +2,7 @@ import { useStoreSelector } from "../store/useStoreSelector.js";
 
 // Task-centered entry surface (SPEC #7007, US-1/US-2). Reads only through the
 // #5016 UI state store: the host feeds the PM window state (request-task
-// overview, pending decision reports, completed-today count) into the store,
+// overview, pending decision reports) into the store,
 // push payloads never reach this component directly.
 const selectHome = state => state;
 
@@ -39,12 +39,12 @@ function summaryFor(home) {
 }
 
 function countsFor(home) {
-  const { overview, completedToday } = home;
+  const { overview } = home;
   if (!overview || overview.state !== "ready") return null;
   const tasks = overview.tasks || [];
   const inProgress = tasks.filter(task => task.status === "in_progress" || task.status === "waiting").length;
   const queued = tasks.filter(task => task.status === "pending").length + (overview.pending_intake || 0);
-  return { inProgress, queued, completedToday };
+  return { inProgress, queued };
 }
 
 export function TaskHome({ store, onCreateTask = () => {}, onReviewDecisions = () => {}, onViewProgress = () => {} }) {
@@ -80,7 +80,6 @@ export function TaskHome({ store, onCreateTask = () => {}, onReviewDecisions = (
         <div className="task-home__counts">
           <div><strong>{counts.inProgress}</strong> Tasks in progress</div>
           <div><strong>{counts.queued}</strong> Tasks queued</div>
-          <div><strong>{counts.completedToday ?? "Unknown"}</strong> Completed today</div>
         </div>
       ) : null}
 
