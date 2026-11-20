@@ -887,21 +887,6 @@ impl IssueClient for FakeIssueClient {
         })
     }
 
-    fn delete_issue(&self, number: IssueNumber) -> Result<(), ApiError> {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.record(&mut state, "delete_issue", &number.to_string());
-        let themes = state.themes.len();
-        state.themes.retain(|theme| theme.number != number);
-        let was_theme = state.themes.len() != themes;
-        if state.issues.remove(&number).is_none() && !was_theme {
-            return Err(ApiError::NotFound(number));
-        }
-        Ok(())
-    }
-
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {
         let mut state = self
             .inner

@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use gwt_core::timestamp::UtcTimestamp;
 use gwt_github::{
     client::{ThemeIssue, ThemeListing},
-    ApiError, Cache, CloseIntakeRecord, IssueClient, IssueNumber, IssueState,
+    ApiError, Cache, CloseIntakeRecord, IssueClient, IssueCloseReason, IssueNumber, IssueState,
 };
 use serde::Serialize;
 
@@ -80,7 +80,11 @@ pub fn load_themes_view(
 }
 
 /// Delete one theme and answer with the themes that remain. The number must
-/// name a current theme: this request never deletes any other Issue.
+/// name a current theme: this request never touches any other Issue.
+///
+/// A theme is deleted by closing its GitHub Issue as not planned. Nothing is
+/// erased: the Issue and the issues under it stay on GitHub, and reopening the
+/// Issue there brings the theme back.
 pub fn delete_theme(
     client: &dyn IssueClient,
     cache: &Cache,
@@ -90,19 +94,25 @@ pub fn delete_theme(
     let mut listing = client.list_themes()?;
     if !listing.themes.iter().any(|theme| theme.number.0 == number) {
         return Err(ThemeRefusal(format!(
-            "Issue #{number} is not a theme of this project, so it was not deleted."
+            "Issue #{number} is not a theme of this project, so it was not closed."
         )));
     }
-    client.delete_issue(IssueNumber(number)).map_err(|error| {
-        ThemeRefusal(match error {
-            ApiError::PermissionDenied { .. } => format!(
-                "GitHub did not delete Issue #{number}. Deleting an Issue needs admin access to the repository."
-            ),
-            other => ThemeRefusal::from(other).0,
-        })
-    })?;
-    // The deleted Issue no longer exists on GitHub; a cached copy would keep
-    // showing it in the Issues screen.
+    client
+        .set_state(
+            IssueNumber(number),
+            IssueState::Closed,
+            Some(IssueCloseReason::NotPlanned),
+        )
+        .map_err(|error| {
+            ThemeRefusal(match error {
+                ApiError::PermissionDenied { .. } => format!(
+                    "GitHub did not close Issue #{number}. Closing an Issue needs write access to the repository."
+                ),
+                other => ThemeRefusal::from(other).0,
+            })
+        })?;
+    // Drop the cached copy instead of rewriting it as closed: a theme given up
+    // is not work completed today, and the next refresh reads it back closed.
     let _ = cache.remove_issue(IssueNumber(number));
     listing.themes.retain(|theme| theme.number.0 != number);
     Ok(themes_view(listing, cache, now))
@@ -335,13 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_theme_removes_it_from_github_the_cache_and_the_view() {
+    fn deleting_a_theme_closes_its_issue_as_not_planned_and_drops_it_from_the_view() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path().to_path_buf());
         cache
             .write_snapshot(&snapshot(7, IssueState::Open))
             .unwrap();
         let client = FakeIssueClient::new();
+        client.seed(snapshot(7, IssueState::Open));
         client.seed_themes(vec![
             theme(7, &[(8, IssueState::Open)]),
             theme(20, &[(21, IssueState::Open)]),
@@ -356,8 +367,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![20]
         );
+        assert!(client
+            .call_log()
+            .contains(&"set_state:#7:not_planned".to_string()));
+        // A theme given up is not an Issue completed today.
         assert!(cache.load_entry(IssueNumber(7)).is_none());
-        assert!(client.call_log().contains(&"delete_issue:#7".to_string()));
+        assert_eq!(view.completed_today, 0);
     }
 
     #[test]
@@ -365,6 +380,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path().to_path_buf());
         let client = FakeIssueClient::new();
+        client.seed(snapshot(8, IssueState::Open));
         client.seed_themes(vec![theme(7, &[(8, IssueState::Open)])]);
 
         let refusal = delete_theme(&client, &cache, 8, UtcTimestamp::now()).unwrap_err();
@@ -373,7 +389,20 @@ mod tests {
         assert!(!client
             .call_log()
             .iter()
-            .any(|call| call.starts_with("delete_issue")));
+            .any(|call| call.starts_with("set_state")));
+    }
+
+    #[test]
+    fn a_failed_close_is_refused_with_the_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_path_buf());
+        let client = FakeIssueClient::new();
+        // The Issue is unknown to the client, so the close itself fails.
+        client.seed_themes(vec![theme(7, &[(8, IssueState::Open)])]);
+
+        let refusal = delete_theme(&client, &cache, 7, UtcTimestamp::now()).unwrap_err();
+
+        assert!(refusal.0.contains("could not be reached"), "{}", refusal.0);
     }
 
     #[test]

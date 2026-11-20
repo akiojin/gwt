@@ -3382,17 +3382,6 @@ query($owner:String!,$repo:String!,$after:String){
 }
 "#;
 
-const FETCH_ISSUE_NODE_ID_QUERY: &str = r#"
-query($owner:String!,$repo:String!,$number:Int!){
-  rateLimit{cost remaining resetAt nodeCount}
-  repository(owner:$owner, name:$repo){ issue(number:$number){ id } }
-}
-"#;
-
-const DELETE_ISSUE_MUTATION: &str = r#"
-mutation($id:ID!){ deleteIssue(input:{issueId:$id}){ clientMutationId } }
-"#;
-
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
@@ -3876,18 +3865,6 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         }
         listing.truncated = true;
         Ok(listing)
-    }
-
-    fn delete_issue(&self, number: IssueNumber) -> Result<(), ApiError> {
-        let value = self.graphql(
-            FETCH_ISSUE_NODE_ID_QUERY,
-            json!({ "owner": self.owner, "repo": self.repo, "number": number.0 }),
-        )?;
-        let Some(id) = value["data"]["repository"]["issue"]["id"].as_str() else {
-            return Err(ApiError::NotFound(number));
-        };
-        self.graphql(DELETE_ISSUE_MUTATION, json!({ "id": id }))?;
-        Ok(())
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {

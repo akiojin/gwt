@@ -129,10 +129,17 @@ fn themes_screen_reads_themes_and_what_was_completed_today() {
 }
 
 #[test]
-fn deleting_a_theme_deletes_its_issue_and_answers_with_the_remaining_themes() {
+fn deleting_a_theme_closes_its_issue_and_answers_with_the_remaining_themes() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let mut fixture = themes_fixture(temp.path(), true);
+    fixture.client.seed(sample_issue_snapshot(
+        7,
+        "Theme 7",
+        &[],
+        "body",
+        "2026-04-20T00:00:00Z",
+    ));
     fixture.client.seed_themes(vec![
         theme(7, &[(8, IssueState::Open)]),
         theme(20, &[(21, IssueState::Open)]),
@@ -155,7 +162,7 @@ fn deleting_a_theme_deletes_its_issue_and_answers_with_the_remaining_themes() {
     assert!(fixture
         .client
         .call_log()
-        .contains(&"delete_issue:#7".to_string()));
+        .contains(&"set_state:#7:not_planned".to_string()));
 }
 
 #[test]
@@ -178,7 +185,7 @@ fn deleting_an_issue_that_is_not_a_theme_is_refused() {
         .client
         .call_log()
         .iter()
-        .any(|call| call.starts_with("delete_issue")));
+        .any(|call| call.starts_with("set_state")));
 }
 
 #[test]

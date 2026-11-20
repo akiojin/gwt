@@ -312,9 +312,9 @@ fn directional_labels_preserve_unrelated_labels_and_issue_state() {
     assert_eq!(issue.body, seeded.body);
 }
 
-// Issue #7643: the fake serves seeded themes and records a delete.
+// Issue #7643: the fake serves seeded themes.
 #[test]
-fn fake_client_lists_seeded_themes_and_deletes_one() {
+fn fake_client_lists_seeded_themes() {
     use gwt_github::client::{ThemeIssue, ThemeListing};
 
     let fake = FakeIssueClient::new();
@@ -336,11 +336,4 @@ fn fake_client_lists_seeded_themes_and_deletes_one() {
             truncated: false
         }
     );
-    fake.delete_issue(IssueNumber(7)).unwrap();
-    assert_eq!(fake.list_themes().unwrap().themes, vec![theme(8)]);
-    assert!(matches!(
-        fake.delete_issue(IssueNumber(7)),
-        Err(ApiError::NotFound(IssueNumber(7)))
-    ));
-    assert!(fake.call_log().contains(&"delete_issue:#7".to_string()));
 }

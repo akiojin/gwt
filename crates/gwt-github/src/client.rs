@@ -356,12 +356,6 @@ pub trait IssueClient: Send + Sync {
     fn list_themes(&self) -> Result<ThemeListing, ApiError> {
         Err(ApiError::Unexpected("list themes unsupported".into()))
     }
-
-    /// Delete an Issue for good. GitHub allows this only to repository
-    /// administrators; its sub-issues are kept and lose their parent.
-    fn delete_issue(&self, _number: IssueNumber) -> Result<(), ApiError> {
-        Err(ApiError::Unexpected("delete issue unsupported".into()))
-    }
 }
 
 /// One theme: an open Issue that has sub-issues (Issue #7643).

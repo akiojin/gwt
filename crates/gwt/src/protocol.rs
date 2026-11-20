@@ -806,8 +806,9 @@ pub enum FrontendEvent {
     LoadThemes {
         request_id: u64,
     },
-    /// Issue #7643: delete one theme. The host deletes the GitHub Issue only
-    /// when the number names a current theme; the screen confirms first.
+    /// Issue #7643: delete one theme. The host closes the GitHub Issue as not
+    /// planned, only when the number names a current theme; the screen
+    /// confirms first.
     DeleteTheme {
         number: u64,
         request_id: u64,

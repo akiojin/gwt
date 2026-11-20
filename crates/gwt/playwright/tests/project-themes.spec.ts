@@ -4,7 +4,8 @@
  *       in the Issues screen.
  * AC-2: "Issues completed today" is the number the backend counted.
  * AC-3: a project with no themes says what a theme is.
- * A-23: deleting a theme asks first and says what happens to its issues.
+ * A-23: deleting a theme asks first and says what happens: its GitHub Issue
+ *       is closed, the issues under it stay, and it can be reopened.
  *
  * Runs against the embedded frontend with a stub backend, in both themes,
  * with zero console / page errors.
@@ -191,8 +192,9 @@ test.describe("Themes", () => {
     const dialog = page.getByRole("dialog", { name: "Delete this theme?" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
-    await expect(dialog).toContainText('"Full screen refresh" (GitHub Issue #7007) is deleted from GitHub. This cannot be undone.');
-    await expect(dialog).toContainText("The 4 issues under it are not deleted. They stay as they are and no longer belong to a theme.");
+    await expect(dialog).toContainText('"Full screen refresh" leaves this list: GitHub Issue #7007 is closed on GitHub as not planned.');
+    await expect(dialog).toContainText("The 4 issues under it stay as they are.");
+    await expect(dialog).toContainText("Nothing is erased. Reopen the Issue on GitHub to bring the theme back.");
     await page.screenshot({ path: info.outputPath("theme-delete-dialog.png") });
 
     // Escape cancels and hands focus back; nothing was deleted.
@@ -214,12 +216,12 @@ test.describe("Themes", () => {
 
   test("a refused delete stays in the dialog with the reason", async ({ page }) => {
     const errors = captureErrors(page);
-    const screen = await open(page, THEMES, { refuseDelete: "GitHub did not delete Issue #7007. Deleting an Issue needs admin access to the repository." });
+    const screen = await open(page, THEMES, { refuseDelete: "GitHub did not close Issue #7007. Closing an Issue needs write access to the repository." });
     await screen.locator('[data-theme-number="7007"]').click();
     await screen.getByRole("button", { name: "Delete theme" }).click();
     const dialog = page.getByRole("dialog", { name: "Delete this theme?" });
     await dialog.getByRole("button", { name: "Delete theme" }).click();
-    await expect(dialog.getByRole("alert")).toContainText("GitHub did not delete Issue #7007.");
+    await expect(dialog.getByRole("alert")).toContainText("GitHub did not close Issue #7007.");
     await expect(dialog.getByRole("button", { name: "Delete theme" })).toBeEnabled();
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await expect(screen.getByRole("heading", { level: 1, name: "Full screen refresh (#7007)" })).toBeVisible();

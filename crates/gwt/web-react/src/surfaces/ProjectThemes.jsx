@@ -39,12 +39,12 @@ const COPY = {
   otherRepository: "In another repository — opens on GitHub",
   actions: "Theme actions",
   deleteTitle: "Delete this theme",
-  deleteLead: "Deleting is the only way to correct a theme that was recorded by mistake. Themes cannot be merged, and issues cannot be moved between themes.",
+  deleteLead: "Deleting is the only way to correct a theme that was recorded by mistake. It closes the theme's GitHub Issue and keeps the issues under it. Themes cannot be merged, and issues cannot be moved between themes.",
   deleteButton: "Delete theme",
   dialogTitle: "Delete this theme?",
-  dialogBody: (title, number) => `"${title}" (GitHub Issue #${number}) is deleted from GitHub. This cannot be undone.`,
-  dialogImpact: total => `${total === 1 ? "The 1 issue" : `The ${total} issues`} under it ${total === 1 ? "is" : "are"} not deleted. ${total === 1 ? "It stays as it is and no longer belongs" : "They stay as they are and no longer belong"} to a theme.`,
-  dialogAccess: "Deleting an Issue needs admin access to the repository.",
+  dialogBody: (title, number) => `"${title}" leaves this list: GitHub Issue #${number} is closed on GitHub as not planned.`,
+  dialogImpact: total => `${total === 1 ? "The 1 issue" : `The ${total} issues`} under it ${total === 1 ? "stays as it is" : "stay as they are"}.`,
+  dialogUndo: "Nothing is erased. Reopen the Issue on GitHub to bring the theme back.",
   deleting: "Deleting…",
   cancel: "Cancel",
 };
@@ -236,7 +236,7 @@ export function ProjectThemes({ store, actions }) {
             <div className="modal-body">
               <p>{COPY.dialogBody(dialogTheme.title, dialogTheme.number)}</p>
               <p data-theme-delete-impact>{COPY.dialogImpact(dialogTheme.total)}</p>
-              <p>{COPY.dialogAccess}</p>
+              <p data-theme-delete-undo>{COPY.dialogUndo}</p>
               {view.deleteError ? <p className="project-themes__error" role="alert">{view.deleteError}</p> : null}
             </div>
             <div className="modal-footer">

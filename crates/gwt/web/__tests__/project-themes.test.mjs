@@ -117,8 +117,8 @@ test("a refused delete keeps the dialog open with the reason", async () => {
   await page.click('[data-theme-number="7"]');
   await page.click("[data-theme-delete]");
   await page.click("[data-theme-delete-confirm]");
-  await page.reply({ kind: "theme_error", request_id: 2, message: "Deleting an Issue needs admin access to the repository." });
-  assert.match(page.document.querySelector("[data-theme-delete-dialog] [role=alert]").textContent, /admin access/);
+  await page.reply({ kind: "theme_error", request_id: 2, message: "Closing an Issue needs write access to the repository." });
+  assert.match(page.document.querySelector("[data-theme-delete-dialog] [role=alert]").textContent, /write access/);
   assert.match(page.text(), /Theme 7 \(#7\)/, "the theme is still there");
   page.themes.dispose();
 });

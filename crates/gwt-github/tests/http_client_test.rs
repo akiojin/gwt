@@ -3047,7 +3047,7 @@ fn pm_bounded_pr_review_submits_only_explicit_events_and_checks_actual_state() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #7643: themes (Issues that have sub-issues) and deleting one
+// Issue #7643: themes (Issues that have sub-issues)
 // ---------------------------------------------------------------------------
 
 fn graphql_ok(data: serde_json::Value) -> HttpResponse {
@@ -3140,42 +3140,4 @@ fn list_themes_stops_at_the_page_limit_and_says_so() {
 
     assert!(listing.truncated);
     assert_eq!(client.transport().recorded().len(), 10);
-}
-
-#[test]
-fn delete_issue_resolves_the_node_id_and_deletes_it() {
-    let transport = FakeTransport::new();
-    transport.enqueue(graphql_ok(
-        serde_json::json!({ "repository": { "issue": { "id": "I_node7" } } }),
-    ));
-    transport.enqueue(graphql_ok(
-        serde_json::json!({ "deleteIssue": { "clientMutationId": null } }),
-    ));
-    let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
-
-    client.delete_issue(IssueNumber(7)).expect("deleted");
-
-    let requests = client.transport().recorded();
-    assert_eq!(requests.len(), 2);
-    let lookup: serde_json::Value =
-        serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
-    assert_eq!(lookup["variables"]["number"], 7);
-    let mutation: serde_json::Value =
-        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
-    assert!(mutation["query"].as_str().unwrap().contains("deleteIssue"));
-    assert_eq!(mutation["variables"]["id"], "I_node7");
-}
-
-#[test]
-fn delete_issue_reports_a_missing_issue_without_deleting() {
-    let transport = FakeTransport::new();
-    transport.enqueue(graphql_ok(
-        serde_json::json!({ "repository": { "issue": null } }),
-    ));
-    let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
-
-    let error = client.delete_issue(IssueNumber(7)).expect_err("missing");
-
-    assert!(matches!(error, ApiError::NotFound(IssueNumber(7))));
-    assert_eq!(client.transport().recorded().len(), 1);
 }

@@ -4,7 +4,8 @@
  * AC-1: theme list → theme detail → the issues under it.
  * AC-2: "Issues completed today" is the number the backend counted.
  * AC-3: a project with no themes says what a theme is and how one appears.
- * A-23: deleting a theme asks first and says what happens to its issues.
+ * A-23: deleting a theme asks first and says what happens: its GitHub Issue
+ *       is closed, the issues under it stay, and it can be reopened.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -132,8 +133,9 @@ test("A-23: deleting a theme asks first and says what happens to the issues unde
   const dialog = page.document.querySelector("[data-theme-delete-dialog] [role=dialog]");
   assert.equal(dialog.getAttribute("aria-modal"), "true");
   assert.ok(dialog.querySelector(".modal-header") && dialog.querySelector(".modal-body") && dialog.querySelector(".modal-footer"));
-  assert.match(dialog.textContent, /"Full refresh" \(GitHub Issue #7\) is deleted from GitHub\. This cannot be undone\./);
-  assert.match(dialog.querySelector("[data-theme-delete-impact]").textContent, /The 3 issues under it are not deleted\. They stay as they are and no longer belong to a theme\./);
+  assert.match(dialog.textContent, /"Full refresh" leaves this list: GitHub Issue #7 is closed on GitHub as not planned\./);
+  assert.match(dialog.querySelector("[data-theme-delete-impact]").textContent, /The 3 issues under it stay as they are\./);
+  assert.match(dialog.querySelector("[data-theme-delete-undo]").textContent, /Nothing is erased\. Reopen the Issue on GitHub to bring the theme back\./);
   assert.deepEqual(page.calls, [], "nothing is deleted before the confirmation");
 
   await page.click(dialog.querySelector("[data-theme-delete-cancel]"));
@@ -148,13 +150,13 @@ test("A-23: deleting a theme asks first and says what happens to the issues unde
   await page.set({ deleting: true });
   assert.ok(page.document.querySelector("[data-theme-delete-confirm]").disabled);
   assert.ok(page.document.querySelector("[data-theme-delete-cancel]").disabled);
-  await page.set({ deleting: false, deleteError: "Deleting an Issue needs admin access to the repository." });
-  assert.match(page.document.querySelector("[data-theme-delete-dialog] [role=alert]").textContent, /admin access/);
+  await page.set({ deleting: false, deleteError: "Closing an Issue needs write access to the repository." });
+  assert.match(page.document.querySelector("[data-theme-delete-dialog] [role=alert]").textContent, /write access/);
   page.unmount();
 });
 
 test("a theme with one issue is worded in the singular", async () => {
   const page = mount({ selected: 20, dialog: { number: 20 } });
-  assert.match(page.document.querySelector("[data-theme-delete-impact]").textContent, /The 1 issue under it is not deleted\. It stays as it is and no longer belongs to a theme\./);
+  assert.match(page.document.querySelector("[data-theme-delete-impact]").textContent, /The 1 issue under it stays as it is\./);
   page.unmount();
 });
