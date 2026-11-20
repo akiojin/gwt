@@ -1,6 +1,6 @@
 /** SPEC #1921 / Issue #5017: real detection, fixture installers and live PTY safety. */
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   acquireLiveGwtBackendLock,
@@ -98,6 +98,7 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     await expect(panel.locator(".settings-help")).toContainText("At the next app startup");
     await expect(panel.locator(".settings-help")).toContainText("installed agents with a verified update route");
     await expect(panel.locator(".settings-help")).toContainText("Nothing is installed automatically");
+    await expect(panel.locator(".settings-help")).toContainText("refused while an agent window is running that tool");
   });
 
   test.afterEach(async ({ page }, info) => {
@@ -264,68 +265,61 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     }
   });
 
-  test("protects a live agent, updates before/after versions and persists automatic updates", async ({ page }, info) => {
+  // Issue #7744: a live agent holds back maintenance of its own tool only.
+  test("protects a live agent's own tool, updates an unused tool beside it and persists automatic updates", async ({ page }, info) => {
     test.skip(!process.env.GWT_L3_BACKENDS, "requires the bounded Issue #5017 provider and installer fixtures");
     const backend = backendFor(info), row = panel.locator('[data-agent-id="grok"]');
     const installerCount = async () => (await lines<string[]>(join(backend.home, "npm-argv.jsonl")))
       .filter(args => args[0] === "install").length;
     const launches = () => lines<{ pid: number; ppid: number }>(join(backend.home, "provider-argv.jsonl"));
-    let windowId = "";
     await expect(row).toContainText("1.0.0");
-    try {
-      await sendLiveGwtEvent(page, { kind: "create_window", preset: "claude",
-        bounds: { x: 80, y: 80, width: 700, height: 440 } });
-      await expect.poll(async () => (await launches()).length, { timeout: 30_000 }).toBe(1);
-      const provider = (await launches())[0];
-      const pane = await (await page.waitForFunction(() => {
-        const workspace = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.payload.kind === "workspace_state")?.payload.workspace;
-        return workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
-          .find((candidate: any) => candidate.preset === "claude" && candidate.session_id);
-      }, undefined, { timeout: 30_000 })).jsonValue();
-      windowId = pane.id;
-      const runtimePath = join(backend.home, ".gwt/sessions/runtime", String(backend.pid), `${pane.session_id}.json`);
-      const runtime = async () => JSON.parse(await readFile(runtimePath, "utf8"));
-      // Windows Host launches keep the selected interactive shell as the PTY
-      // child; the Node fixture is its child. POSIX launches exec the fixture.
-      await expect.poll(async () => (await runtime()).child_pid)
-        .toBe(process.platform === "win32" ? provider.ppid : provider.pid);
-      const before = await runtime(), installsBefore = await installerCount();
-      expect(alive(provider.pid), "the test fixture is an actual live PTY child").toBe(true);
-      const after = await cursor(page);
-      // Safety also applies to clients bypassing the disabled action button.
-      await sendLiveGwtEvent(page, { kind: "maintain_supported_agent", agent_id: "grok", action: "update" });
-      const refusal = await maintenance(page, after, "grok", false);
-      expect(refusal.message).toMatch(/agent.*(?:running|live)|(?:close|stop).*agent/i);
-      expect(await installerCount(), "refusal cannot invoke any installer").toBe(installsBefore);
-      const unchanged = await runtime();
-      expect({ child_pid: unchanged.child_pid, child_started_at: unchanged.child_started_at })
-        .toEqual({ child_pid: before.child_pid, child_started_at: before.child_started_at });
-      expect(alive(provider.pid)).toBe(true);
-      await sendLiveGwtEvent(page, { kind: "terminal_input", id: windowId, data: "maintenance-safety-ack\r" });
-      await expect.poll(() => page.evaluate(id => (window as any).__gwtTerminalTestApi?.bufferText(id) ?? "", windowId),
-        { timeout: 15_000 }).toContain("GWT_MAINTENANCE_FIXTURE_ACK maintenance-safety-ack");
-      const identity = await page.evaluate(id => {
-        const workspace = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.payload.kind === "workspace_state")?.payload.workspace;
-        return workspace.tabs.flatMap((tab: any) => tab.workspace.windows).find((candidate: any) => candidate.id === id)?.session_id;
-      }, windowId);
-      expect(identity).toBe(pane.session_id);
-      await info.attach("live-agent-safety", { body: JSON.stringify({ provider, session_id: identity,
-        before, after: unchanged, refusal, installer_count: installsBefore }, null, 2), contentType: "application/json" });
-    } finally {
-      if (windowId) {
-        await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
-        await expect(page.locator(`.workspace-window[data-id="${windowId}"]`)).toHaveCount(0);
-        await expect.poll(async () => (await launches()).every(launch => !alive(launch.pid)), { timeout: 15_000 }).toBe(true);
+    // The project's own Project Manager is the live agent: it runs Claude Code.
+    await expect.poll(async () => (await launches()).length, { timeout: 30_000 }).toBe(1);
+    const provider = (await launches())[0];
+    const pane = await (await page.waitForFunction(() => {
+      const workspace = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.payload.kind === "workspace_state")?.payload.workspace;
+      return workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
+        .find((candidate: any) => candidate.agent_id === "claude" && candidate.session_id);
+    }, undefined, { timeout: 30_000 })).jsonValue();
+    // The record is published under the process that owns the PTY.
+    const runtimeRoot = join(backend.home, ".gwt/sessions/runtime");
+    const runtime = async () => {
+      for (const owner of await readdir(runtimeRoot).catch(() => [])) {
+        const record = await readFile(join(runtimeRoot, owner, `${pane.session_id}.json`), "utf8").catch(() => "");
+        if (record) return JSON.parse(record);
       }
-    }
+      return {};
+    };
+    // Windows Host launches keep the selected interactive shell as the PTY
+    // child; the Node fixture is its child. POSIX launches exec the fixture.
+    await expect.poll(async () => (await runtime()).child_pid)
+      .toBe(process.platform === "win32" ? provider.ppid : provider.pid);
+    const before = await runtime(), installsBefore = await installerCount();
+    expect(alive(provider.pid), "the test fixture is an actual live PTY child").toBe(true);
     const after = await cursor(page);
+    // The tool in use has no action button; safety also covers direct requests.
+    await sendLiveGwtEvent(page, { kind: "maintain_supported_agent", agent_id: "claude", action: "update" });
+    const refusal = await maintenance(page, after, "claude", false);
+    expect(refusal.message).toMatch(/^Claude Code is in use by .+\. Close those agent panes before maintenance\.$/);
+    expect(refusal.message, "the refusal names the agent using the tool").toContain(pane.agent_name);
+    await expect(panel.locator('[data-agent-maintenance-id="claude"]')).toContainText(refusal.message);
+    expect(await installerCount(), "refusal cannot invoke any installer").toBe(installsBefore);
+    await screenshot(settings, info, "supported-agents-tool-in-use");
+    // Grok has no agent running it, so it updates while Claude stays live.
+    const unused = await cursor(page);
     await row.getByRole("button", { name: "Update Grok Build", exact: true }).click();
-    const result = await maintenance(page, after, "grok", true);
+    const result = await maintenance(page, unused, "grok", true);
     expect(result.before_version).toContain("1.0.0");
     expect(result.after_version).toContain("2.0.0");
     await expect(panel.locator('[data-agent-maintenance-id="grok"]')).toContainText(/1\.0\.0.*2\.0\.0/);
+    expect(await installerCount(), "only the unused tool is updated").toBe(installsBefore + 1);
+    const unchanged = await runtime();
+    expect({ child_pid: unchanged.child_pid, child_started_at: unchanged.child_started_at })
+      .toEqual({ child_pid: before.child_pid, child_started_at: before.child_started_at });
+    expect(alive(provider.pid), "the live agent survives the other tool's update").toBe(true);
+    await info.attach("live-agent-safety", { body: JSON.stringify({ provider, session_id: pane.session_id,
+      before, after: unchanged, refusal, unused_tool_update: result, installer_count: installsBefore }, null, 2), contentType: "application/json" });
     const next = await cursor(page);
     await sendLiveGwtEvent(page, { kind: "list_supported_agents" });
     const updated = (await catalog(page, next)).agents.find((agent: any) => agent.id === "grok");

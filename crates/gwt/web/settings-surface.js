@@ -116,9 +116,9 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   const help = document.createElement("p");
   help.className = "settings-help";
   help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
-    + "Updates require no open agent windows or pending launches, including the Project Manager. "
-    + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
-    + "close them and retry. Update failures leave launches available.";
+    + "A tool is skipped while an agent window, including the Project Manager, is running it. "
+    + "Nothing is installed automatically. Manual installs and updates of a tool are refused while an agent window "
+    + "is running that tool; close those windows and retry. Update failures leave launches available.";
   panel.appendChild(help);
   const globalResult = maintenance.get("");
   if (globalResult?.message) {
