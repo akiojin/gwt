@@ -937,6 +937,14 @@ body::after {
 
 /* Issue #6476: keep every top-bar action reachable on phone-sized screens.
    Let the chrome row grow when the existing controls wrap. */
+/* Issue 7646: the bar gained the agent ledger entry. Below 900px the brand
+   prefix yields its room so the actions never overflow the page. */
+@media (max-width: 900px) {
+  .project-bar::before {
+    display: none;
+  }
+}
+
 @media (max-width: 600px) {
   #app {
     grid-template-rows: auto auto minmax(0, 1fr) var(--usage-strip-row-size, 28px);

@@ -294,7 +294,12 @@
 .roster-history button { text-align: start; color: var(--color-link); }
 .roster-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 /* Issue 7646: ledger order and deletion controls on every member row. */
-.roster-order { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
+/* Buttons take their label's width, so the body of a row stays its selection target. */
+.roster-who > [data-action="activate"] { align-self: flex-start; }
+.roster-row > .roster-avatar,
+.roster-row > .roster-who { grid-row: 1 / span 2; }
+.roster-row > .roster-state { grid-row: 1; grid-column: 3; }
+.roster-order { grid-row: 2; grid-column: 3; justify-self: end; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .roster-order-position { min-width: var(--space-5); color: var(--color-text-muted); font-size: var(--type-xs); font-variant-numeric: tabular-nums; text-align: center; }
 .roster-order button { font-size: var(--type-xs); }
 .agents-surface .roster-add { display: flex; align-items: center; gap: var(--space-3); width: 100%; margin-top: var(--space-2); padding: var(--space-3); border-style: dashed; text-align: start; color: var(--color-text-muted); }
@@ -324,7 +329,10 @@
   .work-side small { flex-basis: 100%; }
   .work-stats { flex-direction: column; }
   .roster-row { grid-template-columns: 40px minmax(0, 1fr); }
-  .roster-state { grid-column: 2; justify-self: start; }
+  .roster-row > .roster-avatar,
+  .roster-row > .roster-who { grid-row: auto; }
+  .roster-row > .roster-state,
+  .roster-order { grid-row: auto; grid-column: 2; justify-self: start; }
   .roster-stats,
   .roster-past-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .roster-past table,

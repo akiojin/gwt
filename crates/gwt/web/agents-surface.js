@@ -583,7 +583,8 @@ export function createAgentsSurface({ document, storage, executionModel, project
         });
         order.append(button);
       }
-      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate, order); row.append(avatar(member), who, state);
+      // The controls sit at the row's trailing edge, so the body of the row stays the selection target.
+      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state, order);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
