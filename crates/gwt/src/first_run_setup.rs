@@ -72,7 +72,8 @@ pub struct FirstRunSetupView {
     pub members: Vec<SetupMemberView>,
     pub pm: Option<PmDesignation>,
     /// `true` while the machine cannot start work: no installed tool is
-    /// registered, or nobody is in the ledger and no PM is designated.
+    /// registered, or it is a new machine — nobody in the ledger, no PM
+    /// designated and no project known.
     pub needs_setup: bool,
     pub name_max_chars: usize,
 }
@@ -94,10 +95,14 @@ pub fn tool_registered(tools: &[SetupToolView]) -> bool {
     tools.iter().any(|tool| tool.installed)
 }
 
+/// `has_projects` says whether this machine already knows a project. A
+/// machine that does is in use: it is never sent into the setup for its
+/// ledger, only for a missing tool.
 pub fn view(
     tools: Vec<SetupToolView>,
     members: Vec<SetupMemberView>,
     pm: Option<PmDesignation>,
+    has_projects: bool,
 ) -> FirstRunSetupView {
     // A designation whose member has left the ledger no longer names anyone.
     let pm = pm.filter(|pm| {
@@ -106,7 +111,8 @@ pub fn view(
                 .iter()
                 .any(|member| pm.names(&member.member_id, &member.name))
     });
-    let needs_setup = !tool_registered(&tools) || (members.is_empty() && pm.is_none());
+    let needs_setup =
+        !tool_registered(&tools) || (members.is_empty() && pm.is_none() && !has_projects);
     FirstRunSetupView {
         tools,
         members,
@@ -222,16 +228,17 @@ mod tests {
     /// not ready, and stops being required once both are.
     #[test]
     fn setup_is_needed_until_a_tool_is_registered_and_a_pm_is_known() {
-        assert!(view(Vec::new(), Vec::new(), None).needs_setup);
+        assert!(view(Vec::new(), Vec::new(), None, false).needs_setup);
         assert!(
             view(
                 vec![tool("Claude Code 1", false)],
                 vec![member("m1", "Aoi")],
-                None
+                None,
+                false,
             )
             .needs_setup
         );
-        assert!(view(vec![tool("Claude Code 1", true)], Vec::new(), None).needs_setup);
+        assert!(view(vec![tool("Claude Code 1", true)], Vec::new(), None, false).needs_setup);
         let designated = PmDesignation {
             member_id: None,
             name: "Aoi".into(),
@@ -240,16 +247,22 @@ mod tests {
             !view(
                 vec![tool("Claude Code 1", true)],
                 Vec::new(),
-                Some(designated)
+                Some(designated),
+                false,
             )
             .needs_setup
         );
+        // A machine that already knows a project is in use: only a missing
+        // tool sends it into setup.
+        assert!(!view(vec![tool("Claude Code 1", true)], Vec::new(), None, true).needs_setup);
+        assert!(view(vec![tool("Claude Code 1", false)], Vec::new(), None, true).needs_setup);
         // An existing installation is never sent back into setup.
         assert!(
             !view(
                 vec![tool("Claude Code 1", true)],
                 vec![member("m1", "Aoi")],
-                None
+                None,
+                false,
             )
             .needs_setup
         );
@@ -265,6 +278,7 @@ mod tests {
             vec![tool("Claude Code 1", true)],
             vec![member("m1", "Ren")],
             Some(gone),
+            false,
         );
         assert_eq!(shown.pm, None);
     }

@@ -5932,6 +5932,7 @@ mod tests {
                 }],
                 Vec::new(),
                 None,
+                false,
             )),
         };
         assert_eq!(event.delivery_policy().kind, "first_run_setup");

@@ -66,6 +66,7 @@ impl AppRuntime {
             None => setup::load_designation()
                 .map_err(|error| format!("Could not read the first-run setup: {error}"))?,
         };
-        Ok(setup::view(tools, members, pm))
+        let has_projects = !self.tabs.is_empty() || !self.recent_projects.is_empty();
+        Ok(setup::view(tools, members, pm, has_projects))
     }
 }
