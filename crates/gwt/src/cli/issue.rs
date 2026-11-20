@@ -14226,6 +14226,7 @@ mod tests {
             stall_reason: None,
             gui_action: None,
             slot_occupancy: None,
+            terminal_queue_refill: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -14333,6 +14334,7 @@ mod tests {
             stall_reason: None,
             gui_action: None,
             slot_occupancy: None,
+            terminal_queue_refill: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -14492,6 +14494,7 @@ mod tests {
                 stall_reason: None,
                 gui_action: None,
                 slot_occupancy: None,
+                terminal_queue_refill: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -14586,6 +14589,7 @@ mod tests {
             stall_reason: None,
             gui_action: None,
             slot_occupancy: None,
+            terminal_queue_refill: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -14918,6 +14922,17 @@ mod tests {
                 "the degraded cache must explicitly report {field} as null"
             );
         }
+        // Issue #7733 AC-2: every terminal queue member is accounted for.
+        assert_eq!(
+            status
+                .as_object_mut()
+                .unwrap()
+                .remove("terminal_queue_refill"),
+            Some(serde_json::json!({
+                "enabled": false, "limit": 0, "counted": [2, 1],
+                "uncounted": [], "hold": "disabled",
+            }))
+        );
         assert_eq!(
             status.as_object_mut().unwrap().remove("event_history"),
             Some(serde_json::json!([]))
@@ -19486,6 +19501,7 @@ command = "my-agent-cli"
             stall_reason: None,
             gui_action: None,
             slot_occupancy: None,
+            terminal_queue_refill: None,
             issue_cache: None,
         };
 
