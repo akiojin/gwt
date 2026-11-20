@@ -1412,7 +1412,11 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const primaryKey = new URL(page.url()).pathname.split('/').at(-1)!;
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
-      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
+      // T-023: a decision is drawn only by Decide and the PM conversation, so
+      // the persisted legacy decision survives the restart there, not in Reports.
+      await expect(pane.locator('.task-decisions__card[data-decision-id="persisted-before-restart"]'))
+        .toContainText('Persisted before restart');
+      await expect(reports.locator('article[data-report-id="persisted-before-restart"]')).toHaveCount(0);
       const originalCount = await reports.locator('article').count();
       const state = ownedState;
       const fixture = { repo_hash: basename(join(state, '..')) };
@@ -1565,22 +1569,27 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         expect(listed.receipts.find((row: any) => row.request_id === unchanged.request_id)).toEqual(unchanged);
         expect(listed.events.find((row: any) => row.event_id === initialEvent.event_id)).toMatchObject({ revision: 3, state: { status: 'resolved' } });
         await refreshPmReports(page);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
         await expect(details).toHaveAttribute('open', '');
+        const decisionId = mixed.reports[1].id;
         for (const receipt of [mixed, resolved]) {
-          for (const row of receipt.reports) await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(1);
+          for (const row of receipt.reports) {
+            await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(row.id === decisionId ? 0 : 1);
+          }
         }
-        const decisionRow = reports.locator(`article[data-report-id="${mixed.reports[1].id}"]`);
-        await expect(decisionRow).toContainText('1. Retry — repeat the check\n2. Wait — keep the current state\n3. Investigate — collect more evidence\n4. Cancel — stop this attempt');
-        await expect(decisionRow).toContainText('Reply with the option number, or Other: your own answer.');
-        await decisionRow.getByRole('button', { name: 'Copy report' }).click();
-        await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('4. Cancel — stop this attempt');
-        await saveEvidence('four-choice-decision', await decisionRow.screenshot(), 'image/png');
+        await expect(reports.locator('.pm-chat__decision-controls')).toHaveCount(0);
 
-        // T-ASK-SURFACE: actual Reports -> existing send path -> stopped-pane
-        // refusal. This fixture proves the request and visible failure, never
-        // a provider-accepted answer or a human Q&A capture.
-        const choices = decisionRow.locator('.pm-chat__decision-option');
+        // T-ASK-SURFACE / T-023: the PM conversation -> existing send path ->
+        // stopped-pane refusal. This fixture proves the request and visible
+        // failure, never a provider-accepted answer or a human Q&A capture.
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        await expect(pane.getByRole('region', { name: 'Decision reports', exact: true })).toHaveCount(0);
+        const conversation = pane.getByRole('log', { name: 'PM conversation messages' });
+        const chatDecision = conversation.locator(`.pm-chat__decision[data-decision-id="${decisionId}"]`);
+        await expect(chatDecision).toContainText('Which recovery?');
+        await expect(chatDecision).toContainText('I recommend: Retry.');
+        await saveEvidence('four-choice-decision', await chatDecision.screenshot(), 'image/png');
+        const choices = chatDecision.locator('.pm-chat__decision-option');
         await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
         await choices.nth(1).focus();
         await page.keyboard.press('Enter');
@@ -1589,22 +1598,21 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
           text: 'Answer to "Which recovery?": 2. Wait — keep the current state\r', request_id: expect.any(Number) });
         await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
           .toMatchObject({ ok: false, request_id: choiceRequests[0].request_id });
-        await expect(decisionRow.getByRole('alert')).not.toBeEmpty();
+        await expect(chatDecision.getByRole('alert')).not.toBeEmpty();
         await expect(choices.nth(1)).toBeEnabled();
         await expect(choices.nth(1)).toBeFocused();
-        const refusal = await decisionRow.getByRole('alert').innerText();
-        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
-        const chatDecisions = pane.getByRole('region', { name: 'Decision reports', exact: true });
-        const chatDecision = chatDecisions.locator(`[data-decision-id="${mixed.reports[1].id}"]`);
-        await expect(chatDecision.getByRole('alert')).toHaveText(refusal);
-        await expect(chatDecision.locator('.pm-chat__decision-option')).toHaveCount(4);
+        const refusal = await chatDecision.getByRole('alert').innerText();
         const draft = pane.getByRole('textbox', { name: 'Message to PM' });
         await draft.fill('Keep this original reply');
-        await chatDecision.getByRole('button', { name: 'Other: reply in chat', exact: true }).click();
+        await chatDecision.getByRole('button', { name: 'Other: write a reply', exact: true }).click();
         await expect(draft).toBeFocused();
         await expect(draft).toHaveValue('Keep this original reply');
+        const replyTarget = pane.locator('.pm-chat__reply-target');
+        await expect(replyTarget).toContainText('Replying to: Which recovery?');
         expect(choiceRequests).toHaveLength(1);
-        await chatDecision.locator('.pm-chat__decision-option').nth(0).click();
+        await replyTarget.getByRole('button', { name: 'Cancel reply', exact: true }).click();
+        await expect(replyTarget).toBeHidden();
+        await choices.nth(0).click();
         await expect.poll(() => choiceRequests.length).toBe(2);
         expect(choiceRequests[1].text).toBe('Answer to "Which recovery?": 1. Retry — repeat the check\r');
         expect(choiceRequests[1].request_id).not.toBe(choiceRequests[0].request_id);
@@ -1614,14 +1622,22 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await expect(draft).toHaveValue('Keep this original reply');
         await page.setViewportSize({ width: 404, height: 1000 });
         await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(400);
-        await expect.poll(() => chatDecisions.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+        await expect.poll(() => conversation.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
         await chatDecision.scrollIntoViewIfNeeded();
         await saveEvidence('chat-decision-narrow', await pane.screenshot(), 'image/png');
         await page.setViewportSize({ width: 1440, height: 1000 });
         const retryRefusal = choiceResults.find(result => result.request_id === choiceRequests[1].request_id).error;
+        expect(refusal).toBeTruthy();
         await pane.getByRole('button', { name: 'Decide', exact: true }).click();
-        await expect(pane.locator(`.task-decisions__card[data-decision-id="${mixed.reports[1].id}"]`)
-          .getByRole('alert')).toContainText(retryRefusal);
+        const decideCard = pane.locator(`.task-decisions__card[data-decision-id="${decisionId}"]`);
+        await expect(decideCard.getByRole('alert')).toContainText(retryRefusal);
+        // "Decide later" keeps the refused decision waiting at the end of the queue.
+        const waitingCount = await pane.locator('.task-decisions__count').innerText();
+        await decideCard.getByRole('button', { name: 'Decide later', exact: true }).click();
+        await expect(pane.locator('.task-decisions__card').last()).toHaveAttribute('data-decision-id', decisionId);
+        await expect(pane.locator('.task-decisions__notice')).toContainText('Kept waiting');
+        await expect(pane.locator('.task-decisions__count')).toHaveText(waitingCount);
+        expect(choiceRequests).toHaveLength(2);
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await saveEvidence('decision-controls-requests', JSON.stringify({ choiceRequests, choiceResults }), 'application/json');
         const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
@@ -1697,7 +1713,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
         await saveEvidence('second-project-reports', await pane.screenshot(), 'image/png');
         await gotoPmReports(page, primaryKey, BASE);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
         await expect(reports).not.toContainText(`RPT-F second project only ${theme}`);
         expect(invoke('pm.report.list', {}).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(3);
         expect(invoke('pm.report.list', {}, secondSession, secondRoot).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(1);

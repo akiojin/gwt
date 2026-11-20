@@ -56,7 +56,7 @@ async function mount(state) {
   globalThis.document = document;
   globalThis.window = window;
   const model = createUiStateStore(state);
-  const calls = { answers: [], replies: [] };
+  const calls = { answers: [], replies: [], deferrals: [] };
   const root = createRoot(document.body);
   await act(async () =>
     root.render(
@@ -64,6 +64,7 @@ async function mount(state) {
         store: model,
         onAnswerDecision: (item, optionIndex) => calls.answers.push([item.id, optionIndex]),
         onReplyInChat: item => calls.replies.push(item.id),
+        onDeferDecision: item => calls.deferrals.push(item.id),
       }),
     ),
   );
@@ -136,10 +137,10 @@ test("typed decision packet renders question, impact, recommendation and numbere
   assert.match(document.body.textContent, /1 decision/);
 });
 
-test("only decision items handed to the surface are listed, with the total count", async () => {
+test("only decision items handed to the surface are listed, with the waiting count", async () => {
   const { document } = await mount(feed([packetItem("d1"), plainItem("d2")]));
   assert.equal(cards(document).length, 2);
-  assert.match(document.body.textContent, /2 decisions/);
+  assert.equal(document.querySelector(".task-decisions__count").textContent, "2 decisions waiting");
 });
 
 test("choosing an option reports the decision and the option index once", async () => {
@@ -176,17 +177,28 @@ test("a failed send keeps the decision actionable and shows the error on its car
   for (const button of optionButtons(card)) assert.equal(button.disabled, false);
 });
 
-test("Later keeps the decision unresolved and moves focus to the next decision", async () => {
+// SPEC #7007 T-023: "Decide later" postpones without settling. The host owns
+// the queue order; the surface reports the deferral and follows the new order.
+test("Decide later reports a deferral, never an answer, and follows the reordered queue", async () => {
   const first = packetItem("d1");
   const second = packetItem("d2", { question: "Ship the fix now?" });
-  const { document, click, calls } = await mount(feed([first, second]));
-  const focused = recordFocus(document);
-  const later = buttonsIn(cards(document)[0]).find(button => button.textContent === "Later");
+  const { document, settle, click, calls } = await mount(feed([first, second]));
+  assert.equal(buttonsIn(cards(document)[0]).some(button => button.textContent === "Later"), false,
+    "the empty Later action is gone");
+  const later = buttonsIn(cards(document)[0]).find(button => button.textContent === "Decide later");
   await click(later);
-  assert.deepEqual(calls.answers, [], "Later never sends an answer");
-  assert.equal(cards(document).length, 2, "the decision stays in the list");
-  assert.equal(focused.at(-1), optionButtons(cards(document)[1])[0],
-    "focus advances to the next decision");
+  assert.deepEqual(calls.deferrals, ["d1"]);
+  assert.deepEqual(calls.answers, [], "deferring never sends an answer");
+  const focused = recordFocus(document);
+  await settle(feed([second, { ...first, deferred: true }],
+    { deferNotice: "Kept waiting and moved to the end of the queue.", deferCount: 1 }));
+  assert.deepEqual(cards(document).map(card => card.dataset.decisionId), ["d2", "d1"]);
+  assert.equal(document.querySelector(".task-decisions__count").textContent, "2 decisions waiting",
+    "a deferred decision still counts as waiting");
+  assert.match(cards(document)[1].querySelector(".task-decisions__chip").textContent, /Deferred/);
+  assert.match(document.querySelector(".task-decisions__notice").textContent, /Kept waiting/);
+  assert.equal(focused.at(-1), optionButtons(cards(document)[0])[0],
+    "focus moves to the decision that is now first");
 });
 
 test("an answered decision stays listed as answer sent and cannot be answered again", async () => {
@@ -197,7 +209,8 @@ test("an answered decision stays listed as answer sent and cannot be answered ag
   const card = cards(document)[0];
   assert.match(card.textContent, /Answer sent: Keep the detailed message/);
   assert.equal(optionButtons(card).length, 0, "answered decisions offer no options");
-  assert.match(document.body.textContent, /1 decision/, "the count still matches the listed items");
+  assert.equal(document.querySelector(".task-decisions__count").textContent, "No decisions waiting",
+    "an answered decision no longer counts as waiting");
 });
 
 test("focus moves to the next decision when the focused decision is answered", async () => {
