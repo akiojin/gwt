@@ -2001,6 +2001,8 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
         event,
         FrontendEvent::RefreshOrphanDaemons
             | FrontendEvent::ReapOrphanDaemon { .. }
+            | FrontendEvent::LoadHomeConversation { .. }
+            | FrontendEvent::HomePmSend { .. }
             | FrontendEvent::FrontendReady
             | FrontendEvent::StartupFirstFrame { .. }
             | FrontendEvent::RefreshUsage
@@ -3087,6 +3089,15 @@ mod tests {
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::OpenProjectDialog
         ));
+        // Issue #7639: Home reads decisions and sends to a PM by project.
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::LoadHomeConversation { request_id: 1 }
+        ));
+        assert!(hub_frontend_event_allowed(&FrontendEvent::HomePmSend {
+            project_key: "0123456789abcdef".to_string(),
+            text: "Approve it".to_string(),
+            request_id: 2,
+        }));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::RestartPmAgent));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::TerminalInput {
             id: "pane".to_string(),

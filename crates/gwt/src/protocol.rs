@@ -788,6 +788,19 @@ pub enum FrontendEvent {
     LoadPmConversation {
         id: String,
     },
+    /// Issue #7639: read the decisions every open project's PM is waiting on,
+    /// for the Home conversation. Hub connections only.
+    LoadHomeConversation {
+        request_id: u64,
+    },
+    /// Issue #7639: send one message from Home to the PM of an open project.
+    /// The host resolves the PM pane from the project; the client never names
+    /// a session or a window.
+    HomePmSend {
+        project_key: String,
+        text: String,
+        request_id: u64,
+    },
     /// Read explicitly posted reports for the registered PM window.
     LoadPmReports {
         id: String,
@@ -1799,6 +1812,49 @@ pub struct ProjectOwnerHealthView {
     pub detail: Option<String>,
 }
 
+/// Issue #7639: what one open project's PM contributes to the Home
+/// conversation. Only decisions: project work status and counts stay on the
+/// project's own page (design item 5).
+#[derive(Debug, Clone, Serialize)]
+pub struct HomeProjectConversationView {
+    pub project_key: String,
+    pub title: String,
+    /// Whether a PM session is registered for this project and can be sent to.
+    pub pm_available: bool,
+    pub decisions: Vec<PmReportView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl HomeProjectConversationView {
+    /// Project the reports of one project store: decisions only, oldest first.
+    pub fn from_reports(
+        project_key: String,
+        title: String,
+        pm_available: bool,
+        reports: std::result::Result<Vec<gwt_core::pm_report::PmReport>, String>,
+    ) -> Self {
+        let (decisions, error) = match reports {
+            Ok(reports) => (
+                reports
+                    .into_iter()
+                    .filter(|report| report.kind == gwt_core::pm_report::PmReportKind::Decision)
+                    .map(PmReportView::from)
+                    .collect(),
+                None,
+            ),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        Self {
+            project_key,
+            title,
+            pm_available,
+            decisions,
+            error,
+        }
+    }
+}
+
 /// Lightweight project catalog. No workspace, terminal, or agent payloads.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubProjectView {
@@ -2752,6 +2808,11 @@ pub enum BackendEvent {
         #[serde(serialize_with = "serialize_pm_conversation_snapshot")]
         snapshot: crate::pm_conversation::PmConversationSnapshot,
     },
+    /// Issue #7639: client-scoped reply to [`FrontendEvent::LoadHomeConversation`].
+    HomeConversation {
+        request_id: u64,
+        projects: Vec<HomeProjectConversationView>,
+    },
     PmReports {
         id: String,
         session_id: Option<String>,
@@ -3677,6 +3738,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "home_conversation",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "workspace_state_notice",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::PreserveOrder,
@@ -4356,6 +4422,7 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PmReports { .. } => "pm_reports",
+            BackendEvent::HomeConversation { .. } => "home_conversation",
             BackendEvent::PmRequestTask { .. } => "pm_request_task",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
@@ -5744,6 +5811,79 @@ mod tests {
             data_base64: "ZWNobw==".to_string(),
         };
         assert_eq!(event.delivery_policy().kind, "terminal_output");
+    }
+
+    #[test]
+    fn home_conversation_requests_name_a_project_and_never_a_session() {
+        let load: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_home_conversation",
+            "request_id": 3
+        }))
+        .expect("Home reads every open project's decisions with one request");
+        assert!(matches!(
+            load,
+            FrontendEvent::LoadHomeConversation { request_id: 3 }
+        ));
+        let send: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "home_pm_send",
+            "project_key": "0123456789abcdef",
+            "text": "Approve it\r",
+            "request_id": 4
+        }))
+        .expect("Home addresses a PM by its project");
+        assert!(matches!(
+            send,
+            FrontendEvent::HomePmSend { ref project_key, request_id: 4, .. }
+                if project_key == "0123456789abcdef"
+        ));
+    }
+
+    #[test]
+    fn home_conversation_carries_decisions_only() {
+        let report = |id: &str, kind| gwt_core::pm_report::PmReport {
+            id: id.to_string(),
+            kind,
+            question: None,
+            body: format!("{id} body"),
+            created_at: gwt_core::timestamp::UtcTimestamp::now(),
+            structured: None,
+        };
+        use crate::HomeProjectConversationView;
+        let view = HomeProjectConversationView::from_reports(
+            "0123456789abcdef".to_string(),
+            "Alpha".to_string(),
+            true,
+            Ok(vec![
+                report("progress-1", gwt_core::pm_report::PmReportKind::Progress),
+                report("decision-1", gwt_core::pm_report::PmReportKind::Decision),
+            ]),
+        );
+        let event = BackendEvent::HomeConversation {
+            request_id: 3,
+            projects: vec![
+                view,
+                HomeProjectConversationView::from_reports(
+                    "fedcba9876543210".to_string(),
+                    "Beta".to_string(),
+                    false,
+                    Err("The report store is unreadable.".to_string()),
+                ),
+            ],
+        };
+        assert_eq!(event.delivery_policy().kind, "home_conversation");
+        let value = serde_json::to_value(event).expect("serialize");
+        assert_eq!(value["kind"], "home_conversation");
+        assert_eq!(value["request_id"], 3);
+        let alpha = &value["projects"][0];
+        assert_eq!(alpha["title"], "Alpha");
+        assert_eq!(alpha["pm_available"], true);
+        assert_eq!(alpha["decisions"].as_array().expect("decisions").len(), 1);
+        assert_eq!(alpha["decisions"][0]["id"], "decision-1");
+        assert!(alpha.get("error").is_none());
+        let beta = &value["projects"][1];
+        assert_eq!(beta["pm_available"], false);
+        assert_eq!(beta["decisions"].as_array().expect("decisions").len(), 0);
+        assert_eq!(beta["error"], "The report store is unreadable.");
     }
 
     #[test]

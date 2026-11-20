@@ -696,6 +696,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
+        FrontendEvent::HomePmSend { project_key, .. } => {
+            FrontendUserActionLog::new("home_pm_send", "pm").target(project_key)
+        }
         FrontendEvent::ReopenPmRequestTask { id, .. } => {
             FrontendUserActionLog::new("reopen_pm_request_task", "pm").window(id)
         }
@@ -834,6 +837,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
+        | FrontendEvent::LoadHomeConversation { .. }
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles

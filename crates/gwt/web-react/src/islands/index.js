@@ -12,6 +12,7 @@ import { TaskLog } from "../surfaces/TaskLog.jsx";
 import { ExecutionEnvironments } from "../surfaces/ExecutionEnvironments.jsx";
 import { AppFooter, AppFooterPm, AppHeader, AppHeaderNav } from "../surfaces/AppChrome.jsx";
 import { ProjectExecutionEnvironments } from "../surfaces/ProjectExecutionEnvironments.jsx";
+import { HomeConversation } from "../surfaces/HomeConversation.jsx";
 
 const islands = Object.freeze({
   "workspace-state-notice": WorkspaceStateNotice,
@@ -25,6 +26,7 @@ const islands = Object.freeze({
   "app-footer": AppFooter,
   "app-footer-pm": AppFooterPm,
   "project-execution-environments": ProjectExecutionEnvironments,
+  "home-conversation": HomeConversation,
 });
 
 export function mountIsland(name, container, props) {

@@ -5,7 +5,11 @@ import type { Page, TestInfo } from "@playwright/test";
 
 type LiveGwtOptions = {
   enableTestBridge?: boolean;
-  /** Issue #4538: stay on the Hub (`/`) instead of a Project route. */
+  /**
+   * Issue #4538: stay on the page at `/` instead of a Project route.
+   * Issue #7639: that page opens on Home; this opens its Projects view, the
+   * picker these specs drive.
+   */
   hub?: boolean;
   /** Issue #4538: open this Project route (`/p/<key>`) explicitly. */
   projectKey?: string;
@@ -222,6 +226,13 @@ export function liveGwtProjectUrl(base: string, projectKey: string): string {
   return new URL(`/p/${projectKey}`, base).toString();
 }
 
+/** Issue #7639: the Projects view (the picker) of the page at `/`. */
+export function liveGwtProjectsUrl(base: string): string {
+  const url = new URL(base);
+  if (!url.searchParams.has("action")) url.searchParams.set("view", "projects");
+  return url.toString();
+}
+
 /**
  * Issue #4538: `/` is the Hub and the workspace lives at `/p/<key>`. A root
  * `base` resolves to the requested Project, else the first open Project,
@@ -232,7 +243,8 @@ export async function liveGwtRouteUrl(
   base: string,
   options: LiveGwtOptions = {},
 ): Promise<string> {
-  if (options.hub || PROJECT_ROUTE.test(new URL(base).pathname)) return base;
+  if (PROJECT_ROUTE.test(new URL(base).pathname)) return base;
+  if (options.hub) return liveGwtProjectsUrl(base);
   if (options.projectKey) return liveGwtProjectUrl(base, options.projectKey);
   const catalog = await readLiveHubCatalog(page, base);
   const key = catalog.projects[0]?.project_key

@@ -212,6 +212,10 @@ root_js_modules! {
     // hub-app.js and frontend-route.js import this at module top level, so
     // the asset MUST be registered or the ES module load 404s.
     "app-chrome.js" => "createAppChrome",
+    // Issue #7639 — host of the Home conversation with the Project Manager.
+    // hub-app.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load 404s.
+    "home-conversation.js" => "createHomeConversation",
     // Issue #7741 — host of a project's available execution environments
     // list. app.js imports this at module top level, so the asset
     // MUST be registered or the ES module load 404s and the splash hangs.

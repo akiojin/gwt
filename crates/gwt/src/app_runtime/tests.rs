@@ -13040,6 +13040,8 @@ mod frontend_launch_tests;
 #[cfg(test)]
 mod gui_slice_tests;
 #[cfg(test)]
+mod home_conversation_tests;
+#[cfg(test)]
 mod issue_monitor_claim_tests;
 #[cfg(test)]
 mod issue_monitor_handoff_tests;

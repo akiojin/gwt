@@ -35,7 +35,6 @@ const COPY = {
     settings: { label: "Settings", title: "Settings: agents, concurrency limit, and theme" },
   },
   unavailable: {
-    noScreen: "This screen is not available yet.",
     needsProject: "Open a project to use this.",
     prefix: "Unavailable",
   },
@@ -43,13 +42,12 @@ const COPY = {
 };
 
 // The tab row, in display order. `surface` marks the entry while that
-// workspace surface is showing. `unavailable` names a COPY.unavailable reason
-// for a destination that has no screen yet.
+// surface is showing.
 const HEADER_DESTINATIONS = Object.freeze([
-  { id: "pm", kind: "pm" },
+  // Home is the conversation with the PM (Issue #7639).
+  { id: "pm", kind: "pm", surface: "home" },
   { id: "notifications", kind: "notifications" },
-  // The project list screen belongs to a later slice (SPEC #7007 T-021).
-  { id: "projects", unavailable: "noScreen" },
+  { id: "projects", surface: "projects" },
   { id: "agents", surface: "agents" },
   { id: "environments", surface: "environments" },
   { id: "menu", kind: "menu" },
@@ -72,9 +70,8 @@ function countOf(value) {
 function chromeView(state, handlers) {
   const entry = destination => {
     const copy = COPY.destinations[destination.id];
-    const reason = destination.kind === "menu" ? ""
-      : destination.unavailable ? COPY.unavailable[destination.unavailable]
-        : typeof handlers[destination.id] === "function" ? "" : COPY.unavailable.needsProject;
+    const reason = destination.kind === "menu" || typeof handlers[destination.id] === "function"
+      ? "" : COPY.unavailable.needsProject;
     return {
       id: destination.id,
       kind: destination.kind || "screen",

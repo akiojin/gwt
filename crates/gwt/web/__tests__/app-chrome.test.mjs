@@ -27,7 +27,7 @@ function projectPage() {
   globalThis.document = document;
   globalThis.window = window;
   const calls = [];
-  const handlers = Object.fromEntries(["pm", "notifications", "agents", "environments", "settings"]
+  const handlers = Object.fromEntries(["pm", "notifications", "projects", "agents", "environments", "settings"]
     .map(id => [id, () => calls.push(id)]));
   const chrome = createAppChrome({ document, handlers });
   chrome.mountNav(document.getElementById("app-head-nav"));
@@ -44,8 +44,8 @@ test("AC-1: the header lists its destinations in one fixed order and opens each 
     DESTINATIONS,
   );
   assert.equal(item("settings"), null, "Settings is not an entry of the tab row (design item 155)");
-  for (const id of ["pm", "notifications", "agents", "environments"]) item(id).click();
-  assert.deepEqual(calls, ["pm", "notifications", "agents", "environments"]);
+  for (const id of ["pm", "notifications", "projects", "agents", "environments"]) item(id).click();
+  assert.deepEqual(calls, ["pm", "notifications", "projects", "agents", "environments"]);
 
   const menu = item("menu");
   assert.equal(menu.getAttribute("aria-haspopup"), "menu");
@@ -60,20 +60,35 @@ test("AC-1: the header lists its destinations in one fixed order and opens each 
   assert.equal(document.querySelector(".app-head-popover"), null);
 });
 
-test("AC-2: a destination without a screen stays visible, disabled, and explains why", async () => {
-  const { document, calls, item } = projectPage();
-  const projects = item("projects");
-  assert.equal(projects.getAttribute("aria-disabled"), "true");
-  assert.equal(projects.disabled, false, "the entry stays focusable so its reason can be reached");
-  assert.match(projects.getAttribute("title"), /not available yet/);
-  assert.match(projects.getAttribute("aria-label"), /^Projects\. Unavailable: /);
-  await click(projects);
+test("AC-2: a destination the page cannot open stays visible, disabled, and explains why", async () => {
+  const { document, window } = parseHTML("<!doctype html><html><body></body></html>");
+  globalThis.document = document;
+  globalThis.window = window;
+  const calls = [];
+  // The page at `/` owns Home and Projects only (Issue #7639).
+  const chrome = createAppChrome({ document, handlers: { pm: () => calls.push("pm"), projects: () => calls.push("projects") } });
+  const page = chrome.mountPage();
+  document.body.append(page.header, page.footer);
+  const item = id => document.querySelector(`.app-head [data-destination="${id}"]`);
+  const agents = item("agents");
+  assert.equal(agents.getAttribute("aria-disabled"), "true");
+  assert.equal(agents.disabled, false, "the entry stays focusable so its reason can be reached");
+  assert.match(agents.getAttribute("title"), /Open a project/);
+  assert.match(agents.getAttribute("aria-label"), /^Agents\. Unavailable: /);
+  await click(agents);
   assert.deepEqual(calls, []);
   const popover = document.querySelector('body > .app-head-popover[role="status"]');
-  assert.match(popover.textContent, /not available yet/, "the reason is shown where the entry was chosen");
-  await click(projects);
+  assert.match(popover.textContent, /Open a project/, "the reason is shown where the entry was chosen");
+  await click(agents);
   assert.equal(document.querySelector(".app-head-popover"), null, "choosing it again dismisses the reason");
-  assert.equal(item("agents").hasAttribute("aria-disabled"), false);
+  for (const id of ["pm", "projects"]) {
+    assert.equal(item(id).hasAttribute("aria-disabled"), false, id);
+    item(id).click();
+  }
+  assert.deepEqual(calls, ["pm", "projects"]);
+  chrome.setActiveSurface("projects");
+  assert.equal(item("projects").getAttribute("aria-current"), "page");
+  assert.equal(item("pm").hasAttribute("aria-current"), false);
 });
 
 test("AC-1/AC-2: pages without a project get the same header and footer and say a project is needed", async () => {
@@ -88,7 +103,7 @@ test("AC-1/AC-2: pages without a project get the same header and footer and say 
     [...document.querySelectorAll(".app-head__nav > [data-destination]")].map(node => node.dataset.destination),
     DESTINATIONS,
   );
-  for (const id of ["pm", "notifications", "agents", "environments"]) {
+  for (const id of ["pm", "notifications", "projects", "agents", "environments"]) {
     assert.equal(item(id).getAttribute("aria-disabled"), "true", id);
     assert.match(item(id).getAttribute("title"), /Open a project/, id);
   }

@@ -253,8 +253,18 @@ windows are excluded. The status strip and the Works heading show the same
 RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
-The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
-from GitHub, Recent projects, and the currently open projects. Every project
+The root URL `http://127.0.0.1:<port>/` is the **Hub**. It opens on **Home**,
+the conversation with the Project Manager: the decisions the Project Manager
+of each open project is waiting on appear there as messages, oldest at the
+top. Answer with the buttons in a message, or reply from the box at the
+bottom; the answer goes to the Project Manager of that project. A new message
+names its project with `@Project name`, or with the project list beside the
+box when several projects are open. Home shows no project contents. With no
+project yet, it offers Import from GitHub, Open a folder, and Clone from a URL.
+
+**Projects** in the header opens the project list: Open Folder, Clone from
+GitHub, Recent projects, and the currently open projects, with a search by
+name. `http://127.0.0.1:<port>/?view=projects` opens it directly. Every project
 has its own URL, `http://127.0.0.1:<port>/p/<project-hash>`, and project links
 open in a new browser tab, so one browser tab shows one project. Different
 projects keep their windows and launch dialogs separate; two browser tabs on

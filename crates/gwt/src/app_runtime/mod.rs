@@ -1070,6 +1070,7 @@ mod knowledge;
 mod launch;
 pub(crate) use launch::LaunchPermissionChecked;
 mod gui_slice;
+mod home_conversation;
 mod launch_errors;
 mod loaders;
 mod migration;
@@ -11726,6 +11727,14 @@ impl AppRuntime {
         log_frontend_user_action(&client_id, &event);
         match event {
             FrontendEvent::RefreshOrphanDaemons => self.start_orphan_observation(client_id, None),
+            FrontendEvent::LoadHomeConversation { request_id } => {
+                self.load_home_conversation_events(client_id, request_id)
+            }
+            FrontendEvent::HomePmSend {
+                project_key,
+                text,
+                request_id,
+            } => self.home_pm_send_events(client_id, &project_key, &text, request_id),
             FrontendEvent::ReapOrphanDaemon { observation_token } => {
                 self.start_orphan_observation(client_id, Some(observation_token))
             }
@@ -12117,6 +12126,17 @@ impl AppRuntime {
                     },
                 )]
             }
+            // Issue #7639: the Home conversation belongs to the Hub connection.
+            FrontendEvent::LoadHomeConversation { .. } => Vec::new(),
+            FrontendEvent::HomePmSend { request_id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some("Send this from Home.".into()),
+                    request_id: Some(request_id),
+                },
+            )],
             FrontendEvent::ProjectAggregateAck {
                 revision,
                 visible,
