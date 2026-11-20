@@ -309,6 +309,48 @@ test.describe("Execution environment definitions", () => {
     await expect(page.locator(".exec-env").getByRole("heading", { level: 1, name: "Execution environments" })).toBeVisible();
     expect(errors, "zero console/page errors").toEqual([]);
   });
+
+  test("the application settings keep the Project Manager's own list, and its last entry stays (Issue #7732 AC-2)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page, true);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    await page.locator('[data-settings-tab="system"]').click();
+    const list = page.locator("[data-settings-pm-environments]");
+    await expect(list.getByRole("group", { name: "Project Manager execution environments" })).toBeVisible();
+    const names = list.locator(".project-environments__name");
+    await expect(names).toHaveText(["1. Claude Code 1", "2. Codex 1"]);
+    await expect(list).toContainText("made from the accounts registered on this machine");
+    await expect(list).toContainText("separate from each project's list");
+    await list.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("pm-environments.png"), fullPage: true });
+
+    await list.getByRole("button", { name: "Move down Claude Code 1" }).click();
+    await expect(names).toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    await expect(list).not.toContainText("made from the accounts");
+
+    await list.getByRole("button", { name: "Remove Claude Code 1" }).click();
+    await expect(names).toHaveText(["1. Codex 1"]);
+    // The last one cannot be removed, and the row says why.
+    const removeLast = list.getByRole("button", { name: "Remove Codex 1" });
+    await expect(removeLast).toBeDisabled();
+    await expect(list).toContainText("Keep at least one. The Project Manager cannot start a session");
+    await page.screenshot({ path: info.outputPath("pm-environments-last.png"), fullPage: true });
+
+    await list.getByRole("button", { name: "Add to the end" }).click();
+    await expect(names).toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    expect(await sent(page, "set_pm_execution_environments")).toEqual([
+      { kind: "set_pm_execution_environments", environment_ids: ["codex", "claude"] },
+      { kind: "set_pm_execution_environments", environment_ids: ["codex"] },
+      { kind: "set_pm_execution_environments", environment_ids: ["codex", "claude"] },
+    ]);
+    // The project's own list is a different list and did not move.
+    await page.locator('[data-settings-tab="issues"]').click();
+    await expect(page.locator("[data-settings-environments] .project-environments__name"))
+      .toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    expect(await sent(page, "set_project_execution_environments")).toEqual([]);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
 });
 
 function captureUsageErrors(page: any): string[] {
@@ -445,6 +487,8 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
       ],
       saved: false,
       list: ["codex", "claude"],
+      pmSaved: false,
+      pmList: ["claude", "codex"],
     };
     const environmentsView = () => {
       const environments = environmentState.environments.map(environment => {
@@ -477,6 +521,13 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
                 : tool === "opencode" ? "OpenCode is not installed. Install it in Tool management." : undefined,
             };
           })),
+          pm: {
+            saved: environmentState.pmSaved,
+            entries: environmentState.pmList.map(id => {
+              const environment = environmentState.environments.find(item => item.id === id)!;
+              return { environment_id: id, tool: environment.via_tool, tool_name: TOOL_NAMES[environment.via_tool], name: environment.name };
+            }),
+          },
           project: {
             project_root: "/fixture", saved: environmentState.saved,
             entries: environmentState.list.map(id => {
@@ -510,6 +561,16 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
         case "delete_execution_environment":
           environmentState.environments = environmentState.environments.filter(item => item.id !== message.environment_id);
           environmentState.list = environmentState.list.filter(id => id !== message.environment_id);
+          environmentState.pmList = environmentState.pmList.filter(id => id !== message.environment_id);
+          break;
+        case "set_pm_execution_environments":
+          // The saving side refuses an empty list, whatever the screen allowed.
+          if (message.environment_ids.length === 0) {
+            return { kind: "execution_environment_error", project_root: "/fixture",
+              message: "Keep at least one execution environment. The Project Manager cannot start a session without one." };
+          }
+          environmentState.pmList = message.environment_ids;
+          environmentState.pmSaved = true;
           break;
         case "set_project_execution_environments":
           environmentState.list = message.environment_ids;

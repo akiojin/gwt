@@ -599,6 +599,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             "set_project_execution_environments",
             "execution_environments",
         ),
+        FrontendEvent::SetPmExecutionEnvironments { .. } => {
+            FrontendUserActionLog::new("set_pm_execution_environments", "execution_environments")
+        }
         FrontendEvent::AddAgentBackend { agent, profile } => {
             FrontendUserActionLog::new("add_agent_backend", "agent_backends")
                 .agent(agent.as_str())

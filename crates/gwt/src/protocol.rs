@@ -1253,6 +1253,11 @@ pub enum FrontendEvent {
     SetProjectExecutionEnvironments {
         environment_ids: Vec<String>,
     },
+    /// Issue #7732: replace this machine's Project Manager execution
+    /// environments. The order is the priority; an empty list is refused.
+    SetPmExecutionEnvironments {
+        environment_ids: Vec<String>,
+    },
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         /// Legacy clients may still send this retired setting; ignore it.
@@ -2689,11 +2694,22 @@ pub struct ProjectExecutionEnvironmentsView {
     pub entries: Vec<ProjectExecutionEnvironmentView>,
 }
 
+/// Issue #7732 (SPEC #7007 item 194): this machine's Project Manager
+/// execution environments, in priority order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PmExecutionEnvironmentsView {
+    /// `false` while the list is still the one made from the registered
+    /// accounts and has never been saved.
+    pub saved: bool,
+    pub entries: Vec<ProjectExecutionEnvironmentView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionEnvironmentsView {
     pub accounts: Vec<ExecutionAccountView>,
     pub environments: Vec<ExecutionEnvironmentView>,
     pub via_options: Vec<ExecutionEnvironmentViaOptionView>,
+    pub pm: PmExecutionEnvironmentsView,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectExecutionEnvironmentsView>,
 }

@@ -44,7 +44,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createExecutionEnvironments } from "/execution-environments.js";
       import { createProjectThemes } from "/project-themes.js";
       import { createAppChrome } from "/app-chrome.js";
-      import { renderProjectExecutionEnvironments } from "/project-execution-environments.js";
+      import { renderPmExecutionEnvironments, renderProjectExecutionEnvironments } from "/project-execution-environments.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
@@ -4824,6 +4824,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onOpenAgents: () => pmSettingsPanel.openAgents(),
         rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
         renderProjectEnvironments: renderProjectExecutionEnvironments,
+        renderPmEnvironments: renderPmExecutionEnvironments,
       });
 
       function ensureWindow(windowData) {

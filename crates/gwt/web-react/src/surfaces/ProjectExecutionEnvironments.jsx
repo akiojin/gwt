@@ -7,7 +7,33 @@ import { useStoreSelector } from "../store/useStoreSelector.js";
 // or signed out. The list is saved with the project's Issues settings.
 const selectModel = state => state;
 
-const REMOVE_LAST_REASON = "Keep at least one. A project with no execution environment cannot start a session.";
+// What differs between the two lists drawn here: a project's list and the
+// Project Manager's own list on this machine (Issue #7732, items 194 and 233).
+const PROJECT = Object.freeze({
+  id: "project",
+  legend: "Available execution environments",
+  help: "The order is the priority. A session starts on the first environment that can be used; one that is held by a "
+    + "limit or signed out is skipped for the next.",
+  listLabel: "Available execution environments, in priority order",
+  unavailable: "Open a project to choose its execution environments.",
+  unsaved: "This is the order the project launches with today. It is saved the first time you change it.",
+  removeLastReason: "Keep at least one. A project with no execution environment cannot start a session.",
+  // A project's launch candidates are unique per tool.
+  onePerTool: true,
+});
+const PM = Object.freeze({
+  id: "pm",
+  legend: "Project Manager execution environments",
+  help: "The execution environments kept for the Project Manager on this machine. The order is the priority. "
+    + "This list is separate from each project's list.",
+  // The list is kept and guarded here; starting the Project Manager from it is not built yet.
+  note: "The Project Manager's sessions do not follow this list yet. They start with the agent assigned in the agent ledger.",
+  listLabel: "Project Manager execution environments, in priority order",
+  unavailable: "No execution environment is registered on this machine yet.",
+  unsaved: "This list was made from the accounts registered on this machine. It is saved the first time you change it.",
+  removeLastReason: "Keep at least one. The Project Manager cannot start a session without an execution environment.",
+  onePerTool: false,
+});
 
 function entryName(entry) {
   return entry.name || `${entry.tool_name} (not registered as an execution environment)`;
@@ -15,13 +41,13 @@ function entryName(entry) {
 
 // Environments the project can still add, each with the reason it cannot be
 // added when its tool is already on the list.
-export function addableEnvironments(view) {
-  const entries = view?.project?.entries || [];
+export function addableEnvironments(view, copy = PROJECT) {
+  const entries = view?.[copy.id]?.entries || [];
   const listed = new Set(entries.map(entry => entry.environment_id));
   return (view?.environments || [])
     .filter(environment => !listed.has(environment.id))
     .map(environment => {
-      const taken = entries.find(entry => entry.tool === environment.via_tool);
+      const taken = copy.onePerTool ? entries.find(entry => entry.tool === environment.via_tool) : null;
       return {
         id: environment.id,
         name: environment.name,
@@ -30,7 +56,7 @@ export function addableEnvironments(view) {
     });
 }
 
-function Row({ entry, index, ids, onSave }) {
+function Row({ entry, index, ids, copy, onSave }) {
   const last = index === ids.length - 1;
   const only = ids.length === 1;
   const move = offset => () => {
@@ -39,7 +65,7 @@ function Row({ entry, index, ids, onSave }) {
     onSave(next);
   };
   const name = entryName(entry);
-  const reasonId = `project-environment-reason-${index}`;
+  const reasonId = `${copy.id}-environment-reason-${index}`;
   return (
     <li className="project-environments__item" data-environment-id={entry.environment_id}>
       <div className="project-environments__text">
@@ -55,13 +81,13 @@ function Row({ entry, index, ids, onSave }) {
           aria-describedby={only ? reasonId : undefined}
           onClick={() => onSave(ids.filter(id => id !== entry.environment_id))}>Remove</button>
       </div>
-      {only ? <p className="settings-help project-environments__reason" id={reasonId}>{REMOVE_LAST_REASON}</p> : null}
+      {only ? <p className="settings-help project-environments__reason" id={reasonId}>{copy.removeLastReason}</p> : null}
     </li>
   );
 }
 
-function Add({ view, ids, onSave }) {
-  const addable = addableEnvironments(view);
+function Add({ view, ids, copy, onSave }) {
+  const addable = addableEnvironments(view, copy);
   const first = addable.find(candidate => !candidate.blockedReason) || null;
   const [picked, setPicked] = useState(null);
   // A pick that left the list, or can no longer be added, falls back to the first choice.
@@ -94,34 +120,27 @@ function Add({ view, ids, onSave }) {
   );
 }
 
-export function ProjectExecutionEnvironments({ store, onSave = () => {}, onManage = () => {} }) {
+function EnvironmentList({ copy, store, onSave, onManage }) {
   const { view = null, error = null } = useStoreSelector(store, selectModel) || {};
-  const project = view?.project || null;
-  const ids = (project?.entries || []).map(entry => entry.environment_id);
+  const list = view?.[copy.id] || null;
+  const entries = list?.entries || [];
+  const ids = entries.map(entry => entry.environment_id);
   return (
-    <fieldset className="settings-section project-environments">
-      <legend>Available execution environments</legend>
-      <p className="settings-help">
-        The order is the priority. A session starts on the first environment that can be used; one that is held by a
-        limit or signed out is skipped for the next.
-      </p>
-      {!project ? (
-        <p className="settings-help">
-          {view ? "Open a project to choose its execution environments." : "Loading execution environments…"}
-        </p>
+    <fieldset className="settings-section project-environments" data-environment-list={copy.id}>
+      <legend>{copy.legend}</legend>
+      <p className="settings-help">{copy.help}</p>
+      {copy.note ? <p className="settings-help">{copy.note}</p> : null}
+      {entries.length === 0 ? (
+        <p className="settings-help">{view ? copy.unavailable : "Loading execution environments…"}</p>
       ) : (
         <>
-          <ol className="project-environments__list" aria-label="Available execution environments, in priority order">
-            {project.entries.map((entry, index) => (
-              <Row key={entry.environment_id} entry={entry} index={index} ids={ids} onSave={onSave} />
+          <ol className="project-environments__list" aria-label={copy.listLabel}>
+            {entries.map((entry, index) => (
+              <Row key={entry.environment_id} entry={entry} index={index} ids={ids} copy={copy} onSave={onSave} />
             ))}
           </ol>
-          {project.saved ? null : (
-            <p className="settings-help">
-              This is the order the project launches with today. It is saved the first time you change it.
-            </p>
-          )}
-          <Add view={view} ids={ids} onSave={onSave} />
+          {list.saved ? null : <p className="settings-help">{copy.unsaved}</p>}
+          <Add view={view} ids={ids} copy={copy} onSave={onSave} />
           <button type="button" className="wizard-button" data-action="environment-manage" onClick={onManage}>
             Manage execution environments
           </button>
@@ -130,4 +149,14 @@ export function ProjectExecutionEnvironments({ store, onSave = () => {}, onManag
       )}
     </fieldset>
   );
+}
+
+export function ProjectExecutionEnvironments({ store, onSave = () => {}, onManage = () => {} }) {
+  return <EnvironmentList copy={PROJECT} store={store} onSave={onSave} onManage={onManage} />;
+}
+
+// Issue #7732 (SPEC #7007 items 194 and 233): the Project Manager's own
+// list, kept with this machine's settings.
+export function PmExecutionEnvironments({ store, onSave = () => {}, onManage = () => {} }) {
+  return <EnvironmentList copy={PM} store={store} onSave={onSave} onManage={onManage} />;
 }
