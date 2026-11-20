@@ -974,7 +974,8 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   ]);
   assert.match(panel.textContent, /next.*startup/i);
   assert.match(panel.textContent, /installed agents with a verified update route/i);
-  assert.match(panel.textContent, /agent windows/i);
+  // Issue #7744: only the windows running a tool hold back its maintenance.
+  assert.match(panel.textContent, /refused while an agent window is running that tool/i);
   const supportedAgentsModel = createUiStateStore({
     agents, autoUpdate: false, maintenanceByAgent: {},
   });

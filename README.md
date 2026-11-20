@@ -209,10 +209,12 @@ bash/zsh, fish, or Windows instructions, open a new terminal, and run the comman
 with `--version`. gwt does not edit your shell startup files.
 
 Automatic agent updates are off by default. When enabled, gwt checks installed
-agents with a verified update route at the next app startup and updates only known newer versions, with
-no live agent panes (including the Project Manager) or pending launches. Manual
-installs and updates also require those agents to be closed. Missing agents are
-never installed automatically.
+agents with a verified update route at the next app startup and updates only known newer versions.
+An agent tool is skipped while an agent pane (including the Project Manager) is
+running it; other tools still update. Manual installs and updates follow the same
+rule: close only the panes that use that tool, which the refusal message names.
+While a tool is being updated, new launches of that tool are refused until it
+finishes. Missing agents are never installed automatically.
 
 | Agent | CLI command |
 | --- | --- |
