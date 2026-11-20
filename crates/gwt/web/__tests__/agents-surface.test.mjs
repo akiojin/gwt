@@ -40,13 +40,13 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], rested = [], activated = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const opened = [], rested = [], activated = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
   if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
-  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onMoveMember: (id, direction) => moved.push([id, direction]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
@@ -408,7 +408,10 @@ test("Agents planned controls use Operator styles and stay inert in split previe
   assert.match(styles, /\.roster-plan-controls\s*\{[^}]*flex-wrap:\s*wrap/s);
   assert.match(styles, /\.agents-surface select\s*\{[^}]*var\(--color-/s);
   assert.doesNotMatch(styles, /#[0-9a-f]{3,8}\b|rgba?\(/i);
-  assert.doesNotMatch(source, /role=["']dialog|modal-backdrop|position:\s*fixed/);
+  assert.doesNotMatch(source, /position:\s*fixed/);
+  // Issue #7646: the only modal is the delete confirmation on the shared primitive.
+  assert.equal(source.match(/modal-backdrop/g).length, 1);
+  assert.equal(f.surface.element.querySelector('[role="dialog"], .modal-backdrop'), null, "planned controls stay inline");
   f.surface.dispose();
 });
 
@@ -1024,4 +1027,74 @@ test("Agents labels its project execution and opens the existing shared PM edito
   [...f.surface.element.querySelectorAll('button')].find(button => button.textContent === 'Project Manager settings').click();
   assert.deepEqual(request, { target: 'project-manager', surface_owner: 'pm' });
   assert.deepEqual(f.added, []); f.surface.dispose();
+});
+
+// Issue #7646 AC-3: the ledger order is the assignee priority, so every row
+// carries its own move controls.
+test("ledger rows reorder members and disable moves at the list edges", async () => {
+  const f = await fixture();
+  const control = (id, action) => f.surface.element.querySelector(`.roster-row[data-member-id="${id}"] [data-action="${action}"]`);
+  assert.equal(control("m1", "move-up").disabled, true);
+  assert.equal(control("m1", "move-down").disabled, false);
+  assert.equal(control("m2", "move-up").disabled, false);
+  assert.equal(control("m2", "move-down").disabled, true);
+  assert.equal(control("m2", "move-up").getAttribute("aria-label"), "Move Two up");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-order-position').textContent, "2");
+  control("m2", "move-up").click();
+  control("m1", "move-down").click();
+  assert.deepEqual(f.moved, [["m2", "up"], ["m1", "down"]]);
+  f.rosterModel.update(state => ({ ...state, members: [...state.members].reverse() })); f.flush();
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-list .roster-row")].map(row => row.dataset.memberId), ["m2", "m1"]);
+  assert.equal(control("m2", "move-up").disabled, true);
+  assert.equal(control("m1", "move-down").disabled, true);
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(control("m1", "move-up").disabled, true, "a pending member change holds further moves");
+  f.surface.dispose();
+});
+
+// Issue #7646 (A-26): deletion is confirmed in the shared dialog, and the
+// Project Manager guard reads the live assignment instead of a static flag.
+test("ledger deletion confirms in a shared dialog and follows the current Project Manager", async () => {
+  const f = await fixture();
+  const dialog = () => f.document.querySelector("#roster-delete-modal");
+  const remove = id => f.surface.element.querySelector(`.roster-row[data-member-id="${id}"] [data-action="remove"]`);
+  assert.equal(dialog().classList.contains("modal-backdrop"), true);
+  assert.equal(dialog().classList.contains("open"), false);
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_eligible: true, pm_project_key: "project" } : member) })); f.flush();
+  remove("m2").click();
+  const shell = dialog().querySelector(".modal-shell");
+  assert.equal(dialog().classList.contains("open"), true);
+  assert.equal(shell.getAttribute("role"), "dialog"); assert.equal(shell.getAttribute("aria-modal"), "true");
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Two cannot be deleted");
+  assert.match(shell.querySelector(".modal-body").textContent, /Two is the Project Manager.*Select another Project Manager/);
+  assert.equal(shell.querySelector('[data-role="roster-delete-confirm"]'), null, "the current Project Manager offers no delete");
+  shell.querySelector('[data-role="roster-delete-cancel"]').click();
+  assert.equal(dialog().classList.contains("open"), false);
+  // Reassigning the Project Manager lifts the guard without a reload.
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: null } : member) })); f.flush();
+  remove("m2").click();
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Delete Two?");
+  assert.match(shell.querySelector(".modal-body").textContent, /every project/);
+  // The guard is read again at confirmation, not at the time the dialog opened.
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: "project" } : member) }));
+  shell.querySelector('[data-role="roster-delete-confirm"]').click();
+  assert.deepEqual(f.removed, []);
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Two cannot be deleted");
+  shell.querySelector('[data-role="roster-delete-cancel"]').click();
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: null } : member) })); f.flush();
+  remove("m2").click(); shell.querySelector('[data-role="roster-delete-confirm"]').click();
+  assert.deepEqual(f.removed, ["m2"]);
+  assert.equal(dialog().classList.contains("open"), false);
+  // A member with live work is not deletable either.
+  remove("m1").click();
+  assert.match(shell.querySelector(".modal-body").textContent, /One is assigned to work/);
+  assert.equal(shell.querySelector('[data-role="roster-delete-confirm"]'), null);
+  f.surface.dispose();
+  assert.equal(dialog(), null, "the dialog leaves with its surface");
+});
+
+test("ledger row controls keep Operator tokens and touch targets", () => {
+  assert.match(styles, /\.roster-order\s*\{[^}]*var\(--space-/);
+  const block = styles.match(/\.roster-order[^{]*\{[^}]*\}/g).join("\n");
+  assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
 });

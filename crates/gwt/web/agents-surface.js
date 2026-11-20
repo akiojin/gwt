@@ -1,5 +1,6 @@
 import { mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { renderMemberTuningControls } from "./settings-surface.js";
+import { createFocusTrap } from "./focus-trap.js";
 
 const configuredPm = member => !!member?.pm_project_key;
 const holdsPmRole = member => !!member && (member.is_pm || !!member.pm_project_key || member.assignment?.role === "pm");
@@ -14,7 +15,7 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 
 export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
@@ -500,7 +501,52 @@ export function createAgentsSurface({ document, storage, executionModel, project
     if (!host || disposed) return;
     previewElement = document.createElement("div"); previewElement.className = "roster-preview-host"; host.append(previewElement); syncPreview();
   }
-  function memberRow(member) {
+  // Issue #7646 (A-26): one shared dialog confirms a deletion. What blocks it
+  // is read from the live roster each time, so reassigning the Project Manager
+  // lifts the guard without a reload.
+  const removal = document.createElement("div"); removal.className = "modal-backdrop"; removal.id = "roster-delete-modal"; removal.setAttribute("aria-hidden", "true");
+  const removalShell = document.createElement("div"); removalShell.className = "modal-shell"; removalShell.setAttribute("role", "dialog"); removalShell.setAttribute("aria-modal", "true");
+  removalShell.setAttribute("aria-labelledby", "roster-delete-title"); removalShell.tabIndex = -1; removal.append(removalShell); document.body.append(removal);
+  let removalId = null, releaseRemovalTrap = null, removalReturnFocus = null;
+  const removalBlocker = member => holdsPmRole(member)
+    ? `${member.name} is the Project Manager${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` for project ${member.pm_project_key}` : " for this project"}. Select another Project Manager first, then delete this member.`
+    : member.assignment || member.active_assignments?.length ? `${member.name} is assigned to work. Wait for that work to finish, then delete this member.` : null;
+  function closeRemoval() {
+    if (removalId === null) return;
+    removalId = null; removal.classList.remove("open"); removal.setAttribute("aria-hidden", "true");
+    releaseRemovalTrap?.(); releaseRemovalTrap = null; removalReturnFocus?.focus?.(); removalReturnFocus = null;
+  }
+  function renderRemoval() {
+    const member = rosterModel.read().members.find(member => member.member_id === removalId);
+    if (!member) { closeRemoval(); return; }
+    const blocker = removalBlocker(member);
+    const header = document.createElement("header"); header.className = "modal-header";
+    const title = document.createElement("h2"); title.id = "roster-delete-title"; title.textContent = blocker ? `${member.name} cannot be deleted` : `Delete ${member.name}?`; header.append(title);
+    const body = document.createElement("div"); body.className = "modal-body";
+    const copy = document.createElement("p"); copy.textContent = blocker || `${member.name} leaves the ledger on this machine for every project. Recorded history stays. This cannot be undone.`; body.append(copy);
+    const footer = document.createElement("footer"); footer.className = "modal-footer";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "text-button"; cancel.dataset.role = "roster-delete-cancel"; cancel.textContent = blocker ? "Close" : "Cancel";
+    cancel.addEventListener("click", closeRemoval); footer.append(cancel);
+    if (!blocker) {
+      const confirm = document.createElement("button"); confirm.type = "button"; confirm.className = "wizard-button destructive"; confirm.dataset.role = "roster-delete-confirm"; confirm.textContent = "Delete";
+      confirm.addEventListener("click", () => {
+        const roster = rosterModel.read(), latest = roster.members.find(member => member.member_id === removalId);
+        if (!latest || removalBlocker(latest) || !rosterReady(roster) || roster.pending_roster) { renderRemoval(); return; }
+        closeRemoval(); onRemoveMember(latest.member_id);
+      });
+      footer.append(confirm);
+    }
+    removalShell.replaceChildren(header, body, footer);
+    releaseRemovalTrap?.(); releaseRemovalTrap = createFocusTrap(removalShell, { document }); cancel.focus();
+  }
+  function openRemoval(memberId, opener) {
+    removalReturnFocus = opener; removalId = memberId;
+    removal.classList.add("open"); removal.removeAttribute("aria-hidden"); renderRemoval();
+  }
+  removal.addEventListener("click", event => { if (event.target === removal) closeRemoval(); });
+  const removalEscape = event => { if (removalId !== null && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeRemoval(); } };
+  document.addEventListener("keydown", removalEscape);
+  function memberRow(member, index, count) {
     const current = liveWork(member), key = current ? JSON.stringify([current.window_id, current.session_id, current.runtime_incarnation]) : "idle";
     let cached = memberRows.get(member.member_id);
     if (!cached || cached.key !== key) {
@@ -524,7 +570,21 @@ export function createAgentsSurface({ document, storage, executionModel, project
         const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
         if (!disposed && rosterReady(roster) && !roster.pending_roster && latest && !latest.enabled) onActivateMember(latest.member_id);
       });
-      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state);
+      // Issue #7646: the ledger order is the assignee priority.
+      const order = document.createElement("div"); order.className = "roster-order"; order.setAttribute("role", "group");
+      const position = document.createElement("span"); position.className = "roster-order-position"; order.append(position);
+      for (const [action, glyph] of [["move-up", "▲"], ["move-down", "▼"], ["remove", "Delete"]]) {
+        const button = document.createElement("button"); button.type = "button"; button.dataset.action = action; button.textContent = glyph;
+        button.addEventListener("click", () => {
+          const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+          if (disposed || !latest || !rosterReady(roster) || roster.pending_roster) return;
+          if (action === "remove") openRemoval(latest.member_id, button);
+          else onMoveMember(latest.member_id, action === "move-up" ? "up" : "down");
+        });
+        order.append(button);
+      }
+      // The controls sit at the row's trailing edge, so the body of the row stays the selection target.
+      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state, order);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
@@ -536,6 +596,14 @@ export function createAgentsSurface({ document, storage, executionModel, project
     activate.disabled = member.enabled || !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     row.querySelector("h3").textContent = member.name;
+    const order = row.querySelector(".roster-order"), held = !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
+    order.setAttribute("aria-label", `Order and deletion for ${member.name}`);
+    order.querySelector(".roster-order-position").textContent = String(index + 1);
+    order.querySelector(".roster-order-position").title = "Assignment priority";
+    for (const [action, label, edge] of [["move-up", `Move ${member.name} up`, index === 0], ["move-down", `Move ${member.name} down`, index === count - 1], ["remove", `Delete ${member.name}`, false]]) {
+      const button = order.querySelector(`[data-action="${action}"]`);
+      button.setAttribute("aria-label", label); button.title = label; button.disabled = held || edge;
+    }
     const purpose = row.querySelector(".roster-purpose");
     purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : member.enabled ? "Waiting for the next issue" : "Not selected for new work"; purpose.title = purpose.textContent;
     const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
@@ -598,11 +666,12 @@ export function createAgentsSurface({ document, storage, executionModel, project
     for (const [id, { row }] of memberRows) if (!memberIds.has(id)) { row.remove(); memberRows.delete(id); }
     const focusedRow = document.activeElement?.closest(".roster-row");
     let anchor = null;
-    for (const member of [...members].reverse()) {
-      const row = memberRow(member);
+    for (const [index, member] of [...members.entries()].reverse()) {
+      const row = memberRow(member, index, members.length);
       if (row !== focusedRow && (row.parentElement !== list || row.nextElementSibling !== anchor)) list.insertBefore(row, anchor);
       anchor = row;
     }
+    if (removalId !== null) renderRemoval();
     renderDetail(selected); renderPast(roster.past_contributors || [], roster.past_complete);
     for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
     element.querySelector(".roster-team").hidden = tab !== "team"; element.querySelector(".roster-past").hidden = tab !== "past";
@@ -650,5 +719,5 @@ export function createAgentsSurface({ document, storage, executionModel, project
   if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
-  return { element, sync, syncPreview, selectMember, openPmSettings, setPreviewHost, dispose() { if (disposed) return; releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
+  return { element, sync, syncPreview, selectMember, openPmSettings, setPreviewHost, dispose() { if (disposed) return; releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); closeRemoval(); document.removeEventListener("keydown", removalEscape); removal.remove(); disposed = true; } };
 }

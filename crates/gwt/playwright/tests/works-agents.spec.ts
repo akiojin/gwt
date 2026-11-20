@@ -1180,6 +1180,75 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(plan(5004).getByRole("button", { name: "Reassign issue #5004", exact: true })).toBeInViewport();
     await page.screenshot({ path: info.outputPath("agents-plans-400.png") });
   });
+  // Issue #7646: the header opens the ledger, its order is the assignee
+  // priority, and deletion follows the live Project Manager assignment.
+  test("Issue #7646 header opens the agent ledger with reorder and guarded deletion", async ({ page }, info) => {
+    await page.locator(".project-bar #open-agents-button").click();
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    const order = () => roster(page).locator('.roster-list[aria-label="Team members"] .roster-row').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.memberId));
+    const mutations = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && !["read", "set_pm_eligibility", "select_pm", "add"].includes(message.action.kind)).map(message => message.action);
+    expect(await order()).toEqual(["m-one", "m-two", "m-idle"]);
+    await expect(roster(page).getByRole("button", { name: "Move Aster up", exact: true })).toBeDisabled();
+    await expect(roster(page).getByRole("button", { name: "Move Cedar down", exact: true })).toBeDisabled();
+    await roster(page).getByRole("button", { name: "Move Cedar up", exact: true }).click();
+    await expect.poll(order).toEqual(["m-one", "m-idle", "m-two"]);
+    await expect(roster(page).locator('.roster-row[data-member-id="m-idle"] .roster-order-position')).toHaveText("2");
+    expect(await mutations()).toEqual([{ kind: "move", member_id: "m-idle", direction: "up" }]);
+
+    const dialog = page.locator("#roster-delete-modal .modal-shell");
+    await roster(page).getByRole("button", { name: "Delete Aster", exact: true }).click();
+    await expect(dialog.getByRole("heading")).toHaveText("Aster cannot be deleted");
+    await expect(dialog).toContainText("Aster is assigned to work");
+    await expect(dialog.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(roster(page).getByRole("button", { name: "Delete Aster", exact: true })).toBeFocused();
+
+    const detail = roster(page).locator(".roster-detail");
+    await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
+    await detail.locator('[data-action="pm-eligible"]').check();
+    await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
+    await detail.locator('[data-action="select-pm"]').click();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await roster(page).getByRole("button", { name: "Delete Cedar", exact: true }).click();
+    await expect(dialog.getByRole("heading")).toHaveText("Cedar cannot be deleted");
+    await expect(dialog).toContainText("Cedar is the Project Manager for this project. Select another Project Manager first");
+    await expect(dialog.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath("agent-ledger-pm-guard.png") });
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(dialog).toBeHidden();
+
+    // Reassigning the Project Manager lifts the guard from the live state.
+    await roster(page).getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+    await roster(page).getByLabel("Name for new member", { exact: true }).fill("Dahlia");
+    await roster(page).getByLabel("PM eligible for new member", { exact: true }).check();
+    await roster(page).locator('.roster-capacity [data-action="add"]').click();
+    await roster(page).locator('.roster-row[data-member-id="m-added"]').click();
+    await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
+    await detail.locator('[data-action="select-pm"]').click();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await roster(page).getByRole("button", { name: "Delete Cedar", exact: true }).click();
+    await expect(dialog.getByRole("heading")).toHaveText("Delete Cedar?");
+    await expect(dialog).toContainText("for every project");
+    await page.screenshot({ path: info.outputPath("agent-ledger-delete-confirm.png") });
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect.poll(order).toEqual(["m-one", "m-two", "m-added"]);
+    expect(await mutations()).toEqual([{ kind: "move", member_id: "m-idle", direction: "up" }, { kind: "remove", member_id: "m-idle" }]);
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
+
+    // Application settings keep only a link to the ledger.
+    await openRail(page, "settings");
+    const link = page.locator('[data-settings-panel="system"] [data-action="open-agent-ledger"]');
+    await expect(link).toHaveText("Open agent ledger");
+    await expect(page.locator('[data-settings-panel]:not([data-settings-panel="issues"]) :is([data-action="move-up"], [data-action="remove"], [aria-label="Name for new member"])')).toHaveCount(0);
+    await link.click();
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    await page.setViewportSize({ width: 400, height: 900 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+  });
+
   test("shared member and PM tuning retain identity, history and narrow layout", async ({ page }, info) => {
     await openRail(page, "agents");
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
@@ -1376,9 +1445,11 @@ async function installWorksAgentsBackend(page: Page) {
           }
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
           if (message.action.kind === "set_pm_eligibility") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.pm_eligible = message.action.eligible; revision++; } }
-          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && member.enabled && !member.assignment) { pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
+          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && member.enabled && !member.assignment) { for (const other of members) if (other.agent_member_id === pmMemberId) { other.is_pm = false; other.pm_project_key = null; } pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
+          if (message.action.kind === "move") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id), target = index + (message.action.direction === "up" ? -1 : 1); if (index >= 0 && target >= 0 && target < members.length) { [members[index], members[target]] = [members[target], members[index]]; revision++; } }
+          if (message.action.kind === "remove") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id); if (index >= 0 && members[index].agent_member_id !== pmMemberId && !members[index].assignment) { members.splice(index, 1); revision++; } }
           if (message.action.kind === "activate") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member && !member.enabled) { member.enabled = true; revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
           if (message.action.kind === "set_pm_eligibility" && deferredEligibility) {

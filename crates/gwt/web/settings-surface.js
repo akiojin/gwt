@@ -1631,6 +1631,16 @@ export function createSettingsSurface({
         updateStatus.setAttribute("role", "status");
         updateSection.appendChild(updateStatus);
         panelSystem.appendChild(updateSection);
+        // Issue #7646: members, their order and deletion live in the agent
+        // ledger. Settings only links there.
+        const ledgerSection = createDiv("settings-section");
+        ledgerSection.appendChild(createNode("p", "settings-help", "Agent members, their order and deletion are managed in the agent ledger."));
+        const ledgerLink = createNode("button", "wizard-button", "Open agent ledger");
+        ledgerLink.type = "button";
+        ledgerLink.dataset.action = "open-agent-ledger";
+        ledgerLink.addEventListener("click", () => document.dispatchEvent(new document.defaultView.CustomEvent("agents:open")));
+        ledgerSection.appendChild(ledgerLink);
+        panelSystem.appendChild(ledgerSection);
         const systemContent = createDiv();
         systemContent.id = `${panelSystem.id}-content`;
         systemContent.dataset.systemSettingsContent = "";

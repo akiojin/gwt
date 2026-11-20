@@ -12237,6 +12237,7 @@ impl AppRuntime {
                         action,
                         gwt::agent_names::AgentRosterAction::SelectPm { .. }
                             | gwt::agent_names::AgentRosterAction::SetPmEligibility { .. }
+                            | gwt::agent_names::AgentRosterAction::Remove { .. }
                             | gwt::agent_names::AgentRosterAction::SetTuning(_)
                     ) && project_key.is_none()
                 {

@@ -6088,6 +6088,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, ...tuning });
         },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
+        onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
         onActivateMember: memberId => requestAgentRoster({ kind: "activate", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
@@ -6099,6 +6101,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
+      // Issue #7646: the header and Application settings both lead to the ledger.
+      document.getElementById("open-agents-button")?.addEventListener("click", () => openSurface("agents"));
+      document.addEventListener("agents:open", () => openSurface("agents"));
       // Telemetry updates keep the current native terminal host.
       worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
