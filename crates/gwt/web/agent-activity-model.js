@@ -207,7 +207,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     if (request.action?.kind === "read") {
       latestRead = { request_id: request.request_id, error: model.read().error }; return true;
     }
-    if (!["add", "rest", "activate", "resize", "set_pm_eligibility", "select_pm"].includes(request.action?.kind)) return false;
+    if (!["add", "rest", "activate", "resize", "set_pm_eligibility", "select_pm", "move", "remove"].includes(request.action?.kind)) return false;
     latestRead = null;
     if (latestSnapshot) latestSnapshot = { ...latestSnapshot, error: null };
     model.update(state => ({ ...state, error: null, pending_roster: { request_id: request.request_id, action: request.action } }));

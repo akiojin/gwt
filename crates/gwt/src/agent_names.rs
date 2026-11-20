@@ -114,7 +114,23 @@ pub enum AgentRosterAction {
     SelectPm {
         member_id: String,
     },
+    /// The ledger order is the assignee priority: an idle member nearer the
+    /// top is reserved first.
+    Move {
+        member_id: String,
+        direction: RosterMoveDirection,
+    },
+    Remove {
+        member_id: String,
+    },
     SetTuning(MemberTuning),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RosterMoveDirection {
+    Up,
+    Down,
 }
 
 /// Sparse future-launch changes share the target core revision. Omitted fields are retained.
@@ -860,6 +876,8 @@ pub fn mutate_project_roster_snapshot(
         AgentRosterAction::Add { .. }
             | AgentRosterAction::SetPmEligibility { .. }
             | AgentRosterAction::SelectPm { .. }
+            | AgentRosterAction::Move { .. }
+            | AgentRosterAction::Remove { .. }
     ) {
         return crate::agent_registry::mutate_pm_selection(
             &gwt_core::paths::project_scope_hash(root),
@@ -1004,8 +1022,29 @@ pub(crate) fn apply_roster_action(
                 roster.members[index].name = name.to_string();
             }
         }
+        AgentRosterAction::Move {
+            ref member_id,
+            direction,
+        } => {
+            let index = roster
+                .members
+                .iter()
+                .position(|member| member.agent_member_id == *member_id)
+                .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?;
+            let target = match direction {
+                RosterMoveDirection::Up => index
+                    .checked_sub(1)
+                    .ok_or_else(|| std::io::Error::other("This member is already first"))?,
+                RosterMoveDirection::Down => index + 1,
+            };
+            if target >= roster.members.len() {
+                return Err(std::io::Error::other("This member is already last"));
+            }
+            roster.members.swap(index, target);
+        }
         AgentRosterAction::SetPmEligibility { .. }
         | AgentRosterAction::SelectPm { .. }
+        | AgentRosterAction::Remove { .. }
         | AgentRosterAction::SetTuning(_) => {
             unreachable!("registry-only action")
         }

@@ -1550,7 +1550,8 @@ pub(crate) fn mutate_pm_selection(
     };
     let member_id: &str = match &action {
         AgentRosterAction::SetPmEligibility { member_id, .. }
-        | AgentRosterAction::SelectPm { member_id } => member_id,
+        | AgentRosterAction::SelectPm { member_id }
+        | AgentRosterAction::Remove { member_id } => member_id,
         _ => "",
     };
     if !member_id.is_empty() {
@@ -1624,6 +1625,55 @@ pub(crate) fn mutate_pm_selection(
                     }
                 }
             }
+            // Issue #7646: deletion reads the live PM and assignment state of
+            // every project, so the guard follows a reassignment by itself.
+            AgentRosterAction::Remove { .. } => {
+                if member_has_pm_duty(&registry, member_id) {
+                    return Err(invalid(format!(
+                        "Agent {} is a Project Manager; select another Project Manager before deleting this member",
+                        member.name
+                    )));
+                }
+                if let Some(project) =
+                    registry
+                        .project_assignments
+                        .iter()
+                        .find_map(|(project, assignments)| {
+                            assignments.contains_key(member_id).then_some(project)
+                        })
+                {
+                    return Err(invalid(format!(
+                        "Agent {} retains an assignment in project {project}; wait for it to finish before deleting this member",
+                        member.name
+                    )));
+                }
+                for (source_key, source) in &registry.sources {
+                    let prefs = project(&registry, source_key, Some(&source.after_json))?;
+                    let selected = decode(Some(&source.after_json))?
+                        .launch_profile_pool()
+                        .into_iter()
+                        .filter_map(|profile| profile.agent_member_id)
+                        .any(|id| {
+                            resolve(&registry, source_key, &id).is_ok_and(|id| id == member_id)
+                        });
+                    let pinned = prefs
+                        .pending_launch_deliveries
+                        .iter()
+                        .any(|delivery| delivery.agent_member_id.as_deref() == Some(member_id))
+                        || prefs
+                            .agent_issue_schedule
+                            .reservations
+                            .iter()
+                            .any(|entry| entry.agent_member_id == member_id)
+                        || prefs
+                            .agent_switch_intents
+                            .values()
+                            .any(|intent| intent.request.member_id == member_id);
+                    if selected || pinned {
+                        return Err(invalid(format!("Agent {} is an implementation candidate or pinned in project {source_key}; remove its candidate or wait for its launch before deleting this member", member.name)));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1650,6 +1700,13 @@ pub(crate) fn mutate_pm_selection(
                 }
             }
             registry.pm_projects.entry(key.clone()).or_default();
+        }
+        AgentRosterAction::Remove { member_id } => {
+            roster
+                .members
+                .retain(|member| member.agent_member_id != member_id);
+            roster.validate().map_err(invalid)?;
+            registry.profiles.remove(&member_id);
         }
         action => crate::agent_names::apply_roster_action(
             &mut roster,
@@ -6615,6 +6672,215 @@ mod tests {
             !IssueMonitorPrefsStamp::matches_current(absent_stamp.as_ref(), &absent_path),
             "a new project mirror must stale the captured absence"
         );
+    }
+
+    fn ledger_add(root: &Path, name: &str, pm_eligible: bool) -> AgentRoster {
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let current = crate::agent_names::mutate_project_roster(
+            root,
+            &sessions,
+            AgentRosterAction::Read,
+            None,
+        )
+        .unwrap();
+        crate::agent_names::mutate_project_roster(
+            root,
+            &sessions,
+            AgentRosterAction::Add {
+                agent_id: Some("codex".into()),
+                name: Some(name.into()),
+                pm_eligible,
+                model: None,
+                reasoning: None,
+            },
+            Some(current.revision),
+        )
+        .unwrap()
+    }
+
+    // Issue #7646 AC-3: the ledger order is the assignee priority.
+    #[test]
+    fn ledger_order_decides_which_member_is_assigned_first() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, _, _) = source();
+        ensure_active_for_project(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let added = ledger_add(&root, "Birch", false);
+        let cedar = added.members[0].agent_member_id.clone();
+        let birch = added.members[1].agent_member_id.clone();
+        let first = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "before",
+            Some(1),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(first.agent_member_id, cedar);
+        crate::agent_names::release_project_member(&root, &sessions, &cedar, "before").unwrap();
+        let current = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Read,
+            None,
+        )
+        .unwrap();
+        let moved = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Move {
+                member_id: birch.clone(),
+                direction: crate::agent_names::RosterMoveDirection::Up,
+            },
+            Some(current.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            moved
+                .members
+                .iter()
+                .map(|member| member.agent_member_id.as_str())
+                .collect::<Vec<_>>(),
+            [birch.as_str(), cedar.as_str()]
+        );
+        assert!(moved.revision > current.revision);
+        let next = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "after",
+            Some(2),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            next.agent_member_id, birch,
+            "the member moved to the top is chosen first"
+        );
+        let latest = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Read,
+            None,
+        )
+        .unwrap();
+        let edge = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Move {
+                member_id: birch,
+                direction: crate::agent_names::RosterMoveDirection::Up,
+            },
+            Some(latest.revision),
+        )
+        .unwrap_err();
+        assert!(edge.contains("already first"), "{edge}");
+    }
+
+    // Issue #7646 (A-26): deletion follows the live PM assignment and never
+    // leaves a dangling candidate, assignment or saved core behind.
+    #[test]
+    fn ledger_removal_follows_the_current_pm_assignment_and_candidates() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, a_path, _) = source();
+        let mut a: serde_json::Value = serde_json::from_slice(&fs::read(&a_path).unwrap()).unwrap();
+        a["launch_profiles"] = serde_json::json!([{
+            "agent_id":"codex", "agent_member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811"
+        }]);
+        let raw = serde_json::to_vec(&a).unwrap();
+        fs::write(&a_path, &raw).unwrap();
+        fs::write(a_path.with_extension("committed.json"), &raw).unwrap();
+        ensure_active_for_project(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        ledger_add(&root, "Birch", true);
+        ledger_add(&root, "Aspen", true);
+        let roster = ledger_add(&root, "Dogwood", false);
+        let id = |name: &str| {
+            roster
+                .members
+                .iter()
+                .find(|member| member.name == name)
+                .unwrap()
+                .agent_member_id
+                .clone()
+        };
+        let (cedar, birch, aspen, dogwood) = (id("Cedar"), id("Birch"), id("Aspen"), id("Dogwood"));
+        let act = |action: AgentRosterAction| {
+            let current = crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                AgentRosterAction::Read,
+                None,
+            )
+            .unwrap();
+            crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                action,
+                Some(current.revision),
+            )
+        };
+        let remove = |member_id: &str| {
+            act(AgentRosterAction::Remove {
+                member_id: member_id.into(),
+            })
+        };
+        act(AgentRosterAction::SelectPm {
+            member_id: birch.clone(),
+        })
+        .unwrap();
+        let refused = remove(&birch).unwrap_err();
+        assert!(
+            refused.contains("Project Manager") && refused.contains("Birch"),
+            "{refused}"
+        );
+        let candidate = remove(&cedar).unwrap_err();
+        assert!(candidate.contains("candidate"), "{candidate}");
+        let removed = remove(&dogwood).unwrap();
+        assert!(removed
+            .members
+            .iter()
+            .all(|member| member.agent_member_id != dogwood));
+        assert!(SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&dogwood)
+            .is_none());
+        act(AgentRosterAction::SelectPm {
+            member_id: aspen.clone(),
+        })
+        .unwrap();
+        let reassigned = remove(&birch).expect("the former PM is deletable after reassignment");
+        assert_eq!(
+            reassigned
+                .members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Cedar", "Aspen"]
+        );
+        assert!(remove(&aspen).unwrap_err().contains("Project Manager"));
+        assert!(remove(&dogwood).unwrap_err().contains("no longer exists"));
+        let stale = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Remove {
+                member_id: cedar.clone(),
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(stale.contains("reload"), "{stale}");
     }
 
     #[test]

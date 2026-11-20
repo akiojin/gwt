@@ -4963,3 +4963,16 @@ test("window navigation publishes the selected pane without changing layout", ()
   assert.match(body, /windowId, notifyFocus, serial:/);
   assert.doesNotMatch(body, /activate_window_tab|splitSurfaces\.close|pendingFrameWindowId/);
 });
+
+// Issue #7646 AC-1: the agent ledger opens from the project header, not only
+// from the rail.
+test("Issue #7646: the project header opens the agent ledger", () => {
+  const button = document.querySelector(".project-bar .project-actions #open-agents-button");
+  assert.ok(button, "the header carries the ledger entry");
+  assert.equal(button.getAttribute("type"), "button");
+  assert.equal(button.textContent.trim(), "Ledger", "the name stays distinct from the rail's Agents entry");
+  assert.equal(button.dataset.surface, undefined, "the rail alone owns surface selection state");
+  assert.match(button.getAttribute("title"), /ledger/i);
+  assert.match(extractMediaBlocks(componentsStyle, "max-width: 900px"), /\.project-bar::before\s*\{[^}]*display:\s*none/, "the brand yields its room before the bar overflows");
+  assert.match(appSource, /getElementById\("open-agents-button"\)\?\.addEventListener\("click", \(\) => openSurface\("agents"\)\)/);
+});
