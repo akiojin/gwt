@@ -41,6 +41,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
       import { createExecutionEnvironments } from "/execution-environments.js";
+      import { createAppChrome } from "/app-chrome.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
@@ -84,7 +85,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createToastStack } from "/toast-host.js";
       import { createProjectPageMetadata, projectAgentSummary } from "/project-page-metadata.js";
-      import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
+      import { createNotificationCenter } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved
       // to /branches-cleanup-surface.js.
       import { createBranchesCleanupSurface } from "/branches-cleanup-surface.js";
@@ -245,6 +246,20 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         ? migrationModal.querySelector(".modal-shell")
         : null;
       const appVersionLabel = document.getElementById("app-version");
+      // Issue #7740: the shared header's destinations. A later slice adds a
+      // screen by adding its row to /app-chrome.js and its handler here.
+      const appChrome = createAppChrome({
+        document,
+        handlers: {
+          pm: () => openPmDecisions(),
+          notifications: () => notificationCenter.toggle(),
+          agents: () => openSurface("agents"),
+          environments: () => openExecutionEnvironments(),
+          settings: () => openSurface("settings"),
+        },
+      });
+      appChrome.mountNav(document.getElementById("app-head-nav"));
+      appChrome.mountFooterPm(document.getElementById("app-foot-pm"));
 
       const decoderMap = new Map();
       const pendingSnapshotMap = new Map();
@@ -2600,6 +2615,16 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         send({ kind: "open_pm_agent" });
       }
 
+      // Issue #7740: the header's PM entry opens the PM on its waiting
+      // decisions. A PM that is not mounted yet shows them once it is.
+      let pendingPmDecisions = false;
+      function openPmDecisions() {
+        const view = pmWindowId ? pmChatViews.get(pmWindowId) : null;
+        pendingPmDecisions = !view;
+        openPmAgent();
+        view?.controller.showDecisions();
+      }
+
       // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
       let projectAgentSummaryModel = null;
 
@@ -2925,20 +2950,25 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
 
       // Rail selection follows the active layout pane.
+      function selectSurface(surface) {
+        applySurfaceSelection(document, surface);
+        appChrome.setActiveSurface(surface);
+      }
+
       function syncSurfaceRail() {
         if (splitSurfaces?.hasLayout) {
-          applySurfaceSelection(document, splitSurfaces.activeSurface());
+          selectSurface(splitSurfaces.activeSurface());
           return;
         }
         if (worksHost) {
-          applySurfaceSelection(document, "works");
+          selectSurface("works");
           return;
         }
         const focusedWindow = focusedId
           ? (activeWorkspace().windows || []).find((windowData) => windowData.id === focusedId)
           : null;
         const focused = windowWithSettingsSection(focusedWindow);
-        applySurfaceSelection(document, surfaceForWindow(focused));
+        selectSurface(surfaceForWindow(focused));
       }
 
       document.addEventListener("settings:section-changed", event => {
@@ -4231,33 +4261,20 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
       pmSettingsPanel.bindEntryPoints({ document });
 
-      // SPEC #3206 v2 — notification center: bell (rail System group) + unread
+      // SPEC #3206 v2 — notification center: bell (shared header) + unread
       // badge + history drawer. The drawer mounts on <body>, never inside
-      // .op-rail (its stacking context would clamp the drawer under toasts and
-      // modals). It is a pure sink; firing/dedup/gating stay in the controllers.
+      // the chrome (its stacking context would clamp the drawer under toasts
+      // and modals). It is a pure sink; firing/dedup/gating stay in the controllers.
       const notificationCenter = createNotificationCenter({ document });
       notificationCenter.mount(document.body);
-      const notificationBellButton = document.getElementById("op-notifications-button");
-      const notificationBellBadge =
-        notificationBellButton?.querySelector(".op-rail__badge") ?? null;
-      notificationCenter.onUnreadChange((count, hasError) => {
-        renderNotificationBell({
-          button: notificationBellButton,
-          badge: notificationBellBadge,
-          count,
-          hasError,
-          open: notificationCenter.isOpen(),
-        });
+      // Issue #7740: the bell is the shared header's Notifications entry.
+      const syncNotificationBell = () => appChrome.setNotifications({
+        count: notificationCenter.unreadCount(),
+        hasError: notificationCenter.unreadHasError(),
+        open: notificationCenter.isOpen(),
       });
-      notificationCenter.onOpenChange(() => {
-        renderNotificationBell({
-          button: notificationBellButton,
-          badge: notificationBellBadge,
-          count: notificationCenter.unreadCount(),
-          hasError: notificationCenter.unreadHasError(),
-          open: notificationCenter.isOpen(),
-        });
-      });
+      notificationCenter.onUnreadChange(syncNotificationBell);
+      notificationCenter.onOpenChange(syncNotificationBell);
 
       // SPEC #3206 — one shared bottom-right `alerts` stack for the transient
       // notifications that used to be three hand-offset systems (agent
@@ -4543,6 +4560,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           onReviewAttention: items => applyPmReviewAttention(windowData.id, items),
         });
         pmChatViews.set(windowData.id, view);
+        if (pendingPmDecisions) {
+          pendingPmDecisions = false;
+          view.controller.showDecisions();
+        }
         // SPEC #7007 T-013: the Log view mirrors this page's notification
         // history (#5016 groups). The subscription fires immediately with
         // the current rows, then on every history change.
@@ -6027,6 +6048,17 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         updateWorksTelemetry(sessions);
       });
       rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      // Issue #7740: the header's PM entry and the footer name the PM (the
+      // running window, else the ledger's designated PM) and count the
+      // decisions waiting for the user.
+      function syncAppChromePm() {
+        const pmWindow = (pmLauncherModel.read().workspace?.windows || []).find(windowData => windowData?.is_pm);
+        const name = String(pmWindow?.agent_name || rosterModel.read().members.find(member => member.is_pm)?.name || "").trim();
+        appChrome.setPm({ name, decisions: issueMonitorModel.read().pmDecisionAttention.count });
+      }
+      pmLauncherModel.subscribe(state => state.workspace, syncAppChromePm);
+      rosterModel.subscribe(state => state.revision, syncAppChromePm);
+      issueMonitorModel.subscribe(model => model.pmDecisionAttention.count, syncAppChromePm);
       let renderedRosterNames = null;
       rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
         [member.member_id, member.name, member.assignment?.session_id])), names => {
@@ -6100,7 +6132,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
       // Issue #7646: the header and Application settings both lead to the ledger.
-      document.getElementById("open-agents-button")?.addEventListener("click", () => openSurface("agents"));
       document.addEventListener("agents:open", () => openSurface("agents"));
       // Issue #7648: Execution environments is the one screen that shows
       // provider usage, reset times and limit state, opened from the top bar.
@@ -6125,7 +6156,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         executionEnvironments.open(view);
         openSurface("environments");
       }
-      document.getElementById("open-environments-button").addEventListener("click", () => openExecutionEnvironments());
       document.addEventListener("environments:open", event => openExecutionEnvironments(event.detail?.view));
       // Telemetry updates keep the current native terminal host.
       worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));

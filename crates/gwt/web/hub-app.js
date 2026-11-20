@@ -7,6 +7,7 @@ import { renderProjectCloneModal, createFolderPickerController, createOpenProjec
 import { HUB_URL_PATH, projectUrlPath, routeWebSocketUrl } from "./frontend-route.js";
 import { createProjectExecutionPolicyModel, mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { createAppChrome } from "./app-chrome.js";
 
 const HUB_RESULT_KINDS = new Set([
   "hub_state",
@@ -38,7 +39,7 @@ function initialCloneState() {
   };
 }
 
-function createHubApp({ document: doc, window: win }) {
+function createHubApp({ document: doc, window: win, setVersion }) {
   const node = (tag, className, text) => {
     const element = doc.createElement(tag);
     if (className) element.className = className;
@@ -76,9 +77,7 @@ function createHubApp({ document: doc, window: win }) {
   root.dataset.hub = "";
   const header = node("header", "gwt-hub__header");
   const title = node("h1", "gwt-hub__title", "gwt");
-  const version = node("span", "gwt-hub__version");
-  version.hidden = true;
-  header.append(title, version);
+  header.append(title);
 
   const actions = node("div", "gwt-hub__actions");
   const openFolder = node("button", "wizard-button primary", "Open Folder…");
@@ -182,8 +181,7 @@ function createHubApp({ document: doc, window: win }) {
   function render() {
     for (const release of releaseExecutionViews) release();
     releaseExecutionViews = [];
-    version.hidden = !catalog.app_version;
-    version.textContent = catalog.app_version ? `v${catalog.app_version}` : "";
+    setVersion(catalog.app_version ? `v${catalog.app_version}` : "");
     renderList(openSection.list, catalog.projects, "No open projects", (project) => {
       const row = node("div", "gwt-hub__project-actions");
       const close = node("button", "text-button", "Close Project");
@@ -520,9 +518,12 @@ function createHubApp({ document: doc, window: win }) {
 
 export function mountHubApp({ window: win, document: doc }) {
   doc.title = "gwt — Hub";
-  const app = createHubApp({ window: win, document: doc });
+  // Issue #7740: the Hub shares the header and footer; the version lives in the footer.
+  const chrome = createAppChrome({ document: doc });
+  const page = chrome.mountPage();
+  const app = createHubApp({ window: win, document: doc, setVersion: chrome.setVersion });
   doc.body.className = "route-body";
-  doc.body.replaceChildren(app.root, app.cloneModal, app.closeModal);
+  doc.body.replaceChildren(page.header, app.root, app.cloneModal, app.closeModal, page.footer);
   // Run once after mounting, before connecting: picker requests queue behind
   // frontend_ready, while reconnect only re-establishes the Hub connection.
   app.openInitialAction();

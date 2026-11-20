@@ -159,11 +159,12 @@ body::after {
      and never overlays surface windows. Issue 4777 T-1 widens it to 64px so
      each surface entry carries a visible label under its icon. */
   grid-template-columns: 64px 1fr;
-  grid-template-rows: 44px 1fr 28px;
+  grid-template-rows: 44px 1fr 28px auto;
   grid-template-areas:
     "projectbar projectbar"
     "rail surface"
-    "strip strip";
+    "strip strip"
+    "appfoot appfoot";
   background: var(--bg-depth-glow), transparent;
 }
 
@@ -191,18 +192,6 @@ body::after {
   text-transform: uppercase;
   font-size: var(--type-sm);
   color: var(--color-display-fg);
-}
-
-.project-bar::before {
-  /* SPEC-2356 — Operator brand prefix.
-     A bracket-flanked GWT mark, painted with the Hubot Sans Condensed
-     display family inherited from .project-bar. The bracket characters
-     pick up the focus-ring colour so the brand reads as an indicator
-     light, not just plain text. */
-  content: "⌜ GWT · OPERATOR ⌟";
-  margin-right: var(--space-4);
-  color: var(--color-display-fg);
-  text-shadow: 0 0 6px color-mix(in oklab, var(--agent-codex) 40%, transparent);
 }
 
 .project-actions {
@@ -813,33 +802,6 @@ body::after {
   padding: 0 var(--space-1);
 }
 
-/* Notification unread count. */
-.op-rail__badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
-  font-weight: 600;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-button-fg);
-  background: var(--color-button-bg);
-  border: 1px solid var(--color-button-border);
-  border-radius: var(--radius-pill);
-  pointer-events: none;
-}
-
-.op-rail__badge[hidden] {
-  display: none;
-}
-
 /* Issue 4777 T-1 — surface entries. Unlike the 40px icon buttons below
    them, a surface entry spans the rail and names itself under the icon; the
    pressed entry is the surface the focused window belongs to, marked by a
@@ -887,12 +849,13 @@ body::after {
 @media (max-width: 860px) {
   #app {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 44px auto minmax(0, 1fr) 28px;
+    grid-template-rows: 44px auto minmax(0, 1fr) 28px auto;
     grid-template-areas:
       "projectbar"
       "rail"
       "surface"
-      "strip";
+      "strip"
+      "appfoot";
   }
 
   .op-rail {
@@ -935,44 +898,253 @@ body::after {
 }
 
 
-/* Issue #6476: keep every top-bar action reachable on phone-sized screens.
-   Let the chrome row grow when the existing controls wrap. */
-.arrange-button__short {
-  display: none;
+/* ============================================================
+   Shared app header and footer (Issue 7740, SPEC 7007 slice F-1)
+
+   Every page carries the same header and footer. The header is a brand
+   plus one row that never wraps: entries that do not fit scroll sideways,
+   so a later slice can add a destination without adding a row. On a phone
+   the brand takes its own row and that row sits below it.
+   ============================================================ */
+
+.app-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
 }
 
-/* Issue 7646: the bar gained the agent ledger entry. Below 900px the brand
-   prefix yields its room so the actions never overflow the page. */
-@media (max-width: 900px) {
-  .project-bar::before {
-    display: none;
-  }
+.app-head__brand {
+  flex: none;
+  color: var(--color-display-fg);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-sm);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+}
+
+.app-head__row {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.app-head__row > * {
+  flex: none;
+}
+
+.app-head__nav {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.app-head__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 32px;
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-mono);
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.app-head__item:hover {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-strong);
+}
+
+.app-head__item:focus-visible,
+.app-head-popover__item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+.app-head__item[aria-current="page"],
+.app-head__item[aria-expanded="true"] {
+  border-color: var(--color-border-strong);
+  color: var(--color-text-strong);
+}
+
+/* Design item 80: an entry that cannot be chosen stays in place and says why. */
+.app-head__item[aria-disabled="true"],
+.app-head-popover__item[aria-disabled="true"] {
+  color: var(--color-text-disabled);
+  cursor: help;
+}
+
+.app-head__item[aria-disabled="true"]:hover {
+  background: transparent;
+  color: var(--color-text-disabled);
+}
+
+.app-head__avatar {
+  display: grid;
+  place-items: center;
+  width: var(--space-5);
+  height: var(--space-5);
+  border: 1px solid var(--color-state-active);
+  border-radius: var(--radius-pill);
+  color: var(--color-state-active);
+  line-height: 1;
+}
+
+.app-head__count {
+  min-width: var(--space-4);
+  height: var(--space-4);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--color-state-active);
+  color: var(--color-canvas);
+  font-weight: 700;
+  line-height: var(--space-4);
+  text-align: center;
+}
+
+.app-head__count[data-has-error="true"] {
+  background: var(--color-state-blocked);
+}
+
+.app-head-popover {
+  position: fixed;
+  z-index: var(--z-popover);
+  min-width: 180px;
+  max-width: min(320px, calc(100vw - 2 * var(--space-2)));
+  padding: var(--space-1);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+}
+
+.app-head-popover__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  width: 100%;
+  min-height: 44px;
+  justify-content: center;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.app-head-popover__item:hover {
+  background: var(--color-surface);
+}
+
+.app-head-popover__reason {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+.app-head-popover__note {
+  margin: 0;
+  padding: var(--space-2);
+}
+
+/* The footer carries the version and the PM name only (design item 155). */
+.app-foot {
+  grid-area: appfoot;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 var(--space-4);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+}
+
+.app-foot .app-version,
+.app-foot .arrange-button {
+  height: 22px;
+  box-shadow: none;
+}
+
+.app-foot__pm {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 600px) {
-  #app {
-    grid-template-rows: auto auto minmax(0, 1fr) 28px;
-  }
-
-  .project-bar {
-    min-height: 44px;
+  .app-head {
+    flex-wrap: wrap;
+    row-gap: 0;
     padding: var(--space-1) var(--space-2);
   }
 
-  .project-bar::before {
-    display: none;
+  .app-head__row {
+    flex: 1 0 100%;
+  }
+
+  .app-head__brand {
+    min-height: 24px;
+    display: flex;
+    align-items: center;
+  }
+
+  .app-head__item,
+  .app-foot .app-version,
+  .app-foot .arrange-button {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+
+  .app-foot {
+    padding: 0 var(--space-2);
+  }
+}
+
+/* Issue #6476: keep every top-bar action reachable on phone-sized screens. */
+@media (max-width: 600px) {
+  #app {
+    grid-template-rows: auto auto minmax(0, 1fr) 28px auto;
   }
 
   .project-bar .project-actions {
-    flex: 1 1 auto;
-    min-width: 0;
-    flex-wrap: wrap;
     gap: var(--space-1);
   }
 
   .project-actions > .arrange-button,
-  .project-actions .update-check > .arrange-button,
-  .project-actions > .app-version,
   .project-actions .op-theme-toggle__option {
     min-width: 44px;
     min-height: 44px;
@@ -980,17 +1152,6 @@ body::after {
 
   .project-actions .op-theme-toggle {
     height: auto;
-  }
-
-  /* Issue 7648: with the ledger and environments entries the bar took a third
-     row of a phone screen. The environments entry shows its short label here;
-     its accessible name stays "Execution environments". */
-  .arrange-button__long {
-    display: none;
-  }
-
-  .arrange-button__short {
-    display: inline;
   }
 
   /* T-005r: each rail group wrapped on its own, so the strip took three
@@ -5860,8 +6021,8 @@ button.workspace-board-ref:focus-visible {
 
 /* Keep persistence diagnostics in the shell layout, above every workspace surface. */
 #app:has(> .react-island > .workspace-state-notice) {
-  grid-template-rows: 44px auto 1fr 28px;
-  grid-template-areas: "projectbar projectbar" "notice notice" "rail surface" "strip strip";
+  grid-template-rows: 44px auto 1fr 28px auto;
+  grid-template-areas: "projectbar projectbar" "notice notice" "rail surface" "strip strip" "appfoot appfoot";
 }
 .react-island { display: contents; }
 .react-island[hidden] { display: none; }
@@ -5891,13 +6052,13 @@ button.workspace-board-ref:focus-visible {
 .workspace-state-notice button:focus-visible { outline: 2px solid var(--color-focus-ring); }
 @media (max-width: 860px) {
   #app:has(> .react-island > .workspace-state-notice) {
-    grid-template-rows: 44px auto auto minmax(0, 1fr) 28px;
-    grid-template-areas: "projectbar" "notice" "rail" "surface" "strip";
+    grid-template-rows: 44px auto auto minmax(0, 1fr) 28px auto;
+    grid-template-areas: "projectbar" "notice" "rail" "surface" "strip" "appfoot";
   }
 }
 @media (max-width: 600px) {
   #app:has(> .react-island > .workspace-state-notice) {
-    grid-template-rows: auto auto auto minmax(0, 1fr) 28px;
+    grid-template-rows: auto auto auto minmax(0, 1fr) 28px auto;
   }
   .workspace-state-notice span {
     max-height: 25vh;

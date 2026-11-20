@@ -38,10 +38,10 @@ test.describe("Execution environments", () => {
     await open(page);
     await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
     const entry = page.locator(".project-bar").getByRole("button", { name: "Environments" });
-    await expect(entry).toHaveAttribute("aria-pressed", "false");
+    await expect(entry).not.toHaveAttribute("aria-current", "page");
     await entry.click();
     await expect(surface(page).getByRole("heading", { level: 1, name: "Execution environments" })).toBeVisible();
-    await expect(entry).toHaveAttribute("aria-pressed", "true");
+    await expect(entry).toHaveAttribute("aria-current", "page");
 
     const cards = surface(page).locator("[data-environment]");
     await expect(cards).toHaveCount(2);
@@ -73,7 +73,7 @@ test.describe("Execution environments", () => {
   test("every account opens its detail with usage, reset and limit state (AC-2)", async ({ page }, info) => {
     const errors = captureUsageErrors(page);
     await open(page);
-    await page.locator("#open-environments-button").click();
+    await page.locator('.app-head [data-destination="environments"]').click();
     await surface(page).getByRole("button", { name: "Accounts", exact: true }).click();
     const heading = surface(page).getByRole("heading", { level: 1, name: "Accounts" });
     await expect(heading).toBeFocused();
@@ -118,7 +118,7 @@ test.describe("Execution environments", () => {
   test("Claude usage collection lives in its account detail and follows snapshots", async ({ page }) => {
     const errors = captureUsageErrors(page);
     await open(page);
-    await page.locator("#open-environments-button").click();
+    await page.locator('.app-head [data-destination="environments"]').click();
     await surface(page).getByRole("button", { name: "Open the Claude Code account" }).click();
     const checkbox = surface(page).getByRole("checkbox", { name: "Show Claude Code account usage" });
     await expect(checkbox).toBeChecked();

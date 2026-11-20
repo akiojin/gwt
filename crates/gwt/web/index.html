@@ -37,20 +37,18 @@
   <body>
     <div id="app">
       <div class="project-shell">
-        <div class="project-bar">
-
+        <!-- Issue #7740 (SPEC #7007 F-1): the header every page shares. The
+             destinations are rendered into #app-head-nav from the one
+             definition in app-chrome.js; a page adds only its own actions
+             after it. Both live in one row that scrolls sideways instead of
+             wrapping. -->
+        <header class="project-bar app-head" id="app-head">
+          <span class="app-head__brand">gwt</span>
+          <div class="app-head__row">
+          <div class="react-island" id="app-head-nav"></div>
           <div class="project-actions">
-            <!-- Issue #7646: the agent ledger opens from the header. -->
-            <button class="arrange-button" id="open-agents-button" type="button" title="Agent ledger: members, their order and Project Manager">Ledger</button>
-            <!-- Issue #7648: the one way to provider accounts, usage and limits. -->
-            <button class="arrange-button" id="open-environments-button" type="button" data-surface="environments" aria-pressed="false" aria-label="Execution environments" title="Execution environments: accounts, usage and limits"><span class="arrange-button__long">Environments</span><span class="arrange-button__short">Envs</span></button>
             <button class="arrange-button" id="split-view-button" type="button" aria-pressed="false" title="Show two surfaces side by side">Split view</button>
             <button class="arrange-button" id="close-project-button" type="button">Close Project</button>
-            <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
-            <span class="update-check" id="update-check">
-              <button class="arrange-button" id="update-check-button" type="button" title="Check for updates now">Check</button>
-              <span class="update-check-status" id="update-check-status" role="status" aria-live="polite"></span>
-            </span>
             <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
                  retired. Open Folder / Clone from GitHub now live inside the
                  consolidated `Projects ▾` switcher (and Cmd+O opens a folder),
@@ -94,7 +92,8 @@
               >LIGHT</button>
             </div>
           </div>
-        </div>
+          </div>
+        </header>
         <!-- SPEC-3038 US-1: the Command Rail is the always-visible 64px home
              for navigation, window operations, and system actions. Operation
              IDs (#tile-button etc.) and data-cmd attributes are preserved so
@@ -208,25 +207,6 @@
           <div class="op-rail__spacer" aria-hidden="true"></div>
           <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
-            <!-- SPEC #3206 v2 (FR-009): notification bell + unread badge. The
-                 drawer itself mounts on <body> (app.js) — never inside the rail,
-                 whose stacking context would clamp it under toasts/modals. -->
-            <button
-              class="op-rail__item op-rail__item--notifications"
-              type="button"
-              id="op-notifications-button"
-              data-cmd="toggle-notifications"
-              aria-label="Notifications"
-              title="Notifications"
-              aria-controls="notification-center"
-              aria-expanded="false"
-            >
-              <span class="op-rail__icon" aria-hidden="true">🔔</span>
-              <span class="op-rail__badge" aria-hidden="true" hidden></span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Notifications</span>
-              </span>
-            </button>
             <button
               class="op-rail__item"
               id="op-palette-button"
@@ -350,6 +330,16 @@
           <div class="op-status-strip__cell" aria-hidden="true">
             <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
           </div>
+        </footer>
+        <!-- Issue #7740: the shared footer carries the version (with its
+             update check) and the PM name only (design item 155). -->
+        <footer class="app-foot" id="app-foot">
+          <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
+          <span class="update-check" id="update-check">
+            <button class="arrange-button" id="update-check-button" type="button" title="Check for updates now">Check</button>
+            <span class="update-check-status" id="update-check-status" role="status" aria-live="polite"></span>
+          </span>
+          <span class="react-island" id="app-foot-pm"></span>
         </footer>
       </div>
       <div

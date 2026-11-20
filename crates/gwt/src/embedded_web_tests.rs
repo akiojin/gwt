@@ -3992,7 +3992,7 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
         "SPEC #3206 FR-012: retired region CSS must not ship",
     );
 
-    // The replacement is wired: registered + imported, bell in the rail, and
+    // The replacement is wired: registered + imported, bell in the header, and
     // the autonomous fan-out records into the notification center history.
     assert!(
         root_js_module_assets()
@@ -4006,9 +4006,9 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
         "SPEC #3206 v2: app.js must import and mount the notification center on <body>",
     );
     assert!(
-        html.contains("id=\"op-notifications-button\"")
-            && html.contains("data-cmd=\"toggle-notifications\""),
-        "SPEC #3206 FR-009: the rail must carry the notification bell",
+        module_graph.contains("view.elementId = \"op-notifications-button\"")
+            && js.contains("notifications: () => notificationCenter.toggle()"),
+        "SPEC #3206 FR-009 / Issue #7740: the shared header must carry the notification bell",
     );
     assert!(
         js.contains("case \"issue_monitor_toast\"") && js.contains("kind: \"issue-monitor\""),

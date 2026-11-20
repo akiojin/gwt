@@ -28,7 +28,6 @@ import { createUiStateStore } from "./ui-state-store.js";
 
 const DEFAULT_MAX_RETAINED = 100;
 const HISTORY_LEVELS = ["info", "success", "warn", "error", "done", "neutral"];
-const BADGE_MAX = 99;
 
 // Issue #3979 (user ruling 2026-09-05) — triage rows. The drawer is the surface
 // where unhandled notices get CLEARED, not read, so a row's first job is to say
@@ -59,30 +58,6 @@ const SEVERITY_LABEL = {
 
 function severityForLevel(level) {
   return SEVERITY_BY_LEVEL[level] || "neutral";
-}
-
-/**
- * Sync the rail bell with the unread model (FR-009). The badge is decorative
- * (aria-hidden); the count is mirrored into the button's aria-label so screen
- * readers hear it, and aria-expanded follows the drawer state.
- */
-export function renderNotificationBell({ button, badge, count = 0, hasError = false, open = false } = {}) {
-  const unread = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
-  if (badge) {
-    badge.hidden = unread === 0;
-    badge.textContent = unread > BADGE_MAX ? `${BADGE_MAX}+` : String(unread);
-    badge.dataset.hasError = hasError ? "true" : "false";
-  }
-  if (button) {
-    button.dataset.unread = String(unread);
-    button.dataset.hasError = hasError ? "true" : "false";
-    button.setAttribute("aria-expanded", open ? "true" : "false");
-    const label = unread === 0
-      ? "Notifications"
-      : `Notifications (${unread} unread${hasError ? ", includes errors" : ""})`;
-    button.setAttribute("aria-label", label);
-    button.setAttribute("title", label);
-  }
 }
 
 function formatClock(date) {
