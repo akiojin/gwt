@@ -27,6 +27,7 @@ bash scripts/run-visual-tests.sh
 | `tests/kanban.spec.ts` | SPEC-2017 Knowledge Bridge list/detail behavior | embedded-frontend fixture |
 | `tests/index-status.spec.ts` | SPEC-1939 Phase 13 Index status surface (per-tab dot / Settings.Index / per-cell rebuild) | embedded-frontend fixture |
 | `tests/home-conversation.spec.ts` | Issue #7639 Home (PM conversation) / Projects view of the page at `/` | embedded-frontend fixture |
+| `tests/first-run-setup.spec.ts` | Issue #7731 first-run setup on the page at `/` (tool gate, Project Manager row, reopening a step from Settings) | embedded-frontend fixture |
 | `tests/agent-history-plans.spec.ts` | Issue #7649 agent history and planned assignments on the project's Agents screen; the ledger shows neither | embedded-frontend fixture |
 | `tests/project-open-surfaces.spec.ts` | Project Picker / Open Folder / Clone / non-Git onboarding | embedded-frontend fixture through the shared live harness |
 

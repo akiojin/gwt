@@ -29,6 +29,7 @@ import { renderHookCenterPanel, hookRepairUnavailableReason } from "./hook-cente
 import { createUiStateStore } from "./ui-state-store.js";
 import { createRepositoryLabelChip } from "./ui-content.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "./first-run-setup.js";
 
 function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
@@ -1671,6 +1672,21 @@ export function createSettingsSurface({
         ledgerLink.addEventListener("click", () => document.dispatchEvent(new document.defaultView.CustomEvent("agents:open")));
         ledgerSection.appendChild(ledgerLink);
         panelSystem.appendChild(ledgerSection);
+        // Issue #7731: every step of the first-run setup stays reachable
+        // from here. The setup lives on the Hub page.
+        const setupSection = createDiv("settings-section");
+        setupSection.dataset.firstRunSetupReview = "";
+        setupSection.appendChild(createNode("h4", "settings-section-heading", "Review first-run setup"));
+        setupSection.appendChild(createNode("p", "settings-help", "Open any step of the setup again. It shows this machine's current state."));
+        const setupLinks = createDiv("settings-link-row");
+        for (const { step, label } of SETUP_REVIEW_STEPS) {
+          const link = createNode("a", "wizard-button", label);
+          link.href = firstRunSetupUrlPath(step);
+          link.dataset.setupStep = step;
+          setupLinks.appendChild(link);
+        }
+        setupSection.appendChild(setupLinks);
+        panelSystem.appendChild(setupSection);
         const systemContent = createDiv();
         systemContent.id = `${panelSystem.id}-content`;
         systemContent.dataset.systemSettingsContent = "";

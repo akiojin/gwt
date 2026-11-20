@@ -573,6 +573,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("list_agent_backends", "agent_backends")
                 .agent(agent.as_str())
         }
+        FrontendEvent::SaveFirstRunSetup { pm_member_id, .. } => {
+            let action = FrontendUserActionLog::new("save_first_run_setup", "first_run_setup");
+            match pm_member_id {
+                Some(member_id) => action.target(member_id.clone()),
+                None => action,
+            }
+        }
         FrontendEvent::AddExecutionEnvironment { via_tool, .. } => {
             FrontendUserActionLog::new("add_execution_environment", "execution_environments")
                 .agent(via_tool)
@@ -846,6 +853,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::GetExecutionEnvironments
+        | FrontendEvent::GetFirstRunSetup { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }

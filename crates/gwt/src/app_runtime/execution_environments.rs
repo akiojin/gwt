@@ -277,7 +277,7 @@ pub(crate) fn lists_without_environments(
 
 impl AppRuntime {
     /// Projects open in a tab, then recently opened ones.
-    fn known_projects(&self) -> Vec<KnownProject> {
+    pub(super) fn known_projects(&self) -> Vec<KnownProject> {
         let mut seen = std::collections::BTreeSet::new();
         self.tabs
             .iter()
@@ -310,7 +310,7 @@ impl AppRuntime {
     /// Carry an existing setup over: every tool that signs in to its own
     /// account and is installed here, or that a known project already
     /// launches, has its account and environment afterwards.
-    fn ensure_execution_environments(
+    pub(super) fn ensure_execution_environments(
         &self,
         projects: &[KnownProject],
         installed: &[String],
