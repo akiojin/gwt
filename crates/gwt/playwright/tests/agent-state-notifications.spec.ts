@@ -157,6 +157,44 @@ test("Issue #5016 AC-HS3: identical Issues notices aggregate into one counted ro
   await page.screenshot({ path: testInfo.outputPath("aggregated-history.png"), fullPage: true });
 });
 
+test("Issue #7732 AC-1: notices carry one of three categories, counted per category, and repeats stay one row", async ({ page }, testInfo) => {
+  const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+  }, detail);
+  const drawer = page.locator("#notification-center");
+  const counts = drawer.locator(".notification-center__category-count");
+  await page.locator("#op-notifications-button").click();
+  await expect(counts).toHaveText(["Decision 0", "Completion report 0", "Info 0"]);
+  await drawer.getByRole("button", { name: "Close notifications" }).click();
+
+  const decision = {
+    kind: "issue_monitor_toast", level: "warn", issue_number: 7732,
+    notification_transition: "needs_human", message: "Issue #7732 needs human attention.",
+  };
+  await inject(decision);
+  await inject(decision);
+  await inject({ kind: "issue_monitor_toast", level: "done", issue_number: 7541, message: "Issue #7541 was merged" });
+  const steering = { kind: "issue_monitor_toast", level: "warn", issue_number: 7047, message: "Issue #7047 steering requested (1): four checks failed" };
+  await inject(steering);
+  await inject(steering);
+  await inject(steering);
+
+  await page.locator("#op-notifications-button").click();
+  const rows = drawer.locator(".notification-center__item");
+  await expect(rows).toHaveCount(3);
+  await expect(rows.locator(".notification-center__category")).toHaveText(["Info", "Completion report", "Decision"]);
+  await expect(rows.nth(0)).toHaveAttribute("data-category", "info");
+  await expect(rows.nth(0).locator(".notification-center__count")).toHaveText("×3");
+  await expect(rows.nth(2)).toContainText("#7732");
+  await expect(rows.nth(2).locator(".notification-center__count")).toHaveText("×2");
+  // A notice that repeated is one row, so each category counts it once.
+  await expect(counts).toHaveText(["Decision 1", "Completion report 1", "Info 1"]);
+  await page.screenshot({ path: testInfo.outputPath("notification-categories.png"), fullPage: true });
+
+  await rows.nth(2).locator(".notification-center__dismiss").click();
+  await expect(counts).toHaveText(["Decision 0", "Completion report 1", "Info 1"]);
+});
+
 test("Issue #7520: a renewed steering request updates one counted row per Issue and reason", async ({ page }, testInfo) => {
   const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
     window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));

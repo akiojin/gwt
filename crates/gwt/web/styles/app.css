@@ -3947,10 +3947,10 @@ body {
    --color-state-active): the accent means "current", not "urgent". */
 .notification-center__item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   grid-template-areas:
-    "severity headline time dismiss"
-    ".        message  message message";
+    "severity headline category time dismiss"
+    ".        message  message  message message";
   align-items: center;
   column-gap: var(--space-2);
   row-gap: var(--space-1);
@@ -4039,6 +4039,34 @@ body {
   color: var(--color-state-blocked);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
+}
+/* Issue #7732 (SPEC #7007 item 211) — the category of a notice, on its row
+   and in the per-category counts above the list. The text names the category;
+   the color only repeats it. */
+.notification-center__categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+}
+.notification-center__category {
+  grid-area: category;
+  padding: 0 var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  white-space: nowrap;
+}
+.notification-center__category[data-category="decision"] {
+  color: var(--color-state-needs-input);
+}
+.notification-center__category[data-category="report"] {
+  color: var(--color-state-success);
+}
+.notification-center__category[data-category="info"] {
+  color: var(--color-text-muted);
 }
 /* A resolved row is done being triaged: it keeps its place in the history but
    its marker de-escalates to the quiet treatment. */
