@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, realpath, rename, rmdir, writeFile } from "no
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { operationOutput, readOperationOutput } from "./_helpers/operation-envelope.mjs";
 
 let rosterReadSequence = 0;
 async function readCanonicalRoster(page: Page): Promise<any> {
@@ -3022,7 +3023,10 @@ request.catch(() => {});
       }, { timeout: 60_000, message: stage }).not.toBe(provider.birth);
       mark(stage, { process: provider, observed_birth: observedBirth! });
     };
-    const status = async (project?: string) => JSON.parse((await fixture.operationAsync("issue.monitor.status", {}, project)).output);
+    // A status read refused by a busy daemon is repeated within a bound; each refusal stays in the timeline.
+    const status = (project?: string) => readOperationOutput("issue.monitor.status",
+      () => fixture.operationAsync("issue.monitor.status", {}, project),
+      { onRefusal: (refusal: Record<string, unknown>) => mark("operation refused", refusal) });
     const inboxState = async (number: number, project?: string) =>
       (await status(project)).inbox.find((row: any) => row.issue_number === number)?.state;
     const activity = (target: Page) => target.evaluate(() =>
@@ -3076,13 +3080,25 @@ request.catch(() => {});
         const { error } = await handle.jsonValue();
         await handle.dispose();
         mark("queue response", { issue_number: number, error });
+        // The GUI waits 200 ms for the daemon's durable commit. Past that the command has
+        // been sent and its outcome is unknown, so it is not sent again: its commit is observed,
+        // within the enclosing bound.
+        if (error && /^publish ack timeout after \d+ms$/.test(error)) {
+          await expect.poll(async () => {
+            const prefs = await read();
+            return Object.values(prefs.terminal_queues ?? {}).flatMap((queue: any) => queue.entries)
+              .some((entry: any) => entry.number === number) || !!prefs.launch_confirmations?.[number];
+          }, { timeout: 60_000, message: `the unacknowledged queue push for Issue #${number} is committed` }).toBe(true);
+          mark("queue commit observed", { issue_number: number });
+          return null;
+        }
         // This refusal is emitted before the daemon connection is attempted.
-        // A missing acknowledgement or any other error must fail the test.
+        // Any other error must fail the test.
         if (error && !/^publish budget exhausted during scope\/bootstrap resolution after \d+ms$/.test(error)) {
           throw new Error(`Queue push for Issue #${number} failed: ${error}`);
         }
         return error;
-      }, { timeout: 30_000, message: `queue push for Issue #${number} is acknowledged` }).toBeNull();
+      }, { timeout: 120_000, message: `queue push for Issue #${number} is acknowledged` }).toBeNull();
     };
     const shots = async (stage: string) => {
       await info.attach(`shared-pool-${stage}-first-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
@@ -3151,9 +3167,9 @@ request.catch(() => {});
       const identity = (await status()).inbox.find((row: any) => row.issue_number === 43);
       const confirmation = (await preferences()).launch_confirmations[43];
       mark("stop original owner");
-      const stopped = JSON.parse((await fixture.operationAsync("issue.monitor.stop", {
+      const stopped = operationOutput("issue.monitor.stop", await fixture.operationAsync("issue.monitor.stop", {
         number: 43, reason: "Issue #7451 slot return", remove_from_queue: false, claim_id: identity.claim_id,
-        delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id })).output);
+        delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id }));
       expect(stopped).toMatchObject({ status: "stopped", removed_from_queue: false, runtime_stop: "requested" });
       await waitForExit("original owner exited", sourceProcess);
       // Remove the exited diagnostic pane so only the hold keeps the Issue from relaunching.
@@ -3192,8 +3208,8 @@ request.catch(() => {});
 
       // 5. An explicit resume of the original owner waits for the slot too.
       mark("requeue original owner");
-      const requeued = JSON.parse((await fixture.operationAsync("issue.monitor.requeue", {
-        number: 43, reason: "Issue #7451 resume the original owner" })).output);
+      const requeued = operationOutput("issue.monitor.requeue", await fixture.operationAsync("issue.monitor.requeue", {
+        number: 43, reason: "Issue #7451 resume the original owner" }));
       expect(requeued.status).toBe("requeued");
       await expect.poll(hold, { timeout: 30_000 }).toBeUndefined();
       await expect.poll(async () => {
