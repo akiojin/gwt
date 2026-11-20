@@ -26,10 +26,11 @@ function fixture(action = "", popupBlocked = false) {
       sockets.push(this);
     }
     addEventListener(kind, handler) { this.handlers[kind] = handler; }
-    // Home's periodic decisions read is covered by home-conversation.test.mjs.
+    // Home's periodic decisions read is covered by home-conversation.test.mjs,
+    // the setup's read by first-run-setup.test.mjs.
     send(raw) {
       const message = JSON.parse(raw);
-      if (message.kind !== "load_home_conversation") this.sent.push(message);
+      if (!["load_home_conversation", "get_first_run_setup"].includes(message.kind)) this.sent.push(message);
     }
     open() { this.readyState = 1; this.handlers.open(); }
     deliver(event) { this.handlers.message({ data: JSON.stringify(event) }); }

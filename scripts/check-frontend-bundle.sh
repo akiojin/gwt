@@ -23,6 +23,7 @@ node_check crates/gwt/web/frontend-bootstrap.js
 node_check crates/gwt/web/frontend-route.js
 node_check crates/gwt/web/hub-app.js
 node_check crates/gwt/web/home-conversation.js
+node_check crates/gwt/web/first-run-setup.js
 node_check crates/gwt/web/project-themes.js
 node_check crates/gwt/web/branch-cleanup-modal.js
 node_check crates/gwt/web/branch-list-state.js

@@ -8,6 +8,7 @@ import { createInteractionGuard } from "../interaction-guard.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 import * as uiContent from "../ui-content.js";
 import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "../first-run-setup.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 const candidateChoices = {
@@ -431,8 +432,9 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
     return () => { if (active) { active = false; activeTuning--; unsubscribe(); } };
   };
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", "createRepositoryLabelChip", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason, uiContent.createRepositoryLabelChip);
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", "createRepositoryLabelChip", "SETUP_REVIEW_STEPS", "firstRunSetupUrlPath", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason, uiContent.createRepositoryLabelChip,
+    SETUP_REVIEW_STEPS, firstRunSetupUrlPath);
   const surface = factory({ send: message => sent.push(message), rosterModel, tuningController: { model: tuningModel },
     scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); },
     createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },

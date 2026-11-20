@@ -1069,6 +1069,7 @@ mod frontend_action_log;
 mod knowledge;
 mod launch;
 pub(crate) use launch::LaunchPermissionChecked;
+mod first_run_setup;
 mod gui_slice;
 mod home_conversation;
 mod launch_errors;
@@ -11739,6 +11740,17 @@ impl AppRuntime {
                 text,
                 request_id,
             } => self.home_pm_send_events(client_id, &project_key, &text, request_id),
+            FrontendEvent::GetFirstRunSetup { refresh } => {
+                if refresh {
+                    // A tool installed while gwt runs is found by detecting again.
+                    self.launch_wizard_cache.refresh_agent_options();
+                }
+                self.first_run_setup_events(client_id, None)
+            }
+            FrontendEvent::SaveFirstRunSetup {
+                pm_member_id,
+                pm_name,
+            } => self.first_run_setup_events(client_id, Some((pm_member_id, pm_name))),
             FrontendEvent::ReapOrphanDaemon { observation_token } => {
                 self.start_orphan_observation(client_id, Some(observation_token))
             }
@@ -12134,6 +12146,10 @@ impl AppRuntime {
             }
             // Issue #7639: the Home conversation belongs to the Hub connection.
             FrontendEvent::LoadHomeConversation { .. } => Vec::new(),
+            // Issue #7731: so does the first-run setup.
+            FrontendEvent::GetFirstRunSetup { .. } | FrontendEvent::SaveFirstRunSetup { .. } => {
+                Vec::new()
+            }
             FrontendEvent::HomePmSend { request_id, .. } => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneSendResult {

@@ -248,6 +248,17 @@ Manager との会話）が表示されます。開いている各プロジェク
 内容は表示しません。プロジェクトがまだ無い場合は、Import from GitHub、Open a
 folder、Clone from a URL を案内します。
 
+エージェントを動かす準備がまだ整っていない端末では、Hub は代わりに **初回
+セットアップ**（Welcome、Tools、Project Manager、Project、Done）を開きます。
+**Tools** にはこの端末に登録済みのエージェントツールが並びます。導入済みのツールが
+1 つも登録されていない間は先へ進めず、その理由を表示します。ツールを導入したら
+**Check again** を選びます。**Project Manager** では、1 つの行で Project Manager を
+務める人を選びます。台帳にいるエージェントか、名前を付けた新しいエージェントです。
+選んだ人は、独自に Project Manager を選んでいない各プロジェクトの Project Manager に
+なります。新しいエージェントは、プロジェクトで Project Manager が最初に起動したときに
+台帳へ加わります。プロジェクトを開く手順は任意です。各ステップは **Settings →
+System → Review first-run setup** からいつでも開き直せます。
+
 ヘッダーの **Projects** でプロジェクト一覧を開きます。Open Folder、Clone from
 GitHub、Recent projects、開いているプロジェクトの一覧を表示し、名前で検索できます。
 `http://127.0.0.1:<port>/?view=projects` で直接開けます。各プロジェクトは

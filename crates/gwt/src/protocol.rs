@@ -1217,6 +1217,22 @@ pub enum FrontendEvent {
     },
     /// Read the current project's complete saved launch profile pool.
     GetIssueMonitorProfiles,
+    /// Issue #7731: read what the first-run setup shows. Hub connections
+    /// only. Response is [`BackendEvent::FirstRunSetup`]. `refresh` detects
+    /// the installed tools again first, for a tool installed while gwt runs.
+    GetFirstRunSetup {
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// Issue #7731: designate this machine's Project Manager — an agent in
+    /// the ledger (`pm_member_id`) or a new agent (`pm_name`). Exactly one is
+    /// given. Hub connections only.
+    SaveFirstRunSetup {
+        #[serde(default)]
+        pm_member_id: Option<String>,
+        #[serde(default)]
+        pm_name: Option<String>,
+    },
     /// Issue #7741: read the execution environments, their accounts, and the
     /// current project's priority list. Response is
     /// [`BackendEvent::ExecutionEnvironments`].
@@ -3045,6 +3061,15 @@ pub enum BackendEvent {
         request_id: u64,
         message: String,
     },
+    /// Issue #7731: the first-run setup as its screen shows it.
+    FirstRunSetup {
+        view: Box<crate::first_run_setup::FirstRunSetupView>,
+    },
+    /// A first-run setup request was refused. `message` says why and what to
+    /// do instead.
+    FirstRunSetupError {
+        message: String,
+    },
     /// Issue #7741: the execution environments as the screens show them.
     ExecutionEnvironments {
         view: Box<ExecutionEnvironmentsView>,
@@ -3799,6 +3824,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "first_run_setup",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "first_run_setup_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "workspace_state_notice",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::PreserveOrder,
@@ -4500,6 +4535,8 @@ impl BackendEvent {
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
             BackendEvent::Themes { .. } => "themes",
             BackendEvent::ThemeError { .. } => "theme_error",
+            BackendEvent::FirstRunSetup { .. } => "first_run_setup",
+            BackendEvent::FirstRunSetupError { .. } => "first_run_setup_error",
             BackendEvent::ExecutionEnvironments { .. } => "execution_environments",
             BackendEvent::ExecutionEnvironmentError { .. } => "execution_environment_error",
             BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
@@ -5869,6 +5906,56 @@ mod tests {
             data_base64: "ZWNobw==".to_string(),
         };
         assert_eq!(event.delivery_policy().kind, "terminal_output");
+    }
+
+    /// Issue #7731: the first-run setup's requests and its reply on the wire.
+    #[test]
+    fn first_run_setup_requests_and_reply_keep_their_wire_shape() {
+        let read: FrontendEvent =
+            serde_json::from_value(serde_json::json!({ "kind": "get_first_run_setup" })).unwrap();
+        assert!(matches!(
+            read,
+            FrontendEvent::GetFirstRunSetup { refresh: false }
+        ));
+        let recheck: FrontendEvent = serde_json::from_value(
+            serde_json::json!({ "kind": "get_first_run_setup", "refresh": true }),
+        )
+        .unwrap();
+        assert!(matches!(
+            recheck,
+            FrontendEvent::GetFirstRunSetup { refresh: true }
+        ));
+        let save: FrontendEvent = serde_json::from_value(
+            serde_json::json!({ "kind": "save_first_run_setup", "pm_name": "Aoi" }),
+        )
+        .unwrap();
+        assert!(matches!(
+            save,
+            FrontendEvent::SaveFirstRunSetup { pm_member_id: None, pm_name: Some(name) } if name == "Aoi"
+        ));
+
+        let event = BackendEvent::FirstRunSetup {
+            view: Box::new(crate::first_run_setup::view(
+                vec![crate::first_run_setup::SetupToolView {
+                    name: "Claude Code 1".into(),
+                    tool: "claude".into(),
+                    installed: true,
+                }],
+                Vec::new(),
+                None,
+                false,
+            )),
+        };
+        assert_eq!(event.delivery_policy().kind, "first_run_setup");
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "first_run_setup");
+        assert_eq!(value["view"]["needs_setup"], true);
+        assert_eq!(value["view"]["pm"], serde_json::Value::Null);
+        assert_eq!(value["view"]["tools"][0]["installed"], true);
+        let refusal = BackendEvent::FirstRunSetupError {
+            message: "Choose one Project Manager.".into(),
+        };
+        assert_eq!(refusal.delivery_policy().kind, "first_run_setup_error");
     }
 
     #[test]

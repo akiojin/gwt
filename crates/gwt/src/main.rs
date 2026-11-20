@@ -2003,6 +2003,8 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::ReapOrphanDaemon { .. }
             | FrontendEvent::LoadHomeConversation { .. }
             | FrontendEvent::HomePmSend { .. }
+            | FrontendEvent::GetFirstRunSetup { .. }
+            | FrontendEvent::SaveFirstRunSetup { .. }
             | FrontendEvent::FrontendReady
             | FrontendEvent::StartupFirstFrame { .. }
             | FrontendEvent::RefreshUsage
@@ -3098,6 +3100,16 @@ mod tests {
             text: "Approve it".to_string(),
             request_id: 2,
         }));
+        // Issue #7731: the first-run setup is read and saved from the Hub.
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::GetFirstRunSetup { refresh: true }
+        ));
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::SaveFirstRunSetup {
+                pm_member_id: None,
+                pm_name: Some("Aoi".to_string()),
+            }
+        ));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::RestartPmAgent));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::TerminalInput {
             id: "pane".to_string(),
