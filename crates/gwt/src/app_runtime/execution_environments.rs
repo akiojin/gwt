@@ -22,6 +22,10 @@ fn tool_name(tool: &str) -> String {
     )
 }
 
+fn project_root(context: Option<&ProjectContext>) -> Option<String> {
+    context.map(|context| context.project_root.display().to_string())
+}
+
 /// One project gwt knows on this machine and its Issues settings.
 pub(crate) struct KnownProject {
     pub(crate) root: PathBuf,
@@ -283,15 +287,23 @@ impl AppRuntime {
             }
             Err(error) => BackendEvent::ExecutionEnvironmentError {
                 message: format!("Could not read the execution environments: {error}"),
+                project_root: project_root(context),
             },
         };
         vec![OutboundEvent::reply(client_id, event)]
     }
 
-    fn execution_environment_error(client_id: &str, message: String) -> Vec<OutboundEvent> {
+    fn execution_environment_error(
+        client_id: &str,
+        context: Option<&ProjectContext>,
+        message: String,
+    ) -> Vec<OutboundEvent> {
         vec![OutboundEvent::reply(
             client_id,
-            BackendEvent::ExecutionEnvironmentError { message },
+            BackendEvent::ExecutionEnvironmentError {
+                message,
+                project_root: project_root(context),
+            },
         )]
     }
 
@@ -359,7 +371,7 @@ impl AppRuntime {
         };
         match outcome {
             Ok(()) => self.execution_environments_reply(client_id, context),
-            Err(message) => Self::execution_environment_error(client_id, message),
+            Err(message) => Self::execution_environment_error(client_id, context, message),
         }
     }
 

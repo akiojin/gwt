@@ -2946,6 +2946,9 @@ pub enum BackendEvent {
     /// what to do instead.
     ExecutionEnvironmentError {
         message: String,
+        /// The project whose settings sent the request, when one did.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_root: Option<String>,
     },
     /// Client-scoped failure for the exact Settings candidate save.
     IssueMonitorProfilesWriteFailed {

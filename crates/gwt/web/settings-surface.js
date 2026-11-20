@@ -956,6 +956,7 @@ export function createSettingsSurface({
   rosterModel,
   tuningController,
   onReloadProfile,
+  renderProjectEnvironments = null,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1295,6 +1296,16 @@ export function createSettingsSurface({
           }
           send(message);
         };
+        // Issue #7741: the project's available execution environments.
+        const environmentsPanel = body.querySelector("[data-settings-environments]");
+        if (environmentsPanel) renderProjectEnvironments?.(environmentsPanel, {
+          view: current.environments || null, error: current.environmentsError || null,
+          send: message => {
+            if (!root || activeProjectTab()?.project_root !== root) return;
+            issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], environmentsPending: true, environmentsError: null } }));
+            send(message);
+          },
+        });
         const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
@@ -1336,6 +1347,24 @@ export function createSettingsSurface({
             labelsRequestId: confirmed ? null : current.labelsRequestId,
           } };
         });
+      }
+      // Issue #7741: `execution_environments` carries the list of the project
+      // the reply was scoped to.
+      function applyExecutionEnvironments(view) {
+        const root = view?.project?.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => ({ ...state, [root]: {
+          ...state[root], environments: view, environmentsPending: false, environmentsError: null,
+        } }));
+      }
+      // Only a save this window sent is answered here; other refusals belong
+      // to the Execution environments screen.
+      function applyExecutionEnvironmentError(event) {
+        const root = event.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => state[root]?.environmentsPending ? { ...state, [root]: {
+          ...state[root], environmentsPending: false, environmentsError: event.message,
+        } } : state);
       }
       function applyIssueMonitorProfiles(event) {
         const root = event.project_root;
@@ -1474,6 +1503,7 @@ export function createSettingsSurface({
           send({ kind: "list_issue_monitor" });
           send({ kind: "get_repository_labels", refresh: false });
           send({ kind: "get_issue_monitor_profiles" });
+          send({ kind: "get_execution_environments" });
           send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
         }
         send({ kind: "list_supported_agents" });
@@ -1695,6 +1725,9 @@ export function createSettingsSurface({
         const controls = createDiv();
         controls.dataset.settingsIssuesControls = "";
         panelIssues.appendChild(controls);
+        const environments = createDiv();
+        environments.dataset.settingsEnvironments = "";
+        panelIssues.appendChild(environments);
         const candidates = createDiv();
         candidates.dataset.settingsCandidates = "";
         panelIssues.appendChild(candidates);
@@ -2943,6 +2976,8 @@ export function createSettingsSurface({
         applyIssueSettingsStatus,
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,
+        applyExecutionEnvironments,
+        applyExecutionEnvironmentError,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,

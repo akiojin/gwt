@@ -10,6 +10,7 @@ import { TaskDecisions } from "../surfaces/TaskDecisions.jsx";
 import { TaskProgress } from "../surfaces/TaskProgress.jsx";
 import { TaskLog } from "../surfaces/TaskLog.jsx";
 import { ExecutionEnvironments } from "../surfaces/ExecutionEnvironments.jsx";
+import { ProjectExecutionEnvironments } from "../surfaces/ProjectExecutionEnvironments.jsx";
 
 const islands = Object.freeze({
   "workspace-state-notice": WorkspaceStateNotice,
@@ -18,6 +19,7 @@ const islands = Object.freeze({
   "task-progress": TaskProgress,
   "task-log": TaskLog,
   "execution-environments": ExecutionEnvironments,
+  "project-execution-environments": ProjectExecutionEnvironments,
 });
 
 export function mountIsland(name, container, props) {
