@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
-import { createNotificationCenter, renderNotificationBell } from "../notification-center.js";
+import { createNotificationCenter } from "../notification-center.js";
 import * as notificationCenter from "../notification-center.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -392,33 +392,6 @@ test("the close control and the backdrop both close the drawer", () => {
 });
 
 // --- T-006 (model half): bell badge renderer (FR-009) ---
-
-test("renderNotificationBell syncs count, visibility, error emphasis, aria-label and aria-expanded", () => {
-  const { document } = parseHTML(
-    '<!doctype html><button id="b" aria-label="Notifications" aria-expanded="false"><span class="op-rail__badge" hidden aria-hidden="true"></span></button>',
-  );
-  const button = document.getElementById("b");
-  const badge = button.querySelector(".op-rail__badge");
-
-  renderNotificationBell({ button, badge, count: 0, hasError: false, open: false });
-  assert.equal(badge.hidden, true, "0 unread hides the badge");
-  assert.equal(button.dataset.unread, "0");
-  assert.equal(button.getAttribute("aria-label"), "Notifications");
-  assert.equal(button.getAttribute("aria-expanded"), "false");
-
-  renderNotificationBell({ button, badge, count: 3, hasError: false, open: false });
-  assert.equal(badge.hidden, false);
-  assert.equal(badge.textContent, "3");
-  assert.equal(badge.dataset.hasError, "false");
-  assert.equal(button.dataset.unread, "3");
-  assert.equal(button.getAttribute("aria-label"), "Notifications (3 unread)");
-
-  renderNotificationBell({ button, badge, count: 120, hasError: true, open: true });
-  assert.equal(badge.textContent, "99+", "count is clamped for the tiny rail badge");
-  assert.equal(badge.dataset.hasError, "true", "state token emphasis hook");
-  assert.equal(button.getAttribute("aria-label"), "Notifications (120 unread, includes errors)");
-  assert.equal(button.getAttribute("aria-expanded"), "true");
-});
 
 // --- FR-017: surface errors — dedup by key, occurrence count, auto-read on resolve ---
 

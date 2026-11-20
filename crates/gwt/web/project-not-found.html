@@ -35,5 +35,12 @@
       </p>
       <a class="wizard-button primary route-not-found__home" href="/">Go to Hub</a>
     </main>
+    <!-- Issue #7740: the same header and footer as every other page. -->
+    <script type="module">
+      import { createAppChrome } from "/app-chrome.js";
+      const page = createAppChrome({ document }).mountPage();
+      document.body.prepend(page.header);
+      document.body.append(page.footer);
+    </script>
   </body>
 </html>

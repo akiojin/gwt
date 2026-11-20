@@ -32,12 +32,14 @@ test.describe("mobile project chrome", () => {
     await expect(page.locator("#app-version")).toBeVisible();
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 });
-      // T-005c: the update Check button sits inside `.update-check`, so the
-      // direct-child selector missed it and it stayed 38px tall.
-      const controls = page.locator(".project-actions > button:visible, .project-actions > [role=button]:visible, #update-check-button:visible, .op-theme-toggle__option");
-      await expect(controls).toHaveCount(7);
+      // Issue #7740: the header is a brand row plus one sideways-scrolling
+      // row, so a control is brought into view before it is measured. The
+      // version and its update Check button moved to the shared footer.
+      const controls = page.locator(".app-head__item, .project-actions > button:visible, .op-theme-toggle__option, .app-foot #app-version, #update-check-button:visible");
+      await expect(controls).toHaveCount(13);
       for (const control of await controls.all()) {
-        await expect(control).toBeInViewport({ ratio: 1 });
+        await control.scrollIntoViewIfNeeded();
+        await expect(control).toBeInViewport({ ratio: 0.95 });
         const bounds = await control.boundingBox();
         expect(bounds!.width).toBeGreaterThanOrEqual(44);
         expect(bounds!.height).toBeGreaterThanOrEqual(44);
@@ -46,6 +48,7 @@ test.describe("mobile project chrome", () => {
           return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
         })).toBe(true);
       }
+      expect((await page.locator(".project-bar").boundingBox())!.height, "brand row plus one row").toBeLessThanOrEqual(104);
       const bar = await page.locator(".project-bar").boundingBox();
       const rail = await page.locator(".op-rail").boundingBox();
       const surface = await page.locator(".surface-area").boundingBox();
@@ -74,7 +77,7 @@ test.describe("mobile project chrome", () => {
     const notice = page.locator(".workspace-state-notice");
     await expect(notice).toBeVisible();
     const noticeBounds = await notice.boundingBox();
-    for (const control of await page.locator(".project-actions > button, #app-version, .op-theme-toggle__option").all()) {
+    for (const control of await page.locator(".app-head__item, .project-actions > button, .op-theme-toggle__option").all()) {
       const bounds = await control.boundingBox();
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(noticeBounds!.y);
     }

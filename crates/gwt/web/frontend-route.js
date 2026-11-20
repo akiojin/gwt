@@ -2,6 +2,8 @@
 // `/p/<repo-hash>` is exactly one Project, and anything else is not found.
 // The hash is the canonical 16-hex ProjectKey; a route never carries a path.
 
+import { createAppChrome } from "./app-chrome.js";
+
 const PROJECT_KEY_PATTERN = /^[0-9a-f]{16}$/;
 
 export function parseFrontendRoute(pathname) {
@@ -55,6 +57,8 @@ export function renderRouteNotFound(doc) {
   home.textContent = "Go to Hub";
   main.append(title, copy, home);
   doc.body.className = "route-body";
-  doc.body.replaceChildren(main);
+  // Issue #7740: every page carries the shared header and footer.
+  const page = createAppChrome({ document: doc }).mountPage();
+  doc.body.replaceChildren(page.header, main, page.footer);
   return main;
 }

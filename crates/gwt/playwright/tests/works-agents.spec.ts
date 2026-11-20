@@ -1183,7 +1183,7 @@ test.describe("Works and Agents approved baseline", () => {
   // Issue #7646: the header opens the ledger, its order is the assignee
   // priority, and deletion follows the live Project Manager assignment.
   test("Issue #7646 header opens the agent ledger with reorder and guarded deletion", async ({ page }, info) => {
-    await page.locator(".project-bar #open-agents-button").click();
+    await page.locator('.project-bar [data-destination="agents"]').click();
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
     const order = () => roster(page).locator('.roster-list[aria-label="Team members"] .roster-row').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.memberId));
     const mutations = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && !["read", "set_pm_eligibility", "select_pm", "add"].includes(message.action.kind)).map(message => message.action);

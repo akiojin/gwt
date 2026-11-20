@@ -29,7 +29,7 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
-- **Execution environments** — 上部バーの Environments から、エージェントが使う
+- **Execution environments** — ヘッダーの Environments から、エージェントが使う
   実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
   リセット時刻・制限状態を 1 か所で確認できます。アカウントの詳細では、全ての枠、
   有効な Usage credits、Codex の `Using credits` 残高と観測した 1 時間あたりの
@@ -2308,7 +2308,7 @@ project 固有の規約を明示的に渡すには、
 - **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
 - **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
 - **Register** は共有名簿の有効メンバーを1人増やします。**Rest member** は1人減らし、現在の作業は完了まで続けます。有効メンバーは最低1人を保ち、端末の安全上限により実際の割当数が少なくなる場合があります。
-- **Agents** は上部バーの **Ledger** またはサイドバーから開きます。**Team** の各行にある **▲** / **▼** でメンバーの並び順を変えられ、待機中のメンバーは上にあるほど先に割り当てられます。**Delete** は確認のうえ、そのメンバーをこの端末の全プロジェクトから削除します。現在の Project Manager、作業を担当中のメンバー、起動候補に入っているメンバーは、その役割や作業を外すまで削除できません。**Settings → System → Open agent ledger** からも同じ画面を開けます。
+- **Agents** はヘッダーまたはサイドバーから開きます。**Team** の各行にある **▲** / **▼** でメンバーの並び順を変えられ、待機中のメンバーは上にあるほど先に割り当てられます。**Delete** は確認のうえ、そのメンバーをこの端末の全プロジェクトから削除します。現在の Project Manager、作業を担当中のメンバー、起動候補に入っているメンバーは、その役割や作業を外すまで削除できません。**Settings → System → Open agent ledger** からも同じ画面を開けます。
 - 登録済みの PM は `pm.agent.add` JSON operation に `name` と `agent_id` を渡し、共有名簿に有効メンバーを1人追加して ID を取得できます。予定した Issue の起動候補にするには、`issue.monitor.profiles.set` でその ID を指定します。
 - **Split view** では左右の面を独立して選び、**Close split** で選択中の面を残します。Shell は補助端末として開け、メンバー人数や稼働 Agent 数へ含めません。
 

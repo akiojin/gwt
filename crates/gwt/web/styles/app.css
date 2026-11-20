@@ -3887,29 +3887,6 @@ body {
    shell is the shared .op-drawer primitive; the history list is the shared
    toast-host stack mounted inside the drawer body. Rows keep the alerts
    level→accent rim so severity reads the same in both surfaces. */
-.op-rail__badge {
-  position: absolute;
-  top: var(--space-0-5);
-  right: var(--space-0-5);
-  min-width: var(--space-4);
-  height: var(--space-4);
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-pill);
-  background: var(--color-state-active);
-  color: var(--color-canvas);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 700;
-  line-height: var(--space-4);
-  text-align: center;
-  pointer-events: none;
-}
-.op-rail__badge[data-has-error="true"] {
-  background: var(--color-state-blocked);
-}
-.op-rail__item--notifications[data-has-error="true"] .op-rail__icon {
-  color: var(--color-state-blocked);
-}
 .notification-center-drawer {
   z-index: var(--z-notification-center);
   width: min(420px, 90vw);
@@ -6382,12 +6359,27 @@ body {
 /* Issue #4538: Hub (`/`) and route not-found pages. They replace the
    Operator shell, so the body owns scrolling and the canvas background. */
 body.route-body {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
   margin: 0;
   overflow: auto;
   background: var(--color-canvas);
   color: var(--color-text);
   font-family: var(--font-body);
+}
+
+/* Issue #7740: the shared header and footer keep their height when the page
+   is taller than the screen, and the footer rests at the bottom of a short
+   page. Their island wrappers are `display: contents`, so both are flex
+   items of the body. */
+.route-body .app-head,
+.route-body .app-foot {
+  flex-shrink: 0;
+}
+
+.route-body .app-foot {
+  margin-top: auto;
 }
 
 .gwt-hub,
@@ -6418,12 +6410,6 @@ body.route-body {
   font-weight: 700;
   letter-spacing: var(--tracking-display);
   text-transform: uppercase;
-}
-
-.gwt-hub__version {
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
 }
 
 .gwt-hub__actions {

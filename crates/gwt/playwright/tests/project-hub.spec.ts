@@ -238,7 +238,7 @@ test.describe("Project Hub and routes", () => {
           recent_projects: [{ title, project_key: null, path: "/private/catalog-path" }],
         } });
       }, { title, index, project: projectA });
-      await expect(page.locator(".gwt-hub__version")).toHaveText(`v9.9.${20 + index}`);
+      await expect(page.locator(".app-foot__version")).toHaveText(`v9.9.${20 + index}`);
       const link = page.locator('[data-hub-list="open"] a');
       await expect(link).toHaveCount(1);
       await expect(link).toHaveText(title);
@@ -545,6 +545,199 @@ test.describe("Project Hub and routes", () => {
     await expect(page).toHaveTitle("gwt — Project not found");
     await expect(view.locator("a")).toHaveAttribute("href", "/");
     await expect(page.locator("#app")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+});
+
+/* Issue #7740 (SPEC #7007 slice F-1) — the header and footer every page
+ * shares, in a real browser against the deterministic route backend.
+ */
+test.describe("shared header and footer", () => {
+  const destinations = ["pm", "notifications", "projects", "agents", "environments", "menu"];
+
+  async function openRoute(page: Page, testInfo: { project: { name: string } }, path: string) {
+    const errors = collectBrowserErrors(page);
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(new URL(path, base || ORIGIN_URL).href);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    return errors;
+  }
+  const entry = (page: Page, id: string) => page.locator(`.app-head [data-destination="${id}"]`);
+  const sentKinds = (page: Page) => page.evaluate(() =>
+    (window as any).__gwtSent.map((sent: any) => `${sent.message.kind}:${sent.message.preset ?? ""}`));
+
+  test("the project header opens every screen and replaces the old top-bar entries (AC-1, AC-2, AC-4)", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, `/p/${projectA.project_key}`);
+    await expect(page.locator(".app-head__brand")).toHaveText("gwt");
+    await expect(page.locator(".app-head__nav > [data-destination]")).toHaveCount(destinations.length);
+    expect(await page.locator(".app-head__nav > [data-destination]").evaluateAll(nodes =>
+      nodes.map(node => (node as HTMLElement).dataset.destination))).toEqual(destinations);
+
+    // AC-4: one entry per destination; the old top-bar buttons and the rail bell are gone.
+    await expect(page.locator("#open-agents-button, #open-environments-button")).toHaveCount(0);
+    await expect(page.locator('.op-rail [data-cmd="toggle-notifications"]')).toHaveCount(0);
+    await expect(page.locator('[aria-controls="notification-center"]')).toHaveCount(1);
+    await expect(page.locator(".project-bar #app-version")).toHaveCount(0);
+
+    // The footer carries the version (with its update check) and the PM name only.
+    await expect(page.locator(".app-foot > *:visible")).toHaveCount(3);
+    await expect(page.locator(".app-foot #app-version")).toHaveText("ve2e");
+    await expect(page.locator(".app-foot .app-foot__pm")).toHaveText("PM: —");
+
+    // AC-1: agents and environments open their screens and mark the entry.
+    await entry(page, "agents").click();
+    await expect(page.locator(".agents-surface")).toBeVisible();
+    await expect(entry(page, "agents")).toHaveAttribute("aria-current", "page");
+    await entry(page, "environments").click();
+    await expect(page.locator(".exec-env")).toBeVisible();
+    await expect(entry(page, "environments")).toHaveAttribute("aria-current", "page");
+    await expect(entry(page, "agents")).not.toHaveAttribute("aria-current", "page");
+
+    // AC-1: the PM entry leads to the waiting decisions; with no PM it starts one.
+    await entry(page, "pm").click();
+    expect(await sentKinds(page)).toContain("open_pm_agent:");
+
+    // AC-1: Settings is an item of the header menu, not of the tab row.
+    await expect(entry(page, "settings")).toHaveCount(0);
+    await entry(page, "menu").click();
+    await expect(entry(page, "menu")).toHaveAttribute("aria-expanded", "true");
+    const settings = page.getByRole("menu").getByRole("menuitem", { name: "Settings" });
+    await expect(settings).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(entry(page, "menu")).toBeFocused();
+    await entry(page, "menu").click();
+    await settings.click();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(await sentKinds(page)).toContain("create_window:settings");
+
+    // AC-1: the bell opens the notification drawer.
+    await entry(page, "notifications").click();
+    await expect(page.locator("#notification-center")).toBeVisible();
+    await expect(entry(page, "notifications")).toHaveAttribute("aria-expanded", "true");
+    await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+    await expect(page.locator("#notification-center")).toBeHidden();
+
+    // AC-2: a destination without a screen is shown, disabled, and says why.
+    const projects = entry(page, "projects");
+    await expect(projects).toBeVisible();
+    await expect(projects).toHaveAttribute("aria-disabled", "true");
+    const sentBefore = (await sentKinds(page)).length;
+    // Playwright treats aria-disabled as not actionable; a user can still press it.
+    await projects.click({ force: true });
+    const reason = page.locator('.app-head-popover[role="status"]');
+    await expect(reason).toBeVisible();
+    await expect(reason).toHaveText("This screen is not available yet.");
+    await expect(reason).toBeInViewport({ ratio: 1 });
+    expect((await sentKinds(page)).length).toBe(sentBefore);
+    await page.screenshot({ path: testInfo.outputPath("shared-header-project.png") });
+    await page.locator(".surface-area").click({ position: { x: 5, y: 5 } });
+    await expect(reason).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("the header stays a brand row plus one row on a phone, even with one more destination (AC-3)", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, `/p/${projectA.project_key}`);
+    await expect(page.locator(".app-head__nav > [data-destination]")).toHaveCount(destinations.length);
+    const measure = () => page.evaluate(() => {
+      const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+      const row = document.querySelector<HTMLElement>(".app-head__row")!;
+      const controls = [...row.querySelectorAll<HTMLElement>(".app-head__item, .project-actions > button, .op-theme-toggle")];
+      return {
+        header: rect(".app-head").height,
+        brandBottom: rect(".app-head__brand").bottom,
+        rowTop: rect(".app-head__row").top,
+        rowBottom: rect(".app-head__row").bottom,
+        // Every control of the row shares one line: none starts below another's end.
+        lines: new Set(controls.map(control => Math.round(control.getBoundingClientRect().top
+          + control.getBoundingClientRect().height / 2))).size,
+        outsideRow: controls.filter(control => control.getBoundingClientRect().top < row.getBoundingClientRect().top - 1
+          || control.getBoundingClientRect().bottom > row.getBoundingClientRect().bottom + 1).length,
+        rowScrolls: row.scrollWidth > row.clientWidth,
+        pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        smallTargets: [...row.querySelectorAll<HTMLElement>(".app-head__item")].filter(item =>
+          item.getBoundingClientRect().height < 44 || item.getBoundingClientRect().width < 44).length,
+        footer: rect(".app-foot").height,
+        surface: rect(".surface-area").height,
+      };
+    });
+    for (const width of [360, 390, 430]) {
+      await page.setViewportSize({ width, height: 844 });
+      const before = await measure();
+      expect(before.rowTop, `brand row above the nav row at ${width}px`).toBeGreaterThanOrEqual(before.brandBottom - 1);
+      expect(before.lines, `one line of entries at ${width}px`).toBe(1);
+      expect(before.outsideRow).toBe(0);
+      expect(before.rowScrolls, `entries that do not fit scroll sideways at ${width}px`).toBe(true);
+      expect(before.pageOverflow, "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+      expect(before.smallTargets, "entries keep 44px touch targets").toBe(0);
+      expect(before.header, `two rows at ${width}px`).toBeLessThanOrEqual(104);
+      expect(before.surface).toBeGreaterThan(0);
+
+      // Adding a destination must not add a row.
+      await page.evaluate(() => {
+        const extra = document.querySelector('.app-head [data-destination="agents"]')!.cloneNode(true) as HTMLElement;
+        extra.dataset.destination = "extra";
+        extra.querySelector(".app-head__label")!.textContent = "One more destination";
+        document.querySelector(".app-head__nav")!.append(extra);
+      });
+      const after = await measure();
+      expect(after.header, `header height with one more destination at ${width}px`).toBe(before.header);
+      expect(after.lines).toBe(1);
+      expect(after.pageOverflow).toBeLessThanOrEqual(0);
+
+      // Every entry, and the page's own actions after them, is reachable by scrolling the row.
+      for (const selector of ['.app-head [data-destination="extra"]', "#close-project-button", '[data-theme-value="light"]']) {
+        await page.locator(selector).scrollIntoViewIfNeeded();
+        await expect(page.locator(selector)).toBeInViewport({ ratio: 0.95 });
+      }
+      await page.screenshot({ path: testInfo.outputPath(`shared-header-${width}.png`) });
+      await page.evaluate(() => document.querySelector('.app-head [data-destination="extra"]')!.remove());
+      await page.locator(".app-head__row").evaluate(row => { row.scrollLeft = 0; });
+    }
+    // Scrolling the row dismisses the popover, so let the reset above settle first.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    // A disabled entry still explains itself on a phone, inside the viewport.
+    await entry(page, "projects").click({ force: true });
+    await expect(page.locator('.app-head-popover[role="status"]')).toBeInViewport({ ratio: 1 });
+    await page.setViewportSize({ width: 1360, height: 900 });
+    await expect(page.locator(".app-head")).toHaveCSS("height", "44px");
+    expect(errors).toEqual([]);
+  });
+
+  test("the Hub and the not-found page carry the same header and footer (AC-1, AC-2)", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, "/");
+    for (const path of ["/", "/p/aaaaaaaaaaaaaaaa"]) {
+      if (path !== "/") await page.goto(new URL(path, process.env.GWT_PLAYWRIGHT_BASE_URL || ORIGIN_URL).href);
+      await expect(page.locator("header.app-head .app-head__brand")).toHaveText("gwt");
+      expect(await page.locator(".app-head__nav > [data-destination]").evaluateAll(nodes =>
+        nodes.map(node => (node as HTMLElement).dataset.destination))).toEqual(destinations);
+      await expect(page.locator("footer.app-foot .app-foot__pm")).toHaveText("PM: —");
+      // No project is open here: the entries stay, disabled, with the reason.
+      for (const id of ["pm", "notifications", "agents", "environments"]) {
+        await expect(entry(page, id)).toHaveAttribute("aria-disabled", "true");
+      }
+      await entry(page, "agents").click({ force: true });
+      await expect(page.locator('.app-head-popover[role="status"]')).toHaveText("Open a project to use this.");
+      await entry(page, "menu").click();
+      const settings = page.getByRole("menu").getByRole("menuitem", { name: /Settings/ });
+      await expect(settings).toHaveAttribute("aria-disabled", "true");
+      await expect(settings).toContainText("Open a project to use this.");
+      await page.keyboard.press("Escape");
+      await page.setViewportSize({ width: 390, height: 844 });
+      const header = (await page.locator(".app-head").boundingBox())!;
+      const row = (await page.locator(".app-head__row").boundingBox())!;
+      expect(header.height).toBeLessThanOrEqual(104);
+      expect(row.y + row.height, "the nav row stays inside the header").toBeLessThanOrEqual(header.y + header.height);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+      await page.screenshot({ path: testInfo.outputPath(`shared-header-${path === "/" ? "hub" : "not-found"}.png`) });
+      await page.setViewportSize({ width: 1280, height: 720 });
+    }
+    await page.goto(new URL("/", process.env.GWT_PLAYWRIGHT_BASE_URL || ORIGIN_URL).href);
+    await expect(page.locator("footer.app-foot .app-foot__version")).toHaveText("v9.9.9");
     expect(errors).toEqual([]);
   });
 });

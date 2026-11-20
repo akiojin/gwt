@@ -93,7 +93,7 @@ test("windowless NeedsHuman uses one notification history entry, never the inbox
     notification_transition: "needs_human", message: "Issue #4665 needs human attention.",
   });
   const bell = page.locator("#op-notifications-button");
-  await expect(bell.locator(".op-rail__badge")).toHaveText("1");
+  await expect(bell.locator(".app-head__count")).toHaveText("1");
   await bell.click();
   const rows = page.locator("#notification-center .notification-center__item");
   await expect(rows).toHaveCount(1);
@@ -146,7 +146,7 @@ test("Issue #5016 AC-HS3: identical Issues notices aggregate into one counted ro
   await inject(steering);
   await inject(steering);
   const bell = page.locator("#op-notifications-button");
-  await expect(bell.locator(".op-rail__badge")).toHaveText("2");
+  await expect(bell.locator(".app-head__count")).toHaveText("2");
   await bell.click();
   const rows = page.locator("#notification-center .notification-center__item");
   await expect(rows).toHaveCount(2);
@@ -169,7 +169,7 @@ test("Issue #7520: a renewed steering request updates one counted row per Issue 
   await steering(4499, 4, "resolve the review before closing");
   await steering(4500, 1, "launch stuck for 900s");
   const bell = page.locator("#op-notifications-button");
-  await expect(bell.locator(".op-rail__badge")).toHaveText("3");
+  await expect(bell.locator(".app-head__count")).toHaveText("3");
   await bell.click();
   const rows = page.locator("#notification-center .notification-center__item");
   await expect(rows).toHaveCount(3);
