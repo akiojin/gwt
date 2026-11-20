@@ -261,6 +261,112 @@ test("Home and Decide read one waiting-decision count after an answer", async ({
   expect(errors, "console and page errors").toEqual([]);
 });
 
+// SPEC #7007 T-023: a waiting decision is drawn only by Decide and by the PM
+// conversation; either one settles the same decision; "Decide later" keeps it
+// waiting; and the status strip count follows what is actually waiting.
+test("T-023 decisions appear only in Decide and the PM conversation and settle together", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    const decision = (id: string, question: string) => ({ id, kind: "decision", created_at: "2026-11-12T00:00:00Z",
+      structured: { summary: { result: `${question} is blocked.`, impact: "The task stays stopped until you choose.", owner: "PM",
+        decision: { question, recommendation: "Retry", reason: "The work is saved.", options: ["Retry", "Wait"] } }, details: "", refs: [] } });
+    (window as any).__pmFixtureReports = [
+      { id: "t023-progress", kind: "progress", created_at: "2026-11-12T00:00:00Z", body: "Progress note", body_html: "<p>Progress note</p>" },
+      decision("t023-a", "Retry the launch?"), decision("t023-b", "Ship the fix now?")];
+    (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  const view = (name: string) => pm.getByRole("button", { name, exact: true });
+  const strip = page.locator("#op-strip-issue-monitor");
+  const sends = () => page.evaluate(() => (window as any).__pmTerminalFixture.sent
+    .filter((packet: any) => packet.kind === "pane_send_input"));
+  const confirm = (requestId: number) => page.evaluate(id => (window as any).__pmTerminalFixture.emit({
+    kind: "pane_send_result", id: "pm-terminal", window_id: "pm-terminal", request_id: id, ok: true, error: null }), requestId);
+  const cards = pm.locator(".task-decisions__card");
+  const messages = pm.getByRole("log", { name: "PM conversation messages" }).locator(".pm-chat__decision");
+  const ids = (locator: typeof cards) => locator.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.decisionId));
+
+  // AC-1: Reports draws no decision; Decide and the conversation each draw both.
+  await view("Reports").click();
+  const reports = pm.getByRole("log", { name: "PM reports" });
+  await expect(reports.locator("article")).toHaveCount(1);
+  await expect(reports.locator("article")).toContainText("Progress note");
+  await expect(pm.locator(".pm-chat__transcript .pm-chat__decision-controls")).toHaveCount(0);
+  await expect(pm.getByLabel("Report kind").locator("option")).toHaveText(["All reports", "Q&A", "Progress", "Blocker"]);
+  await view("Chat").click();
+  await expect(pm.getByRole("region", { name: "Decision reports" })).toHaveCount(0);
+  await expect(messages).toHaveCount(2);
+  expect(await ids(messages)).toEqual(["t023-b", "t023-a"]);
+  await expect(messages.first()).toContainText("Ship the fix now?");
+  await expect(messages.first()).toContainText("I recommend: Retry. The work is saved.");
+  await expect(messages.first()).toContainText("The task stays stopped until you choose.");
+  await info.attach(`t023-conversation-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  await expect(strip).toHaveAttribute("title", /PM decisions 2/);
+
+  // "Decide later" keeps the decision waiting at the end of the queue.
+  await view("Decide").click();
+  await expect(pm.locator(".task-decisions__count")).toHaveText("2 decisions waiting");
+  expect(await ids(cards)).toEqual(["t023-b", "t023-a"]);
+  await expect(cards.first().getByRole("button", { name: "Later", exact: true })).toHaveCount(0);
+  await cards.first().getByRole("button", { name: "Decide later", exact: true }).click();
+  expect(await ids(cards)).toEqual(["t023-a", "t023-b"]);
+  await expect(pm.locator(".task-decisions__notice")).toHaveText("Kept waiting and moved to the end of the queue.");
+  await expect(cards.nth(1).locator(".task-decisions__chip")).toContainText("Deferred");
+  await expect(cards.first().getByRole("button", { name: "1. Retry" })).toBeFocused();
+  await expect(pm.locator(".task-decisions__count")).toHaveText("2 decisions waiting");
+  await expect(strip).toHaveAttribute("title", /PM decisions 2/);
+  expect(await sends(), "deferring sends nothing").toEqual([]);
+  await info.attach(`t023-decide-deferred-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+
+  // AC-2: an answer given in the conversation settles the Decide card too.
+  await view("Chat").click();
+  expect(await ids(messages)).toEqual(["t023-a", "t023-b"]);
+  await expect(messages.nth(1).locator(".pm-chat__decision-meta")).toContainText("Deferred");
+  await messages.first().getByRole("button", { name: "1. Retry" }).click();
+  await expect.poll(async () => (await sends()).length).toBe(1);
+  expect((await sends())[0].text).toBe('Answer to "Retry the launch?": 1. Retry\r');
+  await confirm((await sends())[0].request_id);
+  await expect(messages.first()).toContainText("Answer sent: Retry");
+  await view("Decide").click();
+  await expect(cards.first()).toContainText("Answer sent: Retry");
+  await expect(pm.locator(".task-decisions__count")).toHaveText("1 decision waiting");
+  await expect(strip).toHaveAttribute("title", /PM decisions 1/);
+
+  // AC-2 / AC-3: a free-form reply started from Decide settles the same
+  // decision in the conversation, and nothing is left waiting.
+  await cards.nth(1).getByRole("button", { name: "Reply in chat", exact: true }).click();
+  const draft = pm.getByRole("textbox", { name: "Message to PM" });
+  await expect(draft).toBeFocused();
+  await expect(pm.locator(".pm-chat__reply-target")).toContainText("Replying to: Ship the fix now?");
+  await draft.fill("Ship it after the release note is fixed");
+  await info.attach(`t023-reply-target-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  await draft.press("Enter");
+  await expect.poll(async () => (await sends()).length).toBe(2);
+  expect((await sends())[1].text).toBe('Answer to "Ship the fix now?": Ship it after the release note is fixed\r');
+  await confirm((await sends())[1].request_id);
+  await expect(messages.nth(1)).toContainText("Answer sent: Ship it after the release note is fixed");
+  await expect(pm.locator(".pm-chat__reply-target")).toBeHidden();
+  await expect(draft).toHaveValue("");
+  await view("Decide").click();
+  await expect(cards.nth(1)).toContainText("Answer sent: Ship it after the release note is fixed");
+  await expect(pm.locator(".task-decisions__count")).toHaveText("No decisions waiting");
+  await view("Home").click();
+  await expect(pm.locator(".task-home")).toContainText("No decisions waiting");
+  await expect(strip).toHaveAttribute("title", /PM decisions 0/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`t023-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
 // same awaiting-attention value the status strip reads.
 test("status strip counts unresolved reviews from the PM current facts", async ({ page }, info) => {
@@ -340,7 +446,10 @@ test.describe("PM touch targets", () => {
       (window as any).__pmFixtureReports = [{ id: "t005pm-a", kind: "decision", created_at: "2026-11-14T00:00:00Z",
         structured: { summary: { result: "Retry the launch?", impact: null, owner: "PM",
           decision: { question: "Retry the launch?", recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } },
-          details: "The last launch timed out.", refs: [] } }];
+          details: "", refs: [] } },
+      // Reports lists no decision (T-023), so its disclosure comes from a progress report.
+      { id: "t005pm-b", kind: "progress", created_at: "2026-11-14T00:00:00Z", body: "Launch retried",
+        structured: { summary: { result: "Launch retried" }, details: "The last launch timed out.", refs: [] } }];
       (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 1, pending_intake: 0, tasks: [{
         key: "t005pm-task", title: "Ship the fix", status: "in_progress", assignee: "agent-one", next_action: "Review the PR",
         criteria_preview: { purpose: "Fix the launch", completion_conditions: ["Tests pass"], completion_condition_total: 1 } }] } };

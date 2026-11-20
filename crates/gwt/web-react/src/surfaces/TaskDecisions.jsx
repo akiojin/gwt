@@ -7,8 +7,9 @@ import { focusElement, focusFirstEnabledButton } from "../hosts/focus.js";
 // packets become numbered options, everything else keeps the existing chat
 // reply path. The surface never invents operations the backend did not
 // deliver — an answer is a chat reply, and a decision leaves this list only
-// when a later snapshot no longer hands it to the surface. "Later" keeps the
-// decision unresolved; it only moves focus.
+// when a later snapshot no longer hands it to the surface. "Decide later"
+// postpones without settling: the host moves the decision to the end of the
+// queue, it keeps waiting, and the waiting count does not change (T-023).
 const EMPTY_MODEL = Object.freeze({
   loaded: false,
   error: null,
@@ -17,6 +18,8 @@ const EMPTY_MODEL = Object.freeze({
   pendingId: null,
   sendError: null,
   answered: {},
+  deferNotice: null,
+  deferCount: 0,
 });
 
 function selectTaskDecisionsModel(state) {
@@ -39,11 +42,12 @@ function relativeTimeLabel(iso) {
   return iso.slice(0, 10);
 }
 
-export function TaskDecisions({ store, onAnswerDecision, onReplyInChat }) {
+export function TaskDecisions({ store, onAnswerDecision, onReplyInChat, onDeferDecision = () => {} }) {
   const model = useStoreSelector(store, selectTaskDecisionsModel);
   const headingRef = useRef(null);
   const cardRefs = useRef(new Map());
   const actedRef = useRef(null);
+  const deferredRef = useRef(null);
   const decisions = model.decisions ?? [];
   const answered = model.answered ?? {};
   const actionable = decisions.filter(item => !answered[item.id]);
@@ -77,9 +81,21 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat }) {
     onAnswerDecision(item, optionIndex);
   };
   const later = item => {
-    actedRef.current = item.id;
-    focusAfter(item.id);
+    deferredRef.current = item.id;
+    onDeferDecision(item);
   };
+
+  // After a deferral the queue is reordered: the next waiting decision is
+  // now first, so focus (and with it the scroll position) moves there. When
+  // the deferred decision is the only one waiting, focus stays on it.
+  useEffect(() => {
+    const deferredId = deferredRef.current;
+    if (!deferredId) return;
+    deferredRef.current = null;
+    const next = actionable.find(item => item.id !== deferredId) ?? actionable[0];
+    if (next) focusFirstEnabledButton(cardRefs.current.get(next.id));
+    else focusElement(headingRef.current);
+  }, [model.deferCount]);
 
   return (
     <section className="task-decisions" aria-label="Decide">
@@ -90,10 +106,15 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat }) {
         </div>
         {model.loaded && decisions.length > 0 ? (
           <p className="task-decisions__count" role="status">
-            {`${decisions.length} decision${decisions.length === 1 ? "" : "s"}`}
+            {actionable.length === 0
+              ? "No decisions waiting"
+              : `${actionable.length} decision${actionable.length === 1 ? "" : "s"} waiting`}
           </p>
         ) : null}
       </header>
+      {model.deferNotice ? (
+        <p className="task-decisions__notice" role="status">{model.deferNotice}</p>
+      ) : null}
       {!model.loaded ? (
         <p role="status">Loading decisions…</p>
       ) : model.error && decisions.length === 0 ? (
@@ -131,7 +152,9 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat }) {
                 <div className="task-decisions__card-head">
                   <h2>{item.question}</h2>
                   <span className="task-decisions__chip">
-                    {answeredText ? "Answer sent" : item.options ? "Choice needed" : "Reply needed"}
+                    {answeredText
+                      ? "Answer sent"
+                      : `${item.deferred ? "Deferred · " : ""}${item.options ? "Choice needed" : "Reply needed"}`}
                   </span>
                 </div>
                 {item.result && item.result !== item.question ? (
@@ -178,7 +201,7 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat }) {
                       className="task-decisions__later"
                       onClick={() => later(item)}
                     >
-                      Later
+                      Decide later
                     </button>
                     {isPending ? <span role="status">Sending…</span> : null}
                   </div>
