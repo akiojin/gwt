@@ -38,6 +38,7 @@ mod discussion_resume;
 pub mod disk_space;
 pub mod error_report;
 pub mod execution_environments;
+pub mod first_run_setup;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_resources;

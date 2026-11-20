@@ -5055,6 +5055,18 @@ button.workspace-board-ref:focus-visible {
   line-height: 1.5;
 }
 
+:root[data-theme] .settings-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+:root[data-theme] .settings-link-row a.wizard-button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 :root[data-theme] .settings-status {
   margin: 0;
   font-family: var(--font-mono);

@@ -2232,10 +2232,46 @@ fn reserve_new_pm_member_inner(
                 revision: 0,
                 members: Vec::new(),
             });
-            roster
-                .add(&history_path(), Some(profile.agent_id.clone()), None)
-                .map_err(io::Error::other)?;
-            let member = roster.members.last_mut().expect("bootstrap member");
+            // Issue #7731: the agent designated in the first-run setup
+            // serves as PM here. A designation nobody can fill — unreadable,
+            // or naming a member who left or is resting — changes nothing.
+            let designation = crate::first_run_setup::load_designation().ok().flatten();
+            let designated = designation.as_ref().and_then(|designation| {
+                roster.members.iter().position(|member| {
+                    member.enabled && designation.names(&member.agent_member_id, &member.name)
+                })
+            });
+            let index = match designated {
+                Some(index) => index,
+                None => {
+                    let new_name = designation
+                        .as_ref()
+                        .filter(|designation| designation.member_id.is_none())
+                        .map(|designation| designation.name.as_str())
+                        // A resting member already holds this name.
+                        .filter(|name| {
+                            !roster.members.iter().any(|member| {
+                                member.name.trim().to_lowercase() == name.trim().to_lowercase()
+                            })
+                        });
+                    roster
+                        .add(&history_path(), Some(profile.agent_id.clone()), new_name)
+                        .map_err(io::Error::other)?;
+                    let index = roster.members.len() - 1;
+                    if new_name.is_some() {
+                        // Later projects find this member by id, so a rename
+                        // keeps the designation.
+                        let _ = crate::first_run_setup::save_designation(
+                            &crate::first_run_setup::PmDesignation {
+                                member_id: Some(roster.members[index].agent_member_id.clone()),
+                                name: roster.members[index].name.clone(),
+                            },
+                        );
+                    }
+                    index
+                }
+            };
+            let member = &mut roster.members[index];
             member.pm_eligible = true;
             registry
                 .pm_projects
@@ -3487,6 +3523,24 @@ pub struct SessionMemberSnapshot {
 impl SessionMemberSnapshot {
     pub fn load() -> io::Result<Self> {
         Ok(Self { registry: load()? })
+    }
+
+    /// Issue #7731: `(member id, name)` of every enabled member on this
+    /// machine, in ledger order. Empty while the registry is not active.
+    pub fn enabled_members(&self) -> Vec<(String, String)> {
+        self.registry
+            .as_ref()
+            .filter(|registry| registry.phase == RegistryPhase::Active)
+            .and_then(|registry| registry.roster.as_ref())
+            .map(|roster| {
+                roster
+                    .members
+                    .iter()
+                    .filter(|member| member.enabled)
+                    .map(|member| (member.agent_member_id.clone(), member.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn project_snapshot(&self, key: &ProjectKey) -> io::Result<IssueMonitorPrefs> {
@@ -7779,6 +7833,80 @@ mod tests {
         rewrite(&mut assignment);
         set_project_assignment(&mut registry, key.as_str(), member_id, Some(assignment));
         save(&registry).unwrap();
+    }
+
+    /// A project that has never had a PM: no registration, no selection.
+    fn fresh_pm_project(name: &str) -> (PathBuf, PathBuf) {
+        let root = gwt_core::paths::gwt_home().join(name);
+        fs::create_dir_all(&root).unwrap();
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&root);
+        fs::create_dir_all(&worktree).unwrap();
+        (root, worktree)
+    }
+
+    /// Issue #7731 AC-2/AC-3: the agent designated in the first-run setup
+    /// becomes the PM of a project that has not chosen one. A new agent
+    /// joins the ledger under the given name, and the next project gets the
+    /// same member even after a rename.
+    #[test]
+    fn first_pm_reservation_uses_the_designated_new_agent() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        crate::first_run_setup::save_designation(&crate::first_run_setup::PmDesignation {
+            member_id: None,
+            name: "Aoi".into(),
+        })
+        .unwrap();
+
+        // Two projects hold a PM at once below.
+        measured_machine_budget(4);
+        let (root, worktree) = fresh_pm_project("designated-one");
+        let first = reserve_new_pm_member(&root, &sessions, &worktree, "one").unwrap();
+        assert_eq!(first.member.name, "Aoi");
+        assert!(first.member.pm_eligible);
+        let member_id = first.member.agent_member_id.clone();
+        assert_eq!(
+            crate::first_run_setup::load_designation().unwrap(),
+            Some(crate::first_run_setup::PmDesignation {
+                member_id: Some(member_id.clone()),
+                name: "Aoi".into(),
+            })
+        );
+
+        let mut registry = load().unwrap().unwrap();
+        registry
+            .roster
+            .as_mut()
+            .unwrap()
+            .members
+            .iter_mut()
+            .find(|member| member.agent_member_id == member_id)
+            .unwrap()
+            .name = "Aoi Renamed".into();
+        save(&registry).unwrap();
+        let (root, worktree) = fresh_pm_project("designated-two");
+        let second = reserve_new_pm_member(&root, &sessions, &worktree, "two").unwrap();
+        assert_eq!(second.member.agent_member_id, member_id);
+        assert_eq!(load().unwrap().unwrap().roster.unwrap().members.len(), 1);
+    }
+
+    /// Issue #7731: a designation that names nobody usable — the member left
+    /// the ledger or is resting — leaves the earlier behaviour in place.
+    #[test]
+    fn first_pm_reservation_ignores_a_designation_nobody_can_fill() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        crate::first_run_setup::save_designation(&crate::first_run_setup::PmDesignation {
+            member_id: Some("gone".into()),
+            name: "Aoi".into(),
+        })
+        .unwrap();
+        let (root, worktree) = fresh_pm_project("designated-gone");
+        let prepared = reserve_new_pm_member(&root, &sessions, &worktree, "one").unwrap();
+        assert_ne!(prepared.member.name, "Aoi");
+        assert!(prepared.member.pm_eligible);
     }
 
     /// Issue #7472: a PM reservation left behind by a gwtd incarnation that

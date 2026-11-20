@@ -262,6 +262,17 @@ names its project with `@Project name`, or with the project list beside the
 box when several projects are open. Home shows no project contents. With no
 project yet, it offers Import from GitHub, Open a folder, and Clone from a URL.
 
+On a machine that is not ready for agents yet, the Hub opens the **first-run
+setup** instead: Welcome, Tools, Project Manager, Project, Done. **Tools**
+lists the agent tools registered on this machine; the setup does not continue
+until at least one installed tool is registered, and says so. After installing
+a tool, choose **Check again**. **Project Manager** has one row to choose who
+serves as Project Manager: an agent already in the ledger, or a new agent you
+name. That agent becomes the Project Manager of each project that has not
+chosen its own; a new agent joins the ledger when the Project Manager first
+starts in a project. Opening a project is optional. Every step can be opened
+again from **Settings → System → Review first-run setup**.
+
 **Projects** in the header opens the project list: Open Folder, Clone from
 GitHub, Recent projects, and the currently open projects, with a search by
 name. `http://127.0.0.1:<port>/?view=projects` opens it directly. Every project

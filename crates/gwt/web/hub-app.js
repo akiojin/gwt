@@ -1,20 +1,23 @@
 import { createCloseProjectController } from "./close-project-confirm-modal.js";
-// The page served at `/` (Issue #4538 AC-3, Issue #7639). It has two views and
-// is never a workspace, dashboard, or tab strip:
+// The page served at `/` (Issue #4538 AC-3, Issue #7639). It has three views
+// and is never a workspace, dashboard, or tab strip:
 // - Home: the conversation with the Project Manager. It shows no project
 //   contents (design items 5 and 46).
 // - Projects: the picker — Open Folder, Clone, Recent, and the open Projects —
 //   opened from the header. Every Project entry is a real, path-free link that
 //   opens the Project in its own browser tab.
+// - Setup: the first-run setup (Issue #7731). It opens by itself while this
+//   machine still needs it, and from Settings at any time.
 import { renderProjectCloneModal, createFolderPickerController, createOpenProjectPathForm } from "./project-clone-modal.js";
 import { HUB_URL_PATH, projectUrlPath, routeWebSocketUrl } from "./frontend-route.js";
 import { createProjectExecutionPolicyModel, mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { createAppChrome } from "./app-chrome.js";
 import { createHomeConversation } from "./home-conversation.js";
+import { createFirstRunSetup } from "./first-run-setup.js";
 
 // The view a `/?view=…` link opens; anything else is Home.
-const HUB_VIEWS = Object.freeze(["home", "projects"]);
+const HUB_VIEWS = Object.freeze(["home", "projects", "setup"]);
 
 const HUB_RESULT_KINDS = new Set([
   "hub_state",
@@ -174,8 +177,17 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     onOpenProjects: () => showView("projects"),
   });
   const homeView = home.element;
+  const setup = createFirstRunSetup({
+    document: doc, send,
+    onOpenFolder: () => openFolderDialog(),
+    onClone: () => openCloneDialog(),
+    onHome: () => showView("home"),
+    // A machine that cannot start work yet lands on its setup.
+    onRequired: needed => { if (needed) showView("setup"); },
+  });
+  const setupView = setup.element;
   projectsView.append(header, actions, search, openSection.element, recentSection.element, orphanSection.element);
-  root.append(notice, error, homeView, projectsView);
+  root.append(notice, error, homeView, projectsView, setupView);
 
   let view = "home";
   function showView(next) {
@@ -183,6 +195,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     root.dataset.hubView = view;
     homeView.hidden = view !== "home";
     projectsView.hidden = view !== "projects";
+    setupView.hidden = view !== "setup";
     // Home fills the screen and scrolls its own timeline.
     doc.body.classList.toggle("route-body--chat", view === "home");
     setActiveSurface(view);
@@ -450,6 +463,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
   function receive(event) {
     if (event && picker.receive(event)) return;
     if (event && home.receive(event)) return;
+    if (event && setup.receive(event)) return;
     if (event && closeController.receive(event)) return;
     if (event?.kind === "project_execution_status") {
       executionResults.update(() => event.status);
@@ -474,7 +488,8 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       socket.send(JSON.stringify(message));
       return "sent";
     }
-    if (["confirm_close_project", "cancel_close_project", "preview_close_project", "load_home_conversation", "home_pm_send"].includes(message.kind)) return "unavailable";
+    if (["confirm_close_project", "cancel_close_project", "preview_close_project", "load_home_conversation", "home_pm_send",
+      "get_first_run_setup", "save_first_run_setup"].includes(message.kind)) return "unavailable";
     queued.push(message);
     return "queued";
   }
@@ -490,6 +505,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       connection.send(JSON.stringify({ kind: "frontend_ready" }));
       closeController.reconnect();
       home.connected();
+      setup.connected();
       const replayedCloneSearchQueries = [];
       for (const message of queued.splice(0)) {
         connection.send(JSON.stringify(message));
@@ -517,6 +533,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       if (socket !== connection) return;
       closeController.connectionLost();
       home.connectionLost();
+      setup.connectionLost();
       for (const policy of executionPolicies.values()) policy.connectionLost();
       closeCloneTab();
       if (cloneState.cloning) {
@@ -555,13 +572,15 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     const action = params.get("action");
     // An action link opens the picker's own flow, so it lands on Projects.
     showView(action === "open-folder" || action === "clone" ? "projects" : params.get("view"));
+    // A Settings link opens the setup on the step it names.
+    if (params.get("step")) setup.showStep(params.get("step"));
     if (action === "open-folder") openFolderDialog();
     else if (action === "clone") openCloneDialog();
   }
 
   render();
   showView("home");
-  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, showView, home, homeUrl: HUB_URL_PATH };
+  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, showView, home, setup, homeUrl: HUB_URL_PATH };
 }
 
 export function mountHubApp({ window: win, document: doc }) {
