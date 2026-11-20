@@ -2553,6 +2553,17 @@ pub struct AgentAssignmentHistoryView {
     /// Recorded launch configuration, not observed provider-internal changes.
     #[serde(default)]
     pub model: Option<String>,
+    /// Reasoning the launch asked for, as recorded with the Session.
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    /// Name of the execution environment the project runs this tool on.
+    /// Resolved from the project's list when the view is built; a tool with
+    /// no registered environment stays unknown.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// That environment's own model, shown when the Session recorded none.
+    #[serde(default)]
+    pub environment_model: Option<String>,
     pub issue_number: Option<u64>,
     pub title: Option<String>,
     pub result: Option<String>,
