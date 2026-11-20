@@ -1945,11 +1945,6 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
       token: "--z-popover",
     },
     {
-      name: "usage popover",
-      rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
-      token: "--z-popover",
-    },
-    {
       name: "render degradation banner",
       rule: componentsStyle.match(/\.render-degradation-banner\s*\{[^}]*\}/)?.[0],
       token: "--z-system-degradation",

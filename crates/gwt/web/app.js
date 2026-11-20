@@ -12,7 +12,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         applyTelemetryCounts,
         subscribeIssueMonitorStatus,
         subscribeWorkAttentionSummary,
-        applyProviderUsage,
         subscribeRuntimeHealth,
         subscribeProjectOwnerHealth,
       } from "/operator-shell.js";
@@ -41,6 +40,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         updateTerminalGridMessage,
       } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
+      import { createExecutionEnvironments } from "/execution-environments.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
@@ -211,7 +211,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyIssueMonitorStatus: (status) => applyKnowledgeIssueMonitorStatus(status),
-        applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
         applyRuntimeHealth: (snapshot) => runtimeHealthModel.update(() => snapshot || {}),
       };
 
@@ -2636,12 +2635,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
 
       // ---- Provider usage & rate limits (SPEC-2970) ----
-      // SPEC-3064 Phase 3 (E1): the usage snapshot state, formatters, hover
-      // popover, and Settings usage panel moved to
+      // SPEC-3064 Phase 3 (E1): the usage snapshot state, formatters, account
+      // usage card, and Settings usage link live in
       // /provider-usage-surface.js. app.js keeps the receive() and Settings
       // call sites and wires them through this factory.
-      const { applyProviderUsageUi, renderUsagePanel } = createProviderUsageSurface({
-        send,
+      const { applyProviderUsageUi, renderAccountUsage, renderUsagePanel, usageModel } = createProviderUsageSurface({
         renderWorkspaceWindows: () => workspaceOverviewSurface.renderWindows(),
         // Issue #3862 — name popover session rows by their window title.
         sessionLabel: (sessionId) => {
@@ -6099,6 +6097,31 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
+      // Issue #7648: Execution environments is the one screen that shows
+      // provider usage, reset times and limit state, opened from the top bar.
+      const executionEnvironments = createExecutionEnvironments({
+        document, usageModel, supportedAgentsModel, renderAccountUsage,
+        onOpenToolManagement: () => document.dispatchEvent(
+          new CustomEvent("settings:open", { detail: { target: "supported-agents" } })),
+        onSetUsageCollection: (provider, enabled) => {
+          if (provider === "claude_code") send({ kind: "set_claude_account_usage_enabled", enabled });
+        },
+      });
+      executionEnvironments.element.hidden = true;
+      document.querySelector(".surface-area").appendChild(executionEnvironments.element);
+      function setEnvironmentsHost(host) {
+        const changed = executionEnvironments.element.hidden === Boolean(host);
+        executionEnvironments.element.hidden = !host;
+        const targetHost = host || document.querySelector(".surface-area");
+        if (executionEnvironments.element.parentElement !== targetHost) targetHost.appendChild(executionEnvironments.element);
+        if (host && changed) send({ kind: "list_supported_agents" });
+      }
+      function openExecutionEnvironments(view = "environments") {
+        executionEnvironments.open(view);
+        openSurface("environments");
+      }
+      document.getElementById("open-environments-button").addEventListener("click", () => openExecutionEnvironments());
+      document.addEventListener("environments:open", event => openExecutionEnvironments(event.detail?.view));
       // Telemetry updates keep the current native terminal host.
       worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
@@ -6109,6 +6132,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         getElement: (id) => windowMap.get(id),
         onWorksHost: setWorksHost,
         onAgentsHost: setRosterHost,
+        onEnvironmentsHost: setEnvironmentsHost,
 
         openSurface: (surface) => {
           const preset = surface === "issues" ? "issue" : surface;

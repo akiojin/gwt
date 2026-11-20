@@ -21,6 +21,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
+  crates/gwt/web/__tests__/execution-environments.test.mjs \
   crates/gwt/web/__tests__/dynamic-import-paths.test.mjs \
   crates/gwt/web/__tests__/unused-code.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \

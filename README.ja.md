@@ -29,13 +29,12 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
-- **Provider usage** — USAGE に Claude の Fable / Opus の週次枠を同時表示します。
-  未提供の枠は `—`、古い取得値は `stale` と表示します。ホバーすると共通の
-  アカウント枠・リセット時刻や、有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
-  Claude アカウント枠は Settings → Usage & Limits で有効化してください。
-  Codex のサブスクリプション枠が満杯でもクレジットが残っている場合は、
-  `Using credits` と残高を表示します。同一アカウントの観測が2点そろうと、
-  popover に観測間の1時間あたりのクレジット消費量を表示します。初回は表示しません。
+- **Execution environments** — 上部バーの Environments から、エージェントが使う
+  実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
+  リセット時刻・制限状態を 1 か所で確認できます。アカウントの詳細では、全ての枠、
+  有効な Usage credits、Codex の `Using credits` 残高と観測した 1 時間あたりの
+  クレジット消費量、Claude アカウント枠の有効化を扱います。未提供の枠は `—` と表示します。
+  ツール本体の導入と更新は Settings → Supported Agents で行います。
 
 ## インストール
 

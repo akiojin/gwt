@@ -40,6 +40,8 @@
         <div class="project-bar">
 
           <div class="project-actions">
+            <!-- Issue #7648: the one way to provider accounts, usage and limits. -->
+            <button class="arrange-button" id="open-environments-button" type="button" data-surface="environments" aria-pressed="false" title="Execution environments: accounts, usage and limits">Environments</button>
             <button class="arrange-button" id="split-view-button" type="button" aria-pressed="false" title="Show two surfaces side by side">Split view</button>
             <button class="arrange-button" id="close-project-button" type="button">Close Project</button>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
@@ -343,14 +345,6 @@
               aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             >CPU -- MEM --</span>
           </div>
-          <button
-            type="button"
-            class="op-status-strip__cell op-status-strip__cell--usage"
-            id="op-strip-usage"
-            aria-label="Provider usage and limits"
-            title="Provider usage & limits"
-            hidden
-          ></button>
           <div class="op-status-strip__cell" aria-hidden="true">
             <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
           </div>
