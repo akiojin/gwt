@@ -5,7 +5,10 @@ use gwt::protocol::PmRequestTaskResult;
 use gwt_core::pm_request_tasks::{Action, Actor, ActorKind, Request, TaskError, TaskStore};
 use sha2::{Digest, Sha256};
 
-use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent, ProjectContext, UserEvent};
+use super::{
+    combined_window_id, AppRuntime, BackendEvent, ClientId, OutboundEvent, ProjectContext,
+    UserEvent,
+};
 
 pub(super) enum PmRequestTaskOperation {
     Read {
@@ -317,6 +320,20 @@ fn empty(availability: PmConversationAvailability, detail: &str) -> PmConversati
     }
 }
 
+/// Request ids of decision deliveries live far above the client-issued ones,
+/// so a completion can be matched to its attempt without a second lane.
+const DECISION_ANSWER_REQUEST_BASE: u64 = 1 << 62;
+const DECISION_ANSWER_ACK_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+pub(crate) struct DecisionAnswerInFlight {
+    key: String,
+    project_root: std::path::PathBuf,
+    decision_id: String,
+    waiter: gwt_core::decision_queue::Waiter,
+    started: std::time::Instant,
+}
+
 impl AppRuntime {
     pub(super) fn pm_request_task_events(
         &self,
@@ -390,6 +407,7 @@ impl AppRuntime {
                     current: None,
                     error: Some("This window has no registered PM.".to_owned()),
                     current_error: None,
+                    decisions: None,
                 },
             )];
         };
@@ -432,9 +450,252 @@ impl AppRuntime {
                 current: data.current.map(Box::new),
                 error: data.error,
                 current_error: data.current_error,
+                decisions: data.decisions,
             });
         });
         Vec::new()
+    }
+
+    /// Issue #7742: answer or defer one decision in the gwtd decision queue.
+    ///
+    /// The queue belongs to the project, not to a PM session: the window only
+    /// names the project, so this works while the PM is stopped or replaced.
+    pub(super) fn decision_events(
+        &self,
+        context: &ProjectContext,
+        client_id: ClientId,
+        window_id: &str,
+        request_id: u64,
+        decision_id: String,
+        answer: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let root = self
+            .window_lookup
+            .get(window_id)
+            .and_then(|address| self.tab(&address.tab_id))
+            .filter(|tab| tab.project_root == context.project_root)
+            .map(|tab| tab.project_root.clone());
+        let Some(root) = root else {
+            return vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::DecisionResult {
+                    id: window_id.to_owned(),
+                    request_id,
+                    decision_id,
+                    action: if answer.is_some() { "answer" } else { "defer" }.to_owned(),
+                    ok: false,
+                    error: Some("The selected project window is unavailable; reload the current project before retrying.".to_owned()),
+                    decisions: None,
+                },
+            )];
+        };
+        self.run_decision_request(
+            self.proxy.for_project(context.clone()),
+            root,
+            client_id,
+            window_id,
+            request_id,
+            decision_id,
+            answer,
+        )
+    }
+
+    /// The one queue write behind every surface that answers or defers: the
+    /// project window and Home. `reply_id` is echoed back as the result's `id`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_decision_request(
+        &self,
+        proxy: super::AppEventProxy,
+        root: std::path::PathBuf,
+        client_id: ClientId,
+        reply_id: &str,
+        request_id: u64,
+        decision_id: String,
+        answer: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let action = if answer.is_some() { "answer" } else { "defer" };
+        let reply_client = client_id.clone();
+        let id = reply_id.to_owned();
+        let task_decision = decision_id.clone();
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            use gwt_core::decision_queue as queue;
+            let outcome = match &answer {
+                Some(text) => queue::answer(&root, &task_decision, text, queue::AnsweredBy::User),
+                None => queue::defer(&root, &task_decision),
+            };
+            let error = outcome.err().map(|error| error.to_string());
+            if error.is_none() && answer.is_some() {
+                if let Ok(deliveries) = queue::pending_deliveries(&root) {
+                    proxy.send(UserEvent::DecisionAnswersPending {
+                        project_root: root.clone(),
+                        deliveries,
+                    });
+                }
+            }
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                &reply_client,
+                BackendEvent::DecisionResult {
+                    id,
+                    request_id,
+                    decision_id: task_decision,
+                    action: action.to_owned(),
+                    ok: error.is_none(),
+                    error,
+                    decisions: gwt::pm_current::load_decisions(&root),
+                },
+            )]));
+        });
+        match spawn {
+            Ok(()) => Vec::new(),
+            Err(error) => vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::DecisionResult {
+                    id: reply_id.to_owned(),
+                    request_id,
+                    decision_id,
+                    action: action.to_owned(),
+                    ok: false,
+                    error: Some(error.to_string()),
+                    decisions: None,
+                },
+            )],
+        }
+    }
+
+    /// Look for recorded answers that have not reached their waiters yet.
+    /// Runs on the convergence tick so answers written by another process —
+    /// the PM closing a decision through gwtd — are delivered without the PM.
+    pub(crate) fn scan_decision_answers(&self) {
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for tab in &self.tabs {
+            if !roots.contains(&tab.project_root) {
+                roots.push(tab.project_root.clone());
+            }
+        }
+        for root in roots {
+            if !gwt_core::decision_queue::queue_path(&root).exists() {
+                continue;
+            }
+            let Some(context) = self.project_context_for_root(&root) else {
+                continue;
+            };
+            let proxy = self.proxy.for_project(context);
+            let _ = self.blocking_tasks.try_spawn(move || {
+                match gwt_core::decision_queue::pending_deliveries(&root) {
+                    Ok(deliveries) if !deliveries.is_empty() => {
+                        proxy.send(UserEvent::DecisionAnswersPending {
+                            project_root: root,
+                            deliveries,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        error = %gwt_core::error_ledger::sanitize_error_message(&error.to_string()),
+                        "decision queue deliveries could not be read"
+                    ),
+                }
+            });
+        }
+    }
+
+    /// gwtd hands each answer straight to the session that waits for it: the
+    /// text is submitted into that session's own pane, which resumes it. The
+    /// delivery is recorded only once the pane owner acknowledged the write; a
+    /// waiter without a live pane keeps its delivery pending for a later tick.
+    pub(crate) fn deliver_decision_answers(
+        &mut self,
+        project_root: &std::path::Path,
+        deliveries: Vec<gwt_core::decision_queue::PendingDelivery>,
+    ) -> Vec<OutboundEvent> {
+        use gwt_core::decision_queue::Waiter;
+        // An unacknowledged attempt is retried instead of blocking the answer.
+        self.decision_answers_in_flight
+            .retain(|_, attempt| attempt.started.elapsed() < DECISION_ANSWER_ACK_WINDOW);
+        let mut events = Vec::new();
+        for delivery in deliveries {
+            let key = format!("{}\n{:?}", delivery.decision_id, delivery.waiter);
+            if self.decision_answers_sent.contains(&key)
+                || self
+                    .decision_answers_in_flight
+                    .values()
+                    .any(|attempt| attempt.key == key)
+            {
+                continue;
+            }
+            let session_id = match &delivery.waiter {
+                Waiter::Session { session_id } => Some(session_id.clone()),
+                Waiter::Pm => self.pm_session_for_root(project_root).cloned(),
+            };
+            let window_id = session_id.and_then(|session_id| {
+                self.tabs
+                    .iter()
+                    .filter(|tab| tab.project_root == project_root)
+                    .find_map(|tab| {
+                        tab.workspace
+                            .persisted()
+                            .windows
+                            .iter()
+                            .find(|window| window.session_id.as_deref() == Some(&session_id))
+                            .map(|window| combined_window_id(&tab.id, &window.id))
+                    })
+            });
+            let Some(window_id) = window_id else {
+                continue;
+            };
+            let Some(runtime) = self.runtimes.get(&window_id) else {
+                continue;
+            };
+            let command = gwt::project_runtime::events::OwnerCommand::SendInput {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+                text: format!("{}\r", delivery.message),
+            };
+            self.decision_answer_sequence += 1;
+            let request_id = DECISION_ANSWER_REQUEST_BASE + self.decision_answer_sequence;
+            self.decision_answers_in_flight.insert(
+                request_id,
+                DecisionAnswerInFlight {
+                    key,
+                    project_root: project_root.to_path_buf(),
+                    decision_id: delivery.decision_id,
+                    waiter: delivery.waiter,
+                    started: std::time::Instant::now(),
+                },
+            );
+            events.extend(self.queue_remote_runtime_command(
+                &window_id,
+                command,
+                super::RemoteRuntimeCommandKind::Input {
+                    reply_client: None,
+                    request_id: Some(request_id),
+                },
+            ));
+        }
+        events
+    }
+
+    /// The pane owner answered one delivery attempt. Only an acknowledged
+    /// write is recorded as delivered; a failed one is retried on a later tick.
+    pub(crate) fn settle_decision_answer(&mut self, request_id: u64, written: bool) {
+        let Some(attempt) = self.decision_answers_in_flight.remove(&request_id) else {
+            return;
+        };
+        if !written {
+            return;
+        }
+        self.decision_answers_sent.insert(attempt.key);
+        let _ = self.blocking_tasks.try_spawn(move || {
+            if let Err(error) = gwt_core::decision_queue::mark_delivered(
+                &attempt.project_root,
+                &attempt.decision_id,
+                &attempt.waiter,
+            ) {
+                tracing::warn!(
+                    error = %gwt_core::error_ledger::sanitize_error_message(&error.to_string()),
+                    "decision delivery could not be recorded"
+                );
+            }
+        });
     }
 
     pub(crate) fn pm_reports_loaded_events(

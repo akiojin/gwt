@@ -72,9 +72,125 @@ fn home_reads_the_decisions_of_an_open_project_without_its_other_reports() {
     assert_eq!(project["project_key"], project_key.as_str());
     assert_eq!(project["title"], "Repo");
     assert_eq!(project["pm_available"], false);
+    // Issue #7742: the decisions are the project's decision queue; a decision
+    // the PM raised through a report is bridged into it.
     let decisions = project["decisions"].as_array().unwrap();
     assert_eq!(decisions.len(), 1);
-    assert_eq!(decisions[0]["body"], "Ship the release?");
+    assert_eq!(decisions[0]["question"], "Ship the release?");
+    assert_eq!(project["waiting_count"], 1);
+}
+
+fn decision_results(recorded: &Arc<Mutex<Vec<UserEvent>>>) -> Vec<serde_json::Value> {
+    recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(events) => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| event.target == DispatchTarget::Client("home".into()))
+        .map(|event| serde_json::to_value(&event.event).unwrap())
+        .filter(|value| value["kind"] == "decision_result")
+        .collect()
+}
+
+/// Issue #7742 AC-2 / AC-4: Home answers and defers through the project's
+/// decision queue. No PM is registered here, and the answer is still recorded.
+#[test]
+fn home_answers_and_defers_through_the_queue_without_a_pm() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let register = |target: &str| {
+        queue::register(
+            temp.path(),
+            &queue::Registration {
+                issue: Some(7742),
+                kind: Some("product".into()),
+                target: Some(target.into()),
+                question: Some("Which storage should the queue use?".into()),
+                materials: Some("Both options pass the existing tests.".into()),
+                options: vec!["Keep JSON".into(), "Move to SQLite".into()],
+                recommendation: Some("Keep JSON".into()),
+                reason: None,
+                session_id: Some("waiting-agent".into()),
+            },
+        )
+        .unwrap()
+        .item
+        .id
+    };
+    let (older, newer) = (register("storage"), register("ordering"));
+    let (mut runtime, recorded, tasks, project_key) = home_runtime(temp.path());
+
+    let immediate = hub_event(
+        &mut runtime,
+        serde_json::json!({"kind": "home_defer_decision", "project_key": project_key,
+            "decision_id": newer, "request_id": 4}),
+    );
+    assert!(
+        immediate.is_empty(),
+        "the queue is written off the event loop"
+    );
+    tasks.lock().unwrap().remove(0)();
+    let results = decision_results(&recorded);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], project_key.as_str());
+    assert_eq!(results[0]["request_id"], 4);
+    assert_eq!(results[0]["action"], "defer");
+    assert_eq!(results[0]["ok"], true);
+    assert_eq!(
+        results[0]["decisions"]["waiting_count"], 2,
+        "deferring is not a decision"
+    );
+    assert_eq!(
+        results[0]["decisions"]["items"][1]["id"],
+        newer.as_str(),
+        "deferred to the tail"
+    );
+
+    hub_event(
+        &mut runtime,
+        serde_json::json!({"kind": "home_answer_decision", "project_key": project_key,
+            "decision_id": older, "answer": "1. Keep JSON", "request_id": 5}),
+    );
+    tasks.lock().unwrap().remove(0)();
+    let results = decision_results(&recorded);
+    assert_eq!(results[1]["action"], "answer");
+    assert_eq!(results[1]["ok"], true);
+    assert_eq!(results[1]["decisions"]["waiting_count"], 1);
+    let pending = queue::pending_deliveries(temp.path()).unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "gwtd owes the answer to the waiting session"
+    );
+    assert!(pending[0].message.contains("1. Keep JSON"));
+
+    // A project that is not open is refused out loud, and so is a project
+    // connection borrowing the Home request.
+    let refused = hub_event(
+        &mut runtime,
+        serde_json::json!({"kind": "home_answer_decision", "project_key": "ffffffffffffffff",
+            "decision_id": newer, "answer": "x", "request_id": 6}),
+    );
+    assert_eq!(refused[0]["kind"], "decision_result");
+    assert_eq!(refused[0]["ok"], false);
+    assert!(refused[0]["error"].as_str().unwrap().contains("not open"));
+    let scope = ClientScope::Project(runtime.test_context().project_key.clone());
+    let replies = runtime.handle_frontend_event_in_scope(
+        "project".into(),
+        serde_json::from_value(serde_json::json!({"kind": "home_defer_decision",
+            "project_key": project_key, "decision_id": newer, "request_id": 7}))
+        .unwrap(),
+        &scope,
+    );
+    let value = serde_json::to_value(&replies[0].event).unwrap();
+    assert_eq!(value["kind"], "decision_result");
+    assert_eq!(value["ok"], false);
+    assert_eq!(queue::snapshot(temp.path()).unwrap().waiting_count, 1);
 }
 
 #[test]

@@ -429,6 +429,14 @@ Hard limits, no exceptions:
   already settles it. Release timing, ownership rulings, hold and queue
   changes, retries, fresh launches, and Issue registration or splitting
   are PM decisions: make them, act, and report the outcome.
+- Agents register the decisions they cannot make in the gwtd decision
+  queue. Read it each cycle with `decision.list`: close `technical` and
+  `process` decisions with `decision.answer` (`id`, `answer`), and any
+  other decision a recorded ruling already settles. `product` and `scope`
+  decisions reach the user through the queue; add missing material rather
+  than answering for the user. Bundle decisions that differ only in
+  wording with `decision.merge` (`into`, `ids`). gwtd delivers each
+  answer to the waiting sessions itself; do not relay it.
 - Ask the user only for:
   - a large specification change (a SPEC's goal or scope, or
     user-visible behaviour, changes substantially);

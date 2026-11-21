@@ -15,12 +15,11 @@ const alpha = project(1, "Alpha");
 const beta = project(2, "Beta");
 
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+// One item of a project's gwtd decision queue (Issue #7742).
 const decision = (id: string, minutes: number, question: string, options: string[]) => ({
-  id, kind: "decision", body: question, body_html: "", created_at: minutesAgo(minutes),
-  structured: { details: "", refs: [], summary: {
-    result: `${question} is waiting on you.`, impact: "Only this project is affected.",
-    decision: { question, recommendation: options[0], reason: "Nothing else changes by waiting.", options },
-  } },
+  id, issue: 7742, kind: "product", target: id, question, materials: `${question} is waiting on you.`,
+  impact: "Only this project is affected.", options, recommendation: options[0],
+  reason: "Nothing else changes by waiting.", status: "open", created_at: minutesAgo(minutes), deferred_seq: null,
 });
 
 type Backend = {
@@ -40,11 +39,17 @@ function collectBrowserErrors(page: Page): string[] {
   return errors;
 }
 
-// The stub answers the catalog, the decisions read and a PM send, and drops an
-// answered decision from later reads, the way a PM retires it.
+// The stub answers the catalog and a PM send, and keeps one decision queue per
+// project the way gwtd does: an answer takes the decision out of the queue,
+// "decide later" moves it to the tail, and the waiting count is the queue's.
 async function installHomeBackend(page: Page, backend: Backend) {
   await page.addInitScript(backend => {
-    const state = { sent: [] as any[], answered: new Set<string>() };
+    const state = { sent: [] as any[], seq: 0 };
+    const queues = new Map<string, any[]>(backend.conversation.map(project => [project.project_key, [...project.decisions]]));
+    const queueOf = (projectKey: string) => {
+      const items = queues.get(projectKey) || [];
+      return { waiting_count: items.length, items };
+    };
     (window as any).__homeSent = state.sent;
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -68,16 +73,21 @@ async function installHomeBackend(page: Page, backend: Backend) {
           this.reply({ kind: "hub_state", hub: { app_version: "9.9.9", projects: backend.projects, recent_projects: backend.recent || [] } });
         } else if (message.kind === "load_home_conversation") {
           this.reply({ kind: "home_conversation", request_id: message.request_id, projects: backend.conversation.map(project => ({
-            ...project, decisions: project.decisions.filter((item: any) => !state.answered.has(`${project.project_key}:${item.id}`)),
+            ...project, decisions: queueOf(project.project_key).items, waiting_count: queueOf(project.project_key).waiting_count,
           })) });
+        } else if (message.kind === "home_answer_decision" || message.kind === "home_defer_decision") {
+          state.sent.push(message);
+          const items = queues.get(message.project_key) || [];
+          const found = items.find(item => item.id === message.decision_id);
+          const rest = items.filter(item => item !== found);
+          const answer = message.kind === "home_answer_decision";
+          if (found) queues.set(message.project_key, answer ? rest : [...rest, { ...found, deferred_seq: ++state.seq }]);
+          this.reply({ kind: "decision_result", id: message.project_key, request_id: message.request_id,
+            decision_id: message.decision_id, action: answer ? "answer" : "defer", ok: Boolean(found),
+            error: found ? null : `decision ${message.decision_id} was not found`, decisions: queueOf(message.project_key) });
         } else if (message.kind === "home_pm_send") {
           state.sent.push(message);
           const refused = (backend.refuse || []).includes(message.project_key);
-          if (!refused) {
-            const owner = backend.conversation.find(project => project.project_key === message.project_key);
-            const answered = owner?.decisions.find((item: any) => message.text.startsWith(`Answer to "${item.structured.summary.decision.question}"`)) as any;
-            if (answered) state.answered.add(`${message.project_key}:${answered.id}`);
-          }
           this.reply({ kind: "pane_send_result", ok: !refused, window_id: refused ? null : "tab::pm",
             error: refused ? "No Project Manager is running for this project. Open the project, then try again." : null,
             request_id: message.request_id });
@@ -160,8 +170,9 @@ test.describe("Home conversation with the Project Manager", () => {
     await expect(topics).toHaveCount(2);
     const sent = await page.evaluate(() => (window as any).__homeSent);
     expect(sent).toHaveLength(1);
-    expect(sent[0].project_key).toBe(beta.project_key);
-    expect(sent[0].text).toBe('Answer to "Fix the mapping and continue the import?": 1. Fix and continue\r');
+    // Issue #7742: the answer is a queue operation of the decision's project.
+    expect(sent[0]).toMatchObject({ kind: "home_answer_decision", project_key: beta.project_key,
+      decision_id: "d-mid", answer: "1. Fix and continue" });
     // Settled topics sit above the open ones, with a search and the exchange.
     const resolved = home.locator("[data-home-resolved]");
     await expect(resolved.locator("summary")).toContainText("Fix the mapping and continue the import?");
@@ -180,14 +191,18 @@ test.describe("Home conversation with the Project Manager", () => {
     await expect(draft).toHaveValue("");
     await expect(home.locator("[data-home-replychip]")).toHaveCount(0);
     const replies = await page.evaluate(() => (window as any).__homeSent);
-    expect(replies[1].project_key).toBe(alpha.project_key);
-    expect(replies[1].text).toBe('Answer to "Approve the plan for the refresh?": Start it, but keep the old screen for a week\r');
+    expect(replies[1]).toMatchObject({ kind: "home_answer_decision", project_key: alpha.project_key,
+      decision_id: "d-old", answer: "Start it, but keep the old screen for a week" });
 
-    // Decide later is not an answer.
+    // Decide later is not an answer: the decision keeps waiting and counting,
+    // and the header shows the same count (AC-4).
     await topics.nth(0).getByRole("button", { name: "Decide later" }).click();
     await expect(topics.nth(0).getByRole("status")).toHaveText("Kept waiting. Nothing was decided.");
     await expect(home.locator("[data-home-waitjump]")).toHaveText("1 decision waiting");
-    expect(await page.evaluate(() => (window as any).__homeSent.length)).toBe(2);
+    await expect(page.locator('.app-head [data-destination="pm"] .app-head__count')).toHaveText("1");
+    const deferred = await page.evaluate(() => (window as any).__homeSent);
+    expect(deferred).toHaveLength(3);
+    expect(deferred[2]).toMatchObject({ kind: "home_defer_decision", project_key: alpha.project_key, decision_id: "d-new" });
 
     // Resolved topics are searched by name and deleted only after a confirmation.
     await resolved.getByRole("searchbox", { name: "Search resolved topics" }).fill("mapping");

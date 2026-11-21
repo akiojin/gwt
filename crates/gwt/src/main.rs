@@ -2003,6 +2003,8 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::ReapOrphanDaemon { .. }
             | FrontendEvent::LoadHomeConversation { .. }
             | FrontendEvent::HomePmSend { .. }
+            | FrontendEvent::HomeAnswerDecision { .. }
+            | FrontendEvent::HomeDeferDecision { .. }
             | FrontendEvent::GetFirstRunSetup { .. }
             | FrontendEvent::SaveFirstRunSetup { .. }
             | FrontendEvent::FrontendReady
@@ -2501,6 +2503,13 @@ enum UserEvent {
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
         current_error: Option<String>,
+        decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
+    },
+    /// Issue #7742: answers recorded in the decision queue that still have to
+    /// reach their waiting sessions.
+    DecisionAnswersPending {
+        project_root: PathBuf,
+        deliveries: Vec<gwt_core::decision_queue::PendingDelivery>,
     },
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -5177,6 +5186,9 @@ mod tests {
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             active_agent_sessions: HashMap::new(),
+            decision_answers_sent: Default::default(),
+            decision_answers_in_flight: Default::default(),
+            decision_answer_sequence: 0,
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             update_drain_scan_in_flight: false,
@@ -11737,6 +11749,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
                 app.retry_project_observation_invalidations();
+                // Issue #7742: answers recorded outside this process (the PM
+                // closing a decision through gwtd) are delivered on this tick.
+                app.scan_decision_answers();
                 let mut events = app.terminal_convergence_tick_events();
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
@@ -11974,7 +11989,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
-            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error, current_error }) => {
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error, current_error, decisions }) => {
                 clients.dispatch(app.pm_reports_loaded_events(client_id, BackendEvent::PmReports {
                     id: window_id,
                     session_id: Some(session_id),
@@ -11985,7 +12000,11 @@ fn main() -> std::io::Result<()> {
                     current,
                     error,
                     current_error,
+                    decisions,
                 }));
+            }
+            Event::UserEvent(UserEvent::DecisionAnswersPending { project_root, deliveries }) => {
+                clients.dispatch(app.deliver_decision_answers(&project_root, deliveries));
             }
             Event::UserEvent(UserEvent::ProjectObservationInvalidationCompleted(completed)) => {
                 app.project_observation_invalidation_completed(*completed);

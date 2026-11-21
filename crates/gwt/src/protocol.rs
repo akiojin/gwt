@@ -801,6 +801,20 @@ pub enum FrontendEvent {
         text: String,
         request_id: u64,
     },
+    /// Issue #7742: answer one waiting decision of an open project from Home.
+    /// The queue belongs to the project, so no PM has to be running.
+    HomeAnswerDecision {
+        project_key: String,
+        decision_id: String,
+        answer: String,
+        request_id: u64,
+    },
+    /// Issue #7742: "decide later" from Home.
+    HomeDeferDecision {
+        project_key: String,
+        decision_id: String,
+        request_id: u64,
+    },
     /// Issue #7643: read the themes of this project (Issues that have
     /// sub-issues) and what was completed today, for the Themes screen.
     LoadThemes {
@@ -856,6 +870,20 @@ pub enum FrontendEvent {
         #[serde(default)]
         task_key: Option<String>,
         request: PmRequestTaskCompleteRequest,
+    },
+    /// Answer one waiting decision in the gwtd decision queue (Issue #7742).
+    /// gwtd records the answer and delivers it to the waiting sessions itself.
+    AnswerDecision {
+        id: String,
+        request_id: u64,
+        decision_id: String,
+        answer: String,
+    },
+    /// "Decide later": keep the decision waiting at the tail of the queue.
+    DeferDecision {
+        id: String,
+        request_id: u64,
+        decision_id: String,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -1856,44 +1884,40 @@ pub struct ProjectOwnerHealthView {
     pub detail: Option<String>,
 }
 
-/// Issue #7639: what one open project's PM contributes to the Home
-/// conversation. Only decisions: project work status and counts stay on the
-/// project's own page (design item 5).
+/// Issue #7639: what one open project contributes to the Home conversation.
+/// Only decisions: project work status and counts stay on the project's own
+/// page (design item 5). Issue #7742: they are the project's gwtd decision
+/// queue, so Home, the header and the Decide screen show the same decisions.
 #[derive(Debug, Clone, Serialize)]
 pub struct HomeProjectConversationView {
     pub project_key: String,
     pub title: String,
     /// Whether a PM session is registered for this project and can be sent to.
     pub pm_available: bool,
-    pub decisions: Vec<PmReportView>,
+    /// The queue's own waiting count; Home never recounts the items.
+    pub waiting_count: usize,
+    pub decisions: Vec<gwt_core::decision_queue::DecisionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl HomeProjectConversationView {
-    /// Project the reports of one project store: decisions only, oldest first.
-    pub fn from_reports(
+    pub fn from_queue(
         project_key: String,
         title: String,
         pm_available: bool,
-        reports: std::result::Result<Vec<gwt_core::pm_report::PmReport>, String>,
+        queue: std::result::Result<gwt_core::decision_queue::QueueSnapshot, String>,
     ) -> Self {
-        let (decisions, error) = match reports {
-            Ok(reports) => (
-                reports
-                    .into_iter()
-                    .filter(|report| report.kind == gwt_core::pm_report::PmReportKind::Decision)
-                    .map(PmReportView::from)
-                    .collect(),
-                None,
-            ),
-            Err(error) => (Vec::new(), Some(error)),
+        let (queue, error) = match queue {
+            Ok(queue) => (queue, None),
+            Err(error) => (Default::default(), Some(error)),
         };
         Self {
             project_key,
             title,
             pm_available,
-            decisions,
+            waiting_count: queue.waiting_count,
+            decisions: queue.items,
             error,
         }
     }
@@ -2892,6 +2916,23 @@ pub enum BackendEvent {
         /// Current-card failure only; `reports` remain authoritative.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         current_error: Option<String>,
+        /// The gwtd decision queue (Issue #7742). `None` means it could not
+        /// be read; the client keeps the queue it last applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
+    },
+    /// Client-scoped reply to `AnswerDecision` / `DeferDecision`, carrying the
+    /// queue as it stands after the operation. `id` is the window the request
+    /// named; for the Home requests it is the project key.
+    DecisionResult {
+        id: String,
+        request_id: u64,
+        decision_id: String,
+        action: String,
+        ok: bool,
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
     },
     PmRequestTask {
         id: String,
@@ -3815,6 +3856,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "decision_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "pm_reports",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -4531,6 +4577,7 @@ impl BackendEvent {
             BackendEvent::PmReports { .. } => "pm_reports",
             BackendEvent::HomeConversation { .. } => "home_conversation",
             BackendEvent::PmRequestTask { .. } => "pm_request_task",
+            BackendEvent::DecisionResult { .. } => "decision_result",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
@@ -4843,6 +4890,7 @@ mod tests {
         );
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None, current_error: None,
+            decisions: None,
             request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
@@ -4918,6 +4966,71 @@ mod tests {
         assert_eq!(
             event.delivery_policy().backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #7742: the decision queue travels with the reports snapshot, and
+    /// answering or deferring is a typed request with its own reply.
+    #[test]
+    fn decision_queue_wire_carries_the_queue_and_typed_answer_and_defer() {
+        let answer: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "answer_decision", "id": "pm", "request_id": 3,
+            "decision_id": "d-1", "answer": "1. Keep JSON",
+        }))
+        .unwrap();
+        assert!(matches!(
+            answer,
+            FrontendEvent::AnswerDecision { request_id: 3, decision_id, answer, .. }
+                if decision_id == "d-1" && answer == "1. Keep JSON"
+        ));
+        let defer: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "defer_decision", "id": "pm", "request_id": 4, "decision_id": "d-1",
+        }))
+        .unwrap();
+        assert!(matches!(
+            defer,
+            FrontendEvent::DeferDecision { request_id: 4, decision_id, .. } if decision_id == "d-1"
+        ));
+        // An answer without its text is not a request.
+        assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "answer_decision", "id": "pm", "request_id": 3, "decision_id": "d-1",
+        }))
+        .is_err());
+
+        let queue = gwt_core::decision_queue::QueueSnapshot::default();
+        let reports = BackendEvent::PmReports {
+            id: "pm".into(),
+            session_id: Some("session".into()),
+            request_id: 1,
+            version: None,
+            snapshot: true,
+            reports: Vec::new(),
+            current: None,
+            error: None,
+            current_error: None,
+            decisions: Some(queue.clone()),
+        };
+        let value = serde_json::to_value(&reports).unwrap();
+        assert_eq!(value["decisions"]["waiting_count"], 0);
+        assert_eq!(value["decisions"]["items"], serde_json::json!([]));
+
+        let result = BackendEvent::DecisionResult {
+            id: "pm".into(),
+            request_id: 4,
+            decision_id: "d-1".into(),
+            action: "defer".into(),
+            ok: true,
+            error: None,
+            decisions: Some(queue),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["kind"], "decision_result");
+        assert_eq!(value["action"], "defer");
+        assert_eq!(value["decisions"]["waiting_count"], 0);
+        assert_eq!(result.event_kind(), "decision_result");
+        assert_eq!(
+            result.delivery_policy().backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
         );
     }
 
@@ -6001,33 +6114,32 @@ mod tests {
 
     #[test]
     fn home_conversation_carries_decisions_only() {
-        let report = |id: &str, kind| gwt_core::pm_report::PmReport {
-            id: id.to_string(),
-            kind,
-            question: None,
-            body: format!("{id} body"),
-            created_at: gwt_core::timestamp::UtcTimestamp::now(),
-            structured: None,
-        };
         use crate::HomeProjectConversationView;
-        let view = HomeProjectConversationView::from_reports(
+        let item: gwt_core::decision_queue::DecisionItem =
+            serde_json::from_value(serde_json::json!({
+                "id": "decision-1", "issue": 7742, "kind": "product", "target": "storage",
+                "question": "Which storage?", "materials": "Both pass.", "status": "open",
+                "created_at": gwt_core::timestamp::UtcTimestamp::now(),
+            }))
+            .expect("queue item");
+        let view = HomeProjectConversationView::from_queue(
             "0123456789abcdef".to_string(),
             "Alpha".to_string(),
             true,
-            Ok(vec![
-                report("progress-1", gwt_core::pm_report::PmReportKind::Progress),
-                report("decision-1", gwt_core::pm_report::PmReportKind::Decision),
-            ]),
+            Ok(gwt_core::decision_queue::QueueSnapshot {
+                waiting_count: 1,
+                items: vec![item],
+            }),
         );
         let event = BackendEvent::HomeConversation {
             request_id: 3,
             projects: vec![
                 view,
-                HomeProjectConversationView::from_reports(
+                HomeProjectConversationView::from_queue(
                     "fedcba9876543210".to_string(),
                     "Beta".to_string(),
                     false,
-                    Err("The report store is unreadable.".to_string()),
+                    Err("The decision queue is unreadable.".to_string()),
                 ),
             ],
         };
@@ -6040,11 +6152,13 @@ mod tests {
         assert_eq!(alpha["pm_available"], true);
         assert_eq!(alpha["decisions"].as_array().expect("decisions").len(), 1);
         assert_eq!(alpha["decisions"][0]["id"], "decision-1");
+        assert_eq!(alpha["waiting_count"], 1);
         assert!(alpha.get("error").is_none());
         let beta = &value["projects"][1];
         assert_eq!(beta["pm_available"], false);
         assert_eq!(beta["decisions"].as_array().expect("decisions").len(), 0);
-        assert_eq!(beta["error"], "The report store is unreadable.");
+        assert_eq!(beta["waiting_count"], 0);
+        assert_eq!(beta["error"], "The decision queue is unreadable.");
     }
 
     #[test]

@@ -727,6 +727,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::HomePmSend { project_key, .. } => {
             FrontendUserActionLog::new("home_pm_send", "pm").target(project_key)
         }
+        FrontendEvent::HomeAnswerDecision { decision_id, .. } => {
+            FrontendUserActionLog::new("home_answer_decision", "pm").target(decision_id)
+        }
+        FrontendEvent::HomeDeferDecision { decision_id, .. } => {
+            FrontendUserActionLog::new("home_defer_decision", "pm").target(decision_id)
+        }
         FrontendEvent::ReopenPmRequestTask { id, .. } => {
             FrontendUserActionLog::new("reopen_pm_request_task", "pm").window(id)
         }
@@ -742,6 +748,17 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PmPaneSendInput { window_id, .. } => {
             FrontendUserActionLog::new("pm_pane_send_input", "terminal").target(window_id)
         }
+        // The answer text stays out of the action log, like pane input.
+        FrontendEvent::AnswerDecision {
+            id, decision_id, ..
+        } => FrontendUserActionLog::new("answer_decision", "pm")
+            .window(id)
+            .target(decision_id),
+        FrontendEvent::DeferDecision {
+            id, decision_id, ..
+        } => FrontendUserActionLog::new("defer_decision", "pm")
+            .window(id)
+            .target(decision_id),
         FrontendEvent::SetIssueMonitorEnabled { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })

@@ -1,23 +1,24 @@
 import { createUiStateStore } from "./ui-state-store.js";
 import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
-import { decisionAnswerMessage, decisionItemFromReport, decisionMessageLines } from "./pm-chat.js";
+import { decisionItemFromQueue, decisionMessageLines } from "./pm-chat.js";
 
 // Home is the conversation with the Project Manager (Issue #7639, SPEC #7007
 // T-021). Rendered by the React surface `HomeConversation`
 // (crates/gwt/web-react); this host owns the conversation state.
 //
-// A PM runs per project, so Home gathers what the PM of every open project is
-// waiting on into one timeline and sends each answer to the PM of the project
-// it belongs to. Home shows no project work status and no project counts
-// (design item 5): only what the PM says and what you answer.
+// A PM runs per project, so Home gathers the decisions waiting in every open
+// project into one timeline. Home shows no project work status and no project
+// counts (design item 5): only what the PM says and what you answer.
 //
-// The decisions and the answers each go through exactly one function,
-// `requestDecisions` and `sendToPm`, so their source can be replaced in one
-// place.
+// The decisions are each project's gwtd decision queue (Issue #7742). An
+// answer and "decide later" are queue operations of the project the decision
+// belongs to (`sendDecision`); gwtd delivers the answer to the sessions that
+// wait for it, so no PM has to be running. A new message goes to the PM of
+// the chosen project (`sendToPm`). The waiting count is the sum of the
+// queues' own counts, the same number the header and the Decide screen show.
 //
-// A topic is settled here once its answer is confirmed delivered. Nothing
-// about a settled topic is stored: after a reload the decision reports are the
-// only source again, the same rule the Decide queue follows (T-023).
+// A topic is settled here once the queue confirmed its answer. Nothing about
+// a settled topic is stored: after a reload the queue is the only source.
 
 // Every string Home shows that depends on its state.
 const COPY = {
@@ -35,11 +36,14 @@ const COPY = {
     clear: "Nothing needs a decision right now. Send me a message from the box below whenever you want something done.",
   },
   sending: "Sending…",
+  deferring: "Moving to the end of the queue…",
   deferred: "Kept waiting. Nothing was decided.",
   delivered: project => `Delivered to the Project Manager of ${project}.`,
   notConfirmed: "Delivery was not confirmed. Check the project before sending again.",
   disconnected: "Home is not connected. Reconnect, then send again.",
   refused: "The Project Manager did not accept the message.",
+  answerRefused: "The answer could not be recorded.",
+  deferRefused: "The decision could not be deferred.",
   loadFailed: (project, error) => `Decisions of ${project} could not be read: ${error}`,
 };
 
@@ -51,57 +55,74 @@ const isoTime = ms => new Date(ms).toISOString();
 
 const EMPTY_STATE = Object.freeze({
   catalogLoaded: false, hasProjects: false, loaded: false, appliedRequest: 0, projects: [],
-  settled: [], hidden: [], deferred: [], sent: [], sentCount: 0,
+  settled: [], hidden: [], sent: [], sentCount: 0,
   pending: null, failure: null, replyTo: null,
 });
 
-// What a decisions snapshot changes. It keeps the reports as delivered; the
+// What a decisions snapshot changes. It keeps each queue as delivered; the
 // view below reads them.
 function withDecisions(state, event) {
   if (!Number.isSafeInteger(event.request_id) || event.request_id <= state.appliedRequest) return state;
   const projects = (event.projects || []).map(project => ({
     key: project.project_key, title: project.title || project.project_key,
     pmAvailable: Boolean(project.pm_available), error: project.error || null,
-    reports: project.decisions || [],
+    decisions: project.decisions || [], waitingCount: project.waiting_count ?? 0,
   }));
-  const live = new Set(projects.flatMap(project => project.reports.map(report => topicId(project.key, report.id))));
-  return {
-    ...state, loaded: true, appliedRequest: event.request_id, projects,
-    deferred: state.deferred.filter(id => live.has(id)),
-    replyTo: live.has(state.replyTo) ? state.replyTo : null,
-  };
+  return withProjects({ ...state, loaded: true, appliedRequest: event.request_id }, projects);
 }
 
-// What the outcome of the message in flight changes. Only a confirmed delivery
-// settles a topic; a refusal keeps it open and says why.
-function withSendResult(state, requestId, ok, error) {
+function withProjects(state, projects) {
+  const live = new Set(projects.flatMap(project => project.decisions.map(item => topicId(project.key, item.id))));
+  return { ...state, projects, replyTo: live.has(state.replyTo) ? state.replyTo : null };
+}
+
+// What the queue's reply to an answer or a deferral changes. The reply
+// carries that project's queue as it stands after the operation.
+function withDecisionResult(state, event) {
   const pending = state.pending;
-  if (!pending || pending.requestId !== requestId) return state;
-  if (!ok) {
-    return { ...state, pending: null, failure: { topicId: pending.topicId, message: error || COPY.refused } };
+  if (!pending?.decisionId || pending.requestId !== event.request_id) return state;
+  const queue = event.decisions;
+  const next = queue ? withProjects(state, state.projects.map(project => project.key !== pending.projectKey ? project
+    : { ...project, decisions: queue.items || [], waitingCount: queue.waiting_count ?? 0 })) : state;
+  if (!event.ok) {
+    return { ...next, pending: null, failure: { topicId: pending.topicId,
+      message: event.error || (pending.defer ? COPY.deferRefused : COPY.answerRefused) } };
   }
-  const at = Date.now();
-  const sentCount = state.sentCount + (pending.fromComposer ? 1 : 0);
-  if (!pending.topicId) {
-    return {
-      ...state, pending: null, failure: null, sentCount,
-      sent: [...state.sent, { id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project, text: pending.answer, at }],
-    };
-  }
+  if (pending.defer) return { ...next, pending: null, failure: null };
   return {
-    ...state, pending: null, failure: null, sentCount,
-    replyTo: state.replyTo === pending.topicId ? null : state.replyTo,
-    deferred: state.deferred.filter(id => id !== pending.topicId),
+    ...next, pending: null, failure: null,
+    sentCount: state.sentCount + (pending.fromComposer ? 1 : 0),
+    replyTo: next.replyTo === pending.topicId ? null : next.replyTo,
     settled: [...state.settled, {
       id: pending.topicId, project: pending.project, subject: pending.subject,
-      lines: pending.lines, answer: pending.answer, answeredAt: at,
+      lines: pending.lines, answer: pending.answer, answeredAt: Date.now(),
     }],
   };
 }
 
+// What the outcome of the message to a PM changes: a refusal says why.
+function withSendResult(state, requestId, ok, error) {
+  const pending = state.pending;
+  if (!pending || pending.decisionId || pending.requestId !== requestId) return state;
+  if (!ok) {
+    return { ...state, pending: null, failure: { topicId: null, message: error || COPY.refused } };
+  }
+  return {
+    ...state, pending: null, failure: null, sentCount: state.sentCount + 1,
+    sent: [...state.sent, { id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project, text: pending.answer, at: Date.now() }],
+  };
+}
+
+// A request in flight that was never confirmed, whichever kind it is.
+function withUnconfirmed(state, requestId) {
+  const pending = state.pending;
+  if (!pending || pending.requestId !== requestId) return state;
+  return { ...state, pending: null, failure: { topicId: pending.topicId, message: COPY.notConfirmed } };
+}
+
 function decisionsOf(state) {
-  return state.projects.flatMap(project => project.reports.map(report => {
-    const item = decisionItemFromReport(report);
+  return state.projects.flatMap(project => project.decisions.map(queued => {
+    const item = decisionItemFromQueue(queued);
     return { id: topicId(project.key, item.id), project, item };
   }));
 }
@@ -116,13 +137,13 @@ function homeConversationView(state) {
   const waiting = decisionsOf(state)
     .filter(({ id }) => !settled.has(id) && !state.hidden.includes(id))
     .map(({ id, project, item }) => {
-      const deferred = state.deferred.includes(id);
+      const deferred = item.deferred;
       return {
         id, kind: "decision", projectKey: project.key, project: project.title,
         subject: item.question, createdAt: item.createdAt, lines: decisionMessageLines(item),
         options: item.options || [], recommended: item.options ? item.options.indexOf(item.recommendation) : -1,
         deferred,
-        status: pending?.topicId === id ? COPY.sending : deferred ? COPY.deferred : "",
+        status: pending?.topicId === id ? (pending.defer ? COPY.deferring : COPY.sending) : deferred ? COPY.deferred : "",
         error: state.failure?.topicId === id ? state.failure.message : "",
       };
     });
@@ -133,7 +154,9 @@ function homeConversationView(state) {
   // Oldest at the top, newest at the bottom (design item 230).
   const topics = [...waiting, ...messages]
     .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
-  const count = state.loaded ? waiting.length : null;
+  // Issue #7742 AC-4: the queues' own waiting counts, never a recount of the
+  // topics drawn here.
+  const count = state.loaded ? state.projects.reduce((sum, project) => sum + project.waitingCount, 0) : null;
   const greeting = !state.catalogLoaded || !state.loaded ? COPY.loading
     : !state.hasProjects ? COPY.greeting.noProjects
       : !projects.length ? COPY.greeting.noneOpen
@@ -186,9 +209,23 @@ export function createHomeConversation({
   // The one send of a message to the PM of a project. The pane input path
   // pastes the body and submits it on its own carriage return.
   function sendToPm(pending) {
+    return issue(pending, requestId => ({ kind: "home_pm_send", project_key: pending.projectKey,
+      text: `${pending.answer}\r`, request_id: requestId }));
+  }
+
+  // The one queue operation of a decision: an answer, or "decide later".
+  function sendDecision(pending) {
+    return issue(pending, requestId => (pending.defer
+      ? { kind: "home_defer_decision", project_key: pending.projectKey, decision_id: pending.decisionId, request_id: requestId }
+      : { kind: "home_answer_decision", project_key: pending.projectKey, decision_id: pending.decisionId,
+        answer: pending.answer, request_id: requestId }));
+  }
+
+  // One request is in flight at a time, whichever kind it is.
+  function issue(pending, message) {
     if (state.read().pending) return false;
     const requestId = ++requestSequence;
-    const delivery = send({ kind: "home_pm_send", project_key: pending.projectKey, text: `${pending.message}\r`, request_id: requestId });
+    const delivery = send(message(requestId));
     if (delivery !== "sent") {
       state.update(current => ({ ...current, failure: { topicId: pending.topicId, message: COPY.disconnected } }));
       return false;
@@ -204,10 +241,10 @@ export function createHomeConversation({
   function answer(id, text, optionIndex, fromComposer) {
     const found = decision(id);
     if (!found || state.read().settled.some(entry => entry.id === id)) return false;
-    return sendToPm({
-      topicId: id, projectKey: found.project.key, project: found.project.title, subject: found.item.question,
-      lines: decisionMessageLines(found.item), answer: text, fromComposer,
-      message: decisionAnswerMessage(found.item, text, optionIndex),
+    return sendDecision({
+      topicId: id, decisionId: found.item.id, projectKey: found.project.key, project: found.project.title,
+      subject: found.item.question, lines: decisionMessageLines(found.item), fromComposer,
+      answer: optionIndex == null ? text : `${optionIndex + 1}. ${text}`,
     });
   }
 
@@ -216,10 +253,11 @@ export function createHomeConversation({
       const option = decision(id)?.item.options?.[optionIndex];
       if (option != null) answer(id, option, optionIndex, false);
     },
-    // Deferring is not an answer: the decision keeps waiting and keeps counting.
+    // Deferring is not an answer: the queue moves the decision to its tail,
+    // where it keeps waiting and keeps counting.
     defer(id) {
-      if (state.read().pending || !decision(id)) return;
-      state.update(current => ({ ...current, deferred: [...current.deferred.filter(other => other !== id), id], failure: null }));
+      const found = decision(id);
+      if (found) sendDecision({ topicId: id, decisionId: found.item.id, projectKey: found.project.key, defer: true });
     },
     reply(id) {
       if (decision(id)) state.update(current => ({ ...current, replyTo: id }));
@@ -236,7 +274,7 @@ export function createHomeConversation({
       if (current.replyTo && decision(current.replyTo)) return answer(current.replyTo, body, null, true);
       const project = current.projects.find(candidate => candidate.key === projectKey);
       if (!project) return false;
-      return sendToPm({ topicId: null, projectKey: project.key, project: project.title, answer: body, message: body, fromComposer: true });
+      return sendToPm({ topicId: null, projectKey: project.key, project: project.title, answer: body, fromComposer: true });
     },
     deleteTopic(id) {
       state.update(current => ({ ...current, hidden: [...current.hidden.filter(other => other !== id), id] }));
@@ -257,6 +295,10 @@ export function createHomeConversation({
       state.update(current => withSendResult(current, event.request_id, Boolean(event.ok), event.error));
       return true;
     }
+    if (event?.kind === "decision_result") {
+      state.update(current => withDecisionResult(current, event));
+      return true;
+    }
     return false;
   }
 
@@ -273,7 +315,7 @@ export function createHomeConversation({
     }
     sendTimer = win.setTimeout(() => {
       sendTimer = null;
-      state.update(current => withSendResult(current, requestId, false, COPY.notConfirmed));
+      state.update(current => withUnconfirmed(current, requestId));
     }, SEND_TIMEOUT_MS);
   });
 
@@ -293,7 +335,7 @@ export function createHomeConversation({
     if (refreshTimer) win.clearInterval(refreshTimer);
     refreshTimer = null;
     const pending = state.read().pending;
-    if (pending) state.update(current => withSendResult(current, pending.requestId, false, COPY.notConfirmed));
+    if (pending) state.update(current => withUnconfirmed(current, pending.requestId));
   }
 
   const container = createDetachedIslandContainer(document);

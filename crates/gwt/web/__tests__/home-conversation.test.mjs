@@ -19,13 +19,18 @@ const beta = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind
 
 const minutesAgo = minutes => new Date(Date.now() - minutes * 60_000).toISOString();
 
+// One item of a project's gwtd decision queue (Issue #7742).
 const decision = (id, minutes, question, options) => ({
-  id, kind: "decision", body: question, body_html: "", created_at: minutesAgo(minutes),
-  structured: { details: "", refs: [], summary: {
-    result: `${question} is waiting on you.`, impact: "Only this project is affected.",
-    decision: { question, recommendation: options[0], reason: "Nothing else changes by waiting.", options },
-  } },
+  id, issue: 7742, kind: "product", target: id, question, materials: `${question} is waiting on you.`,
+  impact: "Only this project is affected.", options, recommendation: options[0],
+  reason: "Nothing else changes by waiting.", status: "open", created_at: minutesAgo(minutes), deferred_seq: null,
 });
+const project = (source, decisions, extra = {}) => ({
+  project_key: source.project_key, title: source.title, pm_available: true,
+  waiting_count: decisions.length, decisions, ...extra,
+});
+// The queue of a project as it stands after an operation.
+const queue = items => ({ waiting_count: items.length, items });
 
 // React commits a click's state change on a later task in this DOM.
 const settle = async () => {
@@ -70,6 +75,8 @@ function fixture(search = "") {
   socket.open();
   const reads = () => socket.sent.filter(message => message.kind === "load_home_conversation");
   const sends = () => socket.sent.filter(message => message.kind === "home_pm_send");
+  const answers = () => socket.sent.filter(message => message.kind === "home_answer_decision");
+  const defers = () => socket.sent.filter(message => message.kind === "home_defer_decision");
   // Deliver the catalog, then answer the decisions read it triggers.
   const load = (projects, conversation, recent = []) => {
     socket.deliver({ kind: "hub_state", hub: { app_version: "9.9.9", projects, recent_projects: recent } });
@@ -77,18 +84,13 @@ function fixture(search = "") {
   };
   const home = () => document.querySelector("[data-home]");
   const topics = () => [...home().querySelectorAll(".gwt-home__timeline > [data-home-topic]")];
-  return { app, document, socket, timers, reads, sends, load, home, topics };
+  return { app, document, socket, timers, reads, sends, answers, defers, load, home, topics };
 }
 
-const twoProjects = [
-  { project_key: alpha.project_key, title: "Alpha", pm_available: true, decisions: [
-    decision("d-new", 26, "Save and push the unsaved changes?", ["Save and push", "Leave them"]),
-    decision("d-old", 60, "Approve the plan for the refresh?", ["Approve and start", "Ask for changes"]),
-  ] },
-  { project_key: beta.project_key, title: "Beta", pm_available: true, decisions: [
-    decision("d-mid", 48, "Fix the mapping and continue the import?", ["Fix and continue", "Stop the import"]),
-  ] },
-];
+const dNew = decision("d-new", 26, "Save and push the unsaved changes?", ["Save and push", "Leave them"]);
+const dOld = decision("d-old", 60, "Approve the plan for the refresh?", ["Approve and start", "Ask for changes"]);
+const dMid = decision("d-mid", 48, "Fix the mapping and continue the import?", ["Fix and continue", "Stop the import"]);
+const twoProjects = [project(alpha, [dNew, dOld]), project(beta, [dMid])];
 
 test("AC-1: Home is the conversation with the PM and carries no project status or count", () => {
   const { document, home, load, topics } = fixture();
@@ -118,19 +120,23 @@ test("AC-1: Home is the conversation with the PM and carries no project status o
 });
 
 test("AC-2: an option in the PM's message answers the decision of its own project", async () => {
-  const { document, home, load, sends, socket, topics } = fixture();
+  const { document, home, load, sends, answers, socket, topics } = fixture();
   load([alpha, beta], twoProjects);
   const betaTopic = topics()[1];
   await click(betaTopic.querySelector('[data-home-option="0"]'));
-  assert.deepEqual(sends(), [{
-    kind: "home_pm_send", project_key: beta.project_key, request_id: sends()[0].request_id,
-    text: 'Answer to "Fix the mapping and continue the import?": 1. Fix and continue\r',
+  // Issue #7742: the answer is a queue operation of that project, not a
+  // message typed into a PM pane, so it does not need a running PM.
+  assert.deepEqual(sends(), []);
+  assert.deepEqual(answers(), [{
+    kind: "home_answer_decision", project_key: beta.project_key, decision_id: "d-mid",
+    answer: "1. Fix and continue", request_id: answers()[0].request_id,
   }]);
   assert.equal(topics()[1].querySelector('[role="status"]').textContent, "Sending…");
   assert.equal(topics()[0].querySelector('[data-home-option="0"]').disabled, true, "one answer is in flight at a time");
   assert.equal(home().querySelector("[data-home-resolved]"), null, "an unconfirmed answer settles nothing");
 
-  socket.deliver({ kind: "pane_send_result", ok: true, window_id: "tab-b::pm", error: null, request_id: sends()[0].request_id });
+  socket.deliver({ kind: "decision_result", id: beta.project_key, request_id: answers()[0].request_id,
+    decision_id: "d-mid", action: "answer", ok: true, error: null, decisions: queue([]) });
   await settle();
   // The topic moves to the resolved list, above the open topics (design item 250).
   assert.deepEqual(topics().map(topic => topic.dataset.homeTopic), [`${alpha.project_key}:d-old`, `${alpha.project_key}:d-new`]);
@@ -142,14 +148,14 @@ test("AC-2: an option in the PM's message answers the decision of its own projec
 });
 
 test("AC-2: a refused answer keeps the decision open and says why", async () => {
-  const { home, load, sends, socket, topics } = fixture();
+  const { home, load, answers, socket, topics } = fixture();
   load([alpha], [twoProjects[0]]);
   await click(topics()[0].querySelector('[data-home-option="1"]'));
-  socket.deliver({ kind: "pane_send_result", ok: false, window_id: null,
-    error: "No Project Manager is running for this project. Open the project, then try again.", request_id: sends()[0].request_id });
+  socket.deliver({ kind: "decision_result", id: alpha.project_key, request_id: answers()[0].request_id,
+    decision_id: "d-old", action: "answer", ok: false, error: "decision d-old is no longer open (answered)" });
   await settle();
   assert.equal(topics().length, 2);
-  assert.match(topics()[0].querySelector('[role="alert"]').textContent, /No Project Manager is running/);
+  assert.match(topics()[0].querySelector('[role="alert"]').textContent, /no longer open/);
   assert.equal(topics()[0].querySelector('[data-home-option="1"]').disabled, false);
   assert.equal(home().querySelector("[data-home-resolved]"), null);
 });
@@ -164,18 +170,37 @@ test("an unconfirmed answer is released after its bounded wait", async () => {
   assert.equal(topics().length, 2);
 });
 
-test("Decide later keeps the decision waiting and counted", async () => {
-  const { home, load, sends, topics } = fixture();
+test("AC-4: Decide later moves the decision to the queue's tail and keeps it counted", async () => {
+  const { document, home, load, sends, answers, defers, socket, topics } = fixture();
   load([alpha], [twoProjects[0]]);
   await click(topics()[0].querySelector("[data-home-defer]"));
-  assert.deepEqual(sends(), [], "deferring sends nothing");
+  assert.deepEqual([...sends(), ...answers()], [], "deferring answers nothing");
+  assert.deepEqual(defers(), [{ kind: "home_defer_decision", project_key: alpha.project_key,
+    decision_id: "d-old", request_id: defers()[0].request_id }]);
+  socket.deliver({ kind: "decision_result", id: alpha.project_key, request_id: defers()[0].request_id,
+    decision_id: "d-old", action: "defer", ok: true, error: null,
+    decisions: queue([dNew, { ...dOld, deferred_seq: 1 }]) });
+  await settle();
   assert.equal(topics().length, 2);
   assert.equal(topics()[0].querySelector('[role="status"]').textContent, "Kept waiting. Nothing was decided.");
   assert.equal(home().querySelector("[data-home-waitjump]").textContent, "2 decisions waiting");
+  assert.equal(document.querySelector('.app-head [data-destination="pm"] .app-head__count').textContent, "2");
+});
+
+test("AC-4: the count is the queues' own waiting count, never a recount of the topics", () => {
+  const { document, home, load, topics } = fixture();
+  // An agent-registered decision without options keeps the free-form reply.
+  const open = { ...decision("d-agent", 5, "Which export format?", []), recommendation: null, reason: null };
+  load([alpha, beta], [project(alpha, [open]), project(beta, [], { waiting_count: 0 })]);
+  assert.equal(topics().length, 1);
+  assert.equal(topics()[0].querySelector("[data-home-option]"), null);
+  assert.ok(topics()[0].querySelector("[data-home-reply]"));
+  assert.equal(home().querySelector("[data-home-waitjump]").textContent, "1 decision waiting");
+  assert.equal(document.querySelector('.app-head [data-destination="pm"] .app-head__count').textContent, "1");
 });
 
 test("a reply goes through the one composer, to the topic it names", async () => {
-  const { app, home, load, sends, socket, topics } = fixture();
+  const { app, home, load, answers, socket, topics } = fixture();
   load([alpha, beta], twoProjects);
   assert.equal(home().querySelectorAll("textarea").length, 1, "one composer, no per-topic reply box");
   await click(topics()[1].querySelector("[data-home-reply]"));
@@ -183,11 +208,11 @@ test("a reply goes through the one composer, to the topic it names", async () =>
   assert.match(chip.textContent, /Replying to.*Fix the mapping and continue the import\?/);
   assert.equal(home().querySelector("[data-home-project]"), null, "a reply already has its project");
   app.home.actions.submit("Stop it until Monday", alpha.project_key);
-  assert.deepEqual(sends().map(({ project_key, text }) => ({ project_key, text })), [{
-    project_key: beta.project_key,
-    text: 'Answer to "Fix the mapping and continue the import?": Stop it until Monday\r',
+  assert.deepEqual(answers().map(({ project_key, decision_id, answer }) => ({ project_key, decision_id, answer })), [{
+    project_key: beta.project_key, decision_id: "d-mid", answer: "Stop it until Monday",
   }]);
-  socket.deliver({ kind: "pane_send_result", ok: true, window_id: "tab-b::pm", error: null, request_id: sends()[0].request_id });
+  socket.deliver({ kind: "decision_result", id: beta.project_key, request_id: answers()[0].request_id,
+    decision_id: "d-mid", action: "answer", ok: true, error: null, decisions: queue([]) });
   await settle();
   assert.equal(home().querySelector("[data-home-replychip]"), null);
   assert.match(home().querySelector("[data-home-resolved] summary").textContent, /Stop it until Monday/);
@@ -213,10 +238,11 @@ test("a new message is sent to the chosen project and never to a silent pick", a
 });
 
 test("a resolved topic is deleted only after a confirmation", async () => {
-  const { document, home, load, sends, socket, topics } = fixture();
+  const { document, home, load, answers, socket, topics } = fixture();
   load([alpha], [twoProjects[0]]);
   await click(topics()[0].querySelector('[data-home-option="0"]'));
-  socket.deliver({ kind: "pane_send_result", ok: true, window_id: "tab-a::pm", error: null, request_id: sends()[0].request_id });
+  socket.deliver({ kind: "decision_result", id: alpha.project_key, request_id: answers()[0].request_id,
+    decision_id: "d-old", action: "answer", ok: true, error: null, decisions: queue([dNew]) });
   await settle();
   await click(home().querySelector("[data-home-remove]"));
   const dialog = document.querySelector("body > [data-home-remove-dialog].modal-backdrop.open > .modal-shell");
@@ -262,10 +288,7 @@ test("AC-3: twenty open projects stay one conversation, and Projects is one step
   const many = Array.from({ length: 20 }, (_, index) => ({
     id: `tab-${index}`, project_key: index.toString(16).padStart(16, "0"), title: `Project ${index + 1}`, kind: "git",
   }));
-  load(many, many.map((project, index) => ({
-    project_key: project.project_key, title: project.title, pm_available: true,
-    decisions: index === 7 ? [decision("d-1", 5, "Ship it?", ["Ship", "Hold"])] : [],
-  })));
+  load(many, many.map((source, index) => project(source, index === 7 ? [decision("d-1", 5, "Ship it?", ["Ship", "Hold"])] : [])));
   assert.equal(topics().length, 1);
   assert.match(topics()[0].querySelector(".gwt-home__meta").textContent, /Project 8/);
   assert.equal(home().querySelector("[data-home-waitjump]").textContent, "1 decision waiting");
@@ -288,6 +311,6 @@ test("a late or repeated decisions snapshot never replaces a newer one", () => {
 
 test("a project whose decisions cannot be read is named, not hidden", () => {
   const { home, load } = fixture();
-  load([alpha], [{ project_key: alpha.project_key, title: "Alpha", pm_available: false, decisions: [], error: "store locked" }]);
+  load([alpha], [project(alpha, [], { pm_available: false, error: "store locked" })]);
   assert.equal(home().querySelector('.gwt-home__note[role="alert"]').textContent, "Decisions of Alpha could not be read: store locked");
 });

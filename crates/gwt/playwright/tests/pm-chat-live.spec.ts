@@ -1401,21 +1401,23 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       page.on('websocket', socket => {
         socket.on('framesent', ({ payload }) => {
           const event = JSON.parse(String(payload));
-          if (event.kind === 'pane_send_input') choiceRequests.push(event);
+          if (['answer_decision', 'defer_decision', 'pane_send_input'].includes(event.kind)) choiceRequests.push(event);
         });
         socket.on('framereceived', ({ payload }) => {
           const event = JSON.parse(String(payload));
-          if (event.kind === 'pane_send_result') choiceResults.push(event);
+          if (event.kind === 'decision_result') choiceResults.push(event);
         });
       });
       await gotoPmReports(page, undefined, BASE);
       const primaryKey = new URL(page.url()).pathname.split('/').at(-1)!;
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
-      // T-023: a decision is drawn only by Decide and the PM conversation, so
-      // the persisted legacy decision survives the restart there, not in Reports.
-      await expect(pane.locator('.task-decisions__card[data-decision-id="persisted-before-restart"]'))
-        .toContainText('Persisted before restart');
+      // T-023 / Issue #7742 AC-5: a decision is drawn only by Decide and the PM
+      // conversation, both from the gwtd decision queue. The unanswered legacy
+      // decision report is bridged into that queue, so it still waits there
+      // after the restart, not in Reports.
+      await expect(pane.locator('.task-decisions__card').filter({ hasText: 'Persisted before restart' }))
+        .toHaveCount(1);
       await expect(reports.locator('article[data-report-id="persisted-before-restart"]')).toHaveCount(0);
       const originalCount = await reports.locator('article').count();
       const state = ownedState;
@@ -1579,29 +1581,21 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         }
         await expect(reports.locator('.pm-chat__decision-controls')).toHaveCount(0);
 
-        // T-ASK-SURFACE / T-023: the PM conversation -> existing send path ->
-        // stopped-pane refusal. This fixture proves the request and visible
-        // failure, never a provider-accepted answer or a human Q&A capture.
+        // T-ASK-SURFACE / T-023 / Issue #7742: the PM conversation and Decide
+        // read the gwtd decision queue. A deferral and an answer are queue
+        // requests; nothing travels through the (stopped) PM pane, and the
+        // answer is accepted even though the PM session is not running.
         await pane.getByRole('button', { name: 'Chat', exact: true }).click();
         await expect(pane.getByRole('region', { name: 'Decision reports', exact: true })).toHaveCount(0);
         const conversation = pane.getByRole('log', { name: 'PM conversation messages' });
-        const chatDecision = conversation.locator(`.pm-chat__decision[data-decision-id="${decisionId}"]`);
-        await expect(chatDecision).toContainText('Which recovery?');
+        const chatDecision = conversation.locator('.pm-chat__decision').filter({ hasText: 'Which recovery?' });
+        await expect(chatDecision).toHaveCount(1);
         await expect(chatDecision).toContainText('I recommend: Retry.');
+        const queueId = await chatDecision.getAttribute('data-decision-id');
+        expect(queueId, 'the queue owns the decision identity, not the report').not.toBe(decisionId);
         await saveEvidence('four-choice-decision', await chatDecision.screenshot(), 'image/png');
         const choices = chatDecision.locator('.pm-chat__decision-option');
         await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
-        await choices.nth(1).focus();
-        await page.keyboard.press('Enter');
-        await expect.poll(() => choiceRequests.length).toBe(1);
-        expect(choiceRequests[0]).toEqual({ kind: 'pane_send_input', session_id: SESSION,
-          text: 'Answer to "Which recovery?": 2. Wait — keep the current state\r', request_id: expect.any(Number) });
-        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
-          .toMatchObject({ ok: false, request_id: choiceRequests[0].request_id });
-        await expect(chatDecision.getByRole('alert')).not.toBeEmpty();
-        await expect(choices.nth(1)).toBeEnabled();
-        await expect(choices.nth(1)).toBeFocused();
-        const refusal = await chatDecision.getByRole('alert').innerText();
         const draft = pane.getByRole('textbox', { name: 'Message to PM' });
         await draft.fill('Keep this original reply');
         await chatDecision.getByRole('button', { name: 'Other: write a reply', exact: true }).click();
@@ -1609,35 +1603,50 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await expect(draft).toHaveValue('Keep this original reply');
         const replyTarget = pane.locator('.pm-chat__reply-target');
         await expect(replyTarget).toContainText('Replying to: Which recovery?');
-        expect(choiceRequests).toHaveLength(1);
+        expect(choiceRequests).toHaveLength(0);
         await replyTarget.getByRole('button', { name: 'Cancel reply', exact: true }).click();
         await expect(replyTarget).toBeHidden();
-        await choices.nth(0).click();
-        await expect.poll(() => choiceRequests.length).toBe(2);
-        expect(choiceRequests[1].text).toBe('Answer to "Which recovery?": 1. Retry — repeat the check\r');
-        expect(choiceRequests[1].request_id).not.toBe(choiceRequests[0].request_id);
-        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
-          .toMatchObject({ ok: false });
-        await expect(chatDecision.getByRole('alert')).not.toBeEmpty();
-        await expect(draft).toHaveValue('Keep this original reply');
         await page.setViewportSize({ width: 404, height: 1000 });
         await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(400);
         await expect.poll(() => conversation.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
         await chatDecision.scrollIntoViewIfNeeded();
         await saveEvidence('chat-decision-narrow', await pane.screenshot(), 'image/png');
         await page.setViewportSize({ width: 1440, height: 1000 });
-        const retryRefusal = choiceResults.find(result => result.request_id === choiceRequests[1].request_id).error;
-        expect(refusal).toBeTruthy();
+        // AC-4: "Decide later" keeps the decision waiting at the end of the
+        // queue, and the waiting count does not change.
         await pane.getByRole('button', { name: 'Decide', exact: true }).click();
-        const decideCard = pane.locator(`.task-decisions__card[data-decision-id="${decisionId}"]`);
-        await expect(decideCard.getByRole('alert')).toContainText(retryRefusal);
-        // "Decide later" keeps the refused decision waiting at the end of the queue.
+        const decideCard = pane.locator(`.task-decisions__card[data-decision-id="${queueId}"]`);
         const waitingCount = await pane.locator('.task-decisions__count').innerText();
+        const waitingBefore = Number(waitingCount.match(/^(\d+) decisions? waiting$/)?.[1]);
+        expect(waitingBefore, 'the bridged legacy decision and the typed one both wait').toBeGreaterThanOrEqual(2);
         await decideCard.getByRole('button', { name: 'Decide later', exact: true }).click();
-        await expect(pane.locator('.task-decisions__card').last()).toHaveAttribute('data-decision-id', decisionId);
+        await expect.poll(() => choiceRequests.length).toBe(1);
+        expect(choiceRequests[0]).toEqual({ kind: 'defer_decision', id: expect.any(String),
+          request_id: expect.any(Number), decision_id: queueId });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
+          .toMatchObject({ ok: true, action: 'defer', decision_id: queueId });
+        await expect(pane.locator('.task-decisions__card').last()).toHaveAttribute('data-decision-id', queueId!);
         await expect(pane.locator('.task-decisions__notice')).toContainText('Kept waiting');
         await expect(pane.locator('.task-decisions__count')).toHaveText(waitingCount);
-        expect(choiceRequests).toHaveLength(2);
+        // AC-2: the answer is recorded by the queue while the PM is stopped;
+        // the decision leaves both surfaces and the count drops by one.
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        await choices.nth(1).focus();
+        await page.keyboard.press('Enter');
+        await expect.poll(() => choiceRequests.length).toBe(2);
+        expect(choiceRequests[1]).toEqual({ kind: 'answer_decision', id: expect.any(String),
+          request_id: expect.any(Number), decision_id: queueId, answer: '2. Wait — keep the current state' });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
+          .toMatchObject({ ok: true, action: 'answer', decision_id: queueId });
+        await expect(chatDecision).toHaveCount(0);
+        await expect(draft).toHaveValue('Keep this original reply');
+        await pane.getByRole('button', { name: 'Decide', exact: true }).click();
+        await expect(decideCard).toHaveCount(0);
+        await expect(pane.locator('.task-decisions__count'))
+          .toHaveText(`${waitingBefore - 1} decision${waitingBefore - 1 === 1 ? '' : 's'} waiting`);
+        await expect(pane.locator('.task-decisions__notice')).toHaveText('Answer sent. The waiting session continues with it.');
+        expect(choiceRequests.filter(request => request.kind === 'pane_send_input'),
+          'a decision never travels through the PM pane').toEqual([]);
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await saveEvidence('decision-controls-requests', JSON.stringify({ choiceRequests, choiceResults }), 'application/json');
         const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
