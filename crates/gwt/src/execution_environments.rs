@@ -72,6 +72,10 @@ pub struct Store {
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub environments: Vec<ExecutionEnvironment>,
+    /// Issue #7732 (SPEC #7007 item 194): the Project Manager's own list of
+    /// environment ids, in priority order. Empty while it was never saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pm_environment_ids: Vec<String>,
 }
 
 fn schema_version() -> u32 {
@@ -84,6 +88,7 @@ impl Default for Store {
             schema_version: SCHEMA_VERSION,
             accounts: Vec::new(),
             environments: Vec::new(),
+            pm_environment_ids: Vec::new(),
         }
     }
 }
@@ -205,10 +210,12 @@ impl Store {
             .into_iter()
             .partition(|environment| environment.account_id == account_id);
         self.environments = kept;
-        deleted
+        let deleted: Vec<String> = deleted
             .into_iter()
             .map(|environment: ExecutionEnvironment| environment.id)
-            .collect()
+            .collect();
+        self.pm_environment_ids.retain(|id| !deleted.contains(id));
+        deleted
     }
 
     /// Why `account_id` cannot be registered through `via_tool`, if it cannot.
@@ -293,6 +300,55 @@ impl Store {
                 "This execution environment no longer exists.".into(),
             ));
         }
+        self.pm_environment_ids.retain(|id| id != environment_id);
+        Ok(())
+    }
+
+    /// The Project Manager's execution environments in priority order, and
+    /// whether that list was saved (item 194). A machine that never saved
+    /// one shows each account's own environment, in the order registered.
+    pub fn pm_list(&self) -> (bool, Vec<&ExecutionEnvironment>) {
+        let saved: Vec<_> = self
+            .pm_environment_ids
+            .iter()
+            .filter_map(|id| self.environment(id))
+            .collect();
+        if !saved.is_empty() {
+            return (true, saved);
+        }
+        let own = self
+            .environments
+            .iter()
+            .filter(|environment| self.kind(environment) == EnvironmentKind::Set)
+            .collect();
+        (false, own)
+    }
+
+    /// Replace the Project Manager's list. The last entry cannot be removed
+    /// (items 220 and 233): an empty list is refused here, whatever the
+    /// screen allowed.
+    pub fn set_pm_list(&mut self, environment_ids: &[String]) -> Result<(), Refusal> {
+        if environment_ids.is_empty() {
+            return Err(Refusal(
+                "Keep at least one execution environment. The Project Manager cannot start a session without one."
+                    .into(),
+            ));
+        }
+        for (index, id) in environment_ids.iter().enumerate() {
+            if self.environment(id).is_none() {
+                return Err(Refusal(
+                    "An execution environment on the list no longer exists. Reload and try again."
+                        .into(),
+                ));
+            }
+            if environment_ids[..index].contains(id) {
+                return Err(Refusal(
+                    "An execution environment is on the list more than once. Keep one of them."
+                        .into(),
+                ));
+            }
+        }
+        self.pm_environment_ids = environment_ids.to_vec();
         Ok(())
     }
 
@@ -598,6 +654,70 @@ mod tests {
         assert_eq!(environment.via_tool, "claude");
         assert_eq!(store.kind(environment), EnvironmentKind::Set);
         assert_eq!(environment.runtime, RuntimeOptions::default());
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    fn pm_ids(store: &Store) -> (bool, Vec<&str>) {
+        let (saved, list) = store.pm_list();
+        (saved, list.iter().map(|e| e.id.as_str()).collect())
+    }
+
+    #[test]
+    fn the_project_manager_list_starts_from_the_accounts_and_keeps_its_saved_order() {
+        let mut store = store_with(&["claude", "codex"]);
+        store.register_via("claude", "hermes", None).unwrap();
+        // Never saved: each account's own environment, in the order registered.
+        assert_eq!(pm_ids(&store), (false, vec!["claude", "codex"]));
+
+        store
+            .set_pm_list(&ids(&["codex", "claude:hermes"]))
+            .unwrap();
+        assert_eq!(pm_ids(&store), (true, vec!["codex", "claude:hermes"]));
+
+        // A machine that saved no list writes none, and an older file reads as "never saved".
+        let saved = serde_json::to_string(&store).unwrap();
+        assert_eq!(serde_json::from_str::<Store>(&saved).unwrap(), store);
+        let never = serde_json::to_string(&store_with(&["claude"])).unwrap();
+        assert!(!never.contains("pm_environment_ids"), "{never}");
+        assert!(serde_json::from_str::<Store>(&never)
+            .unwrap()
+            .pm_environment_ids
+            .is_empty());
+    }
+
+    #[test]
+    fn the_last_project_manager_environment_cannot_be_removed() {
+        let mut store = store_with(&["claude", "codex"]);
+        store.set_pm_list(&ids(&["codex"])).unwrap();
+        let before = store.clone();
+
+        let empty = store.set_pm_list(&[]).unwrap_err();
+        assert!(empty.0.contains("Keep at least one"), "{empty}");
+        let gone = store.set_pm_list(&ids(&["codex", "gone"])).unwrap_err();
+        assert!(gone.0.contains("no longer exists"), "{gone}");
+        let twice = store.set_pm_list(&ids(&["codex", "codex"])).unwrap_err();
+        assert!(twice.0.contains("more than once"), "{twice}");
+        assert_eq!(store, before, "a refused save changes nothing");
+    }
+
+    #[test]
+    fn deleting_an_account_or_environment_takes_it_off_the_project_manager_list() {
+        let mut store = store_with(&["claude", "codex"]);
+        store.register_via("claude", "hermes", None).unwrap();
+        store
+            .set_pm_list(&ids(&["claude:hermes", "codex"]))
+            .unwrap();
+
+        store.delete_environment("claude:hermes").unwrap();
+        assert_eq!(pm_ids(&store), (true, vec!["codex"]));
+        // Deleting the account behind the last entry is not stopped. The
+        // list goes back to the one made from the remaining accounts.
+        store.delete_account("codex");
+        assert!(store.pm_environment_ids.is_empty());
+        assert_eq!(pm_ids(&store), (false, vec!["claude"]));
     }
 
     #[test]

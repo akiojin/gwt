@@ -44,7 +44,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createExecutionEnvironments } from "/execution-environments.js";
       import { createProjectThemes } from "/project-themes.js";
       import { createAppChrome } from "/app-chrome.js";
-      import { renderProjectExecutionEnvironments } from "/project-execution-environments.js";
+      import { renderPmExecutionEnvironments, renderProjectExecutionEnvironments } from "/project-execution-environments.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
@@ -4824,6 +4824,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onOpenAgents: () => pmSettingsPanel.openAgents(),
         rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
         renderProjectEnvironments: renderProjectExecutionEnvironments,
+        renderPmEnvironments: renderPmExecutionEnvironments,
       });
 
       function ensureWindow(windowData) {
@@ -5215,7 +5216,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
           if (diagnostic) {
             const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
-            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
+            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error", transition: event.notification_transition };
             if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
             else notificationCenter.recordError(notice);
           }
@@ -5246,6 +5247,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         // inbox snapshots never generate a second notification.
         notificationCenter.record({
           kind: "issue-monitor",
+          transition: event?.notification_transition,
           level: event?.level,
           title: monitorNotice?.title || "Issues",
           message: event?.message,

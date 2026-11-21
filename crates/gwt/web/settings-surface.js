@@ -982,6 +982,7 @@ export function createSettingsSurface({
   tuningController,
   onReloadProfile,
   renderProjectEnvironments = null,
+  renderPmEnvironments = null,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1380,7 +1381,25 @@ export function createSettingsSurface({
       }
       // Issue #7741: `execution_environments` carries the list of the project
       // the reply was scoped to.
+      // Issue #7732: the Project Manager's own list is saved with this
+      // machine, so every reply carries it, with or without a project.
+      const pmEnvironmentsModel = createUiStateStore({ view: null, pending: false, error: null }, { scheduleFrame });
+      function renderPmEnvironmentsPanel(body, state = pmEnvironmentsModel.read()) {
+        const panel = body.querySelector("[data-settings-pm-environments]");
+        if (panel) renderPmEnvironments?.(panel, {
+          view: state.view, error: state.error,
+          send: message => {
+            pmEnvironmentsModel.update(current => ({ ...current, pending: true, error: null }));
+            send(message);
+          },
+        });
+      }
+      pmEnvironmentsModel.subscribe(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderPmEnvironmentsPanel(body, state);
+      });
       function applyExecutionEnvironments(view) {
+        if (view) pmEnvironmentsModel.update(() => ({ view, pending: false, error: null }));
         const root = view?.project?.project_root;
         if (!root) return;
         issueSettingsModel.update(state => ({ ...state, [root]: {
@@ -1390,6 +1409,10 @@ export function createSettingsSurface({
       // Only a save this window sent is answered here; other refusals belong
       // to the Execution environments screen.
       function applyExecutionEnvironmentError(event) {
+        if (pmEnvironmentsModel.read().pending) {
+          pmEnvironmentsModel.update(state => ({ ...state, pending: false, error: event.message }));
+          return;
+        }
         const root = event.project_root;
         if (!root) return;
         issueSettingsModel.update(state => state[root]?.environmentsPending ? { ...state, [root]: {
@@ -1535,6 +1558,8 @@ export function createSettingsSurface({
           send({ kind: "get_issue_monitor_profiles" });
           send({ kind: "get_execution_environments" });
           send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+        } else {
+          send({ kind: "get_execution_environments" });
         }
         send({ kind: "list_supported_agents" });
         send({ kind: "get_system_settings" });
@@ -1701,6 +1726,10 @@ export function createSettingsSurface({
         ledgerLink.addEventListener("click", () => document.dispatchEvent(new document.defaultView.CustomEvent("agents:open")));
         ledgerSection.appendChild(ledgerLink);
         panelSystem.appendChild(ledgerSection);
+        // Issue #7732: the Project Manager's execution environments.
+        const pmEnvironments = createDiv();
+        pmEnvironments.dataset.settingsPmEnvironments = "";
+        panelSystem.appendChild(pmEnvironments);
         // Issue #7731: every step of the first-run setup stays reachable
         // from here. The setup lives on the Hub page.
         const setupSection = createDiv("settings-section");
@@ -1820,6 +1849,7 @@ export function createSettingsSurface({
           });
         });
         renderProjectSettings(body);
+        renderPmEnvironmentsPanel(body);
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());

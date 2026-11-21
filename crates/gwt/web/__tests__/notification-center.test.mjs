@@ -639,6 +639,7 @@ test("the triage row keeps marker, title, dismiss, message and time in one scan 
       "notification-center__severity",
       "notification-center__title",
       "notification-center__dismiss",
+      "notification-center__category",
       "notification-center__message",
       "notification-center__time",
     ],
@@ -720,6 +721,67 @@ test("severity styling never borrows the accent color", () => {
     assert.ok(
       !/--color-focus-ring|--color-state-active/.test(body),
       `${selector} must encode severity independently of the accent: ${body.trim()}`,
+    );
+  }
+});
+
+// Issue #7732 AC-1 (SPEC #7007 item 211, US-5): three categories, a category
+// badge on every row, and the number of notices in each category. The same
+// notice stays one row with its occurrence count.
+function categoryCounts(document) {
+  return Object.fromEntries([...document.querySelectorAll(".notification-center__category-count")]
+    .map(node => [node.dataset.category, node.textContent]));
+}
+
+test("every notice has one of three categories, shown on its row", () => {
+  const { document, center } = setup();
+  center.record({ kind: "issue-monitor", transition: "needs_human", level: "warn", title: "Needs human", issueNumber: 12 });
+  center.record({ kind: "attention", level: "done", title: "Agent finished" });
+  center.record({ kind: "board-mention", title: "Mentioned on the Board" });
+  center.recordError({ key: "surface:board", title: "Board failed to load" });
+  center.record({ kind: "attention", level: "warn", title: "Agent is waiting for input" });
+  center.record({ kind: "queue", category: "decision", title: "Named by its source" });
+  center.record({ kind: "queue", category: "unknown", title: "Unrecognized category" });
+
+  const labels = items(document).map(item => [
+    item.dataset.category, item.querySelector(".notification-center__category").textContent]);
+  assert.deepEqual(labels, [
+    ["info", "Info"], ["decision", "Decision"], ["decision", "Decision"], ["info", "Info"], ["info", "Info"],
+    ["report", "Completion report"], ["decision", "Decision"],
+  ]);
+  assert.deepEqual(center.read().rows.map(row => row.category),
+    ["info", "decision", "decision", "info", "info", "report", "decision"]);
+});
+
+test("the drawer counts the notices in each category, and a repeated notice counts once", () => {
+  const { document, center } = setup();
+  assert.deepEqual(categoryCounts(document), { decision: "Decision 0", report: "Completion report 0", info: "Info 0" });
+
+  const decision = { kind: "needs_human", category: "decision", level: "warn", title: "Needs human", issueNumber: 12 };
+  center.record(decision);
+  center.record(decision);
+  center.record(decision);
+  center.record({ kind: "attention", category: "report", level: "done", title: "Agent finished" });
+  center.record({ kind: "board-mention", title: "Mentioned on the Board" });
+
+  assert.equal(items(document).length, 3, "the same notice is one row");
+  const repeated = items(document).find(item => item.dataset.category === "decision");
+  assert.equal(repeated.querySelector(".notification-center__count").textContent, "×3");
+  assert.deepEqual(categoryCounts(document), { decision: "Decision 1", report: "Completion report 1", info: "Info 1" });
+  assert.deepEqual(center.read().categoryCounts, { decision: 1, report: 1, info: 1 });
+
+  click(document, repeated.querySelector(".notification-center__dismiss"));
+  assert.deepEqual(categoryCounts(document), { decision: "Decision 0", report: "Completion report 1", info: "Info 1" });
+  center.clearAll();
+  assert.deepEqual(center.read().categoryCounts, { decision: 0, report: 0, info: 0 });
+});
+
+test("category badges are told apart by a token color and by their text", () => {
+  for (const category of ["decision", "report", "info"]) {
+    assert.match(
+      ruleBlock(`.notification-center__category[data-category="${category}"]`),
+      /color:\s*var\(--[a-z-]+\)/,
+      `${category} badge needs a token-driven color`,
     );
   }
 });

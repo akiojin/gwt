@@ -8,8 +8,8 @@ use super::*;
 use gwt::execution_environments::{self as environments, Store};
 use gwt::protocol::{
     ExecutionAccountView, ExecutionEnvironmentProjectView, ExecutionEnvironmentViaOptionView,
-    ExecutionEnvironmentView, ExecutionEnvironmentsView, ProjectExecutionEnvironmentView,
-    ProjectExecutionEnvironmentsView,
+    ExecutionEnvironmentView, ExecutionEnvironmentsView, PmExecutionEnvironmentsView,
+    ProjectExecutionEnvironmentView, ProjectExecutionEnvironmentsView,
 };
 use gwt::ProjectExecutionEnvironment;
 
@@ -129,7 +129,21 @@ pub(crate) fn execution_environments_view(
                     .collect(),
             },
         );
+    let (pm_saved, pm_list) = store.pm_list();
+    let pm = PmExecutionEnvironmentsView {
+        saved: pm_saved,
+        entries: pm_list
+            .into_iter()
+            .map(|environment| ProjectExecutionEnvironmentView {
+                environment_id: environment.id.clone(),
+                tool: environment.via_tool.clone(),
+                tool_name: tool_name(&environment.via_tool),
+                name: Some(environment.name.clone()),
+            })
+            .collect(),
+    };
     ExecutionEnvironmentsView {
+        pm,
         accounts: store
             .accounts
             .iter()
@@ -430,6 +444,11 @@ impl AppRuntime {
                 }
                 None => Err("Open a project to change its execution environments.".into()),
             },
+            FrontendEvent::SetPmExecutionEnvironments { environment_ids } => {
+                environments::mutate(|store| Ok(store.set_pm_list(&environment_ids)?))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
             _ => return Vec::new(),
         };
         match outcome {
@@ -610,6 +629,38 @@ mod tests {
             "glm-4.6"
         );
         assert!(view.project.is_none());
+    }
+
+    #[test]
+    fn the_project_manager_list_is_shown_with_or_without_an_open_project() {
+        let names = |view: &ExecutionEnvironmentsView| -> Vec<String> {
+            view.pm
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone().unwrap())
+                .collect()
+        };
+        let unsaved = view(&[], None);
+        assert!(!unsaved.pm.saved);
+        assert_eq!(names(&unsaved), ["Claude Code 1", "Codex 1"]);
+
+        let mut store = store();
+        store
+            .set_pm_list(&["claude:hermes".to_string(), "codex".to_string()])
+            .unwrap();
+        let saved = execution_environments_view(
+            &store,
+            &[project("alpha", &["codex"], &[])],
+            Some(Path::new("/projects/alpha")),
+            &|_| true,
+            &|_| environments::ToolSettings::default(),
+        );
+        assert!(saved.pm.saved);
+        assert_eq!(
+            names(&saved),
+            ["Claude Code 1 (via Hermes Agent)", "Codex 1"]
+        );
+        assert_eq!(saved.pm.entries[0].tool_name, "Hermes Agent");
     }
 
     #[test]

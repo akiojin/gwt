@@ -11,7 +11,7 @@ import { TaskProgress } from "../surfaces/TaskProgress.jsx";
 import { TaskLog } from "../surfaces/TaskLog.jsx";
 import { ExecutionEnvironments } from "../surfaces/ExecutionEnvironments.jsx";
 import { AppFooter, AppFooterPm, AppHeader, AppHeaderNav } from "../surfaces/AppChrome.jsx";
-import { ProjectExecutionEnvironments } from "../surfaces/ProjectExecutionEnvironments.jsx";
+import { PmExecutionEnvironments, ProjectExecutionEnvironments } from "../surfaces/ProjectExecutionEnvironments.jsx";
 import { HomeConversation } from "../surfaces/HomeConversation.jsx";
 import { ProjectThemes } from "../surfaces/ProjectThemes.jsx";
 import { AgentHistoryPlans } from "../surfaces/AgentHistoryPlans.jsx";
@@ -29,6 +29,7 @@ const islands = Object.freeze({
   "app-footer": AppFooter,
   "app-footer-pm": AppFooterPm,
   "project-execution-environments": ProjectExecutionEnvironments,
+  "pm-execution-environments": PmExecutionEnvironments,
   "home-conversation": HomeConversation,
   "project-themes": ProjectThemes,
   "agent-history-plans": AgentHistoryPlans,

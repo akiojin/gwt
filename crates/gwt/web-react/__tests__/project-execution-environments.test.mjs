@@ -5,7 +5,7 @@ import { parseHTML } from "linkedom";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import "../__tests__/jsx-loader.mjs";
-import { ProjectExecutionEnvironments, addableEnvironments } from "../src/surfaces/ProjectExecutionEnvironments.jsx";
+import { PmExecutionEnvironments, ProjectExecutionEnvironments, addableEnvironments } from "../src/surfaces/ProjectExecutionEnvironments.jsx";
 import { createUiStateStore } from "../../web/ui-state-store.js";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -28,7 +28,7 @@ const view = (ids, saved = true) => ({
   project: { project_root: "/projects/alpha", saved, entries: ids.map(entry) },
 });
 
-async function mount(current, error = null) {
+async function mount(current, error = null, Component = ProjectExecutionEnvironments) {
   const { document, window } = parseHTML("<!doctype html><html><body></body></html>");
   globalThis.document = document;
   globalThis.window = window;
@@ -36,7 +36,7 @@ async function mount(current, error = null) {
   const saved = [];
   let managed = 0;
   const root = createRoot(document.body);
-  await act(async () => root.render(React.createElement(ProjectExecutionEnvironments, {
+  await act(async () => root.render(React.createElement(Component, {
     store, onSave: ids => saved.push(ids), onManage: () => { managed += 1; },
   })));
   const button = label => [...document.querySelectorAll("button")].find(item =>
@@ -122,4 +122,42 @@ test("the list leads to the screen where environments are managed", async () => 
   const { button, click, managed } = await mount(view(["claude"]));
   await click(button("Manage execution environments"));
   assert.equal(managed(), 1);
+});
+
+// Issue #7732 AC-2 (SPEC #7007 items 194 and 233): the Project Manager's own
+// list on this machine, with the same guard on its last entry.
+const pmView = (ids, saved = true) => ({ environments: ENVIRONMENTS, pm: { saved, entries: ids.map(entry) } });
+
+test("the Project Manager list is reordered, added to and removed from", async () => {
+  const { document, saved, button, click } = await mount(pmView(["claude", "codex"], false), null, PmExecutionEnvironments);
+  assert.equal(document.querySelector("legend").textContent, "Project Manager execution environments");
+  const names = [...document.querySelectorAll(".project-environments__name")].map(node => node.textContent);
+  assert.deepEqual(names, ["1. Claude Code 1", "2. Codex 1"]);
+  assert.match(document.body.textContent, /made from the accounts registered on this machine/);
+  assert.match(document.body.textContent, /do not follow this list yet/);
+
+  await click(button("Move down Claude Code 1"));
+  await click(button("Remove Codex 1"));
+  // Two environments through one tool are both offered: this list is not a project's.
+  const options = [...document.querySelectorAll("select option")];
+  assert.deepEqual(options.map(option => [option.getAttribute("value"), option.hasAttribute("disabled")]),
+    [["claude:hermes", false], ["codex:hermes", false]]);
+  await act(async () => {
+    document.querySelector("form").dispatchEvent(new document.defaultView.Event("submit", { bubbles: true, cancelable: true }));
+  });
+  assert.deepEqual(saved, [["codex", "claude"], ["claude"], ["claude", "codex", "claude:hermes"]]);
+});
+
+test("the last Project Manager environment cannot be removed, and the row says why", async () => {
+  const one = await mount(pmView(["claude"]), null, PmExecutionEnvironments);
+  const remove = one.button("Remove Claude Code 1");
+  assert.equal(remove.hasAttribute("disabled"), true);
+  const reason = one.document.getElementById(remove.getAttribute("aria-describedby"));
+  assert.match(reason.textContent, /Keep at least one\. The Project Manager cannot start a session/);
+  assert.deepEqual(one.saved, []);
+
+  const refused = await mount(pmView(["claude"]), "Keep at least one execution environment.", PmExecutionEnvironments);
+  assert.match(refused.document.querySelector('[role="alert"]').textContent, /Keep at least one/);
+  const none = await mount({ environments: [], pm: { saved: false, entries: [] } }, null, PmExecutionEnvironments);
+  assert.match(none.document.body.textContent, /No execution environment is registered on this machine yet\./);
 });
