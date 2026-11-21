@@ -187,6 +187,10 @@ const FAMILY_SUMMARIES: &[(&str, &str)] = &[
         "concern",
         "Track, measure, and resolve user concerns (SPEC #4320)",
     ),
+    (
+        "decision",
+        "Register, bundle, answer, and defer decisions in the project decision queue (Issue #7742)",
+    ),
     ("diagnostics", "Host CPU diagnostics"),
     (
         "execution",
