@@ -8468,7 +8468,6 @@ impl AppRuntime {
         client_id: &str,
         title: String,
         launch: bool,
-        auto_merge: bool,
     ) -> Vec<OutboundEvent> {
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -8521,13 +8520,8 @@ impl AppRuntime {
             }
         };
 
-        let labels: Vec<String> = if auto_merge {
-            vec!["auto-merge".to_string()]
-        } else {
-            Vec::new()
-        };
         let body = quick_issue_body(&title);
-        let snapshot = match client.create_issue(&title, &body, &labels) {
+        let snapshot = match client.create_issue(&title, &body, &[]) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return vec![OutboundEvent::reply(
@@ -11616,6 +11610,7 @@ impl AppRuntime {
             | FrontendEvent::RequestWorkAdvisory { id, .. }
             | FrontendEvent::SelectKnowledgeBridgeEntry { id, .. }
             | FrontendEvent::UpdateKnowledgeBridgePhase { id, .. }
+            | FrontendEvent::SetIssueAutonomousTarget { id, .. }
             | FrontendEvent::RunBranchCleanup { id, .. }
             | FrontendEvent::SyncBranchCleanup { id, .. }
             | FrontendEvent::ClearBranchCleanupStatus { id, .. }
@@ -12036,6 +12031,7 @@ impl AppRuntime {
             | FrontendEvent::RequestWorkAdvisory { id, .. }
             | FrontendEvent::SelectKnowledgeBridgeEntry { id, .. }
             | FrontendEvent::UpdateKnowledgeBridgePhase { id, .. }
+            | FrontendEvent::SetIssueAutonomousTarget { id, .. }
             | FrontendEvent::RunBranchCleanup { id, .. }
             | FrontendEvent::SyncBranchCleanup { id, .. }
             | FrontendEvent::ClearBranchCleanupStatus { id, .. }
@@ -12707,6 +12703,18 @@ impl AppRuntime {
                 issue_number,
                 target_phase.as_deref(),
             ),
+            FrontendEvent::SetIssueAutonomousTarget {
+                id,
+                request_id,
+                issue_number,
+                enabled,
+            } => self.set_issue_autonomous_target_events(
+                &client_id,
+                &id,
+                request_id,
+                issue_number,
+                enabled,
+            ),
             FrontendEvent::RunBranchCleanup {
                 id,
                 branches,
@@ -13131,11 +13139,9 @@ impl AppRuntime {
             // Internal agent-listener command. Browser-scoped requests are
             // deliberately inert; the authenticated route below owns it.
             FrontendEvent::AgentIssueMonitorScanNow { .. } => Vec::new(),
-            FrontendEvent::QuickRegisterIssue {
-                title,
-                launch,
-                auto_merge,
-            } => self.quick_register_issue_events(context, &client_id, title, launch, auto_merge),
+            FrontendEvent::QuickRegisterIssue { title, launch } => {
+                self.quick_register_issue_events(context, &client_id, title, launch)
+            }
             FrontendEvent::IssueMonitorLaunchNow {
                 issue_number,
                 linked_issue_kind,

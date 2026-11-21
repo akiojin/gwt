@@ -220,6 +220,7 @@ fn default_launch_tiers() -> Vec<Vec<IssueMonitorLaunchProfile>> {
                 skip_permissions: true,
                 fast_mode: false,
                 codex_speed: Default::default(),
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),

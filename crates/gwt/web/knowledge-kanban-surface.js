@@ -1724,14 +1724,7 @@ export function createKnowledgeKanbanSurface({
         title.dataset.role = "issue-new-title";
         title.placeholder = "Issue title";
         titleLabel.appendChild(title);
-        const autoMergeLabel = createNode("label", "issue-new-check");
-        const autoMerge = createNode("input", "");
-        autoMerge.type = "checkbox";
-        autoMerge.dataset.role = "issue-new-auto-merge";
-        autoMergeLabel.appendChild(autoMerge);
-        autoMergeLabel.appendChild(createNode("span", "", "auto-merge"));
         content.appendChild(titleLabel);
-        content.appendChild(autoMergeLabel);
 
         const footer = createNode("footer", "modal-footer");
         const cancel = createNode("button", "text-button", "Cancel");
@@ -1773,7 +1766,6 @@ export function createKnowledgeKanbanSurface({
             kind: "quick_register_issue",
             title: value,
             launch,
-            auto_merge: autoMerge.checked === true,
           });
           close();
         };
@@ -1798,7 +1790,6 @@ export function createKnowledgeKanbanSurface({
         issueNewPopover = {
           open() {
             title.value = "";
-            autoMerge.checked = false;
             returnFocus = document.activeElement;
             backdrop.classList.add("open");
             backdrop.removeAttribute("aria-hidden");
@@ -4414,6 +4405,115 @@ export function createKnowledgeKanbanSurface({
         return band;
       }
 
+      // Issue #7729 (SPEC #7007 N-2): the operations an Issue takes from its
+      // detail, in one place whatever its state. Priority is the launch queue
+      // order (item 137), the autonomous target is the per-Issue opt-in the
+      // Monitor reads, and the terminal has two ways in: the current session
+      // and the past ones (items 137 and 193).
+      function issueOperationRow(key, title, status) {
+        const row = createNode("div", "issue-detail-operation");
+        row.dataset.operation = key;
+        const copy = createNode("div", "issue-detail-operation-copy");
+        copy.appendChild(createNode("span", "issue-detail-operation-title", title));
+        copy.appendChild(createNode("span", "issue-detail-operation-status", status));
+        row.appendChild(copy);
+        const actions = createNode("div", "issue-detail-operation-actions");
+        row.appendChild(actions);
+        return { row, actions };
+      }
+
+      function sendIssueAutonomousTarget(windowId, state, issueNumber, enabled) {
+        const requestId = nextKnowledgeLoadRequestId++;
+        state.pendingAutonomousTargets ||= new Set();
+        state.pendingAutonomousTargets.add(issueNumber);
+        send({
+          kind: "set_issue_autonomous_target",
+          id: windowId,
+          request_id: requestId,
+          issue_number: issueNumber,
+          enabled,
+        });
+        renderKnowledgeBridge(windowId);
+      }
+
+      function renderIssueDetailOperations(context, detail) {
+        const { windowId, state, entry, queue } = context;
+        const number = entry.number;
+        const section = createNode("section", "knowledge-section issue-detail-operations");
+        section.setAttribute("aria-label", `Issue #${number} operations`);
+        section.appendChild(createNode("div", "knowledge-section-title", "Operations"));
+
+        const priority = issueOperationRow("priority", "Priority", queue
+          ? `Position ${queue.index + 1} of ${queue.length} in the launch queue`
+          : "Not in the launch queue");
+        for (const action of queue ? ["move-to-top", "move-up", "move-down"] : ["queue-push"]) {
+          if (issueRowActionAvailable(action, context)) {
+            priority.actions.appendChild(issueRowActionButton(action, context));
+          }
+        }
+        section.appendChild(priority.row);
+
+        // The Monitor decides what counts as a target and names the label that
+        // carries it; this screen states the role and adds the label as a note.
+        const reported = typeof entry.autonomous_target === "boolean";
+        const included = entry.autonomous_target === true;
+        const modeOff = issueMonitorModel.read().status.autonomous_mode === false;
+        const autonomous = issueOperationRow("autonomous", "Autonomous target", [
+          !reported ? "Not reported yet" : included ? "Included" : "Not included",
+          entry.autonomous_target_label ? `Label: ${entry.autonomous_target_label}` : "",
+          modeOff ? "Autonomous mode is off for this project" : "",
+        ].filter(Boolean).join(" · "));
+        const toggle = createNode("button", "wizard-button is-compact", included ? "Exclude" : "Include");
+        toggle.type = "button";
+        toggle.dataset.action = "set-autonomous-target";
+        toggle.setAttribute("aria-label", included
+          ? `Exclude Issue #${number} from autonomous runs`
+          : `Include Issue #${number} in autonomous runs`);
+        toggle.disabled = !reported || state.pendingAutonomousTargets?.has(number) === true;
+        explainIssueControl(toggle, !reported
+          ? "Reload the Issue list to read whether this Issue is an autonomous target."
+          : included
+            ? "Stop starting and finishing this Issue without a person. It stays in the queue for a manual launch."
+            : "Let this Issue start and finish without a person when autonomous mode is on.",
+        `autonomous-target-${number}`);
+        toggle.addEventListener("click", () => {
+          if (!toggle.disabled) sendIssueAutonomousTarget(windowId, state, number, !included);
+        });
+        autonomous.actions.appendChild(toggle);
+        section.appendChild(autonomous.row);
+
+        const past = (detail.related_works || []).flatMap(work => work.agents || [])
+          .flatMap(agent => agent.sessions || []).filter(session => !session.is_active).length;
+        const live = issueRowActionAvailable("open-window", context);
+        const sessions = issueOperationRow("sessions", "Sessions",
+          `${live ? "Current session" : "No current session"} · ${past === 0 ? "No past sessions"
+            : `${past} past session${past === 1 ? "" : "s"}`}`);
+        if (live) {
+          const open = issueRowActionButton("open-window", context);
+          // Its own id: the action band above already carries "open-window".
+          open.dataset.action = "open-terminal";
+          open.textContent = "Open terminal";
+          open.setAttribute("aria-label", `Open the terminal of the current session for Issue #${number}`);
+          sessions.actions.appendChild(open);
+        }
+        if (past > 0) {
+          const show = createNode("button", "wizard-button is-compact", "Past sessions");
+          show.type = "button";
+          show.dataset.action = "show-past-sessions";
+          show.setAttribute("aria-label", `Show past sessions for Issue #${number}`);
+          show.addEventListener("click", () => {
+            const related = section.parentElement?.querySelector(".knowledge-related-works");
+            if (!related) return;
+            related.setAttribute("tabindex", "-1");
+            related.scrollIntoView?.({ block: "start" });
+            related.focus?.();
+          });
+          sessions.actions.appendChild(show);
+        }
+        section.appendChild(sessions.row);
+        return section;
+      }
+
       function syncIssuePreviewVisibility(element, state) {
         const root = element?.querySelector(".issue-bridge-root");
         if (!root) return;
@@ -4467,7 +4567,8 @@ export function createKnowledgeKanbanSurface({
         const key = JSON.stringify([
           state.detail, state.detailLoading, state.selectedNumber, state.previewHidden,
           state.issueDetailView, agentPreview, state.error, entry, work, attention,
-          relatedActions,
+          relatedActions, state.pendingAutonomousTargets?.has(Number(number)) === true,
+          issueMonitorModel.read().status.autonomous_mode,
           agentPreview && state.issueDetailView === "output" && Boolean(isAgentsSurfaceMounted()),
           queue.findIndex(item => item.number === entry?.number), queue.length,
           [faces.inlineWindow, faces.surfaceWindow].map(target => target ? [
@@ -4684,6 +4785,7 @@ export function createKnowledgeKanbanSurface({
             createNode("div", "knowledge-detail-empty", "No cached detail available"),
           );
         }
+        scroll.insertBefore(renderIssueDetailOperations(context, detail), scroll.firstChild);
         detailPane.appendChild(scroll);
       }
 
@@ -5857,6 +5959,7 @@ export function createKnowledgeKanbanSurface({
             if (state.pendingPhaseUpdates) {
               state.pendingPhaseUpdates.delete(event.issue_number);
             }
+            state.pendingAutonomousTargets?.delete(event.issue_number);
             if (event.result?.kind === "ok") {
               const fresh = event.result.fresh_entry;
               if (fresh) {

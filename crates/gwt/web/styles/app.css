@@ -6703,6 +6703,23 @@ body.route-body {
 .issue-detail-tabs { flex-shrink: 0; padding: var(--space-2); }
 .issue-detail-provenance { color: var(--color-text-muted); font-size: var(--type-xs); }
 
+/* Issue #7729 (SPEC #7007 N-2): priority, autonomous target and sessions of one Issue. */
+.issue-detail-operations { display: flex; flex-direction: column; gap: var(--space-2); }
+.issue-detail-operation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.issue-detail-operation-copy { display: flex; flex-direction: column; gap: var(--space-0-5); min-width: 0; }
+.issue-detail-operation-title { color: var(--color-text); font-size: var(--type-sm); font-weight: 600; }
+.issue-detail-operation-status { color: var(--color-text-muted); font-size: var(--type-xs); overflow-wrap: anywhere; }
+.issue-detail-operation-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+
 /* Project execution health never replaces the browser connection indicator. */
 .project-owner-health {
   color: var(--color-text-muted);

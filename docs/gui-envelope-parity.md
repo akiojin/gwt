@@ -109,6 +109,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `RequestWorkAdvisory` | 読み取り | — | Start Work で重複作業を調べるための候補を取得する。 |
 | `SelectKnowledgeBridgeEntry` | GUI 内部 | — | Knowledge ウィンドウ内の選択とプレビューを更新する。 |
 | `UpdateKnowledgeBridgePhase` | 一部対応 | `issue.label` | ラベルを操作できる。GUI は一覧の変更を既存フェーズラベルの置換として扱う。 |
+| `SetIssueAutonomousTarget` | 対応 | `issue.label` | 課題を自律駆動の対象に含める／外す。対象の印である `auto-merge` ラベルを付け外しする。 |
 | `RunBranchCleanup` | 一部対応 | `branch.prune_merged` | マージ済みブランチの削除に対応する。GUI は候補選択、作業ツリーの削除オプションと進捗も扱う。 |
 | `RunWorkspaceCleanup` | 対象外 | — | ブランチに紐づく作業ツリーの除去を、利用中のセッションと削除オプションを確認して実行する。 |
 | `SyncBranchCleanup` | GUI 内部 | — | 再接続したブラウザへ実行中のクリーンアップの履歴を再配信する。 |
