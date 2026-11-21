@@ -7,7 +7,6 @@ import {
   clearLiveLaunchWizard,
   gotoLiveGwt,
   openLiveGwtProject,
-  openLiveLaunchWizardForBranch,
   sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
 
@@ -23,6 +22,8 @@ const backendFor = (info: TestInfo): Backend => BACKENDS[themeFor(info)] ?? {
 };
 const lines = async <T,>(path: string): Promise<T[]> => (await readFile(path, "utf8").catch(() => ""))
   .split("\n").filter(Boolean).map(line => JSON.parse(line));
+// Issue #5594: the column stays a short value; the reason is the cell's tooltip.
+const available = (row: Locator) => row.locator("td").nth(3);
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 async function cursor(page: Page): Promise<number> {
@@ -122,21 +123,29 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     const claude = panel.locator('[data-agent-id="claude"]');
     await expect(claude).toContainText("Installed");
     await expect(claude).toContainText("2.1.0");
-    await expect(claude).toContainText(/channel/i);
+    await expect(available(claude)).toHaveText("Unknown");
+    await expect(available(claude)).toHaveAttribute("title", /native release channel cannot be verified/i);
     await expect(claude.getByRole("button", { name: /^Update / })).toHaveCount(0);
     const hermes = panel.locator('[data-agent-id="hermes"]');
     await expect(hermes).toContainText("Installed");
-    await expect(hermes).toContainText(/channel/i);
+    await expect(available(hermes)).toHaveText("Unknown");
+    await expect(available(hermes)).toHaveAttribute("title", /update channel and commit cannot be matched/i);
     await expect(hermes.getByRole("button", { name: /^Update / })).toHaveCount(0);
     const copilot = panel.locator('[data-agent-id="gh"]');
     await expect(copilot).toContainText("Installed");
     await expect(copilot).toContainText("1.0.0");
-    await expect(copilot).toContainText(/distribution cannot be verified.*built-in CLI or an extension/i);
+    await expect(available(copilot)).toHaveText("Unknown");
+    await expect(available(copilot)).toHaveAttribute("title",
+      /distribution cannot be verified.*built-in CLI or an extension/i);
     await expect(copilot.getByRole("button", { name: /^Update / })).toHaveCount(0);
     const unknown = panel.locator('[data-agent-id="codex"]');
     await expect(unknown).toContainText("Installed");
-    await expect(unknown).toContainText("Unknown (version unavailable)");
-    if (process.env.GWT_L3_BACKENDS) await expect(unknown).toContainText("Fixture Codex metadata unavailable");
+    await expect(unknown.locator("td").nth(2)).toHaveText("Unknown");
+    await expect(unknown.locator("td").nth(2)).toHaveAttribute("title", "Installed version unavailable");
+    if (process.env.GWT_L3_BACKENDS) {
+      await expect(available(unknown)).toHaveText("Unknown");
+      await expect(available(unknown)).toHaveAttribute("title", /Fixture Codex metadata unavailable/);
+    }
     const missing = panel.locator(`[data-agent-id="${MISSING_AGENT}"]`);
     await expect(missing).toContainText("Not installed");
     await expect(missing).not.toContainText("Unknown");
@@ -181,7 +190,8 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
       expect(failed.available_version).toBeNull();
       expect(failed.update_available).toBe(false);
       expect(failed.update_check_error).toContain("Fixture Antigravity metadata unavailable");
-      await expect(row).toContainText("Fixture Antigravity metadata unavailable");
+      await expect(available(row)).toHaveText("Unknown");
+      await expect(available(row)).toHaveAttribute("title", /Fixture Antigravity metadata unavailable/);
       await expect(row.getByRole("button", { name: /^Update / })).toHaveCount(0);
       await expect(panel.locator('[data-agent-id="grok"]')).toContainText("2.0.0");
       await screenshot(settings, info, "supported-agents-metadata-failed");
@@ -200,13 +210,17 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     expect(updated.update_available).toBe(false);
     await expect(row).toContainText("Latest");
     await expect(row.getByRole("button", { name: /^Update / })).toHaveCount(0);
-    expect((await lines<string[]>(join(backend.home, "gh-argv.jsonl")))
-      .every(args => ["--version", "copilot --version",
-        "pr list --json number,title,headRefName,state --state all --limit 999"].includes(args.join(" "))),
-    "GitHub Copilot detection cannot invoke metadata or an unverified updater").toBe(true);
+    // The app also reads the project's GitHub state through gh; only the
+    // Copilot distribution surface is this maintenance flow's concern.
+    const distribution = (args: string[]) => ["copilot", "extension"].includes(args[0]);
+    expect((await lines<string[]>(join(backend.home, "gh-argv.jsonl"))).filter(distribution)
+      .filter(args => args.join(" ") !== "copilot --version"),
+    "GitHub Copilot detection cannot invoke metadata or an unverified updater").toEqual([]);
     expect(await lines(join(backend.home, "native-update-argv.jsonl")))
       .toEqual([{ command: "agy", args: ["update"] }]);
-    expect(await lines(join(backend.home, "rejected-operations.jsonl"))).toEqual([]);
+    expect((await lines<{ command: string; args: string[] }>(join(backend.home, "rejected-operations.jsonl")))
+      .filter(operation => operation.command !== "gh" || distribution(operation.args)),
+    "no installer, updater or metadata route outside the verified ones").toEqual([]);
     await screenshot(settings, info, "supported-agents-native-updated");
   });
 
@@ -235,7 +249,9 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     await screenshot(settings, info, "supported-agents-installed");
     // AC-8: maintenance invalidates detection for the existing launch path;
     // no app restart and no fallback to offering still-missing built-ins.
-    const launch = await openLiveLaunchWizardForBranch(page, "fixture-main");
+    // Issues windows no longer open the wizard; the window-less route does.
+    await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard",
+      branch_name: "fixture-main", linked_issue_number: null });
     try {
       const wizard = page.locator("#wizard-modal");
       const configure = wizard.getByRole("button", { name: /^Configure and start/ });
@@ -260,9 +276,7 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
         .locator(".wizard-summary-value")).toHaveText("OpenCode");
       await expect(summary.filter({ has: page.locator(".wizard-summary-label", { hasText: /^Version$/ }) })
         .locator(".wizard-summary-value")).toContainText("1.0.0");
-    } finally {
-      try { await clearLiveLaunchWizard(page); } finally { await launch.cleanup(); }
-    }
+    } finally { await clearLiveLaunchWizard(page); }
   });
 
   // Issue #7744: a live agent holds back maintenance of its own tool only.
