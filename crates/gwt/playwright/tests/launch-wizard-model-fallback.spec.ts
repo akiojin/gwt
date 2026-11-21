@@ -250,13 +250,12 @@ test("live Codex picker exposes the current visible snapshot", async ({ page }, 
   test.setTimeout(120_000);
   const errors = collectBrowserErrors(page);
   const release = await acquireLiveGwtBackendLock(base, testInfo);
-  let cleanup: (() => Promise<void>) | undefined;
   try {
     await gotoLiveGwt(page, base, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
-    cleanup = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    await openLiveLaunchWizardForBranch(page);
     // Opening and hydration are asynchronous. Hydration resets the selected
     // launch path, so wait for its final state before applying picker choices.
     await page.waitForFunction(() => {
@@ -297,6 +296,6 @@ test("live Codex picker exposes the current visible snapshot", async ({ page }, 
     expect(errors).toEqual([]);
   } finally {
     try { await clearLiveLaunchWizard(page); }
-    finally { try { await cleanup?.(); } finally { await release(); } }
+    finally { await release(); }
   }
 });

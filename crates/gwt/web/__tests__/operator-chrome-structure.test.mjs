@@ -3624,36 +3624,19 @@ test("hydrated Launch Wizard has no Intake-specific copy override", () => {
   );
 });
 
-test("live Launch Wizard helper reuses only visible Work surfaces and owns only new ids", () => {
+test("live Launch Wizard helper opens the wizard without addressing or owning a window", () => {
+  const start = liveGwtHelperSource.indexOf("export async function openLiveLaunchWizardForBranch");
+  assert.notEqual(start, -1, "expected the shared live Launch Wizard helper");
+  const helper = liveGwtHelperSource.slice(start, liveGwtHelperSource.indexOf("\n}\n", start));
   assert.match(
-    liveGwtHelperSource,
-    /const preexistingWorkSurfaceIds = await liveWorkSurfaceIds\(page\);/,
-    "helper must snapshot every existing Work/legacy Branches id before create_window",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /async function topmostLiveWorkSurfaceId[\s\S]{0,400}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
-    "existing wizard targets must exclude hidden other-project Work surfaces",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /\.waitForFunction\(\(selector\) => \{[\s\S]{0,300}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
-    "materialized wizard targets must exclude hidden other-project Work surfaces",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /const createdWorkWindow = !preexistingWorkSurfaceIds\.has\(id\);/,
-    "cleanup ownership must come from the returned id, not from whether create_window was sent",
+    helper,
+    /kind:\s*"open_active_work_launch_wizard",\s*branch_name:\s*branchName/,
+    "helper must use the route that needs no Work/Branches window (Issue #7766)",
   );
   assert.doesNotMatch(
-    liveGwtHelperSource,
-    /const createdWorkWindow = !id;/,
-    "a hidden existing singleton must never be treated as helper-owned",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /cleanup:\s*async \(\) => \{\s*if \(!createdWorkWindow \|\| cleaned\) return;[\s\S]{0,700}?kind:\s*"close_window"/,
-    "cleanup must gate close_window on ownership of the returned id",
+    helper,
+    /"open_launch_wizard"|"create_window"|"close_window"/,
+    "the backend refuses an Issues window id, so the helper must not select, create, or close windows",
   );
 });
 

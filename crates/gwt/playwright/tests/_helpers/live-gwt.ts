@@ -328,114 +328,22 @@ export async function sendLiveGwtEvent(page: Page, payload: unknown): Promise<vo
   }, payload);
 }
 
-export type LiveLaunchWizardFixture = {
-  windowId: string;
-  createdWorkWindow: boolean;
-  cleanup: () => Promise<void>;
-};
-
-const LIVE_WORK_SURFACE_SELECTOR = [
-  '.workspace-window[data-preset="issue"]',
-  '.workspace-window[data-preset="work"]',
-  '.workspace-window[data-preset="branches"]',
-].join(", ");
-
 /**
- * Open the normal branch Launch Wizard through the active project's
- * canonical Issues/legacy Work singleton. An existing user window is reused
- * and never owned by this helper. If none is visible, the helper requests a
- * persisted Work window; the backend may create one or reveal an existing
- * singleton. Cleanup closes the returned window only when its id did not exist
- * before that request. Neither path creates a branch, worktree, or agent
- * process.
+ * Open the normal branch Launch Wizard for the active project. It uses the
+ * route that addresses no window: `open_launch_wizard` accepts only Work and
+ * Branches windows, and a current backend has neither (it creates Issues for
+ * both presets and migrates persisted ones on load), so an Issues window id is
+ * always refused (Issue #7766). No window, branch, worktree, or agent process
+ * is created, so there is nothing to clean up afterwards.
  */
 export async function openLiveLaunchWizardForBranch(
   page: Page,
   branchName = process.env.GWT_PLAYWRIGHT_BRANCH_NAME ?? "develop",
-): Promise<LiveLaunchWizardFixture> {
-  const preexistingWorkSurfaceIds = await liveWorkSurfaceIds(page);
-  let id = await topmostLiveWorkSurfaceId(page);
-  if (!id) {
-    await sendLiveGwtEvent(page, {
-      kind: "create_window",
-      preset: "work",
-      bounds: { x: 96, y: 96, width: 880, height: 520 },
-    });
-    id = await page
-      .waitForFunction((selector) => {
-        const nodes = Array.from(document.querySelectorAll(selector))
-          .filter((node) => !(node as HTMLElement).hidden);
-        const topmost = nodes.sort((left, right) => {
-          const leftZ =
-            Number.parseInt((left as HTMLElement).style.zIndex || "0", 10) || 0;
-          const rightZ =
-            Number.parseInt((right as HTMLElement).style.zIndex || "0", 10) || 0;
-          return rightZ - leftZ;
-        })[0] as HTMLElement | undefined;
-        return topmost?.dataset.id || "";
-      }, LIVE_WORK_SURFACE_SELECTOR)
-      .then((handle) => handle.jsonValue());
-  }
-  if (!id) throw new Error("Work window fixture did not materialize");
-  const createdWorkWindow = !preexistingWorkSurfaceIds.has(id);
-
+): Promise<void> {
   await sendLiveGwtEvent(page, {
-    kind: "open_launch_wizard",
-    id,
+    kind: "open_active_work_launch_wizard",
     branch_name: branchName,
-  });
-
-  let cleaned = false;
-  return {
-    windowId: id,
-    createdWorkWindow,
-    cleanup: async () => {
-      if (!createdWorkWindow || cleaned) return;
-      const stillExists = await page
-        .locator(LIVE_WORK_SURFACE_SELECTOR)
-        .evaluateAll(
-          (nodes, windowId) =>
-            nodes.some((node) => (node as HTMLElement).dataset.id === windowId),
-          id,
-        );
-      if (!stillExists) {
-        cleaned = true;
-        return;
-      }
-      await sendLiveGwtEvent(page, { kind: "close_window", id });
-      await page.waitForFunction(
-        ({ selector, windowId }) =>
-          !Array.from(document.querySelectorAll(selector))
-            .some((node) => (node as HTMLElement).dataset.id === windowId),
-        { selector: LIVE_WORK_SURFACE_SELECTOR, windowId: id },
-      );
-      cleaned = true;
-    },
-  };
-}
-
-async function liveWorkSurfaceIds(page: Page): Promise<Set<string>> {
-  const ids = await page.locator(LIVE_WORK_SURFACE_SELECTOR).evaluateAll((nodes) =>
-    nodes.flatMap((node) => {
-      const id = (node as HTMLElement).dataset.id;
-      return id ? [id] : [];
-    }),
-  );
-  return new Set(ids);
-}
-
-async function topmostLiveWorkSurfaceId(page: Page): Promise<string | null> {
-  return page.locator(LIVE_WORK_SURFACE_SELECTOR).evaluateAll((nodes) => {
-    const topmost = [...nodes]
-      .filter((node) => !(node as HTMLElement).hidden)
-      .sort((left, right) => {
-        const leftZ =
-          Number.parseInt((left as HTMLElement).style.zIndex || "0", 10) || 0;
-        const rightZ =
-          Number.parseInt((right as HTMLElement).style.zIndex || "0", 10) || 0;
-        return rightZ - leftZ;
-      })[0] as HTMLElement | undefined;
-    return topmost?.dataset.id || null;
+    linked_issue_number: null,
   });
 }
 
