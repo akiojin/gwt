@@ -26,25 +26,23 @@ function reportDisplayText(report) {
   return lines.join('\n');
 }
 
-// What a PM decision report says, in the one shape every surface that draws
-// it reads (SPEC #7007 T-023 / T-021): the Decide queue, this conversation
-// and the Home conversation. Typed packets expose their options; untyped
-// decision reports keep the plain reply path and carry their display text.
-export function decisionItemFromReport(report) {
-  const summary = report.structured?.summary ?? null;
-  const packet = summary?.decision ?? null;
-  const displayText = reportDisplayText(report);
+// One decision of the gwtd decision queue (Issue #7742), in the one shape
+// every surface that draws it reads: the Decide queue, this conversation and
+// the Home conversation. Options become numbered choices; a decision without
+// options keeps the free-form reply and carries its text.
+export function decisionItemFromQueue(item) {
   return {
-    id: String(report.id),
-    question: packet?.question || summary?.result || displayText.split('\n')[0] || 'Decision needed',
-    result: summary?.result ?? null,
-    impact: summary?.impact ?? null,
-    owner: summary?.owner ?? null,
-    recommendation: packet?.recommendation ?? null,
-    reason: packet?.reason ?? null,
-    options: packet ? [...packet.options] : null,
-    detailText: packet ? null : displayText,
-    createdAt: report.created_at ?? null,
+    id: String(item.id),
+    question: item.question || 'Decision needed',
+    result: item.materials || null,
+    impact: item.impact ?? null,
+    owner: item.owner || (item.issue != null ? `Issue #${item.issue}` : null),
+    recommendation: item.recommendation ?? null,
+    reason: item.reason ?? null,
+    options: item.options?.length ? [...item.options] : null,
+    detailText: item.detail_text ?? null,
+    createdAt: item.created_at ?? null,
+    deferred: item.deferred_seq != null,
   };
 }
 
@@ -58,12 +56,6 @@ export function decisionMessageLines(item) {
     item.recommendation ? `I recommend: ${item.recommendation}.${item.reason ? ` ${item.reason}` : ''}` : null,
     item.impact,
   ].filter(Boolean);
-}
-
-// The one wording of an answer sent to a PM, for a numbered option or a
-// free-form reply.
-export function decisionAnswerMessage(item, text, optionIndex = null) {
-  return `Answer to "${item.question}": ${optionIndex == null ? text : `${optionIndex + 1}. ${text}`}`;
 }
 
 // Explicit PM reports and raw terminal packets share one immutable window version.
@@ -681,19 +673,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const chatDecisionRows = new Map();
   const decisionControls = new WeakMap();
   function decisionItems(state) {
-    return (state?.decisions?.items || []).map(item => ({
-      id: String(item.id),
-      question: item.question || 'Decision needed',
-      result: item.materials || null,
-      impact: item.impact ?? null,
-      owner: item.owner || (item.issue != null ? `Issue #${item.issue}` : null),
-      recommendation: item.recommendation ?? null,
-      reason: item.reason ?? null,
-      options: item.options?.length ? [...item.options] : null,
-      detailText: item.detail_text ?? null,
-      createdAt: item.created_at ?? null,
-      deferred: item.deferred_seq != null,
-    }));
+    return (state?.decisions?.items || []).map(decisionItemFromQueue);
   }
   // The queue's own result settles an answer or a deferral exactly once.
   function observeDecisionRequest(request, items) {

@@ -488,7 +488,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       socket.send(JSON.stringify(message));
       return "sent";
     }
-    if (["confirm_close_project", "cancel_close_project", "preview_close_project", "load_home_conversation", "home_pm_send",
+    if (["confirm_close_project", "cancel_close_project", "preview_close_project", "load_home_conversation", "home_pm_send", "home_answer_decision", "home_defer_decision",
       "get_first_run_setup", "save_first_run_setup"].includes(message.kind)) return "unavailable";
     queued.push(message);
     return "queued";
@@ -541,7 +541,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       }
       picker.connectionLost();
       queued = queued.filter(({ kind }) =>
-        !["open_project_dialog", "select_clone_project_parent", "clone_project_start", "load_home_conversation", "home_pm_send"].includes(kind));
+        !["open_project_dialog", "select_clone_project_parent", "clone_project_start", "load_home_conversation", "home_pm_send", "home_answer_decision", "home_defer_decision"].includes(kind));
       reconnectTimer = win.setTimeout(connect, 1000);
     });
   }

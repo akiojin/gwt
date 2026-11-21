@@ -469,16 +469,6 @@ impl AppRuntime {
         decision_id: String,
         answer: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let action = if answer.is_some() { "answer" } else { "defer" };
-        let result = |ok, error, decisions| BackendEvent::DecisionResult {
-            id: window_id.to_owned(),
-            request_id,
-            decision_id: decision_id.clone(),
-            action: action.to_owned(),
-            ok,
-            error,
-            decisions,
-        };
         let root = self
             .window_lookup
             .get(window_id)
@@ -488,16 +478,44 @@ impl AppRuntime {
         let Some(root) = root else {
             return vec![OutboundEvent::reply(
                 &client_id,
-                result(
-                    false,
-                    Some("The selected project window is unavailable; reload the current project before retrying.".to_owned()),
-                    None,
-                ),
+                BackendEvent::DecisionResult {
+                    id: window_id.to_owned(),
+                    request_id,
+                    decision_id,
+                    action: if answer.is_some() { "answer" } else { "defer" }.to_owned(),
+                    ok: false,
+                    error: Some("The selected project window is unavailable; reload the current project before retrying.".to_owned()),
+                    decisions: None,
+                },
             )];
         };
-        let proxy = self.proxy.for_project(context.clone());
+        self.run_decision_request(
+            self.proxy.for_project(context.clone()),
+            root,
+            client_id,
+            window_id,
+            request_id,
+            decision_id,
+            answer,
+        )
+    }
+
+    /// The one queue write behind every surface that answers or defers: the
+    /// project window and Home. `reply_id` is echoed back as the result's `id`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_decision_request(
+        &self,
+        proxy: super::AppEventProxy,
+        root: std::path::PathBuf,
+        client_id: ClientId,
+        reply_id: &str,
+        request_id: u64,
+        decision_id: String,
+        answer: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let action = if answer.is_some() { "answer" } else { "defer" };
         let reply_client = client_id.clone();
-        let id = window_id.to_owned();
+        let id = reply_id.to_owned();
         let task_decision = decision_id.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
             use gwt_core::decision_queue as queue;
@@ -531,7 +549,15 @@ impl AppRuntime {
             Ok(()) => Vec::new(),
             Err(error) => vec![OutboundEvent::reply(
                 &client_id,
-                result(false, Some(error.to_string()), None),
+                BackendEvent::DecisionResult {
+                    id: reply_id.to_owned(),
+                    request_id,
+                    decision_id,
+                    action: action.to_owned(),
+                    ok: false,
+                    error: Some(error.to_string()),
+                    decisions: None,
+                },
             )],
         }
     }

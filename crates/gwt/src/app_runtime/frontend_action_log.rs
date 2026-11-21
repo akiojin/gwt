@@ -727,6 +727,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::HomePmSend { project_key, .. } => {
             FrontendUserActionLog::new("home_pm_send", "pm").target(project_key)
         }
+        FrontendEvent::HomeAnswerDecision { decision_id, .. } => {
+            FrontendUserActionLog::new("home_answer_decision", "pm").target(decision_id)
+        }
+        FrontendEvent::HomeDeferDecision { decision_id, .. } => {
+            FrontendUserActionLog::new("home_defer_decision", "pm").target(decision_id)
+        }
         FrontendEvent::ReopenPmRequestTask { id, .. } => {
             FrontendUserActionLog::new("reopen_pm_request_task", "pm").window(id)
         }

@@ -801,6 +801,20 @@ pub enum FrontendEvent {
         text: String,
         request_id: u64,
     },
+    /// Issue #7742: answer one waiting decision of an open project from Home.
+    /// The queue belongs to the project, so no PM has to be running.
+    HomeAnswerDecision {
+        project_key: String,
+        decision_id: String,
+        answer: String,
+        request_id: u64,
+    },
+    /// Issue #7742: "decide later" from Home.
+    HomeDeferDecision {
+        project_key: String,
+        decision_id: String,
+        request_id: u64,
+    },
     /// Issue #7643: read the themes of this project (Issues that have
     /// sub-issues) and what was completed today, for the Themes screen.
     LoadThemes {
@@ -1870,44 +1884,40 @@ pub struct ProjectOwnerHealthView {
     pub detail: Option<String>,
 }
 
-/// Issue #7639: what one open project's PM contributes to the Home
-/// conversation. Only decisions: project work status and counts stay on the
-/// project's own page (design item 5).
+/// Issue #7639: what one open project contributes to the Home conversation.
+/// Only decisions: project work status and counts stay on the project's own
+/// page (design item 5). Issue #7742: they are the project's gwtd decision
+/// queue, so Home, the header and the Decide screen show the same decisions.
 #[derive(Debug, Clone, Serialize)]
 pub struct HomeProjectConversationView {
     pub project_key: String,
     pub title: String,
     /// Whether a PM session is registered for this project and can be sent to.
     pub pm_available: bool,
-    pub decisions: Vec<PmReportView>,
+    /// The queue's own waiting count; Home never recounts the items.
+    pub waiting_count: usize,
+    pub decisions: Vec<gwt_core::decision_queue::DecisionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl HomeProjectConversationView {
-    /// Project the reports of one project store: decisions only, oldest first.
-    pub fn from_reports(
+    pub fn from_queue(
         project_key: String,
         title: String,
         pm_available: bool,
-        reports: std::result::Result<Vec<gwt_core::pm_report::PmReport>, String>,
+        queue: std::result::Result<gwt_core::decision_queue::QueueSnapshot, String>,
     ) -> Self {
-        let (decisions, error) = match reports {
-            Ok(reports) => (
-                reports
-                    .into_iter()
-                    .filter(|report| report.kind == gwt_core::pm_report::PmReportKind::Decision)
-                    .map(PmReportView::from)
-                    .collect(),
-                None,
-            ),
-            Err(error) => (Vec::new(), Some(error)),
+        let (queue, error) = match queue {
+            Ok(queue) => (queue, None),
+            Err(error) => (Default::default(), Some(error)),
         };
         Self {
             project_key,
             title,
             pm_available,
-            decisions,
+            waiting_count: queue.waiting_count,
+            decisions: queue.items,
             error,
         }
     }
@@ -2912,7 +2922,8 @@ pub enum BackendEvent {
         decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
     },
     /// Client-scoped reply to `AnswerDecision` / `DeferDecision`, carrying the
-    /// queue as it stands after the operation.
+    /// queue as it stands after the operation. `id` is the window the request
+    /// named; for the Home requests it is the project key.
     DecisionResult {
         id: String,
         request_id: u64,
@@ -6103,33 +6114,32 @@ mod tests {
 
     #[test]
     fn home_conversation_carries_decisions_only() {
-        let report = |id: &str, kind| gwt_core::pm_report::PmReport {
-            id: id.to_string(),
-            kind,
-            question: None,
-            body: format!("{id} body"),
-            created_at: gwt_core::timestamp::UtcTimestamp::now(),
-            structured: None,
-        };
         use crate::HomeProjectConversationView;
-        let view = HomeProjectConversationView::from_reports(
+        let item: gwt_core::decision_queue::DecisionItem =
+            serde_json::from_value(serde_json::json!({
+                "id": "decision-1", "issue": 7742, "kind": "product", "target": "storage",
+                "question": "Which storage?", "materials": "Both pass.", "status": "open",
+                "created_at": gwt_core::timestamp::UtcTimestamp::now(),
+            }))
+            .expect("queue item");
+        let view = HomeProjectConversationView::from_queue(
             "0123456789abcdef".to_string(),
             "Alpha".to_string(),
             true,
-            Ok(vec![
-                report("progress-1", gwt_core::pm_report::PmReportKind::Progress),
-                report("decision-1", gwt_core::pm_report::PmReportKind::Decision),
-            ]),
+            Ok(gwt_core::decision_queue::QueueSnapshot {
+                waiting_count: 1,
+                items: vec![item],
+            }),
         );
         let event = BackendEvent::HomeConversation {
             request_id: 3,
             projects: vec![
                 view,
-                HomeProjectConversationView::from_reports(
+                HomeProjectConversationView::from_queue(
                     "fedcba9876543210".to_string(),
                     "Beta".to_string(),
                     false,
-                    Err("The report store is unreadable.".to_string()),
+                    Err("The decision queue is unreadable.".to_string()),
                 ),
             ],
         };
@@ -6142,11 +6152,13 @@ mod tests {
         assert_eq!(alpha["pm_available"], true);
         assert_eq!(alpha["decisions"].as_array().expect("decisions").len(), 1);
         assert_eq!(alpha["decisions"][0]["id"], "decision-1");
+        assert_eq!(alpha["waiting_count"], 1);
         assert!(alpha.get("error").is_none());
         let beta = &value["projects"][1];
         assert_eq!(beta["pm_available"], false);
         assert_eq!(beta["decisions"].as_array().expect("decisions").len(), 0);
-        assert_eq!(beta["error"], "The report store is unreadable.");
+        assert_eq!(beta["waiting_count"], 0);
+        assert_eq!(beta["error"], "The decision queue is unreadable.");
     }
 
     #[test]

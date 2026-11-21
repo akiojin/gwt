@@ -11864,6 +11864,23 @@ impl AppRuntime {
                 text,
                 request_id,
             } => self.home_pm_send_events(client_id, &project_key, &text, request_id),
+            FrontendEvent::HomeAnswerDecision {
+                project_key,
+                decision_id,
+                answer,
+                request_id,
+            } => self.home_decision_events(
+                client_id,
+                &project_key,
+                request_id,
+                decision_id,
+                Some(answer),
+            ),
+            FrontendEvent::HomeDeferDecision {
+                project_key,
+                decision_id,
+                request_id,
+            } => self.home_decision_events(client_id, &project_key, request_id, decision_id, None),
             FrontendEvent::GetFirstRunSetup { refresh } => {
                 if refresh {
                     // A tool installed while gwt runs is found by detecting again.
@@ -12284,6 +12301,28 @@ impl AppRuntime {
                     window_id: None,
                     error: Some("Send this from Home.".into()),
                     request_id: Some(request_id),
+                },
+            )],
+            FrontendEvent::HomeAnswerDecision {
+                project_key,
+                decision_id,
+                request_id,
+                ..
+            }
+            | FrontendEvent::HomeDeferDecision {
+                project_key,
+                decision_id,
+                request_id,
+            } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::DecisionResult {
+                    id: project_key,
+                    request_id,
+                    decision_id,
+                    action: "home".into(),
+                    ok: false,
+                    error: Some("Answer this from Home.".into()),
+                    decisions: None,
                 },
             )],
             FrontendEvent::ProjectAggregateAck {

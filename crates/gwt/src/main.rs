@@ -2003,6 +2003,8 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::ReapOrphanDaemon { .. }
             | FrontendEvent::LoadHomeConversation { .. }
             | FrontendEvent::HomePmSend { .. }
+            | FrontendEvent::HomeAnswerDecision { .. }
+            | FrontendEvent::HomeDeferDecision { .. }
             | FrontendEvent::GetFirstRunSetup { .. }
             | FrontendEvent::SaveFirstRunSetup { .. }
             | FrontendEvent::FrontendReady
