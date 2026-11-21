@@ -1051,6 +1051,7 @@ enum WorktreeFormProjection {
     Resolve,
 }
 
+mod execution_environments;
 mod issue_monitor_delivery_ack;
 mod issue_monitor_list;
 mod issue_monitor_profiles;
@@ -1068,7 +1069,9 @@ mod frontend_action_log;
 mod knowledge;
 mod launch;
 pub(crate) use launch::LaunchPermissionChecked;
+mod first_run_setup;
 mod gui_slice;
+mod home_conversation;
 mod launch_errors;
 mod loaders;
 mod migration;
@@ -1086,6 +1089,7 @@ mod recovery_center;
 mod runtime_events;
 mod settings_update;
 mod startup;
+mod themes;
 pub(crate) use gui_slice::GuiSliceBudget;
 pub(crate) mod terminal_convergence;
 mod title_sync;
@@ -1667,27 +1671,69 @@ pub(crate) struct ProjectContext {
     pub(crate) project_root: PathBuf,
 }
 
+/// A durable Issues control whose daemon commit is awaited off the event loop.
 #[derive(Debug, Clone)]
-pub(crate) struct PendingIssueMonitorMaxActive {
+pub(crate) enum IssueMonitorLaneControl {
+    MaxActive {
+        max_active_agents: Option<usize>,
+        changed_at: String,
+        control_id: String,
+    },
+    QueuePush {
+        issue_numbers: Vec<u64>,
+        now: String,
+    },
+    QueueRemove {
+        issue_numbers: Vec<u64>,
+        now: String,
+    },
+    QueueMove {
+        issue_number: u64,
+        position: usize,
+        now: String,
+    },
+}
+
+impl IssueMonitorLaneControl {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::MaxActive { .. } => "max-active",
+            Self::QueuePush { .. } => "queue-push",
+            Self::QueueRemove { .. } => "queue-remove",
+            Self::QueueMove { .. } => "queue-move",
+        }
+    }
+
+    /// The reply a queue operation owes its origin client.
+    fn queue_result(&self) -> Option<(&'static str, Vec<u64>)> {
+        match self {
+            Self::MaxActive { .. } => None,
+            Self::QueuePush { issue_numbers, .. } => Some(("push", issue_numbers.clone())),
+            Self::QueueRemove { issue_numbers, .. } => Some(("remove", issue_numbers.clone())),
+            Self::QueueMove { issue_number, .. } => Some(("move", vec![*issue_number])),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingIssueMonitorLaneControl {
     context: ProjectContext,
     ticket: Arc<()>,
     client_id: ClientId,
-    max_active_agents: Option<usize>,
-    changed_at: String,
-    control_id: String,
+    control: IssueMonitorLaneControl,
 }
 
 #[derive(Default)]
-pub(crate) struct IssueMonitorMaxActiveSaveLane {
-    requests: std::collections::VecDeque<PendingIssueMonitorMaxActive>,
+pub(crate) struct IssueMonitorControlLane {
+    requests: std::collections::VecDeque<PendingIssueMonitorLaneControl>,
     deferred_profiles: Vec<UserEvent>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PreparedIssueMonitorMaxActive {
+pub(crate) struct PreparedIssueMonitorLaneControl {
     context: ProjectContext,
     ticket: Arc<()>,
-    result: Result<
+    pub(crate) result: Result<
         Option<Box<gwt::IssueMonitorState>>,
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
     >,
@@ -2140,9 +2186,9 @@ pub struct AppRuntime {
     pub(crate) issue_monitor_fallback_commit_timeout: std::time::Duration,
     pub(crate) issue_monitor_profile_saves:
         HashMap<gwt_core::repo_hash::ProjectKey, IssueMonitorProfileSaveLane>,
-    /// Keep Max active saves owned across project close and reopen.
-    pub(crate) issue_monitor_max_active_saves:
-        HashMap<gwt_core::repo_hash::ProjectKey, IssueMonitorMaxActiveSaveLane>,
+    /// Keep Max active saves and queue operations owned across project close and reopen.
+    pub(crate) issue_monitor_control_lanes:
+        HashMap<gwt_core::repo_hash::ProjectKey, IssueMonitorControlLane>,
     pub(crate) runtime_hook_agent_failures_in_flight:
         HashMap<String, RuntimeHookAgentFailureIdentity>,
     /// Issue #3676 AC-2: credential preflight consulted before any Issue
@@ -5242,7 +5288,7 @@ impl AppRuntime {
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             issue_monitor_profile_saves: HashMap::new(),
-            issue_monitor_max_active_saves: HashMap::new(),
+            issue_monitor_control_lanes: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             issue_monitor_provider_auth_probe: gwt::issue_monitor::provider_auth_state_from_env,
             daemon_supervisor: Arc::new(gwt::daemon_supervisor::DaemonSupervisor::gwtd()),
@@ -7901,40 +7947,41 @@ impl AppRuntime {
         events
     }
 
-    fn enqueue_issue_monitor_max_active(
+    /// Issue #7758: the daemon ACKs a control only after its durable commit,
+    /// which can outlast the GUI hot-path budget. One lane per project keeps
+    /// the commands in order and each is sent exactly once.
+    fn enqueue_issue_monitor_lane_control(
         &mut self,
         context: &ProjectContext,
         client_id: ClientId,
-        max_active_agents: Option<usize>,
+        control: IssueMonitorLaneControl,
     ) -> Vec<OutboundEvent> {
         if self.project_state(context).is_none() {
             return Vec::new();
         }
         let lane = self
-            .issue_monitor_max_active_saves
+            .issue_monitor_control_lanes
             .entry(context.project_key.clone())
             .or_default();
         // The front remains owned until its exact completion, including after reopen.
-        lane.requests.push_back(PendingIssueMonitorMaxActive {
+        lane.requests.push_back(PendingIssueMonitorLaneControl {
             context: context.clone(),
             ticket: Arc::new(()),
             client_id,
-            max_active_agents,
-            changed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
-            control_id: uuid::Uuid::new_v4().to_string(),
+            control,
         });
         if lane.requests.len() > 1 {
             return Vec::new();
         }
-        self.start_issue_monitor_max_active(&context.project_key)
+        self.start_issue_monitor_lane_control(&context.project_key)
     }
 
-    fn start_issue_monitor_max_active(
+    fn start_issue_monitor_lane_control(
         &mut self,
         project_key: &gwt_core::repo_hash::ProjectKey,
     ) -> Vec<OutboundEvent> {
         let Some(request) = self
-            .issue_monitor_max_active_saves
+            .issue_monitor_control_lanes
             .get(project_key)
             .and_then(|lane| lane.requests.front())
             .cloned()
@@ -7948,48 +7995,24 @@ impl AppRuntime {
         let worker_context = context.clone();
         let ticket = request.ticket.clone();
         let worker_ticket = ticket.clone();
+        let fallback_timeout = self.issue_monitor_fallback_commit_timeout;
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match Self::publish_issue_monitor_control_owned(
+                Self::commit_issue_monitor_lane_control(
                     &worker_context.project_root,
-                    serde_json::json!({
-                        "max_active_agents": request.max_active_agents,
-                        "control_id": request.control_id,
-                        "changed_at": request.changed_at,
-                    }),
-                ) {
-                    Ok(()) => Ok(None),
-                    Err(error) if error.allows_local_fallback() => {
-                        // A durable user save belongs on the blocking lane, not
-                        // inside the synchronous GUI thread's 250ms budget.
-                        Self::try_commit_local_issue_monitor_control_with_timeout(
-                            &worker_context.project_root,
-                            ISSUE_MONITOR_COMMIT_BUDGET,
-                            |monitor| {
-                                monitor.set_max_active_agents_override_with_source(
-                                    request.max_active_agents,
-                                    gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
-                                    &request.changed_at,
-                                );
-                                monitor.persist_machine_max_active_change(&request.control_id)
-                            },
-                        )
-                        .map(|(monitor, ())| Some(Box::new(monitor)))
-                        .map_err(|error| gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                            format!("Max active save outcome is uncertain: {error}; reread the current machine setting before retrying")))
-                    }
-                    Err(error) => Err(error),
-                }
+                    &request.control,
+                    fallback_timeout,
+                )
             }))
             .unwrap_or_else(|_| {
                 Err(
                     gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                        "Issues Max active worker panicked".to_string(),
+                        "Issues control worker panicked".to_string(),
                     ),
                 )
             });
-            proxy.send(UserEvent::IssueMonitorMaxActivePrepared(Box::new(
-                PreparedIssueMonitorMaxActive {
+            proxy.send(UserEvent::IssueMonitorLaneControlPrepared(Box::new(
+                PreparedIssueMonitorLaneControl {
                     context: worker_context,
                     ticket: worker_ticket,
                     result,
@@ -7998,7 +8021,7 @@ impl AppRuntime {
         });
         match spawn {
             Ok(()) => Vec::new(),
-            Err(error) => self.issue_monitor_max_active_prepared_events(PreparedIssueMonitorMaxActive {
+            Err(error) => self.issue_monitor_lane_control_prepared_events(PreparedIssueMonitorLaneControl {
                 context,
                 ticket,
                 result: Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(error)),
@@ -8006,17 +8029,131 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn issue_monitor_max_active_prepared_events(
+    /// Runs on the blocking lane: one publication, then the local fallback
+    /// only when the daemon was never reached.
+    fn commit_issue_monitor_lane_control(
+        project_root: &Path,
+        control: &IssueMonitorLaneControl,
+        fallback_timeout: std::time::Duration,
+    ) -> Result<
+        Option<Box<gwt::IssueMonitorState>>,
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
+        use IssueMonitorLaneControl as Control;
+        let (payload, budget) = match control {
+            Control::MaxActive {
+                max_active_agents,
+                changed_at,
+                control_id,
+            } => (
+                serde_json::json!({
+                    "max_active_agents": max_active_agents,
+                    "control_id": control_id,
+                    "changed_at": changed_at,
+                }),
+                &gwt::daemon_publisher::ISSUE_MONITOR_CONTROL_BUDGET,
+            ),
+            // Queue operations wait for the commit itself, as the CLI does.
+            Control::QueuePush { issue_numbers, .. } => (
+                serde_json::json!({ "terminal_queue_push": { "issue_numbers": issue_numbers } }),
+                &gwt::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+            ),
+            Control::QueueRemove { issue_numbers, .. } => (
+                serde_json::json!({ "terminal_queue_remove": { "issue_numbers": issue_numbers } }),
+                &gwt::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+            ),
+            Control::QueueMove {
+                issue_number,
+                position,
+                ..
+            } => (
+                serde_json::json!({"terminal_queue_move": {"issue_number": issue_number, "position": position}}),
+                &gwt::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+            ),
+        };
+        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            payload,
+            std::process::id(),
+        );
+        match gwt::daemon_publisher::publish_issue_monitor_control_with_timeout(
+            project_root,
+            payload,
+            budget.resolve(),
+        ) {
+            Ok(()) => return Ok(None),
+            Err(error) if error.allows_local_fallback() => {
+                tracing::debug!(
+                    error = %error,
+                    operation = control.operation(),
+                    "Issues control daemon publish failed; using local fallback"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+        let committed = match control {
+            Control::MaxActive {
+                max_active_agents,
+                changed_at,
+                control_id,
+            } => {
+                // A durable user save belongs on the blocking lane, not
+                // inside the synchronous GUI thread's 250ms budget.
+                Self::try_commit_local_issue_monitor_control_with_timeout(
+                    project_root,
+                    ISSUE_MONITOR_COMMIT_BUDGET,
+                    |monitor| {
+                        monitor.set_max_active_agents_override_with_source(
+                            *max_active_agents,
+                            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+                            changed_at,
+                        );
+                        monitor.persist_machine_max_active_change(control_id)
+                    },
+                )
+                .map_err(|error| gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                    format!("Max active save outcome is uncertain: {error}; reread the current machine setting before retrying")))
+            }
+            Control::QueuePush { issue_numbers, now } => {
+                Self::commit_local_issue_monitor_control_with_timeout(
+                    project_root,
+                    fallback_timeout,
+                    |monitor| monitor.terminal_queue_push(issue_numbers, "operator", now),
+                )
+            }
+            Control::QueueRemove { issue_numbers, now } => {
+                Self::commit_local_issue_monitor_control_with_timeout(
+                    project_root,
+                    fallback_timeout,
+                    |monitor| monitor.terminal_queue_remove(issue_numbers, now),
+                )
+            }
+            Control::QueueMove {
+                issue_number,
+                position,
+                now,
+            } => Self::commit_local_issue_monitor_control_with_timeout(
+                project_root,
+                fallback_timeout,
+                |monitor| {
+                    monitor.terminal_queue_move(*issue_number, *position, now);
+                },
+            ),
+        };
+        committed.map(|(monitor, ())| Some(Box::new(monitor)))
+    }
+
+    pub(crate) fn issue_monitor_lane_control_prepared_events(
         &mut self,
-        prepared: PreparedIssueMonitorMaxActive,
+        prepared: PreparedIssueMonitorLaneControl,
     ) -> Vec<OutboundEvent> {
-        let PreparedIssueMonitorMaxActive {
+        let PreparedIssueMonitorLaneControl {
             context,
             ticket,
             result,
         } = prepared;
         let Some(lane) = self
-            .issue_monitor_max_active_saves
+            .issue_monitor_control_lanes
             .get_mut(&context.project_key)
         else {
             return Vec::new();
@@ -8029,12 +8166,13 @@ impl AppRuntime {
         let request = lane
             .requests
             .pop_front()
-            .expect("matched Max active request");
+            .expect("matched Issues control request");
         let drained = lane.requests.is_empty();
         // Reads started before this commit must reload the durable result.
         self.invalidate_issue_monitor_list(&context.project_root);
         let mut events = Vec::new();
         if self.project_context_is_current(&context) {
+            let queue_error = result.as_ref().err().map(ToString::to_string);
             events = match result {
                 Ok(None) => Vec::new(), // The daemon already committed and publishes its snapshot.
                 Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
@@ -8046,40 +8184,32 @@ impl AppRuntime {
                     Some(&context.project_root),
                     Some(&request.client_id),
                     error,
-                    "max-active",
+                    request.control.operation(),
                     None,
                 ),
             };
+            if let Some((operation, issue_numbers)) = request.control.queue_result() {
+                events.push(OutboundEvent::reply(
+                    request.client_id.clone(),
+                    BackendEvent::IssueMonitorQueueResult {
+                        operation: operation.to_string(),
+                        issue_numbers,
+                        error: queue_error,
+                    },
+                ));
+            }
         }
         if drained {
             if let Some(lane) = self
-                .issue_monitor_max_active_saves
+                .issue_monitor_control_lanes
                 .remove(&context.project_key)
             {
                 self.proxy.prepend_events(lane.deferred_profiles);
             }
         } else {
-            events.extend(self.start_issue_monitor_max_active(&context.project_key));
+            events.extend(self.start_issue_monitor_lane_control(&context.project_key));
         }
         events
-    }
-
-    fn issue_monitor_control_result_events(
-        &mut self,
-        context: &ProjectContext,
-        client_id: &str,
-        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
-        operation: &'static str,
-        apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
-    ) -> Vec<OutboundEvent> {
-        self.issue_monitor_control_result_events_with_queue_result(
-            context,
-            client_id,
-            publication,
-            operation,
-            None,
-            apply_fallback,
-        )
     }
 
     fn issue_monitor_tier_set_result_events(
@@ -8129,13 +8259,12 @@ impl AppRuntime {
         }
     }
 
-    fn issue_monitor_control_result_events_with_queue_result(
+    fn issue_monitor_control_result_events(
         &mut self,
         context: &ProjectContext,
         client_id: &str,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
         operation: &'static str,
-        queue_result: Option<(&'static str, Vec<u64>)>,
         apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
         let project_root = Some(context.project_root.clone());
@@ -8155,8 +8284,7 @@ impl AppRuntime {
             }
             Err(error) => Err(error),
         };
-        let queue_error = outcome.as_ref().err().map(ToString::to_string);
-        let mut events = match outcome {
+        match outcome {
             Ok(None) => Vec::new(),
             Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
                 Some(client_id),
@@ -8170,18 +8298,7 @@ impl AppRuntime {
                 operation,
                 None,
             ),
-        };
-        if let Some((operation, issue_numbers)) = queue_result {
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::IssueMonitorQueueResult {
-                    operation: operation.to_string(),
-                    issue_numbers,
-                    error: queue_error,
-                },
-            ));
         }
-        events
     }
 
     fn issue_monitor_allowed_labels_result_events(
@@ -8473,7 +8590,6 @@ impl AppRuntime {
         client_id: &str,
         title: String,
         launch: bool,
-        auto_merge: bool,
     ) -> Vec<OutboundEvent> {
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -8526,13 +8642,8 @@ impl AppRuntime {
             }
         };
 
-        let labels: Vec<String> = if auto_merge {
-            vec!["auto-merge".to_string()]
-        } else {
-            Vec::new()
-        };
         let body = quick_issue_body(&title);
-        let snapshot = match client.create_issue(&title, &body, &labels) {
+        let snapshot = match client.create_issue(&title, &body, &[]) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return vec![OutboundEvent::reply(
@@ -11438,6 +11549,7 @@ impl AppRuntime {
         client_id: ClientId,
         request_id: u64,
         repair: bool,
+        user_hook_change: Option<gwt::user_hooks::UserHookChange>,
     ) -> Vec<OutboundEvent> {
         let project_root = context.project_root.clone();
         if !self
@@ -11470,9 +11582,16 @@ impl AppRuntime {
             // This is a project audit, not an observation of the GUI parent's
             // agent Session or its runtime sidecar.
             input.runtime_state_path = None;
+            // A refused change is reported inside the audit so the screen
+            // keeps the audit it was showing.
+            let change_error = user_hook_change
+                .and_then(|change| gwt::user_hooks::apply(&worker_root, change).err());
             let (report, error) =
                 match gwt::cli::hook::health::read_hook_doctor(&input, repair, None) {
-                    Ok(report) => (Some(report), None),
+                    Ok(mut report) => {
+                        report["user_hooks"]["change_error"] = change_error.into();
+                        (Some(report), None)
+                    }
                     Err(error) => (None, Some(error.to_string())),
                 };
             drop(flight);
@@ -11615,6 +11734,7 @@ impl AppRuntime {
             | FrontendEvent::RequestWorkAdvisory { id, .. }
             | FrontendEvent::SelectKnowledgeBridgeEntry { id, .. }
             | FrontendEvent::UpdateKnowledgeBridgePhase { id, .. }
+            | FrontendEvent::SetIssueAutonomousTarget { id, .. }
             | FrontendEvent::RunBranchCleanup { id, .. }
             | FrontendEvent::SyncBranchCleanup { id, .. }
             | FrontendEvent::ClearBranchCleanupStatus { id, .. }
@@ -11736,6 +11856,25 @@ impl AppRuntime {
         log_frontend_user_action(&client_id, &event);
         match event {
             FrontendEvent::RefreshOrphanDaemons => self.start_orphan_observation(client_id, None),
+            FrontendEvent::LoadHomeConversation { request_id } => {
+                self.load_home_conversation_events(client_id, request_id)
+            }
+            FrontendEvent::HomePmSend {
+                project_key,
+                text,
+                request_id,
+            } => self.home_pm_send_events(client_id, &project_key, &text, request_id),
+            FrontendEvent::GetFirstRunSetup { refresh } => {
+                if refresh {
+                    // A tool installed while gwt runs is found by detecting again.
+                    self.launch_wizard_cache.refresh_agent_options();
+                }
+                self.first_run_setup_events(client_id, None)
+            }
+            FrontendEvent::SaveFirstRunSetup {
+                pm_member_id,
+                pm_name,
+            } => self.first_run_setup_events(client_id, Some((pm_member_id, pm_name))),
             FrontendEvent::ReapOrphanDaemon { observation_token } => {
                 self.start_orphan_observation(client_id, Some(observation_token))
             }
@@ -11831,6 +11970,14 @@ impl AppRuntime {
                 self.spawn_backend_connection_probe(client_id, base_url, api_key);
                 Vec::new()
             }
+            event @ (FrontendEvent::GetExecutionEnvironments
+            | FrontendEvent::AddExecutionEnvironment { .. }
+            | FrontendEvent::UpdateExecutionEnvironment { .. }
+            | FrontendEvent::DeleteExecutionEnvironment { .. }
+            | FrontendEvent::SetProjectExecutionEnvironments { .. }
+            | FrontendEvent::SetPmExecutionEnvironments { .. }) => {
+                self.execution_environment_events(&client_id, None, event)
+            }
             FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
                 client_id,
                 gwt::agent_backend_dispatch::list_event(agent),
@@ -11861,7 +12008,8 @@ impl AppRuntime {
                     self.update_settings_event(None),
                 )]
             }
-            FrontendEvent::GetHookDoctor { request_id, .. } => vec![OutboundEvent::reply(
+            FrontendEvent::GetHookDoctor { request_id, .. }
+            | FrontendEvent::UpdateUserHooks { request_id, .. } => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::HookDoctor {
                     project_root: String::new(),
@@ -12010,6 +12158,7 @@ impl AppRuntime {
             | FrontendEvent::RequestWorkAdvisory { id, .. }
             | FrontendEvent::SelectKnowledgeBridgeEntry { id, .. }
             | FrontendEvent::UpdateKnowledgeBridgePhase { id, .. }
+            | FrontendEvent::SetIssueAutonomousTarget { id, .. }
             | FrontendEvent::RunBranchCleanup { id, .. }
             | FrontendEvent::SyncBranchCleanup { id, .. }
             | FrontendEvent::ClearBranchCleanupStatus { id, .. }
@@ -12094,7 +12243,7 @@ impl AppRuntime {
             }
             if matches!(event, FrontendEvent::IssueMonitorProfilesSet { .. }) {
                 if let Some(lane) = self
-                    .issue_monitor_max_active_saves
+                    .issue_monitor_control_lanes
                     .get_mut(&context.project_key)
                 {
                     lane.deferred_profiles.push(UserEvent::ProjectCompletion {
@@ -12122,6 +12271,21 @@ impl AppRuntime {
                     },
                 )]
             }
+            // Issue #7639: the Home conversation belongs to the Hub connection.
+            FrontendEvent::LoadHomeConversation { .. } => Vec::new(),
+            // Issue #7731: so does the first-run setup.
+            FrontendEvent::GetFirstRunSetup { .. } | FrontendEvent::SaveFirstRunSetup { .. } => {
+                Vec::new()
+            }
+            FrontendEvent::HomePmSend { request_id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some("Send this from Home.".into()),
+                    request_id: Some(request_id),
+                },
+            )],
             FrontendEvent::ProjectAggregateAck {
                 revision,
                 visible,
@@ -12684,6 +12848,18 @@ impl AppRuntime {
                 issue_number,
                 target_phase.as_deref(),
             ),
+            FrontendEvent::SetIssueAutonomousTarget {
+                id,
+                request_id,
+                issue_number,
+                enabled,
+            } => self.set_issue_autonomous_target_events(
+                &client_id,
+                &id,
+                request_id,
+                issue_number,
+                enabled,
+            ),
             FrontendEvent::RunBranchCleanup {
                 id,
                 branches,
@@ -12982,9 +13158,16 @@ impl AppRuntime {
                 usage_threshold_percent,
                 request_id,
             ),
-            FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
-                self.enqueue_issue_monitor_max_active(context, client_id, max_active_agents)
-            }
+            FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => self
+                .enqueue_issue_monitor_lane_control(
+                    context,
+                    client_id,
+                    IssueMonitorLaneControl::MaxActive {
+                        max_active_agents,
+                        changed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
+                        control_id: uuid::Uuid::new_v4().to_string(),
+                    },
+                ),
             FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
                 let priority_order = issue_numbers;
                 let publication = self.publish_project_issue_monitor_control(
@@ -13001,67 +13184,36 @@ impl AppRuntime {
                     },
                 )
             }
-            FrontendEvent::IssueMonitorQueuePush { issue_numbers } => {
-                let publication = self.publish_project_issue_monitor_control(
+            FrontendEvent::IssueMonitorQueuePush { issue_numbers } => self
+                .enqueue_issue_monitor_lane_control(
                     context,
-                    serde_json::json!({
-                        "terminal_queue_push": { "issue_numbers": issue_numbers.clone() }
-                    }),
-                );
-                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
-                self.issue_monitor_control_result_events_with_queue_result(
-                    context,
-                    &client_id,
-                    publication,
-                    "queue-push",
-                    Some(("push", issue_numbers.clone())),
-                    |monitor| {
-                        monitor.terminal_queue_push(&issue_numbers, "operator", &now);
+                    client_id,
+                    IssueMonitorLaneControl::QueuePush {
+                        issue_numbers,
+                        now: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     },
-                )
-            }
-            FrontendEvent::IssueMonitorQueueRemove { issue_numbers } => {
-                let publication = self.publish_project_issue_monitor_control(
+                ),
+            FrontendEvent::IssueMonitorQueueRemove { issue_numbers } => self
+                .enqueue_issue_monitor_lane_control(
                     context,
-                    serde_json::json!({
-                        "terminal_queue_remove": { "issue_numbers": issue_numbers.clone() }
-                    }),
-                );
-                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
-                self.issue_monitor_control_result_events_with_queue_result(
-                    context,
-                    &client_id,
-                    publication,
-                    "queue-remove",
-                    Some(("remove", issue_numbers.clone())),
-                    |monitor| {
-                        monitor.terminal_queue_remove(&issue_numbers, &now);
+                    client_id,
+                    IssueMonitorLaneControl::QueueRemove {
+                        issue_numbers,
+                        now: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     },
-                )
-            }
+                ),
             FrontendEvent::IssueMonitorQueueMove {
                 issue_number,
                 position,
-            } => {
-                let publication = self.publish_project_issue_monitor_control(
-                    context,
-                    serde_json::json!({"terminal_queue_move": {"issue_number": issue_number, "position": position}}),
-                );
-                self.issue_monitor_control_result_events_with_queue_result(
-                    context,
-                    &client_id,
-                    publication,
-                    "queue-move",
-                    Some(("move", vec![issue_number])),
-                    |monitor| {
-                        monitor.terminal_queue_move(
-                            issue_number,
-                            position,
-                            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
-                        );
-                    },
-                )
-            }
+            } => self.enqueue_issue_monitor_lane_control(
+                context,
+                client_id,
+                IssueMonitorLaneControl::QueueMove {
+                    issue_number,
+                    position,
+                    now: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+                },
+            ),
             FrontendEvent::SetIssueMonitorAutoRefill { enabled, limit } => {
                 let publication = self.publish_project_issue_monitor_control(
                     context,
@@ -13108,11 +13260,9 @@ impl AppRuntime {
             // Internal agent-listener command. Browser-scoped requests are
             // deliberately inert; the authenticated route below owns it.
             FrontendEvent::AgentIssueMonitorScanNow { .. } => Vec::new(),
-            FrontendEvent::QuickRegisterIssue {
-                title,
-                launch,
-                auto_merge,
-            } => self.quick_register_issue_events(context, &client_id, title, launch, auto_merge),
+            FrontendEvent::QuickRegisterIssue { title, launch } => {
+                self.quick_register_issue_events(context, &client_id, title, launch)
+            }
             FrontendEvent::IssueMonitorLaunchNow {
                 issue_number,
                 linked_issue_kind,
@@ -13221,6 +13371,20 @@ impl AppRuntime {
                 self.spawn_backend_connection_probe(client_id, base_url, api_key);
                 Vec::new()
             }
+            event @ (FrontendEvent::GetExecutionEnvironments
+            | FrontendEvent::AddExecutionEnvironment { .. }
+            | FrontendEvent::UpdateExecutionEnvironment { .. }
+            | FrontendEvent::DeleteExecutionEnvironment { .. }
+            | FrontendEvent::SetProjectExecutionEnvironments { .. }
+            | FrontendEvent::SetPmExecutionEnvironments { .. }) => {
+                self.execution_environment_events(&client_id, Some(context), event)
+            }
+            FrontendEvent::LoadThemes { request_id } => {
+                self.theme_events(client_id, context, request_id, None)
+            }
+            FrontendEvent::DeleteTheme { number, request_id } => {
+                self.theme_events(client_id, context, request_id, Some(number))
+            }
             FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
                 client_id,
                 gwt::agent_backend_dispatch::list_event(agent),
@@ -13253,7 +13417,10 @@ impl AppRuntime {
                 self.update_settings_event(Some(&context.project_root)),
             )],
             FrontendEvent::GetHookDoctor { request_id, repair } => {
-                self.spawn_hook_doctor(context, client_id, request_id, repair)
+                self.spawn_hook_doctor(context, client_id, request_id, repair, None)
+            }
+            FrontendEvent::UpdateUserHooks { request_id, change } => {
+                self.spawn_hook_doctor(context, client_id, request_id, false, Some(change))
             }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),

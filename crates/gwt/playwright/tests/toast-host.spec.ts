@@ -293,7 +293,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await expect(alerts).toHaveCount(1);
   await expect(alerts).toContainText(real.id);
   await expect(rows).toHaveCount(1);
-  await expect(page.locator("#op-notifications-button .op-rail__badge")).toHaveText("1");
+  await expect(page.locator("#op-notifications-button .app-head__count")).toHaveText("1");
 
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -366,7 +366,7 @@ test("Issue #6932 Issues notifications group repeated failures and continued/sta
   expect(await (await page.request.get(new URL("/app.js", base!).href)).text())
     .toContain("issueMonitorNotificationModel.update(() => ({ ...event }))");
   const bell = page.locator("#op-notifications-button");
-  const badge = bell.locator(".op-rail__badge");
+  const badge = bell.locator(".app-head__count");
   const drawer = page.locator("#notification-center");
   const rows = drawer.locator(".notification-center__item");
   await bell.click();
@@ -895,7 +895,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     page,
   }) => {
     const bell = page.locator("#op-notifications-button");
-    const badge = bell.locator(".op-rail__badge");
+    const badge = bell.locator(".app-head__count");
     await expect(badge).toBeHidden();
 
     for (let i = 0; i < 12; i += 1) {
@@ -1051,7 +1051,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     });
 
     await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)"));
-    const badge = page.locator("#op-notifications-button .op-rail__badge");
+    const badge = page.locator("#op-notifications-button .app-head__count");
     await expect(badge).toHaveText("1");
     await expect(badge).toHaveAttribute("data-has-error", "true");
     // Still nothing rendered inside the Issue window.

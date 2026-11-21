@@ -20,6 +20,7 @@ import { createInteractionGuard } from "../interaction-guard.js";
 import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "../first-run-setup.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -71,10 +72,12 @@ function createSettingsHarness({ scheduleFrame, onSend, activeProjectTab = () =>
     { member_id: "member-custom", name: "Custom member", agent_id: "fixture-cli", enabled: true },
   ] }, { scheduleFrame: frameScheduler });
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", `${settingsSource
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason",
+    "SETUP_REVIEW_STEPS", "firstRunSetupUrlPath", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
     document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason,
+    SETUP_REVIEW_STEPS, firstRunSetupUrlPath,
   );
   const surface = factory({
     scheduleFrame: frameScheduler,
@@ -810,7 +813,7 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   sent.length = 0;
   surface.resyncSettings();
   assert.deepEqual(sent, [
-    { kind: "list_issue_monitor" }, { kind: "get_repository_labels", refresh: false }, { kind: "get_issue_monitor_profiles" },
+    { kind: "list_issue_monitor" }, { kind: "get_repository_labels", refresh: false }, { kind: "get_issue_monitor_profiles" }, { kind: "get_execution_environments" },
     { kind: "agent_roster", action: { kind: "read" }, expected_revision: null },
     { kind: "list_supported_agents" }, { kind: "get_system_settings" },
     { kind: "get_update_settings" }, { kind: "get_board_auth_status" },
@@ -974,7 +977,8 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   ]);
   assert.match(panel.textContent, /next.*startup/i);
   assert.match(panel.textContent, /installed agents with a verified update route/i);
-  assert.match(panel.textContent, /agent windows/i);
+  // Issue #7744: only the windows running a tool hold back its maintenance.
+  assert.match(panel.textContent, /refused while an agent window is running that tool/i);
   const supportedAgentsModel = createUiStateStore({
     agents, autoUpdate: false, maintenanceByAgent: {},
   });
@@ -1913,12 +1917,27 @@ test("Works loads its saved output line count on reconnect without a Settings mo
   assert.deepEqual(sent, [{ kind: "get_system_settings" }]);
 });
 
+// Issue #7731 AC-1: the setup is not a one-time screen. Settings links to
+// each of its steps on the Hub page.
+test("Issue #7731: Application settings link to every step of the first-run setup", () => {
+  const { surface, body } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const section = body.querySelector("[data-first-run-setup-review]");
+  assert.equal(section.querySelector(".settings-section-heading").textContent, "Review first-run setup");
+  assert.deepEqual([...section.querySelectorAll("a")].map(link => [link.textContent, link.getAttribute("href")]), [
+    ["Welcome", "/?view=setup&step=welcome"],
+    ["Tools", "/?view=setup&step=tools"],
+    ["Project Manager", "/?view=setup&step=pm"],
+    ["Open a project", "/?view=setup&step=project"],
+  ]);
+});
+
 // Issue #7646 AC-2: Application settings keep only a link to the agent
 // ledger. Members are never edited from Settings.
 test("Issue #7646: Application settings link to the agent ledger without editing it", () => {
   assert.match(settingsSource, /dataset\.action = "open-agent-ledger"/);
   assert.match(settingsSource, /CustomEvent\("agents:open"\)/);
-  assert.match(appSource, /addEventListener\("agents:open", \(\) => openSurface\("agents"\)\)/);
+  assert.match(appSource, /addEventListener\("agents:open", \(\) => openAgents\("ledger"\)\)/);
   assert.doesNotMatch(settingsSource, /kind:\s*"(add|rest|activate|rename|move|remove|select_pm|set_pm_eligibility)"/,
     "Settings sends no member change");
 });

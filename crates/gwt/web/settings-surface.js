@@ -29,6 +29,7 @@ import { renderHookCenterPanel, hookRepairUnavailableReason } from "./hook-cente
 import { createUiStateStore } from "./ui-state-store.js";
 import { createRepositoryLabelChip } from "./ui-content.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "./first-run-setup.js";
 
 function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
@@ -116,9 +117,9 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   const help = document.createElement("p");
   help.className = "settings-help";
   help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
-    + "Updates require no open agent windows or pending launches, including the Project Manager. "
-    + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
-    + "close them and retry. Update failures leave launches available.";
+    + "A tool is skipped while an agent window, including the Project Manager, is running it. "
+    + "Nothing is installed automatically. Manual installs and updates of a tool are refused while an agent window "
+    + "is running that tool; close those windows and retry. Update failures leave launches available.";
   panel.appendChild(help);
   const globalResult = maintenance.get("");
   if (globalResult?.message) {
@@ -390,7 +391,7 @@ function renderCandidateSaveError(panel, event) {
     feedback.textContent = event.message;
     feedback.dataset.kind = "error";
     feedback.setAttribute("role", "alert");
-    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|docker_lifecycle_intent|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
     const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
     const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
     const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
@@ -432,7 +433,8 @@ function reconcileCandidateSave(panel, event) {
       if (input.type === "checkbox") input.checked = profile[key] === true;
       else {
         const saved = key === "prefer_for" ? (profile[key] || []).join(", ")
-          : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+          : key === "runtime_target" && profile.runtime_inherit ? "Inherit"
+            : String(profile[key] ?? ({ session_mode: "Normal", runtime_target: "Host", docker_lifecycle_intent: "Connect" }[key] || ""));
         if (input.localName === "select") {
           if (![...input.options].some(option => option.value === saved)) {
             const option = panel.ownerDocument.createElement("option");
@@ -718,6 +720,10 @@ export function renderAgentsSettingsPanel(panel, options) {
         : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
           : input.value.trim() || null;
     }
+    // Issue #7729 AC-4: "Inherit" is a choice of its own, not a third place.
+    // The place the candidate last named stays saved under it.
+    next.runtime_inherit = next.runtime_target === "Inherit";
+    if (next.runtime_inherit) next.runtime_target = profile.runtime_target || "Host";
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === next.agent_member_id);
     if (member) next.agent_id = member.agent_id;
     if (repair && staleTool) {
@@ -788,13 +794,26 @@ export function renderAgentsSettingsPanel(panel, options) {
     let previousTool = provider(profile.agent_id);
     const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(selectedMember()?.agent_id || profile.agent_id));
     const initial = capabilities();
+    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
+    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
+    // Issue #7729 AC-4 (SPEC #7007 item 197): where the candidate runs. Docker
+    // is offered only in a project that has a Docker setup; a saved Docker
+    // choice stays visible, and the launch falls back to the host.
+    const dockerAvailable = (choices?.docker_services || []).length > 0;
+    const runtime = field(row, "Runs on", "runtime_target", profile.runtime_inherit ? "Inherit" : profile.runtime_target || "Host", "text", [
+      { value: "Inherit", label: "Inherit (this project's last launch)" }, "Host", ...(dockerAvailable ? ["Docker"] : []),
+    ]);
     const docker = field(row, "Docker service", "docker_service", profile.docker_service ?? "", "text", [
       { value: "", label: choices?.default_docker_service ? `Auto (${choices.default_docker_service})` : "Auto" },
       ...(choices?.docker_services || []),
     ]);
-    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
-    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
-    const runtime = field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
+    const lifecycle = field(row, "Docker lifecycle", "docker_lifecycle_intent", profile.docker_lifecycle_intent || "Connect", "text", [
+      { value: "Connect", label: "Connect only" }, { value: "Start", label: "Start then launch" },
+      { value: "Restart", label: "Restart then launch" }, { value: "Recreate", label: "Recreate then launch" },
+      { value: "CreateAndStart", label: "Create and start then launch" },
+    ]);
+    const runtimeNote = document.createElement("p"); runtimeNote.className = "settings-help"; runtimeNote.dataset.profileRuntimeNote = "";
+    runtimeNote.setAttribute("role", "status"); row.append(runtimeNote);
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
@@ -842,8 +861,14 @@ export function renderAgentsSettingsPanel(panel, options) {
       syncTuning();
       skip.disabled = !entry?.supports_skip_permissions;
       fast.disabled = !entry?.supports_fast_mode;
-      docker.disabled = runtime.value !== "Docker";
-      shell.disabled = runtime.value === "Docker" || !choices?.windows_shell_supported;
+      const onDocker = runtime.value === "Docker";
+      docker.disabled = lifecycle.disabled = !onDocker;
+      docker.closest("label").hidden = lifecycle.closest("label").hidden = !onDocker;
+      runtimeNote.textContent = runtime.value === "Inherit"
+        ? "Runs where this project's last launch ran. With no earlier launch, it runs on the host."
+        : onDocker && !dockerAvailable ? "This project has no Docker setup, so launches run on the host." : "";
+      runtimeNote.hidden = !runtimeNote.textContent;
+      shell.disabled = onDocker || !choices?.windows_shell_supported;
     };
     row.updateCandidateChoices();
     for (const [direction, offset] of [["up", -1], ["down", 1]]) {
@@ -956,6 +981,8 @@ export function createSettingsSurface({
   rosterModel,
   tuningController,
   onReloadProfile,
+  renderProjectEnvironments = null,
+  renderPmEnvironments = null,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1150,7 +1177,7 @@ export function createSettingsSurface({
       const settingsWindowBodies = new Set();
       const hookDoctorModel = createUiStateStore({}, { scheduleFrame });
       let nextHookDoctorRequest = 0;
-      function requestHookDoctor(projectRoot, repair = false, recovering = false) {
+      function requestHookDoctor(projectRoot, repair = false, recovering = false, userHookChange = null) {
         if (!projectRoot || projectRoot !== activeProjectTab()?.project_root) return;
         const current = hookDoctorModel.read()[projectRoot];
         if (repair && hookRepairUnavailableReason(current)) return;
@@ -1160,10 +1187,14 @@ export function createSettingsSurface({
           report: null, error: null, requestId, pending: true, repairRequested: repair,
           lastRepairOutcome: repair ? "unknown" : current?.lastRepairOutcome ?? null,
         } }));
-        const result = send({ kind: "get_hook_doctor", request_id: requestId, repair });
-        if (repair && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+        const result = send(userHookChange
+          ? { kind: "update_user_hooks", request_id: requestId, change: userHookChange }
+          : { kind: "get_hook_doctor", request_id: requestId, repair });
+        if ((repair || userHookChange) && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
           ...state[projectRoot], pending: false,
-          error: "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically.",
+          error: repair
+            ? "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically."
+            : "The hook change could not be confirmed on this connection. Reconnect and refresh the audit; the change will not be retried automatically.",
         } }));
       }
       function applyHookDoctorEvent(event) {
@@ -1187,6 +1218,7 @@ export function createSettingsSurface({
           renderHookCenterPanel(panel, {
             projectRoot: root, state: state[root], available: Boolean(root && root === activeProjectTab()?.project_root),
             onRefresh: () => requestHookDoctor(root), onRepair: () => requestHookDoctor(root, true),
+            onChangeUserHook: change => requestHookDoctor(root, false, false, change),
           });
         }
       }
@@ -1295,6 +1327,16 @@ export function createSettingsSurface({
           }
           send(message);
         };
+        // Issue #7741: the project's available execution environments.
+        const environmentsPanel = body.querySelector("[data-settings-environments]");
+        if (environmentsPanel) renderProjectEnvironments?.(environmentsPanel, {
+          view: current.environments || null, error: current.environmentsError || null,
+          send: message => {
+            if (!root || activeProjectTab()?.project_root !== root) return;
+            issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], environmentsPending: true, environmentsError: null } }));
+            send(message);
+          },
+        });
         const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
@@ -1336,6 +1378,46 @@ export function createSettingsSurface({
             labelsRequestId: confirmed ? null : current.labelsRequestId,
           } };
         });
+      }
+      // Issue #7741: `execution_environments` carries the list of the project
+      // the reply was scoped to.
+      // Issue #7732: the Project Manager's own list is saved with this
+      // machine, so every reply carries it, with or without a project.
+      const pmEnvironmentsModel = createUiStateStore({ view: null, pending: false, error: null }, { scheduleFrame });
+      function renderPmEnvironmentsPanel(body, state = pmEnvironmentsModel.read()) {
+        const panel = body.querySelector("[data-settings-pm-environments]");
+        if (panel) renderPmEnvironments?.(panel, {
+          view: state.view, error: state.error,
+          send: message => {
+            pmEnvironmentsModel.update(current => ({ ...current, pending: true, error: null }));
+            send(message);
+          },
+        });
+      }
+      pmEnvironmentsModel.subscribe(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderPmEnvironmentsPanel(body, state);
+      });
+      function applyExecutionEnvironments(view) {
+        if (view) pmEnvironmentsModel.update(() => ({ view, pending: false, error: null }));
+        const root = view?.project?.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => ({ ...state, [root]: {
+          ...state[root], environments: view, environmentsPending: false, environmentsError: null,
+        } }));
+      }
+      // Only a save this window sent is answered here; other refusals belong
+      // to the Execution environments screen.
+      function applyExecutionEnvironmentError(event) {
+        if (pmEnvironmentsModel.read().pending) {
+          pmEnvironmentsModel.update(state => ({ ...state, pending: false, error: event.message }));
+          return;
+        }
+        const root = event.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => state[root]?.environmentsPending ? { ...state, [root]: {
+          ...state[root], environmentsPending: false, environmentsError: event.message,
+        } } : state);
       }
       function applyIssueMonitorProfiles(event) {
         const root = event.project_root;
@@ -1474,7 +1556,10 @@ export function createSettingsSurface({
           send({ kind: "list_issue_monitor" });
           send({ kind: "get_repository_labels", refresh: false });
           send({ kind: "get_issue_monitor_profiles" });
+          send({ kind: "get_execution_environments" });
           send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+        } else {
+          send({ kind: "get_execution_environments" });
         }
         send({ kind: "list_supported_agents" });
         send({ kind: "get_system_settings" });
@@ -1641,6 +1726,25 @@ export function createSettingsSurface({
         ledgerLink.addEventListener("click", () => document.dispatchEvent(new document.defaultView.CustomEvent("agents:open")));
         ledgerSection.appendChild(ledgerLink);
         panelSystem.appendChild(ledgerSection);
+        // Issue #7732: the Project Manager's execution environments.
+        const pmEnvironments = createDiv();
+        pmEnvironments.dataset.settingsPmEnvironments = "";
+        panelSystem.appendChild(pmEnvironments);
+        // Issue #7731: every step of the first-run setup stays reachable
+        // from here. The setup lives on the Hub page.
+        const setupSection = createDiv("settings-section");
+        setupSection.dataset.firstRunSetupReview = "";
+        setupSection.appendChild(createNode("h4", "settings-section-heading", "Review first-run setup"));
+        setupSection.appendChild(createNode("p", "settings-help", "Open any step of the setup again. It shows this machine's current state."));
+        const setupLinks = createDiv("settings-link-row");
+        for (const { step, label } of SETUP_REVIEW_STEPS) {
+          const link = createNode("a", "wizard-button", label);
+          link.href = firstRunSetupUrlPath(step);
+          link.dataset.setupStep = step;
+          setupLinks.appendChild(link);
+        }
+        setupSection.appendChild(setupLinks);
+        panelSystem.appendChild(setupSection);
         const systemContent = createDiv();
         systemContent.id = `${panelSystem.id}-content`;
         systemContent.dataset.systemSettingsContent = "";
@@ -1695,6 +1799,9 @@ export function createSettingsSurface({
         const controls = createDiv();
         controls.dataset.settingsIssuesControls = "";
         panelIssues.appendChild(controls);
+        const environments = createDiv();
+        environments.dataset.settingsEnvironments = "";
+        panelIssues.appendChild(environments);
         const candidates = createDiv();
         candidates.dataset.settingsCandidates = "";
         panelIssues.appendChild(candidates);
@@ -1742,6 +1849,7 @@ export function createSettingsSurface({
           });
         });
         renderProjectSettings(body);
+        renderPmEnvironmentsPanel(body);
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
@@ -2943,6 +3051,8 @@ export function createSettingsSurface({
         applyIssueSettingsStatus,
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,
+        applyExecutionEnvironments,
+        applyExecutionEnvironmentError,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,

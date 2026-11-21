@@ -2001,6 +2001,10 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
         event,
         FrontendEvent::RefreshOrphanDaemons
             | FrontendEvent::ReapOrphanDaemon { .. }
+            | FrontendEvent::LoadHomeConversation { .. }
+            | FrontendEvent::HomePmSend { .. }
+            | FrontendEvent::GetFirstRunSetup { .. }
+            | FrontendEvent::SaveFirstRunSetup { .. }
             | FrontendEvent::FrontendReady
             | FrontendEvent::StartupFirstFrame { .. }
             | FrontendEvent::RefreshUsage
@@ -2333,7 +2337,7 @@ enum UserEvent {
         status: Box<gwt::IssueMonitorStatusView>,
     },
     IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
-    IssueMonitorMaxActivePrepared(Box<app_runtime::PreparedIssueMonitorMaxActive>),
+    IssueMonitorLaneControlPrepared(Box<app_runtime::PreparedIssueMonitorLaneControl>),
     IssueMonitorProfilesSaved(Box<app_runtime::IssueMonitorProfilesSaveCompletion>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -3093,6 +3097,25 @@ mod tests {
         assert!(hub_frontend_event_allowed(&FrontendEvent::ApplyUpdateStart));
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::OpenProjectDialog
+        ));
+        // Issue #7639: Home reads decisions and sends to a PM by project.
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::LoadHomeConversation { request_id: 1 }
+        ));
+        assert!(hub_frontend_event_allowed(&FrontendEvent::HomePmSend {
+            project_key: "0123456789abcdef".to_string(),
+            text: "Approve it".to_string(),
+            request_id: 2,
+        }));
+        // Issue #7731: the first-run setup is read and saved from the Hub.
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::GetFirstRunSetup { refresh: true }
+        ));
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::SaveFirstRunSetup {
+                pm_member_id: None,
+                pm_name: Some("Aoi".to_string()),
+            }
         ));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::RestartPmAgent));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::TerminalInput {
@@ -5130,7 +5153,7 @@ mod tests {
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             issue_monitor_profile_saves: HashMap::new(),
-            issue_monitor_max_active_saves: HashMap::new(),
+            issue_monitor_control_lanes: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
@@ -11785,8 +11808,8 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));
             }
-            Event::UserEvent(UserEvent::IssueMonitorMaxActivePrepared(prepared)) => {
-                clients.dispatch(app.issue_monitor_max_active_prepared_events(*prepared));
+            Event::UserEvent(UserEvent::IssueMonitorLaneControlPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_lane_control_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);

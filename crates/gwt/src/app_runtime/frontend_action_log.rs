@@ -413,6 +413,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .window(id)
             .target(issue_number.to_string())
             .mode(target_phase.as_deref().unwrap_or("backlog")),
+        FrontendEvent::SetIssueAutonomousTarget {
+            id,
+            issue_number,
+            enabled,
+            ..
+        } => FrontendUserActionLog::new("set_issue_autonomous_target", "knowledge")
+            .window(id)
+            .target(issue_number.to_string())
+            .mode(if *enabled { "include" } else { "exclude" }),
         FrontendEvent::RebuildIndexCell {
             project_root,
             scope,
@@ -573,6 +582,35 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("list_agent_backends", "agent_backends")
                 .agent(agent.as_str())
         }
+        FrontendEvent::SaveFirstRunSetup { pm_member_id, .. } => {
+            let action = FrontendUserActionLog::new("save_first_run_setup", "first_run_setup");
+            match pm_member_id {
+                Some(member_id) => action.target(member_id.clone()),
+                None => action,
+            }
+        }
+        FrontendEvent::AddExecutionEnvironment { via_tool, .. } => {
+            FrontendUserActionLog::new("add_execution_environment", "execution_environments")
+                .agent(via_tool)
+        }
+        FrontendEvent::UpdateExecutionEnvironment { environment_id, .. } => {
+            FrontendUserActionLog::new("update_execution_environment", "execution_environments")
+                .target(environment_id.clone())
+        }
+        FrontendEvent::DeleteExecutionEnvironment { environment_id } => {
+            FrontendUserActionLog::new("delete_execution_environment", "execution_environments")
+                .target(environment_id.clone())
+        }
+        FrontendEvent::DeleteTheme { number, .. } => {
+            FrontendUserActionLog::new("delete_theme", "themes").target(number.to_string())
+        }
+        FrontendEvent::SetProjectExecutionEnvironments { .. } => FrontendUserActionLog::new(
+            "set_project_execution_environments",
+            "execution_environments",
+        ),
+        FrontendEvent::SetPmExecutionEnvironments { .. } => {
+            FrontendUserActionLog::new("set_pm_execution_environments", "execution_environments")
+        }
         FrontendEvent::AddAgentBackend { agent, profile } => {
             FrontendUserActionLog::new("add_agent_backend", "agent_backends")
                 .agent(agent.as_str())
@@ -613,6 +651,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 "repair"
             } else {
                 "audit"
+            })
+        }
+        FrontendEvent::UpdateUserHooks { change, .. } => {
+            FrontendUserActionLog::new("update_user_hooks", "settings").mode(match change {
+                gwt::user_hooks::UserHookChange::Register { .. } => "register",
+                gwt::user_hooks::UserHookChange::Remove { .. } => "remove",
             })
         }
         FrontendEvent::GetBoardAuthStatus => {
@@ -679,6 +723,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PaneName { .. } => return None,
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
+        }
+        FrontendEvent::HomePmSend { project_key, .. } => {
+            FrontendUserActionLog::new("home_pm_send", "pm").target(project_key)
         }
         FrontendEvent::ReopenPmRequestTask { id, .. } => {
             FrontendUserActionLog::new("reopen_pm_request_task", "pm").window(id)
@@ -829,9 +876,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
+        | FrontendEvent::LoadHomeConversation { .. }
+        | FrontendEvent::LoadThemes { .. }
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
+        | FrontendEvent::GetExecutionEnvironments
+        | FrontendEvent::GetFirstRunSetup { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }

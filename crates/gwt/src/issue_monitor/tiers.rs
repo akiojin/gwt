@@ -220,6 +220,7 @@ fn default_launch_tiers() -> Vec<Vec<IssueMonitorLaunchProfile>> {
                 skip_permissions: true,
                 fast_mode: false,
                 codex_speed: Default::default(),
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -353,7 +354,8 @@ impl IssueMonitorPrefs {
         let start = tier_for(tier_input, is_spec, floor, tiers.len().min(255) as u8);
         let mut skipped = Vec::new();
         for (index, pool) in tiers.into_iter().enumerate().skip(usize::from(start)) {
-            let pool: Vec<_> = pool
+            let pool: Vec<_> = self
+                .environment_tier(pool)
                 .into_iter()
                 .filter(|profile| {
                     (!bound

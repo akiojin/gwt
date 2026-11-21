@@ -58,7 +58,9 @@ pub use tiers::{
     IssueMonitorTierProfileProjection, IssueMonitorTierRecord, IssueMonitorTierSelection,
     IssueMonitorTierSelectionProjection,
 };
+mod environments;
 mod quota;
+pub use environments::{normalize_project_execution_environments, ProjectExecutionEnvironment};
 pub(crate) use quota::provider_quota_reset_label;
 use quota::{PROVIDER_QUOTA_UNKNOWN_RESET_AT, PROVIDER_QUOTA_UNKNOWN_RESET_LABEL};
 
@@ -1103,6 +1105,11 @@ pub struct IssueMonitorPrefs {
     pub terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     #[serde(default)]
     pub terminal_queue_auto_refill_limit: usize,
+    /// Issue #7741: the execution environments this project may use, in
+    /// priority order. Empty means the list was never saved; launches then
+    /// choose exactly as they did before the list existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_environments: Vec<ProjectExecutionEnvironment>,
     /// One-shot, project-scoped migration marker. The serde default is
     /// intentionally the numeric default (0) for pre-migration JSON, while
     /// [`Default`] uses the current version for genuinely fresh projects.
@@ -1439,6 +1446,7 @@ impl Default for IssueMonitorPrefs {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            execution_environments: Vec::new(),
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
@@ -1563,6 +1571,7 @@ impl IssueMonitorPrefs {
             "launch_tiers": self.launch_tiers,
             "terminal_queue_auto_refill": self.terminal_queue_auto_refill,
             "terminal_queue_auto_refill_limit": self.terminal_queue_auto_refill_limit,
+            "execution_environments": self.execution_environments,
             "urgent_queue_limit": self.urgent_queue.limit,
             "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
                 "version": drain.version,
@@ -1600,7 +1609,7 @@ impl IssueMonitorPrefs {
             .first()
             .filter(|profile| profile.agent_member_id.is_some())
         else {
-            return pool;
+            return self.environment_candidates(pool);
         };
         let host = crate::process::current_hostname();
         let delivery_member = self
@@ -1617,7 +1626,7 @@ impl IssueMonitorPrefs {
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
         // Issue #7027: every planned member launches with its own registered
         // tool, so an idle member of another pooled tool can take queued work.
-        let tool = normalize_issue_monitor_provider(
+        let planned_tool = normalize_issue_monitor_provider(
             &scheduled
                 .and_then(|id| {
                     pool.iter()
@@ -1626,6 +1635,42 @@ impl IssueMonitorPrefs {
                 .unwrap_or(primary)
                 .agent_id,
         );
+        let members_for = |tool: &Option<String>| -> Vec<IssueMonitorLaunchProfile> {
+            self.registered_members_for_tool(&pool, tool, scheduled, issue_number)
+        };
+        // Issue #7741: a saved environment list decides which tools the
+        // project uses. A planned agent keeps its own tool; unplanned work
+        // takes the first environment some agent can run and that is not held.
+        let Some(tools) = self.environment_tools() else {
+            return members_for(&planned_tool);
+        };
+        if scheduled.is_some() {
+            return if planned_tool
+                .as_ref()
+                .is_some_and(|tool| tools.contains(tool))
+            {
+                members_for(&planned_tool)
+            } else {
+                Vec::new()
+            };
+        }
+        let tool = self.environment_tool_for_unplanned_issue(&tools, |tool| {
+            !members_for(&Some(tool.to_string())).is_empty()
+        });
+        if tool.is_none() {
+            return Vec::new();
+        }
+        members_for(&tool)
+    }
+
+    fn registered_members_for_tool(
+        &self,
+        pool: &[IssueMonitorLaunchProfile],
+        tool: &Option<String>,
+        scheduled: Option<&str>,
+        issue_number: u64,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let tool = tool.clone();
         pool.iter()
             .filter(|profile| {
                 normalize_issue_monitor_provider(&profile.agent_id) == tool
@@ -2325,6 +2370,8 @@ struct IssueMonitorLaunchProfileRepr {
     #[serde(default)]
     codex_fast_mode: bool,
     #[serde(default)]
+    runtime_inherit: bool,
+    #[serde(default)]
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
     docker_service: Option<String>,
@@ -2355,6 +2402,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
             skip_permissions: repr.skip_permissions,
             fast_mode: repr.fast_mode || legacy_fast_mode,
             codex_speed: repr.codex_speed,
+            runtime_inherit: repr.runtime_inherit,
             runtime_target: repr.runtime_target,
             docker_service: repr.docker_service,
             docker_lifecycle_intent: repr.docker_lifecycle_intent,
@@ -2388,6 +2436,13 @@ pub struct IssueMonitorLaunchProfile {
     /// Explicit Codex speed; old boolean settings intentionally remain Off.
     #[serde(default)]
     pub codex_speed: gwt_agent::CodexSpeed,
+    /// Issue #7729 AC-4 (SPEC #7007 item 197 (4)): the candidate does not
+    /// name where it runs. A launch then runs where this project's last
+    /// launch ran, and the three fields below are only what the form last
+    /// showed. See [`Self::resolve_inherited_runtime`]. Always written, so a
+    /// sparse `profiles.set` can carry the saved choice over like any field.
+    #[serde(default)]
+    pub runtime_inherit: bool,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -2418,11 +2473,38 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             // decide a Claude profile's Fast Mode.
             fast_mode: config.fast_mode,
             codex_speed: config.codex_speed,
+            runtime_inherit: false,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
             windows_shell: config.windows_shell,
             prefer_for: Vec::new(),
+        }
+    }
+}
+
+impl IssueMonitorLaunchProfile {
+    /// Issue #7729 AC-4 (item 197 (3) and (4)): settle where an inheriting
+    /// candidate runs before it starts a session. `previous` is this
+    /// project's last launch; with none, the candidate runs on the host. A
+    /// candidate that names its place is left as it is. The launch still
+    /// falls back to the host when it asks for Docker in a project that has
+    /// no Docker setup (item 197 (2)).
+    pub fn resolve_inherited_runtime(&mut self, previous: Option<&LaunchWizardPreviousProfile>) {
+        if !self.runtime_inherit {
+            return;
+        }
+        match previous {
+            Some(previous) => {
+                self.runtime_target = previous.runtime_target;
+                self.docker_service = previous.docker_service.clone();
+                self.docker_lifecycle_intent = previous.docker_lifecycle_intent;
+            }
+            None => {
+                self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+                self.docker_service = None;
+                self.docker_lifecycle_intent = Default::default();
+            }
         }
     }
 }
@@ -2610,7 +2692,7 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 14] = [
     "agent_member_id",
     "model",
     "reasoning",
@@ -2619,6 +2701,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
     "skip_permissions",
     "fast_mode",
     "codex_speed",
+    "runtime_inherit",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -5594,6 +5677,8 @@ pub struct IssueMonitorState {
     #[serde(default)]
     terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     terminal_queue_auto_refill_limit: usize,
+    #[serde(default)]
+    execution_environments: Vec<ProjectExecutionEnvironment>,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
     /// [`IssueMonitorPrefs::launch_profile_pool`]).
     #[serde(default)]
@@ -6940,8 +7025,14 @@ pub const AUTO_MERGE_LABEL: &str = "auto-merge";
 
 /// Whether `issue` carries the [`AUTO_MERGE_LABEL`] (case-insensitive).
 pub fn issue_has_auto_merge_label(issue: &IssueMonitorIssue) -> bool {
-    issue
-        .labels
+    labels_opt_into_autonomy(&issue.labels)
+}
+
+/// The per-Issue half of the two-stage autonomy opt-in, read from a label
+/// list. The Monitor's gate and the Issue detail (Issue #7729 AC-1) both ask
+/// this one function, so the screen can never name a different mark.
+pub fn labels_opt_into_autonomy(labels: &[String]) -> bool {
+    labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case(AUTO_MERGE_LABEL))
 }
@@ -8970,6 +9061,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            execution_environments: Vec::new(),
             launch_profiles: Vec::new(),
             launch_auto: false,
             launch_tiers: Vec::new(),
@@ -9078,6 +9170,7 @@ impl IssueMonitorState {
         state.terminal_queue_auto_refill = prefs.terminal_queue_auto_refill;
         state.terminal_queue_exclusions = prefs.terminal_queue_exclusions;
         state.terminal_queue_auto_refill_limit = prefs.terminal_queue_auto_refill_limit;
+        state.execution_environments = prefs.execution_environments;
         state.last_scan_at = prefs.last_scan_at;
         state.last_scan_error = prefs.last_scan_error;
         state.agent_blackout_since = prefs.agent_blackout_since;
@@ -9274,6 +9367,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
             terminal_queue_exclusions: self.terminal_queue_exclusions.clone(),
             terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
+            execution_environments: self.execution_environments.clone(),
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profiles.first().cloned(),
@@ -12708,6 +12802,7 @@ impl IssueMonitorState {
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
         self.terminal_queue_auto_refill_limit = disk.terminal_queue_auto_refill_limit;
+        self.execution_environments = disk.execution_environments.clone();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.apply_terminal_queue_retirements();
         for entry in urgent_proposals {
@@ -30307,6 +30402,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -31861,6 +31957,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -32373,6 +32470,7 @@ mod tests {
                 skip_permissions: false,
                 fast_mode: false,
                 codex_speed: gwt_agent::CodexSpeed::Off,
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -33084,6 +33182,62 @@ mod tests {
             "routing tags describe a candidate, not the head slot, so a switch drops them"
         );
         assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+    }
+
+    #[test]
+    fn issue_7729_candidate_runtime_inherit_persists_and_resolves_from_the_last_launch() {
+        // SPEC #7007 item 197 (4): a candidate names Host, Docker, or neither.
+        let explicit = test_launch_profile("codex");
+        assert_eq!(
+            serde_json::to_value(&explicit).unwrap()["runtime_inherit"],
+            false
+        );
+        let legacy: IssueMonitorLaunchProfile =
+            serde_json::from_value(serde_json::json!({"agent_id": "codex"})).unwrap();
+        assert!(
+            !legacy.runtime_inherit,
+            "a pool saved before this field names its place"
+        );
+        let mut inherit = test_launch_profile("codex");
+        inherit.runtime_inherit = true;
+        let saved = serde_json::to_value(&inherit).unwrap();
+        assert_eq!(saved["runtime_inherit"], true);
+        let restored: IssueMonitorLaunchProfile = serde_json::from_value(saved).unwrap();
+        assert!(restored.runtime_inherit);
+
+        // Item 197 (3): it runs where the project's last launch ran.
+        let mut docker = test_launch_profile("claude");
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        docker.docker_service = Some("app".to_string());
+        docker.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        let previous: LaunchWizardPreviousProfile = docker.into();
+        let mut resolved = restored.clone();
+        resolved.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(
+            resolved.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(resolved.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            resolved.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+
+        // No earlier launch: the host, whatever the form last showed.
+        let mut first = restored;
+        first.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        first.docker_service = Some("stale".to_string());
+        first.resolve_inherited_runtime(None);
+        assert_eq!(first.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+        assert_eq!(first.docker_service, None);
+
+        // A candidate that names its place ignores the last launch.
+        let mut host = explicit;
+        host.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(host.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+
+        // A reorder written without the field keeps the saved choice.
+        assert!(ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS.contains(&"runtime_inherit"));
     }
 
     #[test]

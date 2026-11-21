@@ -126,62 +126,125 @@ export function accountRows(snapshot) {
   });
 }
 
-// One row per provider account that agents can actually be run through: the
-// tool has to be installed. Before the tool catalog has arrived the row is
-// kept, because an unknown install state is not a missing tool.
-export function environmentRows(snapshot, agents) {
-  const rows = [];
-  for (const account of accountRows(snapshot)) {
-    const tool = PROVIDER_TOOL[account.provider];
-    const agent = tool && Array.isArray(agents)
-      ? agents.find(candidate => candidate.id === tool.agentId) || null : null;
-    if (Array.isArray(agents) && tool && (!agent || !agent.installed)) continue;
-    const availability = account.limitReached ? "limit"
-      : account.status.kind === "ok" || account.status.kind === "stale" ? "available" : "unknown";
-    rows.push({
-      id: account.provider,
-      name: account.name,
-      vendor: tool?.vendor || null,
-      via: agent?.name || account.name,
+// One row per execution environment the backend has defined (Issue #7741).
+// Usage is the account's, so it is shown on the environment that runs the
+// account's own tool; a tool that reads its own settings reports none.
+export function environmentRows(view, snapshot, agents) {
+  const usage = accountRows(snapshot);
+  const accounts = view?.accounts || [];
+  return (view?.environments || []).map(environment => {
+    const registered = accounts.find(account => account.id === environment.account_id) || null;
+    const account = environment.kind === "set"
+      ? usage.find(row => PROVIDER_TOOL[row.provider]?.agentId === registered?.tool) || null : null;
+    const agent = Array.isArray(agents)
+      ? agents.find(candidate => candidate.id === environment.via_tool) || null : null;
+    const availability = !environment.tool_installed ? "not_installed"
+      : account?.limitReached ? "limit"
+        : account && (account.status.kind === "ok" || account.status.kind === "stale") ? "available" : "unknown";
+    return {
+      id: environment.id,
+      name: environment.name,
+      kind: environment.kind,
+      accountName: environment.account_name,
+      usageProvider: account?.provider || null,
+      via: environment.via_tool_name,
+      viaTool: environment.via_tool,
       toolVersion: agent?.installed_version?.trim() || null,
       updateAvailable: Boolean(agent?.update_available),
-      members: 1,
       availability,
       account,
-    });
-  }
-  return rows;
+      runtime: environment.runtime || {},
+      deleteBlockedReason: environment.delete_blocked_reason || null,
+      readOnlyReason: environment.runtime_read_only_reason || null,
+      toolSettings: environment.tool_settings || null,
+      projects: environment.projects || [],
+    };
+  });
 }
 
-const VIEWS = new Set(["environments", "accounts", "account"]);
+const VIEWS = new Set(["environments", "accounts", "account", "add", "edit", "delete"]);
 
 // Execution environments host. Rendered by the React surface
-// `ExecutionEnvironments` (crates/gwt/web-react). The usage snapshot and the
-// tool catalog stay owned by their models; this host only derives rows.
+// `ExecutionEnvironments` (crates/gwt/web-react). The definitions come from
+// the backend (`execution_environments`); the usage snapshot and the tool
+// catalog stay owned by their models. This host only derives rows.
 export function createExecutionEnvironments({
   document, usageModel, supportedAgentsModel, renderAccountUsage,
-  onOpenToolManagement, onSetUsageCollection, scheduleFrame,
+  onOpenToolManagement, onSetUsageCollection, definitionsModel = null, send = () => {}, scheduleFrame,
 }) {
+  let definitions = null;
+  // Whether this screen is waiting for an answer to its own request.
+  let pending = false;
   const derive = () => {
     const snapshot = usageModel.read();
     const agents = supportedAgentsModel?.read()?.agents ?? null;
-    return { loaded: snapshot != null, accounts: accountRows(snapshot), environments: environmentRows(snapshot, agents) };
+    return {
+      loaded: definitions != null,
+      accounts: accountRows(snapshot),
+      environments: environmentRows(definitions, snapshot, agents),
+      registeredAccounts: definitions?.accounts || [],
+      viaOptions: definitions?.via_options || [],
+    };
   };
-  const model = createUiStateStore({ ...derive(), view: { name: "environments", provider: null } }, { scheduleFrame });
+  const model = createUiStateStore({
+    ...derive(), view: { name: "environments", key: null }, error: null, saving: false, saved: false,
+  }, { scheduleFrame });
   const refresh = () => model.update(state => ({ ...state, ...derive() }));
   const releases = [usageModel.subscribe(state => state, refresh)];
   if (supportedAgentsModel) releases.push(supportedAgentsModel.subscribe(state => state.agents, refresh));
-  function open(name = "environments", provider = null) {
+  // What to show once the pending request is answered.
+  let afterSave = null;
+  function open(name = "environments", key = null) {
     if (!VIEWS.has(name)) return;
-    model.update(state => ({ ...state, view: { name, provider: name === "account" ? provider : null } }));
+    afterSave = null;
+    model.update(state => ({
+      ...state, error: null, saved: false,
+      view: { name, key: ["account", "edit", "delete"].includes(name) ? key : null },
+    }));
+  }
+  function request(message, next = null) {
+    afterSave = next;
+    pending = true;
+    model.update(state => ({ ...state, saving: true, saved: false, error: null }));
+    send(message);
+  }
+  // `execution_environments`: the definitions after a read or a change.
+  function applyView(view) {
+    definitions = view;
+    pending = false;
+    const next = afterSave;
+    afterSave = null;
+    model.update(state => ({
+      ...state, ...derive(), error: null, saved: state.saving, saving: false,
+      view: next && state.saving ? next : state.view,
+    }));
+  }
+  // `execution_environment_error`: the request was refused; say why in place.
+  // A refusal of a request this screen did not send belongs elsewhere.
+  function applyError(message) {
+    if (!pending) return;
+    pending = false;
+    afterSave = null;
+    model.update(state => ({ ...state, saving: false, saved: false, error: message }));
+  }
+  if (definitionsModel) {
+    releases.push(definitionsModel.subscribe(state => state.view, view => { if (view) applyView(view); }));
+    releases.push(definitionsModel.subscribe(state => state.refusal, refusal => { if (refusal) applyError(refusal.message); }));
   }
   const container = createDetachedIslandContainer(document);
   const island = mountIsland("execution-environments", container, {
     store: model, renderAccountUsage, onNavigate: open, onOpenToolManagement, onSetUsageCollection,
+    onAdd: input => request({ kind: "add_execution_environment", ...input }, { name: "environments", key: null }),
+    onUpdate: (id, change) => request({ kind: "update_execution_environment", environment_id: id, ...change }),
+    onDelete: id => request({ kind: "delete_execution_environment", environment_id: id }, { name: "environments", key: null }),
   });
   function dispose() {
     for (const release of releases) release?.();
     island.unmount();
   }
-  return { element: container, open, dispose };
+  function reload() {
+    pending = true;
+    send({ kind: "get_execution_environments" });
+  }
+  return { element: container, open, reload, dispose };
 }

@@ -10,6 +10,12 @@ import { TaskDecisions } from "../surfaces/TaskDecisions.jsx";
 import { TaskProgress } from "../surfaces/TaskProgress.jsx";
 import { TaskLog } from "../surfaces/TaskLog.jsx";
 import { ExecutionEnvironments } from "../surfaces/ExecutionEnvironments.jsx";
+import { AppFooter, AppFooterPm, AppHeader, AppHeaderNav } from "../surfaces/AppChrome.jsx";
+import { PmExecutionEnvironments, ProjectExecutionEnvironments } from "../surfaces/ProjectExecutionEnvironments.jsx";
+import { HomeConversation } from "../surfaces/HomeConversation.jsx";
+import { ProjectThemes } from "../surfaces/ProjectThemes.jsx";
+import { AgentHistoryPlans } from "../surfaces/AgentHistoryPlans.jsx";
+import { FirstRunSetup } from "../surfaces/FirstRunSetup.jsx";
 
 const islands = Object.freeze({
   "workspace-state-notice": WorkspaceStateNotice,
@@ -18,6 +24,16 @@ const islands = Object.freeze({
   "task-progress": TaskProgress,
   "task-log": TaskLog,
   "execution-environments": ExecutionEnvironments,
+  "app-header": AppHeader,
+  "app-header-nav": AppHeaderNav,
+  "app-footer": AppFooter,
+  "app-footer-pm": AppFooterPm,
+  "project-execution-environments": ProjectExecutionEnvironments,
+  "pm-execution-environments": PmExecutionEnvironments,
+  "home-conversation": HomeConversation,
+  "project-themes": ProjectThemes,
+  "agent-history-plans": AgentHistoryPlans,
+  "first-run-setup": FirstRunSetup,
 });
 
 export function mountIsland(name, container, props) {

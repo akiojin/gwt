@@ -1,9 +1,11 @@
 /* Issue #4538 AC-1 / AC-3 — Hub picker and route not-found in a real
  * browser with a deterministic WebSocket backend (no live gwt required).
+ * Issue #7639: the picker is the Projects view of the page at `/`; Home, its
+ * other view, is covered by home-conversation.spec.ts.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { HUB_URL, ORIGIN_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
-import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { HUB_PROJECTS_URL, HUB_URL, ORIGIN_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt, liveGwtProjectsUrl, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "Alpha", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind: "git" };
@@ -112,7 +114,7 @@ test("live isolated Hub opens a manual path and acknowledges an already-open Pro
         if (JSON.parse(String(payload)).kind === "project_opened") openedEvents += 1;
       } catch { /* Ignore non-JSON frames. */ }
     }));
-    await page.goto(new URL("/", base!).href);
+    await page.goto(liveGwtProjectsUrl(base!));
     await expect(page.locator("[data-hub]")).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     await page.getByText("Enter folder path…", { exact: true }).click();
@@ -223,7 +225,7 @@ test.describe("Project Hub and routes", () => {
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
     await installRouteBackend(page);
-    await page.goto(new URL("/", base || ORIGIN_URL).href);
+    await page.goto(new URL("/?view=projects", base || ORIGIN_URL).href);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const control = page.locator('[data-hub-action="open-folder"]');
     await expect(control).toBeVisible();
@@ -238,7 +240,7 @@ test.describe("Project Hub and routes", () => {
           recent_projects: [{ title, project_key: null, path: "/private/catalog-path" }],
         } });
       }, { title, index, project: projectA });
-      await expect(page.locator(".gwt-hub__version")).toHaveText(`v9.9.${20 + index}`);
+      await expect(page.locator(".app-foot__version")).toHaveText(`v9.9.${20 + index}`);
       const link = page.locator('[data-hub-list="open"] a');
       await expect(link).toHaveCount(1);
       await expect(link).toHaveText(title);
@@ -418,7 +420,7 @@ test.describe("Project Hub and routes", () => {
     await page.screenshot({ path: testInfo.outputPath("project-not-found-state.png") });
     await view.getByRole('link', { name: 'Go to Hub' }).click();
     await expect(page.locator('[data-hub]')).toBeVisible();
-    await expect(page).toHaveTitle('gwt — Hub');
+    await expect(page).toHaveTitle('gwt — Home');
     expect(errors).toEqual([]);
   });
 
@@ -459,7 +461,7 @@ test.describe("Project Hub and routes", () => {
     const errors = collectBrowserErrors(page);
     await installEmbeddedRoutes(page);
     await installRouteBackend(page);
-    await page.goto(HUB_URL);
+    await page.goto(HUB_PROJECTS_URL);
     const open = page.locator('[data-hub-action="open-folder"]');
     await open.click();
     await expect(open).toHaveText("Choosing folder…");
@@ -493,8 +495,8 @@ test.describe("Project Hub and routes", () => {
     const errors = collectBrowserErrors(page);
     await installEmbeddedRoutes(page);
     await installRouteBackend(page);
-    await page.goto(HUB_URL);
-    await expect(page).toHaveTitle("gwt — Hub");
+    await page.goto(HUB_PROJECTS_URL);
+    await expect(page).toHaveTitle("gwt — Home");
     await expect(page.locator("[data-hub]")).toBeVisible();
     for (const selector of ["#app", "#project-tabs", "#op-rail", ".workspace-window", "#project-switcher-button"]) {
       await expect(page.locator(selector)).toHaveCount(0);
@@ -545,6 +547,201 @@ test.describe("Project Hub and routes", () => {
     await expect(page).toHaveTitle("gwt — Project not found");
     await expect(view.locator("a")).toHaveAttribute("href", "/");
     await expect(page.locator("#app")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+});
+
+/* Issue #7740 (SPEC #7007 slice F-1) — the header and footer every page
+ * shares, in a real browser against the deterministic route backend.
+ */
+test.describe("shared header and footer", () => {
+  const destinations = ["pm", "notifications", "projects", "agents", "environments", "menu"];
+
+  async function openRoute(page: Page, testInfo: { project: { name: string } }, path: string) {
+    const errors = collectBrowserErrors(page);
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(new URL(path, base || ORIGIN_URL).href);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    return errors;
+  }
+  const entry = (page: Page, id: string) => page.locator(`.app-head [data-destination="${id}"]`);
+  const sentKinds = (page: Page) => page.evaluate(() =>
+    (window as any).__gwtSent.map((sent: any) => `${sent.message.kind}:${sent.message.preset ?? ""}`));
+
+  test("the project header opens every screen and replaces the old top-bar entries (AC-1, AC-2, AC-4)", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, `/p/${projectA.project_key}`);
+    await expect(page.locator(".app-head__brand")).toHaveText("gwt");
+    await expect(page.locator(".app-head__nav > [data-destination]")).toHaveCount(destinations.length);
+    expect(await page.locator(".app-head__nav > [data-destination]").evaluateAll(nodes =>
+      nodes.map(node => (node as HTMLElement).dataset.destination))).toEqual(destinations);
+
+    // AC-4: one entry per destination; the old top-bar buttons and the rail bell are gone.
+    await expect(page.locator("#open-agents-button, #open-environments-button")).toHaveCount(0);
+    await expect(page.locator('.op-rail [data-cmd="toggle-notifications"]')).toHaveCount(0);
+    await expect(page.locator('[aria-controls="notification-center"]')).toHaveCount(1);
+    await expect(page.locator(".project-bar #app-version")).toHaveCount(0);
+
+    // The footer carries the version (with its update check) and the PM name only.
+    await expect(page.locator(".app-foot > *:visible")).toHaveCount(3);
+    await expect(page.locator(".app-foot #app-version")).toHaveText("ve2e");
+    await expect(page.locator(".app-foot .app-foot__pm")).toHaveText("PM: —");
+
+    // AC-1: agents and environments open their screens and mark the entry.
+    await entry(page, "agents").click();
+    await expect(page.locator(".agents-surface")).toBeVisible();
+    await expect(entry(page, "agents")).toHaveAttribute("aria-current", "page");
+    await entry(page, "environments").click();
+    await expect(page.locator(".exec-env")).toBeVisible();
+    await expect(entry(page, "environments")).toHaveAttribute("aria-current", "page");
+    await expect(entry(page, "agents")).not.toHaveAttribute("aria-current", "page");
+
+    // AC-1: the PM entry leads to the waiting decisions; with no PM it starts one.
+    await entry(page, "pm").click();
+    expect(await sentKinds(page)).toContain("open_pm_agent:");
+
+    // AC-1: Settings is an item of the header menu, not of the tab row.
+    await expect(entry(page, "settings")).toHaveCount(0);
+    await entry(page, "menu").click();
+    await expect(entry(page, "menu")).toHaveAttribute("aria-expanded", "true");
+    const settings = page.getByRole("menu").getByRole("menuitem", { name: "Settings" });
+    await expect(settings).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(entry(page, "menu")).toBeFocused();
+    await entry(page, "menu").click();
+    await settings.click();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(await sentKinds(page)).toContain("create_window:settings");
+
+    // AC-1: the bell opens the notification drawer.
+    await entry(page, "notifications").click();
+    await expect(page.locator("#notification-center")).toBeVisible();
+    await expect(entry(page, "notifications")).toHaveAttribute("aria-expanded", "true");
+    await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+    await expect(page.locator("#notification-center")).toBeHidden();
+
+    // Every destination has a screen on a project page (Issue #7639 gave
+    // Projects its own); the disabled entry and its reason are covered on the
+    // page at `/` below.
+    for (const id of destinations) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
+    await page.screenshot({ path: testInfo.outputPath("shared-header-project.png") });
+    expect(errors).toEqual([]);
+  });
+
+  test("the header stays a brand row plus one row on a phone, even with one more destination (AC-3)", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, `/p/${projectA.project_key}`);
+    await expect(page.locator(".app-head__nav > [data-destination]")).toHaveCount(destinations.length);
+    const measure = () => page.evaluate(() => {
+      const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+      const row = document.querySelector<HTMLElement>(".app-head__row")!;
+      const controls = [...row.querySelectorAll<HTMLElement>(".app-head__item, .project-actions > button, .op-theme-toggle")];
+      return {
+        header: rect(".app-head").height,
+        brandBottom: rect(".app-head__brand").bottom,
+        rowTop: rect(".app-head__row").top,
+        rowBottom: rect(".app-head__row").bottom,
+        // Every control of the row shares one line: none starts below another's end.
+        lines: new Set(controls.map(control => Math.round(control.getBoundingClientRect().top
+          + control.getBoundingClientRect().height / 2))).size,
+        outsideRow: controls.filter(control => control.getBoundingClientRect().top < row.getBoundingClientRect().top - 1
+          || control.getBoundingClientRect().bottom > row.getBoundingClientRect().bottom + 1).length,
+        rowScrolls: row.scrollWidth > row.clientWidth,
+        pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        smallTargets: [...row.querySelectorAll<HTMLElement>(".app-head__item")].filter(item =>
+          item.getBoundingClientRect().height < 44 || item.getBoundingClientRect().width < 44).length,
+        footer: rect(".app-foot").height,
+        surface: rect(".surface-area").height,
+      };
+    });
+    for (const width of [360, 390, 430]) {
+      await page.setViewportSize({ width, height: 844 });
+      const before = await measure();
+      expect(before.rowTop, `brand row above the nav row at ${width}px`).toBeGreaterThanOrEqual(before.brandBottom - 1);
+      expect(before.lines, `one line of entries at ${width}px`).toBe(1);
+      expect(before.outsideRow).toBe(0);
+      expect(before.rowScrolls, `entries that do not fit scroll sideways at ${width}px`).toBe(true);
+      expect(before.pageOverflow, "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+      expect(before.smallTargets, "entries keep 44px touch targets").toBe(0);
+      expect(before.header, `two rows at ${width}px`).toBeLessThanOrEqual(104);
+      expect(before.surface).toBeGreaterThan(0);
+
+      // Adding a destination must not add a row.
+      await page.evaluate(() => {
+        const extra = document.querySelector('.app-head [data-destination="agents"]')!.cloneNode(true) as HTMLElement;
+        extra.dataset.destination = "extra";
+        extra.querySelector(".app-head__label")!.textContent = "One more destination";
+        document.querySelector(".app-head__nav")!.append(extra);
+      });
+      const after = await measure();
+      expect(after.header, `header height with one more destination at ${width}px`).toBe(before.header);
+      expect(after.lines).toBe(1);
+      expect(after.pageOverflow).toBeLessThanOrEqual(0);
+
+      // Every entry, and the page's own actions after them, is reachable by scrolling the row.
+      for (const selector of ['.app-head [data-destination="extra"]', "#close-project-button", '[data-theme-value="light"]']) {
+        await page.locator(selector).scrollIntoViewIfNeeded();
+        await expect(page.locator(selector)).toBeInViewport({ ratio: 0.95 });
+      }
+      await page.screenshot({ path: testInfo.outputPath(`shared-header-${width}.png`) });
+      await page.evaluate(() => document.querySelector('.app-head [data-destination="extra"]')!.remove());
+      await page.locator(".app-head__row").evaluate(row => { row.scrollLeft = 0; });
+    }
+    // Scrolling the row dismisses the popover, so let the reset above settle first.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.setViewportSize({ width: 1360, height: 900 });
+    await expect(page.locator(".app-head")).toHaveCSS("height", "44px");
+    // Issue #7639: Projects opens the project list, the Projects view of `/`.
+    await entry(page, "projects").click();
+    await expect(page).toHaveURL(/\/\?view=projects$/);
+    await expect(page.locator("[data-hub-projects]")).toBeVisible();
+    await expect(entry(page, "projects")).toHaveAttribute("aria-current", "page");
+    expect(errors).toEqual([]);
+  });
+
+  test("the Hub and the not-found page carry the same header and footer (AC-1, AC-2)", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, "/");
+    for (const path of ["/", "/p/aaaaaaaaaaaaaaaa"]) {
+      if (path !== "/") await page.goto(new URL(path, process.env.GWT_PLAYWRIGHT_BASE_URL || ORIGIN_URL).href);
+      await expect(page.locator("header.app-head .app-head__brand")).toHaveText("gwt");
+      expect(await page.locator(".app-head__nav > [data-destination]").evaluateAll(nodes =>
+        nodes.map(node => (node as HTMLElement).dataset.destination))).toEqual(destinations);
+      await expect(page.locator("footer.app-foot .app-foot__pm")).toHaveText("PM: —");
+      // No project is open here: the entries that need one stay, disabled,
+      // with the reason. Home and Projects need none (Issue #7639).
+      for (const id of ["notifications", "agents", "environments"]) {
+        await expect(entry(page, id)).toHaveAttribute("aria-disabled", "true");
+      }
+      for (const id of ["pm", "projects"]) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
+      await entry(page, "agents").click({ force: true });
+      await expect(page.locator('.app-head-popover[role="status"]')).toHaveText("Open a project to use this.");
+      await entry(page, "menu").click();
+      const settings = page.getByRole("menu").getByRole("menuitem", { name: /Settings/ });
+      await expect(settings).toHaveAttribute("aria-disabled", "true");
+      await expect(settings).toContainText("Open a project to use this.");
+      await page.keyboard.press("Escape");
+      await page.setViewportSize({ width: 390, height: 844 });
+      // A disabled entry still explains itself on a phone, inside the viewport.
+      // Scrolling the row dismisses the popover, so bring the entry into view first.
+      await entry(page, "agents").scrollIntoViewIfNeeded();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await entry(page, "agents").click({ force: true });
+      await expect(page.locator('.app-head-popover[role="status"]')).toBeInViewport({ ratio: 1 });
+      await entry(page, "agents").click({ force: true });
+      await page.locator(".app-head__row").evaluate(row => { row.scrollLeft = 0; });
+      const header = (await page.locator(".app-head").boundingBox())!;
+      const row = (await page.locator(".app-head__row").boundingBox())!;
+      expect(header.height).toBeLessThanOrEqual(104);
+      expect(row.y + row.height, "the nav row stays inside the header").toBeLessThanOrEqual(header.y + header.height);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+      await page.screenshot({ path: testInfo.outputPath(`shared-header-${path === "/" ? "hub" : "not-found"}.png`) });
+      await page.setViewportSize({ width: 1280, height: 720 });
+    }
+    await page.goto(new URL("/", process.env.GWT_PLAYWRIGHT_BASE_URL || ORIGIN_URL).href);
+    await expect(page.locator("footer.app-foot .app-foot__version")).toHaveText("v9.9.9");
     expect(errors).toEqual([]);
   });
 });

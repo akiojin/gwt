@@ -15,7 +15,6 @@ import {
   openLiveGwtProject,
   openLiveLaunchWizardForBranch,
   sendLiveGwtEvent,
-  type LiveLaunchWizardFixture,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
@@ -29,7 +28,7 @@ test.describe("Retired backend upgrade (live backend)", () => {
   test("launch explains Settings recovery without migrating or deleting the old config", async ({ page }, testInfo) => {
     expect(CHECK_HOME, "Set GWT_PLAYWRIGHT_CHECK_HOME to the seeded isolated HOME").not.toBe("");
     const release = await acquireLiveGwtBackendLock(BASE, testInfo);
-    let fixture: LiveLaunchWizardFixture | undefined;
+    let opened = false;
     let failed = false;
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(String(error)));
@@ -46,7 +45,8 @@ test.describe("Retired backend upgrade (live backend)", () => {
       await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await clearLiveLaunchWizard(page);
-      fixture = await openLiveLaunchWizardForBranch(page);
+      await openLiveLaunchWizardForBranch(page);
+      opened = true;
       const wizard = page.locator("#wizard-modal");
       // Cold Windows HOME measured 101–127s Frontend stalls before the first
       // wizard. Bound the real DOM wait; do not retry or warm it up.
@@ -77,10 +77,7 @@ test.describe("Retired backend upgrade (live backend)", () => {
       throw error;
     } finally {
       try {
-        if (fixture) {
-          await clearLiveLaunchWizard(page);
-          await fixture.cleanup();
-        }
+        if (opened) await clearLiveLaunchWizard(page);
       } catch (error) {
         if (!failed) throw error;
         await testInfo.attach("cleanup-error", {

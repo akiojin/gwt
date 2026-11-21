@@ -96,11 +96,11 @@ test("the PM sits alone above the rule, then the Surfaces group of Issues / Agen
   const items = Array.from(surfacesGroup.querySelectorAll("[data-surface]"));
   assert.deepEqual(
     items.map((item) => item.dataset.surface),
-    ["issues", "works", "agents", "board", "settings"],
+    ["themes", "issues", "works", "agents", "board", "settings"],
   );
   assert.deepEqual(
     items.map((item) => item.querySelector(".op-rail__surface-label")?.textContent.trim()),
-    ["Issues", "Works", "Agents", "Board", "Settings"],
+    ["Themes", "Issues", "Works", "Agents", "Board", "Settings"],
   );
   for (const item of items) {
     assert.equal(item.tagName, "BUTTON");
@@ -110,7 +110,9 @@ test("the PM sits alone above the rule, then the Surfaces group of Issues / Agen
     assert.ok(item.getAttribute("title"), `${item.dataset.surface} explains itself on hover`);
   }
   // The existing ⌘G Issues entry keeps its id so its wiring stays intact.
-  assert.equal(items[0].id, "op-workspace-overview-entry");
+  assert.equal(items[1].id, "op-workspace-overview-entry");
+  // Issue #7643: Themes leads the group, above the Issues it groups.
+  assert.equal(items[0].dataset.surface, "themes");
 });
 
 test("applySurfaceSelection presses exactly the selected surface", async () => {

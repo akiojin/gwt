@@ -2429,7 +2429,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       await expect(page.locator(`.works-full .works-terminal[data-window-id="${firstWindow.id}"] .xterm-helper-textarea`)).toBeVisible();
       await attachScreenshot(page, testInfo, `launched-${theme}`);
       const initialRoster = await checkMemberLinks(page, firstWindow, first.gwt_session_id!, "initial");
-      await page.getByRole("button", { name: "Agents", exact: true }).click();
+      await page.locator(".op-rail").getByRole("button", { name: "Agents", exact: true }).click();
       const enabledBefore = new Set(initialRoster.members.filter(member => member.enabled).map(member => member.agent_member_id));
       await page.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
       await page.getByLabel("Name for new member", { exact: true }).fill("Relaunch helper");

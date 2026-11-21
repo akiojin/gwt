@@ -34,7 +34,7 @@ use crate::client::{
     MergedPullRequest, OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient,
     RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity,
     RepositoryIssue, RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter,
-    SpecSummary, UpdatedAt,
+    SpecSummary, ThemeIssue, ThemeListing, ThemeSubIssue, UpdatedAt,
 };
 
 /// HTTP method.
@@ -2823,6 +2823,40 @@ mod transport_tests {
     }
 }
 
+/// A theme is an Issue that has sub-issues; any other node yields `None`.
+fn parse_theme_issue(node: &Value, repository: &str) -> Option<ThemeIssue> {
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_string();
+    let total = node["subIssuesSummary"]["total"].as_u64().unwrap_or(0);
+    if total == 0 {
+        return None;
+    }
+    let sub_issues = node["subIssues"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|sub| {
+            Some(ThemeSubIssue {
+                number: IssueNumber(sub["number"].as_u64()?),
+                title: text(sub, "title"),
+                state: parse_issue_state(sub["state"].as_str().unwrap_or_default()),
+                url: text(sub, "url"),
+                in_repository: sub["repository"]["nameWithOwner"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(repository)),
+            })
+        })
+        .collect();
+    Some(ThemeIssue {
+        number: IssueNumber(node["number"].as_u64()?),
+        title: text(node, "title"),
+        body: text(node, "body"),
+        url: text(node, "url"),
+        sub_issues_total: total,
+        sub_issues_completed: node["subIssuesSummary"]["completed"].as_u64().unwrap_or(0),
+        sub_issues,
+    })
+}
+
 fn parse_issue_state(s: &str) -> IssueState {
     match s {
         "CLOSED" | "closed" => IssueState::Closed,
@@ -3329,6 +3363,25 @@ query($owner:String!,$repo:String!,$number:Int!){
 }
 "#;
 
+/// How many pages of open Issues one theme listing reads (100 per page).
+const THEME_LISTING_MAX_PAGES: usize = 10;
+
+const LIST_THEMES_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
+  repository(owner:$owner, name:$repo){
+    issues(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT,direction:DESC}){
+      nodes{
+        number title body url
+        subIssuesSummary{ total completed }
+        subIssues(first:100){ nodes{ number title state url repository{ nameWithOwner } } }
+      }
+      pageInfo{ hasNextPage endCursor }
+    }
+  }
+}
+"#;
+
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
@@ -3790,6 +3843,28 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("set_state json: {e}")))?;
         parse_rest_issue(&value)
+    }
+
+    fn list_themes(&self) -> Result<ThemeListing, ApiError> {
+        let repository = format!("{}/{}", self.owner, self.repo);
+        let mut listing = ThemeListing::default();
+        let mut after = Value::Null;
+        for _ in 0..THEME_LISTING_MAX_PAGES {
+            let value = self.graphql(
+                LIST_THEMES_QUERY,
+                json!({ "owner": self.owner, "repo": self.repo, "after": after }),
+            )?;
+            let issues = &value["data"]["repository"]["issues"];
+            for node in issues["nodes"].as_array().into_iter().flatten() {
+                listing.themes.extend(parse_theme_issue(node, &repository));
+            }
+            if issues["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                return Ok(listing);
+            }
+            after = issues["pageInfo"]["endCursor"].clone();
+        }
+        listing.truncated = true;
+        Ok(listing)
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {

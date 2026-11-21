@@ -41,3 +41,52 @@ test("Hook Center renders observations, exact trust gaps and unexecuted repair s
   assert.equal(panel.querySelectorAll("script").length, 0);
   assert.equal(panel.querySelectorAll('input[type="checkbox"]').length, 0, "profile inspection does not opt in collection");
 });
+
+test("Hook Center lists the registered hooks from the audit and registers one from a timing and a script location", () => {
+  const { document, Event } = parseHTML("<html><body><section></section></body></html>");
+  const panel = document.querySelector("section");
+  const changes = [];
+  const render = userHooks => renderHookCenterPanel(panel, {
+    projectRoot: "/project", state: { report: { health: { status: "ready" }, user_hooks: userHooks } },
+    onChangeUserHook: change => changes.push(change),
+  });
+  const rows = () => [...panel.querySelectorAll('[data-role="user-hook"]')];
+
+  render({ hooks: [], error: null, change_error: null });
+  assert.equal(rows().length, 0);
+  assert.match(panel.textContent, /No hooks are registered\./);
+  assert.match(panel.textContent, /Registered hooks are included in this audit\./);
+  const timing = panel.querySelector('select[data-role="user-hook-timing"]');
+  const script = panel.querySelector('input[data-role="user-hook-script"]');
+  assert.deepEqual([...timing.options].map(option => [option.value, option.textContent]),
+    [["session_start", "Session start"], ["stop", "Stop"]]);
+  for (const option of timing.options) option.selected = option.value === "stop";
+  timing.dispatchEvent(new Event("change"));
+  script.value = ".gwt/hooks/notify.sh";
+  script.dispatchEvent(new Event("input"));
+  panel.querySelector('[data-action="register-user-hook"]').click();
+  assert.deepEqual(changes, [{ action: "register", timing: "stop", script: ".gwt/hooks/notify.sh" }]);
+
+  // A refused registration keeps what was typed and says why.
+  render({ hooks: [], error: null, change_error: "No file exists at /project/.gwt/hooks/notify.sh." });
+  assert.equal(panel.querySelector('[data-role="user-hook-change-error"]').getAttribute("role"), "alert");
+  assert.match(panel.textContent, /No file exists at \/project\/\.gwt\/hooks\/notify\.sh\./);
+  assert.equal(panel.querySelector('input[data-role="user-hook-script"]').value, ".gwt/hooks/notify.sh");
+  assert.equal(panel.querySelector('select[data-role="user-hook-timing"]').value, "stop");
+  panel.querySelector('[data-action="register-user-hook"]').click();
+
+  render({ hooks: [
+    { timing: "stop", script: "/project/.gwt/hooks/notify.sh", state: "ready" },
+    { timing: "session_start", script: "/gone/setup.sh", state: "missing" },
+  ], error: null, change_error: null });
+  assert.equal(panel.querySelector('input[data-role="user-hook-script"]').value, "", "an accepted registration clears the form");
+  assert.deepEqual(rows().map(row => [row.dataset.state, row.textContent.includes("Timing: Stop"), row.textContent.includes("Timing: Session start")]),
+    [["ready", true, false], ["missing", false, true]]);
+  for (const value of ["notify.sh", "Location: /project/.gwt/hooks/notify.sh", "Registered",
+    "setup.sh", "Location: /gone/setup.sh", "Script missing"]) assert.ok(panel.textContent.includes(value), value);
+  rows()[1].querySelector('[data-action="remove-user-hook"]').click();
+  assert.deepEqual(changes.at(-1), { action: "remove", timing: "session_start", script: "/gone/setup.sh" });
+
+  render({ hooks: [], error: "Registered hooks could not be read: invalid data", change_error: null });
+  assert.match(panel.textContent, /Registered hooks could not be read: invalid data/);
+});

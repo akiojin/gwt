@@ -788,6 +788,31 @@ pub enum FrontendEvent {
     LoadPmConversation {
         id: String,
     },
+    /// Issue #7639: read the decisions every open project's PM is waiting on,
+    /// for the Home conversation. Hub connections only.
+    LoadHomeConversation {
+        request_id: u64,
+    },
+    /// Issue #7639: send one message from Home to the PM of an open project.
+    /// The host resolves the PM pane from the project; the client never names
+    /// a session or a window.
+    HomePmSend {
+        project_key: String,
+        text: String,
+        request_id: u64,
+    },
+    /// Issue #7643: read the themes of this project (Issues that have
+    /// sub-issues) and what was completed today, for the Themes screen.
+    LoadThemes {
+        request_id: u64,
+    },
+    /// Issue #7643: delete one theme. The host closes the GitHub Issue as not
+    /// planned, only when the number names a current theme; the screen
+    /// confirms first.
+    DeleteTheme {
+        number: u64,
+        request_id: u64,
+    },
     /// Read explicitly posted reports for the registered PM window.
     LoadPmReports {
         id: String,
@@ -998,6 +1023,15 @@ pub enum FrontendEvent {
         issue_number: u64,
         target_phase: Option<String>,
     },
+    /// Issue #7729 AC-1: include an Issue in, or exclude it from, autonomous
+    /// runs from the Issue detail. Answered by
+    /// [`BackendEvent::KnowledgeBridgePhaseUpdated`] with the fresh entry.
+    SetIssueAutonomousTarget {
+        id: String,
+        request_id: u64,
+        issue_number: u64,
+        enabled: bool,
+    },
     RunBranchCleanup {
         id: String,
         branches: Vec<String>,
@@ -1185,12 +1219,68 @@ pub enum FrontendEvent {
         #[serde(default)]
         repair: bool,
     },
+    /// Issue #7730: register or remove one of the user's own hooks, then
+    /// answer with the same audit as [`FrontendEvent::GetHookDoctor`].
+    UpdateUserHooks {
+        request_id: u64,
+        change: crate::user_hooks::UserHookChange,
+    },
     /// GUI-only app-wide update preference shared by projects and the Hub.
     SetAutoApplyUpdates {
         enabled: bool,
     },
     /// Read the current project's complete saved launch profile pool.
     GetIssueMonitorProfiles,
+    /// Issue #7731: read what the first-run setup shows. Hub connections
+    /// only. Response is [`BackendEvent::FirstRunSetup`]. `refresh` detects
+    /// the installed tools again first, for a tool installed while gwt runs.
+    GetFirstRunSetup {
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// Issue #7731: designate this machine's Project Manager — an agent in
+    /// the ledger (`pm_member_id`) or a new agent (`pm_name`). Exactly one is
+    /// given. Hub connections only.
+    SaveFirstRunSetup {
+        #[serde(default)]
+        pm_member_id: Option<String>,
+        #[serde(default)]
+        pm_name: Option<String>,
+    },
+    /// Issue #7741: read the execution environments, their accounts, and the
+    /// current project's priority list. Response is
+    /// [`BackendEvent::ExecutionEnvironments`].
+    GetExecutionEnvironments,
+    /// Register an account reached through a tool that reads its own settings.
+    AddExecutionEnvironment {
+        account_id: String,
+        via_tool: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Rename an environment or change its runtime options. A change takes
+    /// effect from the next session.
+    UpdateExecutionEnvironment {
+        environment_id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        runtime: Option<crate::execution_environments::RuntimeOptions>,
+    },
+    /// Delete an environment and take it off every project's list.
+    DeleteExecutionEnvironment {
+        environment_id: String,
+    },
+    /// Replace the current project's available execution environments. The
+    /// order is the priority.
+    SetProjectExecutionEnvironments {
+        environment_ids: Vec<String>,
+    },
+    /// Issue #7732: replace this machine's Project Manager execution
+    /// environments. The order is the priority; an empty list is refused.
+    SetPmExecutionEnvironments {
+        environment_ids: Vec<String>,
+    },
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         /// Legacy clients may still send this retired setting; ignore it.
@@ -1247,10 +1337,6 @@ pub enum FrontendEvent {
         title: String,
         #[serde(default)]
         launch: bool,
-        /// SPEC #3885 T-033 (FR-022): the "+ New" popover's auto-merge
-        /// checkbox; `true` creates the Issue with the `auto-merge` label.
-        #[serde(default)]
-        auto_merge: bool,
     },
     IssueMonitorLaunchNow {
         issue_number: u64,
@@ -1782,6 +1868,49 @@ pub struct ProjectOwnerHealthView {
     pub project_key: String,
     pub state: ProjectOwnerHealthState,
     pub detail: Option<String>,
+}
+
+/// Issue #7639: what one open project's PM contributes to the Home
+/// conversation. Only decisions: project work status and counts stay on the
+/// project's own page (design item 5).
+#[derive(Debug, Clone, Serialize)]
+pub struct HomeProjectConversationView {
+    pub project_key: String,
+    pub title: String,
+    /// Whether a PM session is registered for this project and can be sent to.
+    pub pm_available: bool,
+    pub decisions: Vec<PmReportView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl HomeProjectConversationView {
+    /// Project the reports of one project store: decisions only, oldest first.
+    pub fn from_reports(
+        project_key: String,
+        title: String,
+        pm_available: bool,
+        reports: std::result::Result<Vec<gwt_core::pm_report::PmReport>, String>,
+    ) -> Self {
+        let (decisions, error) = match reports {
+            Ok(reports) => (
+                reports
+                    .into_iter()
+                    .filter(|report| report.kind == gwt_core::pm_report::PmReportKind::Decision)
+                    .map(PmReportView::from)
+                    .collect(),
+                None,
+            ),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        Self {
+            project_key,
+            title,
+            pm_available,
+            decisions,
+            error,
+        }
+    }
 }
 
 /// Lightweight project catalog. No workspace, terminal, or agent payloads.
@@ -2470,6 +2599,17 @@ pub struct AgentAssignmentHistoryView {
     /// Recorded launch configuration, not observed provider-internal changes.
     #[serde(default)]
     pub model: Option<String>,
+    /// Reasoning the launch asked for, as recorded with the Session.
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    /// Name of the execution environment the project runs this tool on.
+    /// Resolved from the project's list when the view is built; a tool with
+    /// no registered environment stays unknown.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// That environment's own model, shown when the Session recorded none.
+    #[serde(default)]
+    pub environment_model: Option<String>,
     pub issue_number: Option<u64>,
     pub title: Option<String>,
     pub result: Option<String>,
@@ -2497,6 +2637,100 @@ pub struct AgentWorkFactsView {
     pub last_action: Option<String>,
     pub elapsed_seconds: Option<u64>,
     pub warning_count: Option<usize>,
+}
+
+/// Issue #7741: an account an execution environment belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionAccountView {
+    pub id: String,
+    pub name: String,
+    pub tool: String,
+    pub tool_name: String,
+}
+
+/// A project that has an execution environment on its list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentProjectView {
+    pub project_root: String,
+    pub title: String,
+    /// 1-based priority of the environment in that project.
+    pub priority: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentView {
+    pub id: String,
+    pub name: String,
+    pub kind: crate::execution_environments::EnvironmentKind,
+    pub account_id: String,
+    pub account_name: String,
+    pub via_tool: String,
+    pub via_tool_name: String,
+    pub runtime: crate::execution_environments::RuntimeOptions,
+    /// Whether the tool sessions start with is installed on this machine.
+    pub tool_installed: bool,
+    /// Why Delete is disabled, when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_blocked_reason: Option<String>,
+    /// Why the runtime options are read-only, when they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_read_only_reason: Option<String>,
+    /// What the tool's own settings file says, for a read-only environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_settings: Option<crate::execution_environments::ToolSettings>,
+    pub projects: Vec<ExecutionEnvironmentProjectView>,
+}
+
+/// One account and tool pair the Add screen offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentViaOptionView {
+    pub account_id: String,
+    pub via_tool: String,
+    pub via_tool_name: String,
+    /// Why this pair cannot be registered, when it cannot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectExecutionEnvironmentView {
+    pub environment_id: String,
+    pub tool: String,
+    pub tool_name: String,
+    /// The environment's name, or `None` when the project launches this tool
+    /// without a registered environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// The current project's available execution environments, in priority order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectExecutionEnvironmentsView {
+    pub project_root: String,
+    /// `false` while the list is still the one derived from the project's
+    /// launch candidates and has never been saved.
+    pub saved: bool,
+    pub entries: Vec<ProjectExecutionEnvironmentView>,
+}
+
+/// Issue #7732 (SPEC #7007 item 194): this machine's Project Manager
+/// execution environments, in priority order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PmExecutionEnvironmentsView {
+    /// `false` while the list is still the one made from the registered
+    /// accounts and has never been saved.
+    pub saved: bool,
+    pub entries: Vec<ProjectExecutionEnvironmentView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionEnvironmentsView {
+    pub accounts: Vec<ExecutionAccountView>,
+    pub environments: Vec<ExecutionEnvironmentView>,
+    pub via_options: Vec<ExecutionEnvironmentViaOptionView>,
+    pub pm: PmExecutionEnvironmentsView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectExecutionEnvironmentsView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2653,6 +2887,11 @@ pub enum BackendEvent {
         session_id: Option<String>,
         #[serde(serialize_with = "serialize_pm_conversation_snapshot")]
         snapshot: crate::pm_conversation::PmConversationSnapshot,
+    },
+    /// Issue #7639: client-scoped reply to [`FrontendEvent::LoadHomeConversation`].
+    HomeConversation {
+        request_id: u64,
+        projects: Vec<HomeProjectConversationView>,
     },
     PmReports {
         id: String,
@@ -2855,6 +3094,39 @@ pub enum BackendEvent {
         choices: crate::launch_wizard::IssueMonitorProfileChoices,
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
+    },
+    /// Issue #7643: client-scoped reply to [`FrontendEvent::LoadThemes`] and
+    /// to a [`FrontendEvent::DeleteTheme`] that went through.
+    Themes {
+        request_id: u64,
+        view: Box<crate::themes::ThemesView>,
+    },
+    /// Issue #7643: a theme request was refused. `message` says why and what
+    /// to do instead.
+    ThemeError {
+        request_id: u64,
+        message: String,
+    },
+    /// Issue #7731: the first-run setup as its screen shows it.
+    FirstRunSetup {
+        view: Box<crate::first_run_setup::FirstRunSetupView>,
+    },
+    /// A first-run setup request was refused. `message` says why and what to
+    /// do instead.
+    FirstRunSetupError {
+        message: String,
+    },
+    /// Issue #7741: the execution environments as the screens show them.
+    ExecutionEnvironments {
+        view: Box<ExecutionEnvironmentsView>,
+    },
+    /// An execution environment request was refused. `message` says why and
+    /// what to do instead.
+    ExecutionEnvironmentError {
+        message: String,
+        /// The project whose settings sent the request, when one did.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_root: Option<String>,
     },
     /// Client-scoped failure for the exact Settings candidate save.
     IssueMonitorProfilesWriteFailed {
@@ -3588,6 +3860,31 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "home_conversation",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "themes",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "theme_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "first_run_setup",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "first_run_setup_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "workspace_state_notice",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::PreserveOrder,
@@ -4267,6 +4564,7 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PmReports { .. } => "pm_reports",
+            BackendEvent::HomeConversation { .. } => "home_conversation",
             BackendEvent::PmRequestTask { .. } => "pm_request_task",
             BackendEvent::DecisionResult { .. } => "decision_result",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
@@ -4287,6 +4585,12 @@ impl BackendEvent {
             BackendEvent::PmLaunchProfileResult { .. } => "pm_launch_profile_result",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
+            BackendEvent::Themes { .. } => "themes",
+            BackendEvent::ThemeError { .. } => "theme_error",
+            BackendEvent::FirstRunSetup { .. } => "first_run_setup",
+            BackendEvent::FirstRunSetupError { .. } => "first_run_setup_error",
+            BackendEvent::ExecutionEnvironments { .. } => "execution_environments",
+            BackendEvent::ExecutionEnvironmentError { .. } => "execution_environment_error",
             BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
                 "issue_monitor_profiles_write_failed"
             }
@@ -5720,6 +6024,129 @@ mod tests {
             data_base64: "ZWNobw==".to_string(),
         };
         assert_eq!(event.delivery_policy().kind, "terminal_output");
+    }
+
+    /// Issue #7731: the first-run setup's requests and its reply on the wire.
+    #[test]
+    fn first_run_setup_requests_and_reply_keep_their_wire_shape() {
+        let read: FrontendEvent =
+            serde_json::from_value(serde_json::json!({ "kind": "get_first_run_setup" })).unwrap();
+        assert!(matches!(
+            read,
+            FrontendEvent::GetFirstRunSetup { refresh: false }
+        ));
+        let recheck: FrontendEvent = serde_json::from_value(
+            serde_json::json!({ "kind": "get_first_run_setup", "refresh": true }),
+        )
+        .unwrap();
+        assert!(matches!(
+            recheck,
+            FrontendEvent::GetFirstRunSetup { refresh: true }
+        ));
+        let save: FrontendEvent = serde_json::from_value(
+            serde_json::json!({ "kind": "save_first_run_setup", "pm_name": "Aoi" }),
+        )
+        .unwrap();
+        assert!(matches!(
+            save,
+            FrontendEvent::SaveFirstRunSetup { pm_member_id: None, pm_name: Some(name) } if name == "Aoi"
+        ));
+
+        let event = BackendEvent::FirstRunSetup {
+            view: Box::new(crate::first_run_setup::view(
+                vec![crate::first_run_setup::SetupToolView {
+                    name: "Claude Code 1".into(),
+                    tool: "claude".into(),
+                    installed: true,
+                }],
+                Vec::new(),
+                None,
+                false,
+            )),
+        };
+        assert_eq!(event.delivery_policy().kind, "first_run_setup");
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "first_run_setup");
+        assert_eq!(value["view"]["needs_setup"], true);
+        assert_eq!(value["view"]["pm"], serde_json::Value::Null);
+        assert_eq!(value["view"]["tools"][0]["installed"], true);
+        let refusal = BackendEvent::FirstRunSetupError {
+            message: "Choose one Project Manager.".into(),
+        };
+        assert_eq!(refusal.delivery_policy().kind, "first_run_setup_error");
+    }
+
+    #[test]
+    fn home_conversation_requests_name_a_project_and_never_a_session() {
+        let load: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_home_conversation",
+            "request_id": 3
+        }))
+        .expect("Home reads every open project's decisions with one request");
+        assert!(matches!(
+            load,
+            FrontendEvent::LoadHomeConversation { request_id: 3 }
+        ));
+        let send: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "home_pm_send",
+            "project_key": "0123456789abcdef",
+            "text": "Approve it\r",
+            "request_id": 4
+        }))
+        .expect("Home addresses a PM by its project");
+        assert!(matches!(
+            send,
+            FrontendEvent::HomePmSend { ref project_key, request_id: 4, .. }
+                if project_key == "0123456789abcdef"
+        ));
+    }
+
+    #[test]
+    fn home_conversation_carries_decisions_only() {
+        let report = |id: &str, kind| gwt_core::pm_report::PmReport {
+            id: id.to_string(),
+            kind,
+            question: None,
+            body: format!("{id} body"),
+            created_at: gwt_core::timestamp::UtcTimestamp::now(),
+            structured: None,
+        };
+        use crate::HomeProjectConversationView;
+        let view = HomeProjectConversationView::from_reports(
+            "0123456789abcdef".to_string(),
+            "Alpha".to_string(),
+            true,
+            Ok(vec![
+                report("progress-1", gwt_core::pm_report::PmReportKind::Progress),
+                report("decision-1", gwt_core::pm_report::PmReportKind::Decision),
+            ]),
+        );
+        let event = BackendEvent::HomeConversation {
+            request_id: 3,
+            projects: vec![
+                view,
+                HomeProjectConversationView::from_reports(
+                    "fedcba9876543210".to_string(),
+                    "Beta".to_string(),
+                    false,
+                    Err("The report store is unreadable.".to_string()),
+                ),
+            ],
+        };
+        assert_eq!(event.delivery_policy().kind, "home_conversation");
+        let value = serde_json::to_value(event).expect("serialize");
+        assert_eq!(value["kind"], "home_conversation");
+        assert_eq!(value["request_id"], 3);
+        let alpha = &value["projects"][0];
+        assert_eq!(alpha["title"], "Alpha");
+        assert_eq!(alpha["pm_available"], true);
+        assert_eq!(alpha["decisions"].as_array().expect("decisions").len(), 1);
+        assert_eq!(alpha["decisions"][0]["id"], "decision-1");
+        assert!(alpha.get("error").is_none());
+        let beta = &value["projects"][1];
+        assert_eq!(beta["pm_available"], false);
+        assert_eq!(beta["decisions"].as_array().expect("decisions").len(), 0);
+        assert_eq!(beta["error"], "The report store is unreadable.");
     }
 
     #[test]

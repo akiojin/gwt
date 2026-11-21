@@ -1,16 +1,16 @@
 import { surfaceForWindow } from "./surface-rail.js";
 
-const SURFACES = { issues: "Issues", works: "Works", agents: "Agents", board: "Board", settings: "Settings", environments: "Environments" };
+const SURFACES = { themes: "Themes", issues: "Issues", works: "Works", agents: "Agents", board: "Board", settings: "Settings", environments: "Environments" };
 const PRESETS = { issues: "issue", board: "board", settings: "settings" };
 // Surfaces the app hosts itself instead of a backend window.
-const HOSTED = ["agents", "works", "environments"];
+const HOSTED = ["agents", "works", "environments", "themes"];
 
 // A client-local layout: move live views, never clone terminals or persist
 // geometry. One or two panes share the same host; inactive live views stay
 // connected in an inert cache so view lifecycle checks keep their state alive.
 export function createSplitSurfaces({
   document, windowCatalogModel, getWindows, getElement, openSurface, onChange, onLayout,
-  onAgentsHost = () => {}, onWorksHost = () => {}, onEnvironmentsHost = () => {},
+  onAgentsHost = () => {}, onWorksHost = () => {}, onEnvironmentsHost = () => {}, onThemesHost = () => {},
 }) {
   const host = document.getElementById("split-surfaces");
   const button = document.getElementById("split-view-button");
@@ -148,7 +148,7 @@ export function createSplitSurfaces({
         }
       }
     }
-    for (const [surface, onHost] of [["agents", onAgentsHost], ["works", onWorksHost], ["environments", onEnvironmentsHost]]) {
+    for (const [surface, onHost] of [["agents", onAgentsHost], ["works", onWorksHost], ["environments", onEnvironmentsHost], ["themes", onThemesHost]]) {
       const surfacePanes = visiblePanes.filter(({ index }) => selections[index] === surface).map(({ pane }) => pane);
       const livePane = selections[active] === surface ? panes[active] : surfacePanes[0];
       const previewPane = surfacePanes.find(pane => pane !== livePane);
@@ -254,6 +254,7 @@ export function createSplitSurfaces({
     onAgentsHost(null, null);
     onWorksHost(null, null);
     onEnvironmentsHost(null, null);
+    onThemesHost(null, null);
     host.hidden = false;
     host.dataset.split = "false";
     area.classList.remove("is-split");

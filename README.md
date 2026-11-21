@@ -30,14 +30,23 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
+- **Operator workspace** — switch between Themes, Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Execution environments** — open Environments from the top bar to see what
+- **Execution environments** — open Environments from the header to see what
   your agents run on. Accounts shows each provider account's usage, reset
   times, and limit state in one place; an account's detail adds every window,
   enabled Usage credits, Codex's `Using credits` balance and observed
   credits/hour, and the Claude account usage opt-in. Missing limits show `—`.
   Tools are installed and updated in Settings → Supported Agents.
+  An environment is an account plus the tool agents reach it through. A tool
+  that signs in to its own account (Claude Code, Codex, …) gets its environment
+  automatically; add one for an account reached through Hermes Agent, OpenClaw,
+  or OpenCode. Edit an environment to set its model, Skip permissions, and Fast
+  mode — changes apply from the next session. Tools that read their own
+  settings file show those values read-only. In Settings → Issues execution
+  settings, **Available execution environments** lists the ones a project
+  uses in priority order: a session starts on the first one that can be used,
+  skipping one that is held by a limit or signed out.
 
 ## Install
 
@@ -200,10 +209,12 @@ bash/zsh, fish, or Windows instructions, open a new terminal, and run the comman
 with `--version`. gwt does not edit your shell startup files.
 
 Automatic agent updates are off by default. When enabled, gwt checks installed
-agents with a verified update route at the next app startup and updates only known newer versions, with
-no live agent panes (including the Project Manager) or pending launches. Manual
-installs and updates also require those agents to be closed. Missing agents are
-never installed automatically.
+agents with a verified update route at the next app startup and updates only known newer versions.
+An agent tool is skipped while an agent pane (including the Project Manager) is
+running it; other tools still update. Manual installs and updates follow the same
+rule: close only the panes that use that tool, which the refusal message names.
+While a tool is being updated, new launches of that tool are refused until it
+finishes. Missing agents are never installed automatically.
 
 | Agent | CLI command |
 | --- | --- |
@@ -242,8 +253,29 @@ windows are excluded. The status strip and the Works heading show the same
 RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
-The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
-from GitHub, Recent projects, and the currently open projects. Every project
+The root URL `http://127.0.0.1:<port>/` is the **Hub**. It opens on **Home**,
+the conversation with the Project Manager: the decisions the Project Manager
+of each open project is waiting on appear there as messages, oldest at the
+top. Answer with the buttons in a message, or reply from the box at the
+bottom; the answer goes to the Project Manager of that project. A new message
+names its project with `@Project name`, or with the project list beside the
+box when several projects are open. Home shows no project contents. With no
+project yet, it offers Import from GitHub, Open a folder, and Clone from a URL.
+
+On a machine that is not ready for agents yet, the Hub opens the **first-run
+setup** instead: Welcome, Tools, Project Manager, Project, Done. **Tools**
+lists the agent tools registered on this machine; the setup does not continue
+until at least one installed tool is registered, and says so. After installing
+a tool, choose **Check again**. **Project Manager** has one row to choose who
+serves as Project Manager: an agent already in the ledger, or a new agent you
+name. That agent becomes the Project Manager of each project that has not
+chosen its own; a new agent joins the ledger when the Project Manager first
+starts in a project. Opening a project is optional. Every step can be opened
+again from **Settings → System → Review first-run setup**.
+
+**Projects** in the header opens the project list: Open Folder, Clone from
+GitHub, Recent projects, and the currently open projects, with a search by
+name. `http://127.0.0.1:<port>/?view=projects` opens it directly. Every project
 has its own URL, `http://127.0.0.1:<port>/p/<project-hash>`, and project links
 open in a new browser tab, so one browser tab shows one project. Different
 projects keep their windows and launch dialogs separate; two browser tabs on
@@ -1326,7 +1358,9 @@ implementation → independent review → strong automated gate → auto-merge. 
 is **off by default** and requires a **two-stage opt-in**:
 
 1. Enable the `Autonomous` toggle in the Issue surface toolbar (per project).
-2. Label each issue you want handled autonomously with `auto-merge`.
+2. Include each issue you want handled autonomously: open the issue's detail
+   and choose `Include` under Operations → Autonomous target. This adds the
+   `auto-merge` label, which you can also add yourself.
 
 An issue additionally qualifies only when it has machine-checkable acceptance
 criteria (an `## Acceptance Criteria` checklist in the body), the base
@@ -2009,6 +2043,17 @@ reconnect. A lost repair reply leaves the outcome Unknown; a read-only refresh
 does not confirm completion. The latest audit and last repair outcome are shown
 separately.
 
+**Your hooks** in the same Hook Center lists the scripts you registered for the
+project and registers a new one from a timing (**Session start** or **Stop**)
+and a script location. A location is absolute, starts with `~/`, or is relative
+to the project; the script must exist and be executable. gwt starts a
+registered script when an agent session starts or an agent stops, in the
+agent's working directory, with `GWT_HOOK_TIMING` set to `session_start` or
+`stop`, and does not wait for it. A Stop that gwt blocks does not start it.
+Registered hooks are part of the audit: a script that is missing or no longer
+executable is reported and is not started. Registrations are saved on this
+computer under `~/.gwt/projects/`, not in the repository.
+
 If an agent stop or pane close reports unread Board evidence, read the bodies
 in that same agent session with JSON operation `board.show` and
 `params:{"all":true}`, then retry. Automatic reminders do not acknowledge a
@@ -2525,7 +2570,8 @@ an entry removes its copied policy on the next refresh.
 
 ## Surface Navigation
 
-- Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
+- Select **Themes**, **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
+- **Themes** lists the themes of the project: GitHub Issues that have sub-issues. Each row shows how many issues are under the theme and how many are completed, as GitHub reports them. Select a theme to see its issues, and select an issue to open it in Issues. **Issues completed today** counts the closes gwt took in today. **Delete theme** asks for confirmation, then closes the theme's GitHub Issue as not planned. The issues under it are kept, and reopening the Issue on GitHub brings the theme back.
 - Open **Logs**, **Index**, and **Profile** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Use the Command Palette for all-stop; individual agent stop/restart remain available through the existing controls.
 - Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
 - **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
@@ -2534,7 +2580,8 @@ an entry removes its copied policy on the next refresh.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
 - **Register** adds one enabled member to the shared roster. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
-- Open **Agents** from **Ledger** in the top bar or from the sidebar. On each **Team** row, **▲** / **▼** change the member's position; an idle member nearer the top is assigned first. **Delete** removes a member from this machine for every project after confirmation. The current Project Manager, a member with assigned work, and a launch candidate cannot be deleted until that role or work is moved. **Settings → System → Open agent ledger** leads to the same screen.
+- **Agents** in the header opens the agent ledger. On each **Team** row, **▲** / **▼** change the member's position; an idle member nearer the top is assigned first. **Delete** removes a member from this machine for every project after confirmation. The current Project Manager, a member with assigned work, and a launch candidate cannot be deleted until that role or work is moved. **Settings → System → Open agent ledger** leads to the same ledger.
+- **Agents** in the sidebar opens the project's **Agent history & plans**: the same members with this project's work. **Agent history** lists every session in the project, the Project Manager's included, with its issue, execution environment, model, reasoning and result. **Planned assignments** lists the issue each agent starts next, as the assignment plan has it. The ledger shows neither.
 - A registered PM can send the `pm.agent.add` JSON operation with `name` and `agent_id` to add one enabled member and receive its ID. To use that member for scheduled Issues, select its ID with `issue.monitor.profiles.set`.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 

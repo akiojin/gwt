@@ -49,8 +49,7 @@ export function surfaceForWindow(windowData) {
 }
 
 export function applySurfaceSelection(document, surface) {
-  // The top bar's Environments entry (Issue #7648) is a surface entry too.
-  for (const item of document.querySelectorAll(".op-rail [data-surface], .project-actions [data-surface]")) {
+  for (const item of document.querySelectorAll(".op-rail [data-surface]")) {
     item.setAttribute("aria-pressed", item.dataset.surface === surface ? "true" : "false");
   }
 }

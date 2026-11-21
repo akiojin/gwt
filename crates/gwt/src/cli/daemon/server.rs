@@ -2232,6 +2232,8 @@ fn spawn_issue_monitor_worker(
                     if let Some(observe) = &test_hooks.scan_idle_observer { observe(false); }
                     match control {
                         Some(request) => {
+                            // Issue #7758: where a control's time to ACK goes.
+                            let control_queued = request.accepted_at().elapsed();
                             let (frame, completion) = request.into_parts();
                             let DaemonFrame::Event { payload, .. } = frame else {
                                 completion.reject(IssueMonitorControlQueueError::Rejected);
@@ -2269,7 +2271,9 @@ fn spawn_issue_monitor_worker(
                                     let window_snapshot = matches!(&control, IssueMonitorControl::WindowSnapshot { .. });
                                     let observation_kind = control.observation_kind();
                                     let previous_policy = monitor.max_active_agents_policy();
+                                    let capacity_started = Instant::now();
                                     monitor.refresh_agent_capacity(&scope.project_root);
+                                    let control_capacity = capacity_started.elapsed();
                                     #[cfg(test)]
                                     if let Some(refresh) = &test_hooks.capacity_override {
                                         refresh(&mut monitor);
@@ -2293,6 +2297,7 @@ fn spawn_issue_monitor_worker(
                                         }),
                                         _ => None,
                                     };
+                                    let apply_started = Instant::now();
                                     let outcome = apply_or_queue_issue_monitor_control(
                                         &hub,
                                         &prefs_path,
@@ -2302,6 +2307,7 @@ fn spawn_issue_monitor_worker(
                                         &mut pending_authority_controls,
                                         Some(completion),
                                     );
+                                    let control_apply = apply_started.elapsed();
                                     if window_snapshot {
                                         if let Some(snapshot) = monitor.fresh_window_snapshot(&gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()) {
                                             let observed_at = snapshot.observed_at.clone();
@@ -2333,6 +2339,9 @@ fn spawn_issue_monitor_worker(
                                         captured_revision = revision,
                                         invalidates_scan = !launch_authority_unchanged || capacity_policy_changed,
                                         capacity_policy_changed,
+                                        control_queued_ms = control_queued.as_millis() as u64,
+                                        control_capacity_ms = control_capacity.as_millis() as u64,
+                                        control_apply_ms = control_apply.as_millis() as u64,
                                         "Issues control scan fence"
                                     );
                                     if !launch_authority_unchanged || capacity_policy_changed {
@@ -3580,6 +3589,8 @@ enum IssueMonitorControl {
         enabled: bool,
         limit: usize,
     },
+    /// Issue #7741: replace the project's available execution environments.
+    ExecutionEnvironments(Vec<crate::issue_monitor::ProjectExecutionEnvironment>),
     TierSet {
         issue_number: u64,
         tier: u8,
@@ -4189,7 +4200,11 @@ fn apply_or_queue_issue_monitor_control(
     completion: Option<IssueMonitorControlCompletion>,
 ) -> IssueMonitorControlCommit {
     let mut accepted = AcceptedIssueMonitorControl::new(control);
-    match capture_wait_control_subject(monitor.wait_project_root(), prefs_path, &accepted.control) {
+    let wait_subject_started = Instant::now();
+    let wait_subject =
+        capture_wait_control_subject(monitor.wait_project_root(), prefs_path, &accepted.control);
+    let control_wait_subject = wait_subject_started.elapsed();
+    match wait_subject {
         Ok(subject) => accepted.wait_subject = subject,
         Err(error) => {
             monitor.record_control_commit_error(format!(
@@ -4213,18 +4228,29 @@ fn apply_or_queue_issue_monitor_control(
         }
     }
 
+    let commit_started = Instant::now();
     let outcome = try_apply_accepted_issue_monitor_control_with_disk_migration(
         prefs_path,
         monitor,
         &mut accepted,
     );
+    let control_prefs_commit = commit_started.elapsed();
     match outcome {
         IssueMonitorControlCommit::Committed { .. } => {
             if authorizing {
                 effect_permit.reopen();
             }
             if let Some(completion) = completion {
+                let ack_started = Instant::now();
                 commit_issue_monitor_control_completion(hub, monitor, completion);
+                // Issue #7758: the ACK a caller waits for covers these three steps.
+                tracing::info!(
+                    target: "gwt.issue_monitor.scan",
+                    control_wait_subject_ms = control_wait_subject.as_millis() as u64,
+                    control_prefs_commit_ms = control_prefs_commit.as_millis() as u64,
+                    control_ack_ms = ack_started.elapsed().as_millis() as u64,
+                    "Issues control commit timing"
+                );
             }
         }
         rejection @ (IssueMonitorControlCommit::Rejected
@@ -4807,6 +4833,10 @@ fn apply_routine_issue_monitor_control(
         } => monitor.terminal_queue_move(issue_number, position, &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()),
         IssueMonitorControl::TerminalQueueAutoRefill { enabled, limit } => {
             monitor.set_terminal_queue_auto_refill(enabled, limit);
+            true
+        }
+        IssueMonitorControl::ExecutionEnvironments(list) => {
+            monitor.set_execution_environments(list);
             true
         }
         IssueMonitorControl::TerminalQueueRemove(issue_numbers) => {
@@ -7738,6 +7768,11 @@ fn decode_issue_monitor_control_in_repo(
                     enabled: refill.get("enabled")?.as_bool()?,
                     limit: usize::try_from(refill.get("limit")?.as_u64()?).ok()?,
                 });
+            }
+            if let Some(list) = payload.get("execution_environments") {
+                return serde_json::from_value(list.clone())
+                    .ok()
+                    .map(IssueMonitorControl::ExecutionEnvironments);
             }
             if let Some(tier) = payload.get("tier_set") {
                 let issue_number = tier.get("number")?.as_u64()?;
@@ -14757,6 +14792,7 @@ exit 0
             skip_permissions: false,
             fast_mode: false,
             codex_speed: Default::default(),
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -19267,6 +19303,7 @@ exit 0
                 skip_permissions: false,
                 fast_mode: true,
                 codex_speed: Default::default(),
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -29543,6 +29580,7 @@ exit 1
                 skip_permissions: false,
                 fast_mode: false,
                 codex_speed: Default::default(),
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),

@@ -98,6 +98,13 @@ fn playwright_config_opens_headed_chromium_off_screen_without_minimizing() {
         !config.contains("--start-minimized"),
         "a minimized window reports document.visibilityState hidden and breaks focus specs (#6977)"
     );
+    // macOS clamps --window-position back onto the display, where the real
+    // cursor and other workers' windows deliver native mouse events (#7755).
+    assert!(
+        config.contains("process.platform === \"darwin\"")
+            && config.contains("Browser.setWindowBounds"),
+        "headed Chromium on macOS must be moved off the display after launch (#7755)"
+    );
 }
 
 #[test]

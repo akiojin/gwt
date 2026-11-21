@@ -261,6 +261,50 @@ export function createLaunchWizardSurface({
         return note;
       }
 
+      // Issue #7652 (SPEC #7007 items 243 and 251): the execution environment
+      // this launch runs on, its place on the project's list, and why each
+      // entry ahead of it is not the one used. The backend owns the wording.
+      function appendExecutionEnvironmentNote(parent, environment) {
+        if (!environment) return null;
+        const note = createNode("div", "launch-note launch-environment");
+        note.dataset.priority = environment.priority ? String(environment.priority) : "";
+        note.setAttribute("role", "note");
+        note.appendChild(createNode(
+          "div",
+          "launch-environment__title",
+          `Execution environment · ${environment.name || ""}`,
+        ));
+        note.appendChild(createNode("div", "launch-environment__detail", environment.note || ""));
+        for (const skipped of environment.skipped || []) {
+          note.appendChild(createNode(
+            "div",
+            "launch-environment__skipped",
+            `${skipped.priority}. ${skipped.name} — ${skipped.reason}`,
+          ));
+        }
+        note.appendChild(createNode(
+          "div",
+          "launch-environment__detail",
+          "Execution environments are tried in the order of this project's list.",
+        ));
+        parent.appendChild(note);
+        return note;
+      }
+
+      // Issue #7652 (SPEC #7007 item 189): what a launch chooses is an
+      // override for that launch. The Issues settings form saves what it
+      // shows, so it carries no such note.
+      function appendLaunchOverrideNote(parent, savedSettingsForm) {
+        if (savedSettingsForm) return null;
+        const note = createNode(
+          "div",
+          "launch-field-help launch-override-note",
+          "Model, reasoning and speed chosen here apply to this launch only. They take priority over the execution environment's settings, and the agent's saved traits stay as they are.",
+        );
+        parent.appendChild(note);
+        return note;
+      }
+
       // Issue #4911: Issues settings form repeats the Agent
       // Settings block once per launch candidate, in launch order. The backend
       // owns the list — it holds one editable draft, so only the open set
@@ -1925,6 +1969,8 @@ export function createLaunchWizardSurface({
               section,
               launchWizard.issue_monitor_pool_impact,
             );
+            appendLaunchOverrideNote(section, launchWizard.issue_monitor_pool);
+            appendExecutionEnvironmentNote(section, launchWizard.execution_environment);
           }
           setupParent.appendChild(section);
         }
@@ -2166,6 +2212,15 @@ export function createLaunchWizardSurface({
             grid.appendChild(note);
           }
           section.appendChild(grid);
+          // Issue #7652 (item 197): inherited from this project's last
+          // launch, or a change made for this one.
+          if (launchWizard.runtime_target_note) {
+            section.appendChild(createNode(
+              "div",
+              "launch-field-help launch-runtime-note",
+              launchWizard.runtime_target_note,
+            ));
+          }
 
           panel.appendChild(section);
         }

@@ -2419,6 +2419,49 @@ fn app_runtime_open_launch_wizard_accepts_work_window_preset() {
     );
 }
 
+// Issue #7768: Work and Branches presets canonicalize to Issues, so the Issues
+// window is the only one that hosts the Workspace row ▶ and `Launch Agent`.
+#[test]
+fn app_runtime_open_launch_wizard_accepts_issues_window_preset() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::OpenLaunchWizard {
+            id: window_id,
+            branch_name: "main".to_string(),
+            linked_issue_number: None,
+        },
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::LaunchWizardOpenError { .. })),
+        "the Issues window hosts the Workspace launch buttons and must not be rejected"
+    );
+    assert!(
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_some(),
+        "Launch wizard should open from the Issues window"
+    );
+}
+
 #[test]
 fn app_runtime_resume_branch_latest_agent_accepts_work_window_preset() {
     let temp = tempdir().expect("tempdir");

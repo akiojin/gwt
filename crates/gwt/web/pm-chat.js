@@ -26,6 +26,46 @@ function reportDisplayText(report) {
   return lines.join('\n');
 }
 
+// What a PM decision report says, in the one shape every surface that draws
+// it reads (SPEC #7007 T-023 / T-021): the Decide queue, this conversation
+// and the Home conversation. Typed packets expose their options; untyped
+// decision reports keep the plain reply path and carry their display text.
+export function decisionItemFromReport(report) {
+  const summary = report.structured?.summary ?? null;
+  const packet = summary?.decision ?? null;
+  const displayText = reportDisplayText(report);
+  return {
+    id: String(report.id),
+    question: packet?.question || summary?.result || displayText.split('\n')[0] || 'Decision needed',
+    result: summary?.result ?? null,
+    impact: summary?.impact ?? null,
+    owner: summary?.owner ?? null,
+    recommendation: packet?.recommendation ?? null,
+    reason: packet?.reason ?? null,
+    options: packet ? [...packet.options] : null,
+    detailText: packet ? null : displayText,
+    createdAt: report.created_at ?? null,
+  };
+}
+
+// A decision reads as a PM message: what happened, the question, the
+// recommendation with its reason, and the impact, as prose (design item 226).
+export function decisionMessageLines(item) {
+  if (item.detailText) return [item.detailText];
+  return [
+    item.result && item.result !== item.question ? item.result : null,
+    item.question,
+    item.recommendation ? `I recommend: ${item.recommendation}.${item.reason ? ` ${item.reason}` : ''}` : null,
+    item.impact,
+  ].filter(Boolean);
+}
+
+// The one wording of an answer sent to a PM, for a numbered option or a
+// free-form reply.
+export function decisionAnswerMessage(item, text, optionIndex = null) {
+  return `Answer to "${item.question}": ${optionIndex == null ? text : `${optionIndex + 1}. ${text}`}`;
+}
+
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
@@ -593,10 +633,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   // Derive the Home island state from the same window snapshot the other
   // views read, so every surface reports the same numbers (SPEC #7007 AC-6).
   // Unknown stays unknown: decisions are counted only once reports have
-  // loaded, and no completed-today source exists yet, so it stays null.
+  // loaded. What was completed today is shown on the Themes screen, never
+  // on this entry screen (Issue 7643).
   function renderHome(state, decisions) {
     const overview = state?.requestTasks ?? null;
-    taskHome.receive({ overview, decisionsWaiting: decisions.waiting, completedToday: null,
+    taskHome.receive({ overview, decisionsWaiting: decisions.waiting,
       stale: Boolean(state?.requestTasksError) && overview !== null });
   }
   // Progress reads the same snapshot: the request-task overview plus the
@@ -851,9 +892,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   // The conversation shows each decision as a PM message: what happened,
   // the question, the recommendation with its reason and the impact read as
   // prose, and the choices are quick replies inside that message.
-  // Today the PM conversation is this Chat view. When Home becomes the PM
-  // conversation (SPEC #7007 T-021, Issue #7639), these messages move there
-  // with it; Decide stays the queue side.
+  // Home shows the same decisions of every open project as one conversation
+  // (SPEC #7007 T-021, Issue #7639); Decide stays the queue side.
   function decisionMessage(item) {
     const row = element('article', 'pm-chat__bubble pm-chat__bubble--assistant pm-chat__decision');
     row.dataset.decisionId = item.id;
@@ -871,12 +911,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       }
       const meta = answered[item.id] ? 'Decision answered' : item.deferred ? 'Decision waiting · Deferred' : 'Decision waiting';
       if (row.firstChild.textContent !== meta) row.firstChild.textContent = meta;
-      const lines = item.detailText ? [item.detailText] : [
-        item.result && item.result !== item.question ? item.result : null,
-        item.question,
-        item.recommendation ? `I recommend: ${item.recommendation}.${item.reason ? ` ${item.reason}` : ''}` : null,
-        item.impact,
-      ].filter(Boolean);
+      const lines = decisionMessageLines(item);
       const text = row.children[1];
       if (text.dataset.digest !== JSON.stringify(lines)) {
         text.dataset.digest = JSON.stringify(lines);

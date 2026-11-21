@@ -393,6 +393,28 @@ pub struct LaunchWizardProgressStepView {
     pub detail: Option<String>,
 }
 
+/// Issue #7652 (SPEC #7007 items 243 and 251): the execution environment a
+/// launch with the selected tool runs on, where it stands on the project's
+/// list, and why each entry ahead of it is not the one used.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardExecutionEnvironmentView {
+    pub name: String,
+    pub via_tool_name: String,
+    /// Place on the project's list, counted from 1. `None` when the tool is
+    /// not on that list.
+    pub priority: Option<usize>,
+    pub list_len: usize,
+    pub note: String,
+    pub skipped: Vec<LaunchWizardSkippedEnvironmentView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardSkippedEnvironmentView {
+    pub priority: usize,
+    pub name: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
     pub title: String,
@@ -428,6 +450,10 @@ pub struct LaunchWizardView {
     pub selected_reasoning: String,
     pub runtime_target_options: Vec<LaunchWizardOptionView>,
     pub selected_runtime_target: String,
+    /// Issue #7652 (item 197): whether the place the session runs is the one
+    /// this project used last or a change made for this launch. `None` until
+    /// the runtime step is shown.
+    pub runtime_target_note: Option<String>,
     pub windows_shell_options: Vec<LaunchWizardOptionView>,
     pub selected_windows_shell: Option<String>,
     pub docker_service_options: Vec<LaunchWizardOptionView>,
@@ -471,6 +497,10 @@ pub struct LaunchWizardView {
     /// Monitor settings form, which edits every Agent Settings set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_monitor_pool: Option<LaunchWizardIssueMonitorPoolView>,
+    /// Issue #7652: filled by the app runtime, which knows the project's
+    /// list, for a launch that starts an agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_environment: Option<LaunchWizardExecutionEnvironmentView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
