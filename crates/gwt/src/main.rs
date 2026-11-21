@@ -2337,7 +2337,7 @@ enum UserEvent {
         status: Box<gwt::IssueMonitorStatusView>,
     },
     IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
-    IssueMonitorMaxActivePrepared(Box<app_runtime::PreparedIssueMonitorMaxActive>),
+    IssueMonitorLaneControlPrepared(Box<app_runtime::PreparedIssueMonitorLaneControl>),
     IssueMonitorProfilesSaved(Box<app_runtime::IssueMonitorProfilesSaveCompletion>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -5146,7 +5146,7 @@ mod tests {
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             issue_monitor_profile_saves: HashMap::new(),
-            issue_monitor_max_active_saves: HashMap::new(),
+            issue_monitor_control_lanes: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
@@ -11795,8 +11795,8 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));
             }
-            Event::UserEvent(UserEvent::IssueMonitorMaxActivePrepared(prepared)) => {
-                clients.dispatch(app.issue_monitor_max_active_prepared_events(*prepared));
+            Event::UserEvent(UserEvent::IssueMonitorLaneControlPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_lane_control_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);

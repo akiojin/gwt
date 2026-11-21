@@ -3034,9 +3034,9 @@ request.catch(() => {});
         .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
         .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
         .at(-1));
-    // The shared budget's own refusal, as each project's Host recorded it.
-    const capacityRefusals = async (number: number) => {
-      const rows: string[] = [];
+    // Structured log rows from the shared HOME and from each project's Host.
+    const logRows = async (matches: (row: any) => boolean) => {
+      const rows: any[] = [];
       const projects = join(fixture.home, ".gwt", "projects");
       const directories = [join(fixture.home, ".gwt", "logs"),
         ...(await readdir(projects)).map(key => join(projects, key, "logs"))];
@@ -3046,13 +3046,22 @@ request.catch(() => {});
           for (const line of (await readFile(join(directory, file), "utf8")).split("\n")) {
             let row;
             try { row = JSON.parse(line); } catch { continue; }
-            if (row.fields?.issue_number === number
-              && String(row.fields.reason ?? "").startsWith("Machine Agent capacity is occupied;")) rows.push(row.timestamp);
+            if (row?.fields && matches(row)) rows.push(row);
           }
         }
       }
       return rows;
     };
+    // The shared budget's own refusal, as each project's Host recorded it.
+    const capacityRefusals = async (number: number) =>
+      (await logRows(row => row.fields.issue_number === number
+        && String(row.fields.reason ?? "").startsWith("Machine Agent capacity is occupied;")))
+        .map(row => row.timestamp);
+    // Issue #7758 AC-1: where each daemon control's time to ACK went on this host.
+    const controlTimings = async () =>
+      (await logRows(row => row.fields.control_apply_ms !== undefined || row.fields.control_prefs_commit_ms !== undefined))
+        .map(row => ({ timestamp: row.timestamp, ...row.fields }))
+        .sort((left, right) => String(left.timestamp).localeCompare(String(right.timestamp)));
     // Two completed scans: the decision under test was taken with the slot already occupied.
     const scans = async (read: () => Promise<any>, subject: string) => {
       for (const pass of ["first", "second"]) {
@@ -3080,18 +3089,6 @@ request.catch(() => {});
         const { error } = await handle.jsonValue();
         await handle.dispose();
         mark("queue response", { issue_number: number, error });
-        // The GUI waits 200 ms for the daemon's durable commit. Past that the command has
-        // been sent and its outcome is unknown, so it is not sent again: its commit is observed,
-        // within the enclosing bound.
-        if (error && /^publish ack timeout after \d+ms$/.test(error)) {
-          await expect.poll(async () => {
-            const prefs = await read();
-            return Object.values(prefs.terminal_queues ?? {}).flatMap((queue: any) => queue.entries)
-              .some((entry: any) => entry.number === number) || !!prefs.launch_confirmations?.[number];
-          }, { timeout: 60_000, message: `the unacknowledged queue push for Issue #${number} is committed` }).toBe(true);
-          mark("queue commit observed", { issue_number: number });
-          return null;
-        }
         // This refusal is emitted before the daemon connection is attempted.
         // Any other error must fail the test.
         if (error && !/^publish budget exhausted during scope\/bootstrap resolution after \d+ms$/.test(error)) {
@@ -3246,6 +3243,10 @@ request.catch(() => {});
         original_owner_waiting: waiting.launch_capacity,
         launches: await fixture.launches(), timeline,
       }, null, 2), contentType: "application/json" });
+      await info.attach("issue-7758-control-commit-timing", { body: JSON.stringify({
+        platform: process.platform, theme, timeline: timeline.filter(row => String(row.stage).startsWith("queue ")),
+        controls: await controlTimings(),
+      }, null, 2), contentType: "application/json" });
     } catch (error) {
       // A native runner's HOME is not retained; keep both projects' view of the shared pool.
       const observedAt = new Date().toISOString();
@@ -3256,6 +3257,7 @@ request.catch(() => {});
       ].map(promise => promise.catch(failure => String(failure))));
       await info.attach("issue-7451-failure-state", { body: JSON.stringify({
         observed_at: observedAt, launches, first, second, policy, registry, capacity, owner_close: ownerClose, timeline,
+        control_commit_timing: await controlTimings().catch(failure => String(failure)),
       }, null, 2), contentType: "application/json" }).catch(() => {});
       throw error;
     } finally {

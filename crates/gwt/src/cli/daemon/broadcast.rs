@@ -123,6 +123,8 @@ impl IssueMonitorControlCompletion {
 pub(crate) struct IssueMonitorControlRequest {
     frame: DaemonFrame,
     completion: IssueMonitorControlCompletion,
+    /// When the daemon took the control from its connection (Issue #7758).
+    accepted_at: Instant,
 }
 
 /// Connection-bound proof that one GUI subscriber can materialize Issue
@@ -169,6 +171,10 @@ impl IssueMonitorControlRequest {
     #[cfg(test)]
     pub(crate) fn frame(&self) -> &DaemonFrame {
         &self.frame
+    }
+
+    pub(crate) fn accepted_at(&self) -> Instant {
+        self.accepted_at
     }
 
     pub(crate) fn into_parts(self) -> (DaemonFrame, IssueMonitorControlCompletion) {
@@ -425,6 +431,7 @@ impl BroadcastHub {
         oneshot::Receiver<Result<(), IssueMonitorControlQueueError>>,
         IssueMonitorControlQueueError,
     > {
+        let accepted_at = Instant::now();
         let mut state = self.issue_monitor_controls.state.subscribe();
         match *state.borrow() {
             IssueMonitorControlState::RecoveryBlocked => {
@@ -465,6 +472,7 @@ impl BroadcastHub {
                     sender: Some(completion),
                     _admission: admission,
                 },
+                accepted_at,
             })
             .await
             .map_err(|_| IssueMonitorControlQueueError::Closed)?;
