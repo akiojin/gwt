@@ -2055,7 +2055,9 @@ impl AppRuntime {
             return launch_agent_open_error(client_id, "Window not found");
         };
 
-        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
+        // Work and Branches canonicalize to Issues on create and on load, so the
+        // Issues window is what hosts the Workspace launch buttons (Issue #7768).
+        if window.preset.canonical_surface_preset() != WindowPreset::Issue {
             tracing::warn!(
                 preset = ?window.preset,
                 window_id = id,

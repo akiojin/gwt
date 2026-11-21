@@ -330,10 +330,9 @@ export async function sendLiveGwtEvent(page: Page, payload: unknown): Promise<vo
 
 /**
  * Open the normal branch Launch Wizard for the active project. It uses the
- * route that addresses no window: `open_launch_wizard` accepts only Work and
- * Branches windows, and a current backend has neither (it creates Issues for
- * both presets and migrates persisted ones on load), so an Issues window id is
- * always refused (Issue #7766). No window, branch, worktree, or agent process
+ * route that addresses no window, so it works whichever window is frontmost
+ * and against backends that still refuse `open_launch_wizard` from an Issues
+ * window (fixed in Issue #7768). No window, branch, worktree, or agent process
  * is created, so there is nothing to clean up afterwards.
  */
 export async function openLiveLaunchWizardForBranch(
