@@ -832,6 +832,20 @@ pub enum FrontendEvent {
         task_key: Option<String>,
         request: PmRequestTaskCompleteRequest,
     },
+    /// Answer one waiting decision in the gwtd decision queue (Issue #7742).
+    /// gwtd records the answer and delivers it to the waiting sessions itself.
+    AnswerDecision {
+        id: String,
+        request_id: u64,
+        decision_id: String,
+        answer: String,
+    },
+    /// "Decide later": keep the decision waiting at the tail of the queue.
+    DeferDecision {
+        id: String,
+        request_id: u64,
+        decision_id: String,
+    },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
     /// window id so the event can only target the caller's own pane.
@@ -2653,6 +2667,22 @@ pub enum BackendEvent {
         /// Current-card failure only; `reports` remain authoritative.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         current_error: Option<String>,
+        /// The gwtd decision queue (Issue #7742). `None` means it could not
+        /// be read; the client keeps the queue it last applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
+    },
+    /// Client-scoped reply to `AnswerDecision` / `DeferDecision`, carrying the
+    /// queue as it stands after the operation.
+    DecisionResult {
+        id: String,
+        request_id: u64,
+        decision_id: String,
+        action: String,
+        ok: bool,
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
     },
     PmRequestTask {
         id: String,
@@ -3543,6 +3573,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "decision_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "pm_reports",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -4233,6 +4268,7 @@ impl BackendEvent {
             BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PmReports { .. } => "pm_reports",
             BackendEvent::PmRequestTask { .. } => "pm_request_task",
+            BackendEvent::DecisionResult { .. } => "decision_result",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
@@ -4539,6 +4575,7 @@ mod tests {
         );
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None, current_error: None,
+            decisions: None,
             request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
@@ -4614,6 +4651,71 @@ mod tests {
         assert_eq!(
             event.delivery_policy().backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #7742: the decision queue travels with the reports snapshot, and
+    /// answering or deferring is a typed request with its own reply.
+    #[test]
+    fn decision_queue_wire_carries_the_queue_and_typed_answer_and_defer() {
+        let answer: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "answer_decision", "id": "pm", "request_id": 3,
+            "decision_id": "d-1", "answer": "1. Keep JSON",
+        }))
+        .unwrap();
+        assert!(matches!(
+            answer,
+            FrontendEvent::AnswerDecision { request_id: 3, decision_id, answer, .. }
+                if decision_id == "d-1" && answer == "1. Keep JSON"
+        ));
+        let defer: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "defer_decision", "id": "pm", "request_id": 4, "decision_id": "d-1",
+        }))
+        .unwrap();
+        assert!(matches!(
+            defer,
+            FrontendEvent::DeferDecision { request_id: 4, decision_id, .. } if decision_id == "d-1"
+        ));
+        // An answer without its text is not a request.
+        assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "answer_decision", "id": "pm", "request_id": 3, "decision_id": "d-1",
+        }))
+        .is_err());
+
+        let queue = gwt_core::decision_queue::QueueSnapshot::default();
+        let reports = BackendEvent::PmReports {
+            id: "pm".into(),
+            session_id: Some("session".into()),
+            request_id: 1,
+            version: None,
+            snapshot: true,
+            reports: Vec::new(),
+            current: None,
+            error: None,
+            current_error: None,
+            decisions: Some(queue.clone()),
+        };
+        let value = serde_json::to_value(&reports).unwrap();
+        assert_eq!(value["decisions"]["waiting_count"], 0);
+        assert_eq!(value["decisions"]["items"], serde_json::json!([]));
+
+        let result = BackendEvent::DecisionResult {
+            id: "pm".into(),
+            request_id: 4,
+            decision_id: "d-1".into(),
+            action: "defer".into(),
+            ok: true,
+            error: None,
+            decisions: Some(queue),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["kind"], "decision_result");
+        assert_eq!(value["action"], "defer");
+        assert_eq!(value["decisions"]["waiting_count"], 0);
+        assert_eq!(result.event_kind(), "decision_result");
+        assert_eq!(
+            result.delivery_policy().backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
         );
     }
 

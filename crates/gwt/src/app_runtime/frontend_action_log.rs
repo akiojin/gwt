@@ -695,6 +695,17 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PmPaneSendInput { window_id, .. } => {
             FrontendUserActionLog::new("pm_pane_send_input", "terminal").target(window_id)
         }
+        // The answer text stays out of the action log, like pane input.
+        FrontendEvent::AnswerDecision {
+            id, decision_id, ..
+        } => FrontendUserActionLog::new("answer_decision", "pm")
+            .window(id)
+            .target(decision_id),
+        FrontendEvent::DeferDecision {
+            id, decision_id, ..
+        } => FrontendUserActionLog::new("defer_decision", "pm")
+            .window(id)
+            .target(decision_id),
         FrontendEvent::SetIssueMonitorEnabled { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })

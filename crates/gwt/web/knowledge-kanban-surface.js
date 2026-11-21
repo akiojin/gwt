@@ -1558,16 +1558,18 @@ export function createKnowledgeKanbanSurface({
           summary: [count == null ? "" : `Awaiting attention ${count}`, ...parts.map(part => part.summary)].filter(Boolean).join(" | ") } };
       }
 
-      // SPEC #5016 HSK: pm-chat publishes the unanswered decisions of one PM
-      // window from its single derivation; `null` (not loaded, or closed)
-      // removes that window from the count.
+      // SPEC #5016 HSK: pm-chat publishes the waiting decisions of one PM
+      // window; `null` (not loaded, or closed) removes that window from the
+      // count. Issue #7742: the number is the gwtd decision queue's own
+      // waiting count, taken as published and never recounted here, so the
+      // header, the status bar and the Decide screen cannot disagree.
       function applyPmDecisions(windowId, decisions) {
         issueMonitorModel.update(model => {
           const byWindow = { ...model.pmDecisionAttention.byWindow };
-          if (Array.isArray(decisions?.ids)) byWindow[windowId] = [...decisions.ids];
+          if (Number.isFinite(decisions?.waiting)) byWindow[windowId] = decisions.waiting;
           else delete byWindow[windowId];
           const windows = Object.values(byWindow);
-          const count = windows.length ? windows.reduce((sum, ids) => sum + ids.length, 0) : null;
+          const count = windows.length ? windows.reduce((sum, waiting) => sum + waiting, 0) : null;
           return withDecisionAttention({ ...model, pmDecisionAttention: { count, byWindow,
             summary: count == null ? "" : `PM decisions ${count}` } });
         });

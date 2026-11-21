@@ -2241,6 +2241,12 @@ pub struct AppRuntime {
     /// The startup restore drain phase, closed by the drain's tail.
     pub(crate) startup_restore_drain_phase: Option<gwt::perf::startup::PhaseTimer>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Issue #7742: decision answers whose pane write this process confirmed,
+    /// so a tick racing the durable receipt never submits one twice.
+    pub(crate) decision_answers_sent: HashSet<String>,
+    /// Decision answers handed to a pane owner and not acknowledged yet.
+    pub(crate) decision_answers_in_flight: HashMap<u64, pm_chat::DecisionAnswerInFlight>,
+    pub(crate) decision_answer_sequence: u64,
     /// Issue #3927 (SPEC #3340 FR-045): grace candidates for runtime-owned
     /// terminal close, keyed by combined window id. Process-local only.
     /// Issue #4084: agent windows launched as independent review dispatches
@@ -5251,6 +5257,9 @@ impl AppRuntime {
             startup_auto_resume_ready_pending: false,
             startup_restore_drain_phase: None,
             active_agent_sessions: HashMap::new(),
+            decision_answers_sent: HashSet::new(),
+            decision_answers_in_flight: HashMap::new(),
+            decision_answer_sequence: 0,
             issue_monitor_review_dispatch_windows: HashSet::new(),
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
@@ -11586,6 +11595,8 @@ impl AppRuntime {
             | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::UpdatePmRequestTask { id, .. }
             | FrontendEvent::CompletePmRequestTask { id, .. }
+            | FrontendEvent::AnswerDecision { id, .. }
+            | FrontendEvent::DeferDecision { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11979,6 +11990,8 @@ impl AppRuntime {
             | FrontendEvent::CancelPmRequestTask { id, .. }
             | FrontendEvent::UpdatePmRequestTask { id, .. }
             | FrontendEvent::CompletePmRequestTask { id, .. }
+            | FrontendEvent::AnswerDecision { id, .. }
+            | FrontendEvent::DeferDecision { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12484,6 +12497,24 @@ impl AppRuntime {
                 request_id,
                 pm_chat::PmRequestTaskOperation::Complete { request, task_key },
             ),
+            FrontendEvent::AnswerDecision {
+                id,
+                request_id,
+                decision_id,
+                answer,
+            } => self.decision_events(
+                context,
+                client_id,
+                &id,
+                request_id,
+                decision_id,
+                Some(answer),
+            ),
+            FrontendEvent::DeferDecision {
+                id,
+                request_id,
+                decision_id,
+            } => self.decision_events(context, client_id, &id, request_id, decision_id, None),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput {
                 session_id,

@@ -84,6 +84,8 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `CancelPmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 取消のドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |
 | `UpdatePmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 項目更新のドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |
 | `CompletePmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 完了のドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |
+| `AnswerDecision` | 対応 | `decision.answer` | 判断キューの判断へ回答する。GUI は操作者として、envelope は正規 PM または利用者の直接呼び出しとして記録し、どちらも gwtd が待機セッションへ配送する。 |
+| `DeferDecision` | 対応 | `decision.defer` | 判断を判断待ちのままキューの末尾へ回す。件数は変わらない。 |
 | `PaneSendInput` | 対応 | `pane.send` | agent transport で呼び出し元自身のペインに入力を送る。 |
 | `PmPaneSendInput` | 対応 | `pm.message.send` | PM 権限を確認して同じプロジェクトの対象ペインへ送信する。 |
 | `AgentIssueMonitorScanNow` | GUI 内部 | — | agent transport 専用の即時スキャン要求。envelope の再キュー等が内部の通知経路として使う場合がある。 |

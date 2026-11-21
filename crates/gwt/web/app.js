@@ -952,7 +952,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
@@ -4420,7 +4420,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, requestPmDecisionAnswer, requestPmDecisionDefer, markPmDecisionUnavailable, expirePmDecision, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4526,6 +4526,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
             window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
           },
+          // Issue #7742: answers and deferrals are gwtd decision-queue
+          // operations; gwtd delivers an answer to the waiting session itself.
+          onAnswerDecision: (decisionId, answer) => sendPmDecisionRequest(windowData.id,
+            requestPmDecisionAnswer(windowData.id, decisionId, answer)),
+          onDeferDecision: decisionId => sendPmDecisionRequest(windowData.id,
+            requestPmDecisionDefer(windowData.id, decisionId)),
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
             if (!visible) requestVisiblePmReports(true);
@@ -4558,6 +4564,17 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           if (state) view.logHost.dataset.stateVersion = String(state.revision);
         });
         requestVisiblePmReports();
+      }
+
+      // Issue #7742: `false` tells the PM view the request was not issued.
+      function sendPmDecisionRequest(windowId, request) {
+        if (!request) return false;
+        if (send(request) === "unavailable") {
+          markPmDecisionUnavailable(windowId);
+          return true;
+        }
+        window.setTimeout(() => expirePmDecision(windowId, request.request_id), 30000);
+        return true;
       }
 
       function requestVisiblePmReports(resync = false, onlyWindowId = null) {
@@ -5489,7 +5506,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           case "pm_reports":
           case "pm_conversation":
           case "pm_request_task":
-          case "pane_send_result": {
+          case "pane_send_result":
+          case "decision_result": {
             applyPmWindowReceiveEvent(event);
             break;
           }

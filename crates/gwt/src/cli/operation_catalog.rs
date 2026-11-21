@@ -174,6 +174,30 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "decision.answer",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.attach",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.defer",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.merge",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.register",
+        aliases: &[],
+    },
+    Operation {
         name: "diagnostics.cpu",
         aliases: &[],
     },
