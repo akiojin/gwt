@@ -9212,6 +9212,9 @@ fn with_environment_runtime(
     mut profile: gwt::IssueMonitorLaunchProfile,
     model_chosen_by_tier: bool,
 ) -> gwt::IssueMonitorLaunchProfile {
+    // Issue #7647: the agent's fixed traits come first, so the environment's
+    // runtime options below win over them (item 189).
+    gwt::agent_names::apply_member_traits(prefs, &mut profile);
     match gwt::execution_environments::load() {
         Ok(store) => {
             if let Some(environment) = gwt::execution_environments::environment_for_candidate(

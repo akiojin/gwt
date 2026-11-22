@@ -6175,6 +6175,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
         onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
+        onSetTraits: (memberId, traits) => requestAgentRoster({ kind: "set_traits", member_id: memberId, traits }),
         onActivateMember: memberId => requestAgentRoster({ kind: "activate", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),

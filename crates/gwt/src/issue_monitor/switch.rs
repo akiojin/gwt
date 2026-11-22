@@ -794,6 +794,7 @@ mod tests {
                 last_spec_number: None,
                 last_owner_project_key: None,
                 assignment: Some(intent.source.assignment.clone()),
+                traits: Default::default(),
             }],
         });
         prefs.launched_issues.push(IssueMonitorLaunchedIssue {

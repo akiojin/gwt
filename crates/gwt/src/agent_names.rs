@@ -38,6 +38,93 @@ pub struct AgentMember {
     pub last_owner_project_key: Option<String>,
     #[serde(default)]
     pub assignment: Option<AgentMemberAssignment>,
+    /// Fixed traits of this agent (SPEC #7007 items 26, 43 and 48).
+    #[serde(default, skip_serializing_if = "AgentTraits::is_unset")]
+    pub traits: AgentTraits,
+}
+
+/// Longest personality text an agent may carry. Item 180 fixes that a cap
+/// exists and leaves its value open; this is the working value.
+pub const PERSONALITY_MAX_CHARS: usize = 4000;
+
+/// Tool-independent reasoning level of an agent (item 48).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraitReasoningLevel {
+    Low,
+    Standard,
+    High,
+    Max,
+}
+
+/// Tool-independent speed of an agent (item 48).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraitSpeed {
+    Normal,
+    Fast,
+    Fastest,
+}
+
+/// What an agent is, whichever tool it runs on. An unset level or speed
+/// leaves the launched tool's own setting in place.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTraits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_level: Option<TraitReasoningLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<TraitSpeed>,
+    /// Instructions the agent reads when a session starts (item 43).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+}
+
+impl AgentTraits {
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Trim the personality and refuse one over the cap. The text is
+    /// otherwise passed through as written (item 180).
+    fn normalized(mut self) -> Result<Self, String> {
+        self.personality = self
+            .personality
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        if self
+            .personality
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > PERSONALITY_MAX_CHARS)
+        {
+            return Err(format!(
+                "Personality is limited to {PERSONALITY_MAX_CHARS} characters"
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// Start a registered agent's candidate with that agent's fixed traits.
+///
+/// Call it before the execution environment's runtime options and before any
+/// value chosen for one launch, so both win over the traits (item 189). A
+/// candidate that names no registered agent is left as it is.
+pub fn apply_member_traits(
+    prefs: &crate::IssueMonitorPrefs,
+    profile: &mut crate::IssueMonitorLaunchProfile,
+) {
+    let traits = profile.agent_member_id.as_deref().and_then(|member_id| {
+        prefs
+            .agent_roster
+            .as_ref()?
+            .members
+            .iter()
+            .find(|member| member.agent_member_id == member_id)
+            .map(|member| &member.traits)
+    });
+    if let Some(traits) = traits {
+        crate::launch_wizard::apply_agent_traits(profile, traits);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +209,11 @@ pub enum AgentRosterAction {
     },
     Remove {
         member_id: String,
+    },
+    /// Replace the member's fixed traits. A launch never writes them.
+    SetTraits {
+        member_id: String,
+        traits: AgentTraits,
     },
     SetTuning(MemberTuning),
 }
@@ -259,6 +351,7 @@ impl AgentRoster {
             last_spec_number: None,
             last_owner_project_key: None,
             assignment: None,
+            traits: Default::default(),
         });
         Ok(())
     }
@@ -824,6 +917,7 @@ pub(crate) fn observed_project_member_seeds(
                         observed.session.host_pid,
                     ),
                 }),
+                traits: Default::default(),
             });
     }
     Ok(members)
@@ -878,6 +972,7 @@ pub fn mutate_project_roster_snapshot(
             | AgentRosterAction::SelectPm { .. }
             | AgentRosterAction::Move { .. }
             | AgentRosterAction::Remove { .. }
+            | AgentRosterAction::SetTraits { .. }
     ) {
         return crate::agent_registry::mutate_pm_selection(
             &gwt_core::paths::project_scope_hash(root),
@@ -1041,6 +1136,15 @@ pub(crate) fn apply_roster_action(
                 return Err(std::io::Error::other("This member is already last"));
             }
             roster.members.swap(index, target);
+        }
+        AgentRosterAction::SetTraits { member_id, traits } => {
+            let traits = traits.normalized().map_err(std::io::Error::other)?;
+            roster
+                .members
+                .iter_mut()
+                .find(|member| member.agent_member_id == member_id)
+                .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
+                .traits = traits;
         }
         AgentRosterAction::SetPmEligibility { .. }
         | AgentRosterAction::SelectPm { .. }
@@ -1772,6 +1876,7 @@ pub fn adopt_project_member_session(
                 host_pid: observed.host_pid,
                 host_started_at: crate::process::host_process_start_time(observed.host_pid),
             }),
+        traits: Default::default(),
     };
     let mut seed = initial_project_members(root, &path, sessions_dir)?;
     if !seed

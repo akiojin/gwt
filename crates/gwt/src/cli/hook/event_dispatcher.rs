@@ -197,6 +197,13 @@ fn handle_session_start(
         IntentBoundaryEvent::SessionStart,
         autonomous_decision_policy_context(),
     );
+    // Issue #7647 (SPEC #7007 item 43): the registered agent's personality is
+    // read when its session starts.
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::SessionStart,
+        run_value(event, "agent-personality", agent_personality_context),
+    );
     let pending_goal = run_value(event, "discussion-goal-start", || {
         load_pending_goal_for_hook_worktree(worktree_root)
     });
@@ -204,6 +211,23 @@ fn handle_session_start(
         output,
         IntentBoundaryEvent::SessionStart,
         pending_goal,
+    ))
+}
+
+/// The personality of the registered agent this session runs as, passed
+/// through as its owner wrote it (item 180). An unreadable ledger delivers
+/// nothing rather than stopping the session from starting.
+fn agent_personality_context() -> Option<String> {
+    let member_id = std::env::var("GWT_AGENT_MEMBER_ID").ok()?;
+    let personality = match crate::agent_registry::member_personality(member_id.trim()) {
+        Ok(personality) => personality?,
+        Err(error) => {
+            tracing::warn!(%error, "agent personality is unreadable; none is delivered");
+            return None;
+        }
+    };
+    Some(format!(
+        "# Agent personality\n\nThe owner set this as how you work, whichever tool you run on. Follow it for the whole session.\n\n{personality}"
     ))
 }
 
@@ -2655,6 +2679,72 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Question tools are blocked"), "{text}");
+    }
+
+    // Issue #7647 AC-1 (item 43): the personality is instructions the agent
+    // reads when its session starts.
+    #[test]
+    fn session_start_delivers_the_registered_agents_personality() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-personality");
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+        let root = gwt_core::paths::gwt_home().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["agent_roster"] = serde_json::json!({"schema_version":1,"revision":1,"members":[
+            {"agent_member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811", "agent_id":"codex",
+             "name":"Cedar", "enabled":true, "created_at":"2026-10-01T00:00:00Z",
+             "traits":{"personality":"Measure first, then change."}},
+            {"agent_member_id":"b5263a32-14e9-4bb0-ab78-ec3d4816e822", "agent_id":"codex",
+             "name":"Birch", "enabled":true, "created_at":"2026-10-01T00:00:00Z"}
+        ]});
+        let raw = serde_json::to_string_pretty(&prefs).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        std::fs::write(path.with_extension("committed.json"), &raw).unwrap();
+        crate::agent_registry::ensure_active_for_project(&root).unwrap();
+        // Importing a project's first roster gives its members new ids.
+        let members = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .enabled_members();
+        let id = |name: &str| {
+            let (id, _) = members.iter().find(|(_, member)| member == name).unwrap();
+            id.clone()
+        };
+        let (cedar, birch) = (id("Cedar"), id("Birch"));
+        let context = |member: Option<&str>| {
+            let _member = match member {
+                Some(id) => ScopedEnvVar::set("GWT_AGENT_MEMBER_ID", id),
+                None => ScopedEnvVar::unset("GWT_AGENT_MEMBER_ID"),
+            };
+            match handle_with_input("SessionStart", "{}", worktree.path(), None).unwrap() {
+                HookOutput::HookSpecificAdditionalContext { text, .. } => text,
+                _ => String::new(),
+            }
+        };
+
+        let text = context(Some(&cedar));
+        assert!(text.contains("# Agent personality"), "{text}");
+        assert!(text.contains("Measure first, then change."), "{text}");
+        for other in [None, Some(birch.as_str())] {
+            let text = context(other);
+            assert!(
+                !text.contains("Agent personality"),
+                "a session without a personality gets no such section: {text}"
+            );
+        }
     }
 
     #[test]

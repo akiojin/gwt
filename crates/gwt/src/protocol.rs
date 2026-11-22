@@ -6607,6 +6607,10 @@ mod tests {
             serde_json::json!({"kind":"move","member_id":"member-1","direction":"up"}),
             serde_json::json!({"kind":"move","member_id":"member-1","direction":"down"}),
             serde_json::json!({"kind":"remove","member_id":"member-1"}),
+            serde_json::json!({"kind":"set_traits","member_id":"member-1","traits":{}}),
+            serde_json::json!({"kind":"set_traits","member_id":"member-1","traits":{
+                "reasoning_level":"max","speed":"fastest","personality":"Verify before changing."
+            }}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
                 "kind":"agent_roster", "action":action, "expected_revision":3
