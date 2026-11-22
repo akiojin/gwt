@@ -4429,6 +4429,13 @@ impl OwnerState {
                     spawn_owner_worker(move || {
                         let mut attempted = false;
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            // Issue #7701: human mobile input outranks an unconfirmed wake.
+                            super::pm_delivery::release_retained_wake(
+                                &entry,
+                                None,
+                                super::pm_delivery::RetainedWakeRelease::HumanInput,
+                                std::time::Instant::now(),
+                            )?;
                             let reservation = entry
                                 .handle
                                 .reserve_input_transaction()
