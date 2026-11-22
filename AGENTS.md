@@ -172,7 +172,7 @@
 > 🚨 **Draft PR は廃止する（ユーザー裁定 2026-09-16）。PR は常に Ready で作成し、auto-merge を有効にする。**
 
 - **Draft PR を作成しない。** `pr.create` は常に非 draft で行い、既存の Draft を見つけたら `pr.ready` で Ready 化する。「まだ途中だから Draft」という運用は行わない。
-- **すべての PR に `auto-merge` を有効にする。** CI が緑になった時点で着地させる。配信の可否は CI の必須チェック（一覧は下の「Merge queue」節）が判定する。
+- **すべての PR を auto-merge で着地させる。担当 agent は auto-merge を自分で有効にしない（Issue #7697）。** 有効化はリポジトリの merge automation が行う。独立レビュー対象の PR（`auto-merge` ラベル付き Issue の `work/issue-N`）は、head の PASS verdict が記録された後に gwt Issues が有効にする。配信の可否は CI の必須チェック（一覧は下の「Merge queue」節）が判定する。
 - この裁定により、**配信可否の唯一のゲートは CI になる。** 「未完了だから Draft に留める」という緩衝は無くなるので、**PR のスコープを最初から単独で配信可能な大きさに切ること**が以前より重要になる。大きすぎる変更は 1 本の PR に詰めず分割する。
 - 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。残件がある場合は PR 本文に後続タスクとして明記し、**Draft に倒すのではなく follow-up Issue を立てる。**
 - PR 作成前に `gwt-verify --mode pre-pr` の `Overall: PASS` と PR 本文 checklist 完了を確認する。`User Verification Result` は任意の記録欄で、オーナーが明示的に確認を求めた場合のみ必須とする。**これは Ready 化の条件ではなく PR 作成の条件になった。**
