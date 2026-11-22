@@ -495,9 +495,14 @@ There is no standalone `gwt-search` executable.
 ## Delivery: Ready PRs only, always auto-merge
 
 **Draft PRs are prohibited (owner ruling, 2026-10-23).** Create
-every PR non-draft and enable `auto-merge` on it. Never open a Draft, and mark
+every PR non-draft. Never open a Draft, and mark
 any Draft you inherit ready with `pr.ready`. "It is still in progress, so keep
 it a Draft" is no longer a valid state.
+
+**Never enable auto-merge yourself**, at PR creation or afterwards. The
+repository's merge automation enables it. A PR under independent review is
+armed by gwt Issues only after a PASS verdict for its head is recorded; a PR
+armed earlier is merged by required CI before the verdict.
 
 CI is therefore the only delivery gate. That makes PR scope the thing to get
 right: cut each PR so it is independently shippable, and when work remains,
@@ -1245,6 +1250,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         generate_coordination_guidance(dir.path()).unwrap();
         read_contract(skill_path(&dir.path().join(".claude/skills"))).unwrap()
+    }
+
+    /// Issue #7697 AC-5: an agent told to enable auto-merge arms a PR before
+    /// its independent review verdict, and required CI then merges it.
+    #[test]
+    fn issue_7697_delivery_guidance_never_tells_an_agent_to_enable_auto_merge() {
+        let contract = render_contract();
+        assert!(contract.contains("**Never enable auto-merge yourself**"));
+        assert!(contract
+            .contains("armed by gwt Issues only after a PASS verdict for its head is recorded"));
+        assert!(!contract.contains("enable `auto-merge` on it"));
+
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for provider in [".claude", ".codex"] {
+            let flow = std::fs::read_to_string(
+                workspace_root
+                    .join(provider)
+                    .join("skills/gwt-manage-pr/references/deliver-flow.md"),
+            )
+            .expect("deliver flow");
+            assert!(flow.contains("nor the agent enables auto-merge"));
+            assert!(flow.contains("gwt Issues only after a PASS verdict for its head is recorded"));
+            assert!(!flow.contains("arms the merge"));
+        }
     }
 
     #[test]

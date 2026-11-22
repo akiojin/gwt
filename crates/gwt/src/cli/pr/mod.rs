@@ -2540,6 +2540,9 @@ mod tests {
         );
         assert_eq!(env.pr_create_call_log.len(), 1);
         assert!(!env.pr_create_call_log[0].draft);
+        // Issue #7697 AC-5: this operation leaves auto-merge to the merge
+        // automation, which arms a reviewed PR only after its PASS verdict.
+        assert!(env.pr_auto_merge_call_log.is_empty());
         assert_eq!(
             env.pr_create_call_log[0].head.as_deref(),
             Some(request.head.as_str())
@@ -4674,6 +4677,9 @@ mod tests {
             .expect("run adjudicated pr ready");
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_ready_call_log, vec![7]);
+        // Issue #7697 AC-5: this operation leaves auto-merge to the merge
+        // automation, which arms a reviewed PR only after its PASS verdict.
+        assert!(env.pr_auto_merge_call_log.is_empty());
         assert_eq!(env.pr_comments.len(), 1);
         assert_eq!(env.pr_comments[0].0, 7);
         assert!(env.pr_comments[0].1.contains(&decision_id));
@@ -5631,6 +5637,9 @@ fn main() -> ExitCode {
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_update_branch_call_log, vec![7]);
         assert!(out.contains("updated pull request #7 branch"), "{out}");
+        // Issue #7697 AC-5: this operation leaves auto-merge to the merge
+        // automation, which arms a reviewed PR only after its PASS verdict.
+        assert!(env.pr_auto_merge_call_log.is_empty());
     }
 
     /// SPEC #3835 AC-15 / FR-007: a conflicting update is refused, not
