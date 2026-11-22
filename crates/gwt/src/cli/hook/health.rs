@@ -309,6 +309,8 @@ pub fn read_hook_doctor(
         "repair_plan": repair_plan,
         "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
         "health": health,
+        // Issue #7730: the user's registered hooks are audited with the rest.
+        "user_hooks": crate::user_hooks::audit(&input.worktree_root),
     });
     if purpose == Some(HookDoctorPurpose::ManagedBrowser) {
         payload["preflight"] = serde_json::to_value(read_managed_browser_preflight(&input))

@@ -1359,6 +1359,95 @@ fn hook_center_uses_connection_project_and_preserves_failed_repair() {
     drain_queued_blocking_tasks(&tasks);
 }
 
+/// Issue #7730: a hook registered from the Hook Center is in the audit that
+/// answers the request, and a refused registration keeps the audit.
+#[test]
+fn hook_center_registers_a_user_hook_into_the_project_audit() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    init_repo(&project);
+    let script = project.join("notify.sh");
+    fs::write(&script, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let tabs = vec![sample_project_tab(
+        "p",
+        "P",
+        project.clone(),
+        ProjectKind::Git,
+        &[],
+    )];
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), tabs, Some("p"));
+    let context = runtime.project_context_for_root(&project).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut user_hooks = |request_id: u64, event: serde_json::Value| {
+        events.lock().unwrap().clear();
+        let immediate = runtime.handle_frontend_event_for_project(
+            &context,
+            "client".to_string(),
+            serde_json::from_value(event).expect("Hook Center request is supported"),
+        );
+        assert!(
+            immediate.is_empty(),
+            "the change runs off the UI event loop"
+        );
+        drain_queued_blocking_tasks(&tasks);
+        let recorded = events.lock().unwrap();
+        let reply = recorded
+            .iter()
+            .find_map(|event| {
+                let UserEvent::Dispatch(dispatched) = recorded_project_payload(event) else {
+                    return None;
+                };
+                dispatched.iter().find_map(|outbound| {
+                    let wire = serde_json::to_value(&outbound.event).unwrap();
+                    (wire["kind"] == "hook_doctor" && wire["request_id"] == request_id)
+                        .then_some(wire)
+                })
+            })
+            .expect("correlated Doctor reply");
+        assert!(reply["error"].is_null(), "{reply}");
+        reply["report"]["user_hooks"].clone()
+    };
+    let registered = user_hooks(
+        773001,
+        serde_json::json!({
+            "kind": "update_user_hooks", "request_id": 773001,
+            "change": { "action": "register", "timing": "stop", "script": "notify.sh" }
+        }),
+    );
+    let listed = serde_json::json!([{
+        "timing": "stop", "script": script.to_string_lossy(), "state": "ready"
+    }]);
+    assert_eq!(registered["hooks"], listed);
+    assert!(registered["change_error"].is_null());
+
+    let refused = user_hooks(
+        773002,
+        serde_json::json!({
+            "kind": "update_user_hooks", "request_id": 773002,
+            "change": { "action": "register", "timing": "session_start", "script": "missing.sh" }
+        }),
+    );
+    assert!(refused["change_error"]
+        .as_str()
+        .is_some_and(|error| error.starts_with("No file exists at ")));
+    assert_eq!(refused["hooks"], listed);
+
+    // A plain audit lists the registered hook too.
+    let audited = user_hooks(
+        773003,
+        serde_json::json!({ "kind": "get_hook_doctor", "request_id": 773003 }),
+    );
+    assert_eq!(audited["hooks"], listed);
+}
+
 pub(super) fn sample_runtime(
     temp_root: &Path,
     tabs: Vec<ProjectTabRuntime>,
@@ -2057,7 +2146,7 @@ fn sample_runtime_with_events(
         // the GUI-thread one; tests that assert that budget set it explicitly.
         issue_monitor_fallback_commit_timeout: super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
         issue_monitor_profile_saves: HashMap::new(),
-        issue_monitor_max_active_saves: HashMap::new(),
+        issue_monitor_control_lanes: HashMap::new(),
         runtime_hook_agent_failures_in_flight: HashMap::new(),
         // Issue #3676 AC-2: tests default to fail-open so ambient developer /
         // CI credential state never decides a launch; auth-preflight tests
@@ -2082,6 +2171,9 @@ fn sample_runtime_with_events(
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+        decision_answers_sent: HashSet::new(),
+        decision_answers_in_flight: HashMap::new(),
+        decision_answer_sequence: 0,
         issue_monitor_review_dispatch_windows: HashSet::new(),
         terminal_close_candidates: HashMap::new(),
         terminal_convergence_scan_in_flight: false,
@@ -2677,6 +2769,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         skip_permissions: true,
         fast_mode: true,
         codex_speed: Default::default(),
+        runtime_inherit: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -8249,6 +8342,7 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             last_spec_number: None,
             last_owner_project_key: None,
             assignment: None,
+            traits: Default::default(),
         })
         .collect(),
     });
@@ -9351,6 +9445,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         skip_permissions: true,
         fast_mode: false,
         codex_speed: Default::default(),
+        runtime_inherit: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9370,6 +9465,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         skip_permissions: true,
         fast_mode: false,
         codex_speed: Default::default(),
+        runtime_inherit: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9838,6 +9934,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         skip_permissions: true,
         fast_mode: false,
         codex_speed: Default::default(),
+        runtime_inherit: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -10127,6 +10224,7 @@ fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
         skip_permissions: false,
         fast_mode: false,
         codex_speed: Default::default(),
+        runtime_inherit: false,
         runtime_target: Default::default(),
         docker_service: None,
         docker_lifecycle_intent: Default::default(),
@@ -13040,6 +13138,8 @@ mod frontend_launch_tests;
 #[cfg(test)]
 mod gui_slice_tests;
 #[cfg(test)]
+mod home_conversation_tests;
+#[cfg(test)]
 mod issue_monitor_claim_tests;
 #[cfg(test)]
 mod issue_monitor_handoff_tests;
@@ -13081,6 +13181,8 @@ mod startup_status_tests;
 mod terminal_approval_tests;
 #[cfg(test)]
 mod terminal_lifecycle_tests;
+#[cfg(test)]
+mod themes_tests;
 #[cfg(test)]
 mod ui_trace_attachment_tests;
 #[cfg(test)]

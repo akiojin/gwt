@@ -228,10 +228,11 @@ test("Home and Decide read one waiting-decision count after an answer", async ({
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
   await page.addInitScript(() => {
-    const decision = (id: string, question: string) => ({ id, kind: "decision", created_at: "2026-11-12T00:00:00Z",
-      structured: { summary: { result: question, impact: null, owner: "PM",
-        decision: { question, recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } }, details: "", refs: [] } });
-    (window as any).__pmFixtureReports = [decision("hs1-a", "Retry the launch?"), decision("hs1-b", "Ship the fix now?")];
+    const decision = (id: string, question: string) => ({ id, issue: null, kind: "pm_decision", target: `pm-report:${id}`,
+      question, materials: question, options: ["Retry", "Wait"], recommendation: "Retry", reason: "fixture", impact: null,
+      owner: "PM", detail_text: null, source_report_id: id, deferred_seq: null, created_at: "2026-11-12T00:00:00Z", status: "open", waiters: [{ role: "pm" }] });
+    // The gwtd decision queue, newest first (Issue #7742).
+    (window as any).__pmFixtureDecisions = [decision("hs1-b", "Ship the fix now?"), decision("hs1-a", "Retry the launch?")];
     (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
   });
   if (!liveBase) await installEmbeddedRoutes(page);
@@ -247,17 +248,130 @@ test("Home and Decide read one waiting-decision count after an answer", async ({
   await expect(strip).toHaveAttribute("title", /Awaiting attention 2 \| PM decisions 2/);
   await pm.getByRole("button", { name: "Decide", exact: true }).click();
   await pm.locator(".task-decisions__card").first().getByRole("button", { name: "1. Retry" }).click();
-  const send = await page.evaluate(() => (window as any).__pmTerminalFixture.sent.find((packet: any) => packet.kind === "pane_send_input"));
-  expect(send, "the answer travels the chat reply path").toBeTruthy();
-  await page.evaluate(requestId => (window as any).__pmTerminalFixture.emit({ kind: "pane_send_result", id: "pm-terminal",
-    window_id: "pm-terminal", request_id: requestId, ok: true, error: null }), send.request_id);
-  await expect(pm.locator(".task-decisions__card").first()).toContainText("Answer sent: Retry");
+  const sent = await page.evaluate(() => (window as any).__pmTerminalFixture.sent
+    .filter((packet: any) => ["answer_decision", "pane_send_input"].includes(packet.kind)));
+  expect(sent.map((packet: any) => [packet.kind, packet.decision_id, packet.answer]),
+    "the answer goes to the gwtd decision queue, never through the PM pane").toEqual([["answer_decision", "hs1-b", "1. Retry"]]);
+  await expect(pm.locator(".task-decisions__card")).toHaveCount(1);
+  await expect(pm.locator(".task-decisions__notice")).toHaveText("Answer sent. The waiting session continues with it.");
+  await expect(pm.locator(".task-decisions__count")).toHaveText("1 decision waiting");
   await info.attach(`hs1-decide-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
   await pm.getByRole("button", { name: "Home", exact: true }).click();
   await expect(pm.locator(".task-home")).toContainText("1 decision needs your attention");
   await expect(strip).toHaveAttribute("title", /Awaiting attention 1 \| PM decisions 1/);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await info.attach(`hs1-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
+// SPEC #7007 T-023: a waiting decision is drawn only by Decide and by the PM
+// conversation; either one settles the same decision; "Decide later" keeps it
+// waiting; and the status strip count follows what is actually waiting.
+test("T-023 decisions appear only in Decide and the PM conversation and settle together", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    const decision = (id: string, question: string) => ({ id, issue: null, kind: "pm_decision", target: `pm-report:${id}`,
+      question, materials: `${question} is blocked.`, options: ["Retry", "Wait"], recommendation: "Retry", reason: "The work is saved.", impact: "The task stays stopped until you choose.",
+      owner: "PM", detail_text: null, source_report_id: id, deferred_seq: null, created_at: "2026-11-12T00:00:00Z", status: "open", waiters: [{ role: "pm" }] });
+    // A decision report alone is not a waiting decision: gwtd bridges PM
+    // decisions into the queue, and the queue is all the surfaces read.
+    (window as any).__pmFixtureReports = [
+      { id: "t023-progress", kind: "progress", created_at: "2026-11-12T00:00:00Z", body: "Progress note", body_html: "<p>Progress note</p>" },
+      { id: "t023-report-only", kind: "decision", created_at: "2026-11-12T00:00:00Z", body: "Report-only decision", body_html: "<p>Report-only decision</p>" }];
+    (window as any).__pmFixtureDecisions = [decision("t023-b", "Ship the fix now?"), decision("t023-a", "Retry the launch?")];
+    (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  const view = (name: string) => pm.getByRole("button", { name, exact: true });
+  const strip = page.locator("#op-strip-issue-monitor");
+  // Every packet a decision could travel on: queue requests and PM pane sends.
+  const sends = () => page.evaluate(() => (window as any).__pmTerminalFixture.sent
+    .filter((packet: any) => ["answer_decision", "defer_decision", "pane_send_input"].includes(packet.kind))
+    .map((packet: any) => ({ kind: packet.kind, decision_id: packet.decision_id ?? null, answer: packet.answer ?? null })));
+  const cards = pm.locator(".task-decisions__card");
+  const messages = pm.getByRole("log", { name: "PM conversation messages" }).locator(".pm-chat__decision");
+  const ids = (locator: typeof cards) => locator.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.decisionId));
+
+  // AC-1: Reports draws no decision; Decide and the conversation each draw both.
+  await view("Reports").click();
+  const reports = pm.getByRole("log", { name: "PM reports" });
+  await expect(reports.locator("article")).toHaveCount(1);
+  await expect(reports.locator("article")).toContainText("Progress note");
+  await expect(pm.locator(".pm-chat__transcript .pm-chat__decision-controls")).toHaveCount(0);
+  await expect(pm.getByLabel("Report kind").locator("option")).toHaveText(["All reports", "Q&A", "Progress", "Blocker"]);
+  await view("Chat").click();
+  await expect(pm.getByRole("region", { name: "Decision reports" })).toHaveCount(0);
+  await expect(messages).toHaveCount(2);
+  expect(await ids(messages)).toEqual(["t023-b", "t023-a"]);
+  await expect(messages.first()).toContainText("Ship the fix now?");
+  await expect(messages.first()).toContainText("I recommend: Retry. The work is saved.");
+  await expect(messages.first()).toContainText("The task stays stopped until you choose.");
+  await info.attach(`t023-conversation-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  await expect(strip).toHaveAttribute("title", /PM decisions 2/);
+
+  // "Decide later" keeps the decision waiting at the end of the queue.
+  await view("Decide").click();
+  await expect(pm.locator(".task-decisions__count")).toHaveText("2 decisions waiting");
+  expect(await ids(cards)).toEqual(["t023-b", "t023-a"]);
+  await expect(cards.first().getByRole("button", { name: "Later", exact: true })).toHaveCount(0);
+  await cards.first().getByRole("button", { name: "Decide later", exact: true }).click();
+  await expect.poll(() => ids(cards)).toEqual(["t023-a", "t023-b"]);
+  await expect(pm.locator(".task-decisions__notice")).toHaveText("Kept waiting and moved to the end of the queue.");
+  await expect(cards.nth(1).locator(".task-decisions__chip")).toContainText("Deferred");
+  await expect(cards.first().getByRole("button", { name: "1. Retry" })).toBeFocused();
+  await expect(pm.locator(".task-decisions__count")).toHaveText("2 decisions waiting");
+  await expect(strip).toHaveAttribute("title", /PM decisions 2/);
+  expect(await sends(), "deferring is one queue request and sends nothing to the PM")
+    .toEqual([{ kind: "defer_decision", decision_id: "t023-b", answer: null }]);
+  await info.attach(`t023-decide-deferred-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+
+  // AC-2: an answer given in the conversation settles the Decide card too.
+  await view("Chat").click();
+  expect(await ids(messages)).toEqual(["t023-a", "t023-b"]);
+  await expect(messages.nth(1).locator(".pm-chat__decision-meta")).toContainText("Deferred");
+  await messages.first().getByRole("button", { name: "1. Retry" }).click();
+  await expect.poll(async () => (await sends()).length).toBe(2);
+  expect((await sends())[1]).toEqual({ kind: "answer_decision", decision_id: "t023-a", answer: "1. Retry" });
+  await expect(messages).toHaveCount(1);
+  expect(await ids(messages)).toEqual(["t023-b"]);
+  await view("Decide").click();
+  expect(await ids(cards), "the answered decision left Decide too").toEqual(["t023-b"]);
+  await expect(pm.locator(".task-decisions__notice")).toHaveText("Answer sent. The waiting session continues with it.");
+  await expect(pm.locator(".task-decisions__count")).toHaveText("1 decision waiting");
+  await expect(strip).toHaveAttribute("title", /PM decisions 1/);
+
+  // AC-2 / AC-3: a free-form reply started from Decide settles the same
+  // decision in the conversation, and nothing is left waiting.
+  await cards.first().getByRole("button", { name: "Reply in chat", exact: true }).click();
+  const draft = pm.getByRole("textbox", { name: "Message to PM" });
+  await expect(draft).toBeFocused();
+  await expect(pm.locator(".pm-chat__reply-target")).toContainText("Replying to: Ship the fix now?");
+  await draft.fill("Ship it after the release note is fixed");
+  await info.attach(`t023-reply-target-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  await draft.press("Enter");
+  await expect.poll(async () => (await sends()).length).toBe(3);
+  expect((await sends())[2]).toEqual({ kind: "answer_decision", decision_id: "t023-b",
+    answer: "Ship it after the release note is fixed" });
+  await expect(messages).toHaveCount(0);
+  await expect(pm.locator(".pm-chat__reply-target")).toBeHidden();
+  await expect(draft).toHaveValue("");
+  await view("Decide").click();
+  await expect(cards).toHaveCount(0);
+  await expect(pm.locator(".task-decisions")).toContainText("No decisions waiting");
+  await view("Home").click();
+  await expect(pm.locator(".task-home")).toContainText("No decisions waiting");
+  await expect(strip).toHaveAttribute("title", /PM decisions 0/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`t023-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
   expect(errors, "console and page errors").toEqual([]);
 });
 
@@ -337,10 +451,14 @@ test.describe("PM touch targets", () => {
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
     await page.addInitScript(() => {
-      (window as any).__pmFixtureReports = [{ id: "t005pm-a", kind: "decision", created_at: "2026-11-14T00:00:00Z",
-        structured: { summary: { result: "Retry the launch?", impact: null, owner: "PM",
-          decision: { question: "Retry the launch?", recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } },
-          details: "The last launch timed out.", refs: [] } }];
+      // The waiting decision comes from the gwtd decision queue (Issue #7742).
+      (window as any).__pmFixtureDecisions = [{ id: "t005pm-a", issue: null, kind: "pm_decision", target: "pm-report:t005pm-a",
+        question: "Retry the launch?", materials: "Retry the launch?", options: ["Retry", "Wait"], recommendation: "Retry",
+        reason: "fixture", impact: null, owner: "PM", detail_text: null, source_report_id: "t005pm-a", deferred_seq: null,
+        created_at: "2026-11-14T00:00:00Z", status: "open", waiters: [{ role: "pm" }] }];
+      // Reports lists no decision (T-023), so its disclosure comes from a progress report.
+      (window as any).__pmFixtureReports = [{ id: "t005pm-b", kind: "progress", created_at: "2026-11-14T00:00:00Z", body: "Launch retried",
+        structured: { summary: { result: "Launch retried" }, details: "The last launch timed out.", refs: [] } }];
       (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 1, pending_intake: 0, tasks: [{
         key: "t005pm-task", title: "Ship the fix", status: "in_progress", assignee: "agent-one", next_action: "Review the PR",
         criteria_preview: { purpose: "Fix the launch", completion_conditions: ["Tests pass"], completion_condition_total: 1 } }] } };
@@ -768,7 +886,24 @@ async function installPmBackend(page: Pick<Page, "addInitScript">): Promise<void
       send(raw: string) {
         const packet = JSON.parse(raw);
         fixture.sent.push(packet);
-        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: (window as any).__pmFixtureReports ?? [], current: (window as any).__pmFixtureCurrent ?? null });
+        // Issue #7742: the fixture answers like gwtd's decision queue. An
+        // answer removes the decision, a deferral moves it to the tail, and
+        // each result carries the queue as it is after the operation.
+        const queue = () => {
+          const items = (window as any).__pmFixtureDecisions as any[] | undefined;
+          return items ? { waiting_count: items.length, items } : undefined;
+        };
+        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: (window as any).__pmFixtureReports ?? [], current: (window as any).__pmFixtureCurrent ?? null, decisions: queue() });
+        if (packet.kind === "answer_decision" || packet.kind === "defer_decision") {
+          const items = ((window as any).__pmFixtureDecisions ?? []) as any[];
+          const item = items.find(entry => entry.id === packet.decision_id);
+          const rest = items.filter(entry => entry.id !== packet.decision_id);
+          const deferred = items.reduce((max, entry) => Math.max(max, entry.deferred_seq ?? 0), 0) + 1;
+          if (item) (window as any).__pmFixtureDecisions = packet.kind === "answer_decision" ? rest : [...rest, { ...item, deferred_seq: deferred }];
+          setTimeout(() => this.emit({ kind: "decision_result", id: packet.id, request_id: packet.request_id, decision_id: packet.decision_id,
+            action: packet.kind === "answer_decision" ? "answer" : "defer", ok: Boolean(item),
+            error: item ? null : `decision ${packet.decision_id} was not found`, decisions: queue() ?? null }), 0);
+        }
       }
       emit(packet: unknown) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(packet) })); }
       close() { this.readyState = 3; this.dispatchEvent(new CloseEvent("close")); }
@@ -1095,7 +1230,6 @@ exit 67
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
     const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
     await surface.getByRole("textbox", { name: "Name for new member" }).fill("Owned Codex PM");
-    await surface.getByRole("combobox", { name: "Tool for new member" }).selectOption("codex");
     await surface.getByRole("checkbox", { name: "PM eligible for new member" }).check();
     await surface.locator('.roster-capacity [data-action="add"]').click();
     const member = surface.locator(".roster-row").filter({ hasText: "Owned Codex PM" });

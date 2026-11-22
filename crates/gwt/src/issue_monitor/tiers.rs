@@ -220,6 +220,7 @@ fn default_launch_tiers() -> Vec<Vec<IssueMonitorLaunchProfile>> {
                 skip_permissions: true,
                 fast_mode: false,
                 codex_speed: Default::default(),
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -281,7 +282,15 @@ impl IssueMonitorPrefs {
     }
 
     pub fn effective_launch_tiers(&self) -> Vec<Vec<IssueMonitorLaunchProfile>> {
-        self.launch_tiers_for_pool(&self.launch_profile_pool())
+        let pool = self.launch_profile_pool();
+        if pool
+            .first()
+            .is_some_and(|profile| profile.agent_member_id.is_some())
+        {
+            // Registered agents' tiers are those of the tool they start with.
+            return self.launch_tiers_for_pool(&self.agent_candidates_on_environment(pool));
+        }
+        self.launch_tiers_for_pool(&pool)
     }
 
     fn launch_tiers_for_pool(
@@ -353,7 +362,8 @@ impl IssueMonitorPrefs {
         let start = tier_for(tier_input, is_spec, floor, tiers.len().min(255) as u8);
         let mut skipped = Vec::new();
         for (index, pool) in tiers.into_iter().enumerate().skip(usize::from(start)) {
-            let pool: Vec<_> = pool
+            let pool: Vec<_> = self
+                .environment_tier(pool)
                 .into_iter()
                 .filter(|profile| {
                     (!bound

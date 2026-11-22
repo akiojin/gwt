@@ -10085,6 +10085,27 @@ pub(crate) mod tests {
             .expect("warning must stay outside the structured diagnostic");
             assert!(!String::from_utf8_lossy(&env.stdout).contains(primary));
             assert!(!String::from_utf8_lossy(&env.stderr).contains(primary));
+            // Issue #7339 (#6419): a retried Done update must not be steered to
+            // workspace.ensure, and must say an own earlier Done already succeeded.
+            let message = payload["error"].as_str().unwrap();
+            assert!(
+                !message.contains("workspace_ensure_required"),
+                "{operation}: {message}"
+            );
+            assert!(
+                message.contains("already succeeded"),
+                "{operation}: {message}"
+            );
+        }
+        // Issue #7339 (#6419): Done Work is a completed record, not a blocker.
+        // Neither refusal may auto-file a fresh-launch escalation.
+        for root in [&project_root, &worktree] {
+            assert!(
+                gwt_core::coordination::load_open_escalations(root)
+                    .unwrap()
+                    .is_empty(),
+                "Done Work refusal must not escalate to the PM"
+            );
         }
 
         // AC-4: the eligible primary can safely retry proof repair when the

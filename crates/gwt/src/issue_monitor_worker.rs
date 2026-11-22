@@ -7100,6 +7100,7 @@ pub(crate) mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: Default::default(),
+            runtime_inherit: false,
             runtime_target: gwt_agent::LaunchRuntimeTarget::default(),
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),

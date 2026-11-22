@@ -31,7 +31,6 @@ const readyState = {
     ],
   },
   decisionsWaiting: 2,
-  completedToday: 4,
 };
 
 test("home leads with the decisions waiting and a plain-language summary", () => {
@@ -41,7 +40,8 @@ test("home leads with the decisions waiting and a plain-language summary", () =>
   assert.match(text, /Create task/);
   assert.match(text, /Tasks in progress/);
   assert.match(text, /Tasks queued/);
-  assert.match(text, /Completed today/);
+  // Issue #7643 AC-2: what was completed today belongs to the Themes screen.
+  assert.doesNotMatch(text, /Completed today|Unknown/);
   root.unmount();
 });
 
@@ -53,7 +53,6 @@ test("counts come from the overview totals, never from the visible rows", () => 
   // 2 in progress (in_progress + waiting), 2 queued (pending + intake).
   assert.match(counts.textContent, /2\s*Tasks in progress/);
   assert.match(counts.textContent, /2\s*Tasks queued/);
-  assert.match(counts.textContent, /4\s*Completed today/);
   root.unmount();
 });
 
@@ -69,7 +68,7 @@ test("recent cards show purpose, owner, stage and the decision link", () => {
 });
 
 test("unknown state is never rendered as zero decisions", () => {
-  const { container, root } = mount({ overview: null, decisionsWaiting: null, completedToday: null });
+  const { container, root } = mount({ overview: null, decisionsWaiting: null });
   const text = container.textContent;
   assert.match(text, /Unable to refresh/);
   assert.doesNotMatch(text, /No decisions waiting/);
@@ -84,7 +83,7 @@ test("no decisions waiting is stated plainly when the count is known zero", () =
 });
 
 test("absent overview says no tasks recorded yet", () => {
-  const { container, root } = mount({ overview: { state: "absent", total: 0, pending_intake: 0, tasks: [] }, decisionsWaiting: 0, completedToday: 0 });
+  const { container, root } = mount({ overview: { state: "absent", total: 0, pending_intake: 0, tasks: [] }, decisionsWaiting: 0 });
   assert.match(container.textContent, /No request tasks have been recorded yet/);
   root.unmount();
 });

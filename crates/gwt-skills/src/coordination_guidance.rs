@@ -251,6 +251,36 @@ posting output and every PM-facing surface repeat back to you:
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### Decisions: register them in the gwtd decision queue
+
+When the work needs a decision you cannot make yourself, register it in
+the decision queue. The queue belongs to gwtd and the project, not to the
+PM session: it survives a stopped or replaced PM, and the answer is
+delivered by gwtd straight into your own session.
+
+Look first, so one topic stays one decision:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"decision.list","params":{"issue":2338}}
+    JSON
+
+If the topic is already there, wait on it with `decision.attach`
+(`params.id`). Otherwise register it:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"decision.register","params":{"issue":2338,"kind":"scope","target":"export format","question":"Should the export include archived rows?","materials":"Archived rows double the file size; the spec does not mention them.","options":["Include them","Exclude them"],"recommendation":"Exclude them","reason":"Matches the current list view"}}
+    JSON
+
+`issue`, `kind`, `target`, `question` and `materials` are always required.
+`kind` is `product` or `scope` (these reach the user and also require at
+least two `options` and a `recommendation`) or `technical` or `process`
+(the PM closes these). A registration missing a required field is
+refused. Registering the same issue, kind and target again returns the
+existing decision and attaches you to it instead of creating a second
+one. After registering, end the turn and wait: the answer arrives as input
+in this session. `decision.answer`, `decision.merge` and `decision.defer`
+belong to the PM and the user.
+
 ### Waiting is not a stall: declare it
 
 The Issues runtime judges a launched agent stuck when it sees no activity
@@ -465,9 +495,14 @@ There is no standalone `gwt-search` executable.
 ## Delivery: Ready PRs only, always auto-merge
 
 **Draft PRs are prohibited (owner ruling, 2026-10-23).** Create
-every PR non-draft and enable `auto-merge` on it. Never open a Draft, and mark
+every PR non-draft. Never open a Draft, and mark
 any Draft you inherit ready with `pr.ready`. "It is still in progress, so keep
 it a Draft" is no longer a valid state.
+
+**Never enable auto-merge yourself**, at PR creation or afterwards. The
+repository's merge automation enables it. A PR under independent review is
+armed by gwt Issues only after a PASS verdict for its head is recorded; a PR
+armed earlier is merged by required CI before the verdict.
 
 CI is therefore the only delivery gate. That makes PR scope the thing to get
 right: cut each PR so it is independently shippable, and when work remains,
@@ -775,6 +810,33 @@ blocker が解消したら、必ず明示的に escalation を閉じます（他
     gwtd <<'JSON'
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
+
+### 判断: gwtd の判断キューへ登録する
+
+自分では決められない判断が必要になったら、判断キューへ登録します。キュー
+は PM セッションではなく gwtd とプロジェクトが持つため、PM が止まっても
+入れ替わっても残り、回答は gwtd が自分の session へ直接届けます。
+
+同じ話題を 1 件に保つため、先に引きます:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"decision.list","params":{"issue":2338}}
+    JSON
+
+同じ話題が既にあれば `decision.attach`（`params.id`）でぶら下がります。
+無ければ登録します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"decision.register","params":{"issue":2338,"kind":"scope","target":"export format","question":"Should the export include archived rows?","materials":"Archived rows double the file size; the spec does not mention them.","options":["Include them","Exclude them"],"recommendation":"Exclude them","reason":"Matches the current list view"}}
+    JSON
+
+`issue` / `kind` / `target` / `question` / `materials` は常に必須です。
+`kind` は `product` / `scope`（ユーザーへ上がる。`options` 2 件以上と
+`recommendation` も必須）または `technical` / `process`（PM が閉じる）です。
+必須項目が欠けた登録は拒否されます。同じ issue・kind・target の再登録は
+新規に作らず、既存の判断を返してそこへぶら下げます。登録後は turn を終えて
+待ちます。回答はこの session への入力として届きます。`decision.answer` /
+`decision.merge` / `decision.defer` は PM とユーザーの操作です。
 
 ### 待機は停滞ではない: 申告する
 
@@ -1188,6 +1250,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         generate_coordination_guidance(dir.path()).unwrap();
         read_contract(skill_path(&dir.path().join(".claude/skills"))).unwrap()
+    }
+
+    /// Issue #7697 AC-5: an agent told to enable auto-merge arms a PR before
+    /// its independent review verdict, and required CI then merges it.
+    #[test]
+    fn issue_7697_delivery_guidance_never_tells_an_agent_to_enable_auto_merge() {
+        let contract = render_contract();
+        assert!(contract.contains("**Never enable auto-merge yourself**"));
+        assert!(contract
+            .contains("armed by gwt Issues only after a PASS verdict for its head is recorded"));
+        assert!(!contract.contains("enable `auto-merge` on it"));
+
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for provider in [".claude", ".codex"] {
+            let flow = std::fs::read_to_string(
+                workspace_root
+                    .join(provider)
+                    .join("skills/gwt-manage-pr/references/deliver-flow.md"),
+            )
+            .expect("deliver flow");
+            assert!(flow.contains("nor the agent enables auto-merge"));
+            assert!(flow.contains("gwt Issues only after a PASS verdict for its head is recorded"));
+            assert!(!flow.contains("arms the merge"));
+        }
     }
 
     #[test]

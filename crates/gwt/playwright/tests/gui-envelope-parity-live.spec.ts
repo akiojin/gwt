@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
-import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { gotoLiveGwt, liveGwtProjectsUrl, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test("gwtd opens a Project and places its Agent in the live Kanban", async ({ page }, info) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
@@ -78,7 +78,7 @@ test("gwtd opens a Project and places its Agent in the live Kanban", async ({ pa
     });
     const theme = info.project.name.endsWith("-light") ? "light" : "dark";
     const projectPath = `/p/${key}`;
-    await page.goto(base!);
+    await page.goto(liveGwtProjectsUrl(base!));
     await expect(page.locator("[data-hub]")).toBeVisible();
     const projectLink = page.locator(`[data-hub-list="open"] a[href="${projectPath}"]`);
     await expect(projectLink).toHaveCount(0);

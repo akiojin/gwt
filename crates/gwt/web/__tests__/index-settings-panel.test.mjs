@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
-import { renderIndexSettingsPanel } from "../index-settings-panel.js";
+import { INDEX_SCOPE_IDS, buildIndexHealthSummary, renderIndexSettingsPanel } from "../index-settings-panel.js";
 
 function fixture() {
   const { document } = parseHTML(
@@ -149,10 +149,13 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
     summary,
     "summary cards should appear before the detailed table",
   );
-  assert.match(summary.textContent, /6 ready/);
-  assert.match(summary.textContent, /2 degraded/);
+  // Issue #7729 AC-3: health is counted over the nine search scopes.
+  assert.match(summary.textContent, /Ready 5\/9/);
+  assert.match(summary.textContent, /4 need attention/);
   assert.match(summary.textContent, /specs/);
   assert.match(summary.textContent, /files · feature\/x/);
+  assert.match(summary.textContent, /works \(status unavailable\)/);
+  assert.match(summary.textContent, /memory \(status unavailable\)/);
 
   const headerCols = table.querySelectorAll("thead th[scope='col']");
   // 1 scope column + 2 worktree columns
@@ -165,11 +168,11 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   assert.deepEqual(scopes, [
     "issues",
     "specs",
-    "memory",
-    "discussions",
     "board",
+    "discussions",
     "works",
     "reports",
+    "memory",
     "files",
     "files-docs",
   ]);
@@ -185,7 +188,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   assert.ok(specsCell.classList.contains("unhealthy"));
 
   // memory row is repo-shared and renders a single column-spanning cell.
-  const memoryCell = scopeRows[2].querySelector(".settings-index-cell");
+  const memoryCell = scopeRows[6].querySelector(".settings-index-cell");
   assert.equal(memoryCell.colSpan, 2);
 
   // discussions row is repo-shared and reports the Discussion semantic index.
@@ -194,12 +197,12 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   assert.match(discussionsCell.textContent, /8 docs/);
 
   // board row is repo-shared and reports the Board semantic index.
-  const boardCell = scopeRows[4].querySelector(".settings-index-cell");
+  const boardCell = scopeRows[2].querySelector(".settings-index-cell");
   assert.equal(boardCell.colSpan, 2);
   assert.match(boardCell.textContent, /21 docs/);
 
   // files row has one cell per worktree, in worktree-hash sort order.
-  const reportsCell = scopeRows[6].querySelector(".settings-index-cell");
+  const reportsCell = scopeRows[5].querySelector(".settings-index-cell");
   assert.equal(reportsCell.colSpan, 2);
   assert.match(reportsCell.textContent, /6 docs/);
 
@@ -279,4 +282,27 @@ test("Rebuild all button dispatches rebuild_index_cell without worktree hash", (
       scope: "issues",
     },
   ]);
+});
+
+test("Issue #7729 AC-3: the health summary counts the nine search scopes", () => {
+  assert.deepEqual(INDEX_SCOPE_IDS, [
+    "issues", "specs", "board", "discussions", "works", "reports", "memory", "files", "files-docs",
+  ]);
+  const ready = { healthy: true, repair_required: false };
+  const all = Object.fromEntries(INDEX_SCOPE_IDS.map(scope => [scope,
+    scope.startsWith("files") ? { wtA: ready, wtB: ready } : ready]));
+  const whole = buildIndexHealthSummary({ state: "ready", scopes: all, worktrees: {} });
+  assert.equal(whole.scopeTotal, 9);
+  assert.equal(whole.scopeReadyCount, 9, "two worktrees of one scope are one scope");
+  assert.deepEqual(whole.attentionScopes, []);
+
+  const partial = buildIndexHealthSummary({ state: "ready", worktrees: { wtB: { branch: "work/issue-5561" } }, scopes: {
+    ...all, board: undefined, files: { wtA: ready, wtB: { healthy: false, repair_required: true, reason: "manifest_missing" } },
+  } });
+  assert.equal(partial.scopeReadyCount, 7);
+  assert.deepEqual(partial.attentionScopes, [
+    { scope: "board", label: "board (status unavailable)" },
+    { scope: "files", label: "files · work/issue-5561" },
+  ]);
+  assert.equal(buildIndexHealthSummary(null).scopeReadyCount, 0);
 });

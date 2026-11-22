@@ -28,7 +28,6 @@ import { createUiStateStore } from "./ui-state-store.js";
 
 const DEFAULT_MAX_RETAINED = 100;
 const HISTORY_LEVELS = ["info", "success", "warn", "error", "done", "neutral"];
-const BADGE_MAX = 99;
 
 // Issue #3979 (user ruling 2026-09-05) — triage rows. The drawer is the surface
 // where unhandled notices get CLEARED, not read, so a row's first job is to say
@@ -57,32 +56,37 @@ const SEVERITY_LABEL = {
   neutral: "Neutral",
 };
 
-function severityForLevel(level) {
-  return SEVERITY_BY_LEVEL[level] || "neutral";
-}
+// Issue #7732 (SPEC #7007 item 211, US-5) — every notice is one of three
+// categories. A decision waits for the user, a completion report says that
+// work finished, and everything else is information.
+const NOTIFICATION_CATEGORIES = Object.freeze(["decision", "report", "info"]);
 
 /**
- * Sync the rail bell with the unread model (FR-009). The badge is decorative
- * (aria-hidden); the count is mirrored into the button's aria-label so screen
- * readers hear it, and aria-expanded follows the drawer state.
+ * The one place a notice's category is decided, for every `record*` call. A
+ * source that knows its category names it with `category`; the others are
+ * read from what they already carry: a `needs_human` transition or an agent waiting for input is
+ * a decision, a `done` notice is a completion report.
  */
-export function renderNotificationBell({ button, badge, count = 0, hasError = false, open = false } = {}) {
-  const unread = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
-  if (badge) {
-    badge.hidden = unread === 0;
-    badge.textContent = unread > BADGE_MAX ? `${BADGE_MAX}+` : String(unread);
-    badge.dataset.hasError = hasError ? "true" : "false";
-  }
-  if (button) {
-    button.dataset.unread = String(unread);
-    button.dataset.hasError = hasError ? "true" : "false";
-    button.setAttribute("aria-expanded", open ? "true" : "false");
-    const label = unread === 0
-      ? "Notifications"
-      : `Notifications (${unread} unread${hasError ? ", includes errors" : ""})`;
-    button.setAttribute("aria-label", label);
-    button.setAttribute("title", label);
-  }
+function notificationCategory(notice) {
+  if (NOTIFICATION_CATEGORIES.includes(notice?.category)) return notice.category;
+  if (notice?.transition === "needs_human" || notice?.kind === "needs_human"
+    || (notice?.kind === "attention" && notice.level === "warn")) return "decision";
+  return notice?.level === "done" ? "report" : "info";
+}
+const CATEGORY_LABEL = {
+  decision: "Decision",
+  report: "Completion report",
+  info: "Info",
+};
+
+function countByCategory(rows) {
+  const counts = { decision: 0, report: 0, info: 0 };
+  for (const row of rows) counts[row.category] += 1;
+  return counts;
+}
+
+function severityForLevel(level) {
+  return SEVERITY_BY_LEVEL[level] || "neutral";
 }
 
 function formatClock(date) {
@@ -95,7 +99,8 @@ function formatClock(date) {
 
 /** Session history data, independent of the drawer or its DOM lifetime. */
 export function createNotificationHistory({ maxRetained = DEFAULT_MAX_RETAINED, now = () => new Date() } = {}) {
-  const store = createUiStateStore({ rows: [], dropped: 0, open: false, unreadCount: 0, unreadHasError: false });
+  const store = createUiStateStore({ rows: [], dropped: 0, open: false, unreadCount: 0, unreadHasError: false,
+    categoryCounts: countByCategory([]) });
   // Commands stay outside snapshots; retained row IDs own their callbacks.
   const activations = new Map();
   let nextId = 0;
@@ -107,6 +112,7 @@ export function createNotificationHistory({ maxRetained = DEFAULT_MAX_RETAINED, 
     for (const id of activations.keys()) if (!retained.has(id)) activations.delete(id);
     store.update(() => ({ ...next, rows, dropped: next.dropped + dropped,
       unreadCount: rows.filter(row => row.unread).length,
+      categoryCounts: countByCategory(rows),
       unreadHasError: rows.some(row => row.unread && row.level === "error") }));
   }
 
@@ -129,7 +135,7 @@ export function createNotificationHistory({ maxRetained = DEFAULT_MAX_RETAINED, 
       || previous.level !== level || previous.title !== title || (previous.message ?? "") !== (message ?? "");
     const row = { id, surface, key, identity,
       kind: surface ? incrementOccurrence ? "error" : "surface-notice" : notice.kind == null ? "" : String(notice.kind),
-      level,
+      level, category: notificationCategory({ ...notice, level }),
       title: previous && incrementOccurrence && notice.title == null ? previous.title : title,
       message: previous && incrementOccurrence && notice.message == null ? previous.message : message,
       issueNumber: surface ? null : notice.issueNumber || null,
@@ -214,6 +220,7 @@ export function createNotificationCenter({
   let drawer = null;
   let backdrop = null;
   let emptyState = null;
+  const categoryCountNodes = new Map();
   const history = createNotificationHistory({ maxRetained, now });
   const renderedRows = new Map();
   let focusReturn = null;
@@ -306,6 +313,19 @@ export function createNotificationCenter({
 
     const body = document.createElement("div");
     body.className = "op-drawer__body notification-center__body";
+    // The number of notices in each category (item 211). A notice that
+    // repeated is one row, so it counts once here and shows ×N on its row.
+    const categories = document.createElement("p");
+    categories.className = "notification-center__categories";
+    categories.setAttribute("aria-label", "Notices by category");
+    for (const category of NOTIFICATION_CATEGORIES) {
+      const count = document.createElement("span");
+      count.className = "notification-center__category notification-center__category-count";
+      count.dataset.category = category;
+      categoryCountNodes.set(category, count);
+      categories.appendChild(count);
+    }
+    body.appendChild(categories);
     emptyState = document.createElement("p");
     emptyState.className = "notification-center__empty";
     emptyState.textContent = "No notifications yet";
@@ -317,6 +337,7 @@ export function createNotificationCenter({
     parent.appendChild(drawer);
     syncDrawerState();
     syncEmptyState();
+    renderCategoryCounts(history.read().categoryCounts);
     return drawer;
   }
 
@@ -357,6 +378,7 @@ export function createNotificationCenter({
         }
         item.querySelector(".notification-center__title").textContent = `${row.title}${row.issueNumber ? ` #${row.issueNumber}` : ""}`;
         renderSeverity(item, row.level);
+        renderCategory(item, row.category);
         renderErrorCount(item, row.count);
         let time = item.querySelector(".notification-center__time");
         if (!time) {
@@ -411,6 +433,23 @@ export function createNotificationCenter({
     notifyUnread();
   }
   history.subscribe(state => state.rows, renderRows);
+
+  function renderCategoryCounts(counts) {
+    for (const [category, node] of categoryCountNodes) node.textContent = `${CATEGORY_LABEL[category]} ${counts[category]}`;
+  }
+  history.subscribe(state => state.categoryCounts, renderCategoryCounts);
+
+  function renderCategory(item, category) {
+    item.dataset.category = category;
+    let badge = item.querySelector(".notification-center__category");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "notification-center__category";
+      item.insertBefore(badge, item.querySelector(".notification-center__message, .notification-center__details, .notification-center__time"));
+    }
+    badge.dataset.category = category;
+    badge.textContent = CATEGORY_LABEL[category];
+  }
 
   function renderSeverity(item, level) {
     const severity = severityForLevel(level);

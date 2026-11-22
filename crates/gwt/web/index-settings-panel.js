@@ -6,9 +6,12 @@
 // and a per-cell Rebuild button that emits `rebuild_index_cell` with
 // `(project_root, scope, worktree_hash?)`.
 
-const REPO_SHARED_SCOPES = ["issues", "specs", "memory", "discussions", "board", "works", "reports"];
+// Issue #7729 AC-3 (SPEC #7007 item 15): the nine search scopes, in the order
+// the search offers them. Health is counted over this list, so the search and
+// its health summary always name the same number.
+const REPO_SHARED_SCOPES = ["issues", "specs", "board", "discussions", "works", "reports", "memory"];
 const PER_WORKTREE_SCOPES = ["files", "files-docs"];
-const ALL_SCOPES = [...REPO_SHARED_SCOPES, ...PER_WORKTREE_SCOPES];
+export const INDEX_SCOPE_IDS = Object.freeze([...REPO_SHARED_SCOPES, ...PER_WORKTREE_SCOPES]);
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
@@ -34,50 +37,34 @@ function healthViewDegraded(view) {
 }
 
 export function buildIndexHealthSummary(status) {
+  // A scope is ready when every cell of it is. One that reports nothing is not
+  // ready, and is named apart from a degraded one.
   const summary = {
     available: Boolean(status),
     state: String(status?.state || "unknown"),
     detail: String(status?.detail || "").trim(),
-    readyCount: 0,
-    degradedCount: 0,
-    totalCount: 0,
-    degradedScopes: [],
+    scopeTotal: INDEX_SCOPE_IDS.length,
+    scopeReadyCount: 0,
+    attentionScopes: [],
   };
   if (!status) return summary;
 
   const scopes = status.scopes || {};
   const worktrees = status.worktrees || {};
-  for (const scope of REPO_SHARED_SCOPES) {
-    const view = scopes[scope] || null;
-    if (!view) continue;
-    summary.totalCount += 1;
-    if (healthViewReady(view)) {
-      summary.readyCount += 1;
-    } else if (healthViewDegraded(view)) {
-      summary.degradedCount += 1;
-      summary.degradedScopes.push({
-        label: scopeLabel(scope, "", worktrees),
-        reason: view.reason || summary.state,
-      });
+  for (const scope of INDEX_SCOPE_IDS) {
+    const perWorktree = PER_WORKTREE_SCOPES.includes(scope);
+    const reported = scopes[scope] || null;
+    const cells = !reported ? []
+      : perWorktree ? Object.keys(reported).sort().filter(hash => reported[hash]).map(hash => [hash, reported[hash]])
+        : [["", reported]];
+    if (cells.length === 0) {
+      summary.attentionScopes.push({ scope, label: `${scope} (status unavailable)` });
+      continue;
     }
-  }
-
-  for (const scope of PER_WORKTREE_SCOPES) {
-    const perScope = scopes[scope] || {};
-    const hashes = Object.keys(perScope).sort();
-    for (const worktreeHash of hashes) {
-      const view = perScope[worktreeHash] || null;
-      if (!view) continue;
-      summary.totalCount += 1;
-      if (healthViewReady(view)) {
-        summary.readyCount += 1;
-      } else if (healthViewDegraded(view)) {
-        summary.degradedCount += 1;
-        summary.degradedScopes.push({
-          label: scopeLabel(scope, worktreeHash, worktrees),
-          reason: view.reason || summary.state,
-        });
-      }
+    const degraded = cells.filter(([, view]) => healthViewDegraded(view));
+    if (degraded.length === 0) summary.scopeReadyCount += 1;
+    for (const [worktreeHash] of degraded) {
+      summary.attentionScopes.push({ scope, label: scopeLabel(scope, worktreeHash, worktrees) });
     }
   }
   return summary;
@@ -189,7 +176,7 @@ function renderIndexHealthSummaryCards(doc, summary) {
 
   const stateCard = doc.createElement("div");
   stateCard.className = "settings-index-summary-card";
-  stateCard.dataset.healthKind = summary.degradedCount > 0 ? "degraded" : "ready";
+  stateCard.dataset.healthKind = summary.scopeReadyCount < summary.scopeTotal ? "degraded" : "ready";
   const stateLabel = doc.createElement("span");
   stateLabel.className = "settings-index-summary-label";
   stateLabel.textContent = "State";
@@ -199,23 +186,24 @@ function renderIndexHealthSummaryCards(doc, summary) {
   stateCard.appendChild(stateValue);
   wrap.appendChild(stateCard);
 
+  const attention = summary.scopeTotal - summary.scopeReadyCount;
   const readyCard = doc.createElement("div");
   readyCard.className = "settings-index-summary-card";
   readyCard.dataset.healthKind = "ready";
-  readyCard.appendChild(cardLabel(doc, "Ready"));
-  readyCard.appendChild(cardValue(doc, `${summary.readyCount} ready`));
+  readyCard.appendChild(cardLabel(doc, "Search scopes"));
+  readyCard.appendChild(cardValue(doc, `Ready ${summary.scopeReadyCount}/${summary.scopeTotal}`));
   wrap.appendChild(readyCard);
 
   const degradedCard = doc.createElement("div");
   degradedCard.className = "settings-index-summary-card";
-  degradedCard.dataset.healthKind = summary.degradedCount > 0 ? "degraded" : "ready";
-  degradedCard.appendChild(cardLabel(doc, "Degraded"));
-  degradedCard.appendChild(cardValue(doc, `${summary.degradedCount} degraded`));
-  const degradedList = summary.degradedScopes.map((scope) => scope.label).join(", ");
-  if (degradedList) {
+  degradedCard.dataset.healthKind = attention > 0 ? "degraded" : "ready";
+  degradedCard.appendChild(cardLabel(doc, "Attention"));
+  degradedCard.appendChild(cardValue(doc, attention > 0 ? `${attention} need attention` : "None"));
+  const attentionList = summary.attentionScopes.map((scope) => scope.label).join(", ");
+  if (attentionList) {
     const detail = doc.createElement("span");
     detail.className = "settings-index-summary-detail";
-    detail.textContent = degradedList;
+    detail.textContent = attentionList;
     degradedCard.appendChild(detail);
   }
   wrap.appendChild(degradedCard);
@@ -309,7 +297,7 @@ export function renderIndexSettingsPanel(options) {
   table.appendChild(thead);
 
   const tbody = ownerDoc.createElement("tbody");
-  for (const scope of ALL_SCOPES) {
+  for (const scope of INDEX_SCOPE_IDS) {
     const tr = ownerDoc.createElement("tr");
     tr.dataset.scope = scope;
     const scopeCell = ownerDoc.createElement("th");

@@ -15,7 +15,9 @@ Response steps. Deliver only adds "make it merge, then watch until it does."
 gwtd has no merge operation, and the agent never merges a PR itself. The merge
 is performed by the repository's merge automation — GitHub auto-merge enabled
 on the PR, or a repository workflow that merges non-Draft PRs once their checks
-pass — or by a human. `pr.ready` hands the PR to that automation (arms the merge).
+pass — or by a human. `pr.ready` hands the PR to that automation. Neither it
+nor the agent enables auto-merge: a PR under independent review is armed by
+gwt Issues only after a PASS verdict for its head is recorded.
 Draft PRs are prohibited; creation and demotion are unavailable. Recover an
 inherited Draft through `pr.ready` after its automated gates pass.
 

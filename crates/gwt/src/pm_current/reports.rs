@@ -22,6 +22,8 @@ pub struct PmReportsData {
     pub error: Option<String>,
     /// A failed Current card never freezes independently readable reports.
     pub current_error: Option<String>,
+    /// The gwtd decision queue (Issue #7742); `None` when it is unreadable.
+    pub decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
     refresh_at: Option<UtcTimestamp>,
     processes: Vec<(u32, u64)>,
     uncertain: bool,
@@ -46,6 +48,7 @@ impl PmReportsData {
         self.reports == other.reports
             && self.error == other.error
             && self.current_error == other.current_error
+            && self.decisions == other.decisions
             && match (&self.current, &other.current) {
                 (Some(a), Some(b)) => {
                     a.status == b.status
@@ -109,6 +112,7 @@ impl PmReportsReader {
             self.paths = Some((
                 vec![
                     gwt_core::pm_report::reports_path(repo),
+                    gwt_core::decision_queue::queue_path(repo),
                     gwt_core::user_instruction::instructions_path(repo),
                     home.join("pm-peer-messages.json"),
                     status_path(repo),
@@ -361,6 +365,27 @@ fn relevant_tree_change(event: &notify::Event, roots: &[PathBuf]) -> bool {
             }))
 }
 
+/// Decisions the PM raised through its reports are bridged into the queue
+/// first, so the snapshot never loses a decision that was already waiting.
+pub fn load_decisions(repo: &Path) -> Option<gwt_core::decision_queue::QueueSnapshot> {
+    if let Err(error) = gwt_core::decision_queue::sync_pm_report_decisions(repo) {
+        tracing::warn!(
+            error = %gwt_core::error_ledger::sanitize_error_message(&error.to_string()),
+            "PM report decisions could not be bridged into the decision queue"
+        );
+    }
+    match gwt_core::decision_queue::snapshot(repo) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            tracing::warn!(
+                error = %gwt_core::error_ledger::sanitize_error_message(&error.to_string()),
+                "decision queue is unreadable"
+            );
+            None
+        }
+    }
+}
+
 fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReportsData {
     let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut data = PmReportsData::default();
@@ -371,6 +396,7 @@ fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReport
         }
         Err(error) => data.error = Some(format!("PM reports could not be loaded: {error}")),
     }
+    data.decisions = load_decisions(repo);
     let inventory =
         crate::session_inventory::observe_sessions(repo, &gwt_core::paths::gwt_sessions_dir());
     data.processes = inventory

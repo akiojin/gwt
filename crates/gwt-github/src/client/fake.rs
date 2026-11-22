@@ -23,7 +23,7 @@ use crate::client::{
     OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
     RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
     RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
-    UpdatedAt,
+    ThemeIssue, ThemeListing, UpdatedAt,
 };
 
 type FetchHook = Box<dyn FnOnce() + Send>;
@@ -56,6 +56,7 @@ struct FakeState {
     label_assignments: HashMap<(IssueNumber, String), LabelAssignment>,
     /// Recorded call log for tests (operation + target).
     pub call_log: Vec<String>,
+    themes: Vec<ThemeIssue>,
     owner_issues: HashMap<RepositoryIdentity, HashMap<IssueNumber, RepositoryIssue>>,
     owner_comments: HashMap<(RepositoryIdentity, IssueNumber), Vec<RepositoryComment>>,
     merged_pull_requests: HashMap<(RepositoryIdentity, IssueNumber), MergedPullRequest>,
@@ -121,6 +122,7 @@ impl FakeIssueClient {
                 issues: HashMap::new(),
                 label_assignments: HashMap::new(),
                 call_log: Vec::new(),
+                themes: Vec::new(),
                 owner_issues: HashMap::new(),
                 owner_comments: HashMap::new(),
                 merged_pull_requests: HashMap::new(),
@@ -246,6 +248,14 @@ impl FakeIssueClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .call_log
             .clone()
+    }
+
+    /// Seed the themes `list_themes` answers with (Issue #7643).
+    pub fn seed_themes(&self, themes: Vec<ThemeIssue>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .themes = themes;
     }
 
     /// Snapshot comments for one Issue. Used by higher-level tests that need
@@ -863,6 +873,18 @@ impl IssueClient for FakeIssueClient {
         issue.state = new_state;
         issue.updated_at = self.tick();
         Ok(issue.clone())
+    }
+
+    fn list_themes(&self) -> Result<ThemeListing, ApiError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "list_themes", "*");
+        Ok(ThemeListing {
+            themes: state.themes.clone(),
+            truncated: false,
+        })
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {

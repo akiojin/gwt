@@ -113,6 +113,125 @@ test.describe("Launch Wizard — Issues candidate pool impact", () => {
   });
 });
 
+// Issue #7652 (SPEC #7007 items 189, 197, 243 and 251): a launch names its
+// execution environment with its place on the project's list and the reason
+// each earlier entry is not used, says its choices are overrides for that
+// launch, and says where the place to run comes from.
+const LAUNCH_WIZARD = {
+  ...SETTINGS_WIZARD,
+  title: "Launch Agent",
+  primary_action_label: "Launch",
+  issue_monitor_pool_impact: null,
+  execution_environment: {
+    name: "Codex 1",
+    via_tool_name: "Codex",
+    priority: 2,
+    list_len: 2,
+    note: "Number 2 of 2 on this project's list.",
+    skipped: [
+      {
+        priority: 1,
+        name: "Claude Code 1",
+        reason: "Claude Code is not installed on this machine.",
+      },
+    ],
+  },
+};
+
+// The runtime step is its own phase: the settings form is not painted with it.
+const RUNTIME_STEP = {
+  ...LAUNCH_WIZARD,
+  show_manual_setup: false,
+  show_agent_settings: false,
+  show_runtime_confirmation: true,
+  show_runtime_target: true,
+  runtime_target_options: [
+    { value: "host", label: "Host", description: "Run on the host" },
+    { value: "docker", label: "Docker", description: "Run in a Docker service" },
+  ],
+  selected_runtime_target: "host",
+  runtime_target_note: "Inherited from the last launch in this project.",
+};
+
+test.describe("Launch Wizard — execution environment and launch-only overrides", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("a launch names its environment, its overrides and its place to run", async ({
+    page,
+  }, testInfo) => {
+    const browserErrors = collectBrowserErrors(page);
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page);
+    await page.goto(APP_URL);
+    await keepLaunchWizardModalVisible(page);
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
+
+    await injectWizard(page, LAUNCH_WIZARD);
+    const modal = page.locator("#wizard-modal");
+    await expect(modal).toHaveClass(/open/);
+
+    const environment = modal.locator(".launch-environment");
+    await expect(environment).toBeVisible();
+    await expect(environment).toHaveAttribute("data-priority", "2");
+    await expect(environment).toContainText("Execution environment · Codex 1");
+    await expect(environment).toContainText("Number 2 of 2 on this project's list.");
+    await expect(environment.locator(".launch-environment__skipped")).toHaveText(
+      "1. Claude Code 1 — Claude Code is not installed on this machine.",
+    );
+
+    const override = modal.locator(".launch-override-note");
+    await expect(override).toBeVisible();
+    await expect(override).toContainText("apply to this launch only");
+    await expect(override).toContainText("saved traits stay as they are");
+
+    await testInfo.attach(`execution-environment-${testInfo.project.name}`, {
+      body: await modal.screenshot(),
+      contentType: "image/png",
+    });
+
+    await injectWizard(page, RUNTIME_STEP);
+    const runtime = modal.locator(".launch-runtime-note");
+    await expect(runtime).toBeVisible();
+    await expect(runtime).toHaveText("Inherited from the last launch in this project.");
+    await testInfo.attach(`runtime-note-${testInfo.project.name}`, {
+      body: await modal.screenshot(),
+      contentType: "image/png",
+    });
+    expect(browserErrors).toEqual([]);
+  });
+
+  test("the saved-settings form and a wizard without an environment stay as they were", async ({
+    page,
+  }) => {
+    const browserErrors = collectBrowserErrors(page);
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page);
+    await page.goto(APP_URL);
+    await keepLaunchWizardModalVisible(page);
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
+
+    // Issues settings saves what it shows: no override note there.
+    await injectWizard(page, {
+      ...SETTINGS_WIZARD,
+      issue_monitor_pool: {
+        active_index: 0,
+        sets: [{ agent_member_id: null, agent_id: "codex", summary: [] }],
+      },
+    });
+    const modal = page.locator("#wizard-modal");
+    await expect(modal).toHaveClass(/open/);
+    await expect(modal.locator(".launch-override-note")).toHaveCount(0);
+    await expect(modal.locator(".launch-environment")).toHaveCount(0);
+
+    // A launch whose tool has no environment still opens and can launch.
+    await injectWizard(page, { ...LAUNCH_WIZARD, execution_environment: null });
+    await expect(modal.locator(".launch-environment")).toHaveCount(0);
+    await expect(modal.locator(".launch-override-note")).toBeVisible();
+    await expect(modal.getByRole("button", { name: "Launch", exact: true })).toBeEnabled();
+    expect(browserErrors).toEqual([]);
+  });
+});
+
 function collectBrowserErrors(page: any): string[] {
   const errors: string[] = [];
   page.on("pageerror", (error: Error) => errors.push(error.message));

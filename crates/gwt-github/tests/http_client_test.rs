@@ -3045,3 +3045,99 @@ fn pm_bounded_pr_review_submits_only_explicit_events_and_checks_actual_state() {
         Err(ApiError::PermissionDenied { .. })
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #7643: themes (Issues that have sub-issues)
+// ---------------------------------------------------------------------------
+
+fn graphql_ok(data: serde_json::Value) -> HttpResponse {
+    HttpResponse {
+        status: 200,
+        headers: Vec::new(),
+        body: serde_json::json!({ "data": data }).to_string(),
+    }
+}
+
+fn theme_page(nodes: serde_json::Value, next: Option<&str>) -> HttpResponse {
+    graphql_ok(serde_json::json!({
+        "repository": { "issues": {
+            "nodes": nodes,
+            "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
+        }}
+    }))
+}
+
+#[test]
+fn list_themes_returns_only_issues_with_sub_issues_across_pages() {
+    let transport = FakeTransport::new();
+    transport.enqueue(theme_page(
+        serde_json::json!([
+            { "number": 5, "title": "Plain", "body": "", "url": "https://github.com/o/r/issues/5",
+              "subIssuesSummary": { "total": 0, "completed": 0 }, "subIssues": { "nodes": [] } },
+            { "number": 7, "title": "Full refresh", "body": "Rebuild every screen.",
+              "url": "https://github.com/o/r/issues/7",
+              "subIssuesSummary": { "total": 3, "completed": 1 },
+              "subIssues": { "nodes": [
+                { "number": 8, "title": "Status bar", "state": "OPEN",
+                  "url": "https://github.com/o/r/issues/8", "repository": { "nameWithOwner": "o/r" } },
+                { "number": 9, "title": "Home", "state": "CLOSED",
+                  "url": "https://github.com/o/r/issues/9", "repository": { "nameWithOwner": "O/R" } },
+                { "number": 3, "title": "Elsewhere", "state": "OPEN",
+                  "url": "https://github.com/o/other/issues/3", "repository": { "nameWithOwner": "o/other" } }
+              ] } }
+        ]),
+        Some("cursor-1"),
+    ));
+    transport.enqueue(theme_page(
+        serde_json::json!([
+            { "number": 20, "title": "Second page", "body": "", "url": "https://github.com/o/r/issues/20",
+              "subIssuesSummary": { "total": 1, "completed": 1 },
+              "subIssues": { "nodes": [
+                { "number": 21, "title": "Done", "state": "CLOSED",
+                  "url": "https://github.com/o/r/issues/21", "repository": { "nameWithOwner": "o/r" } }
+              ] } }
+        ]),
+        None,
+    ));
+    let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+
+    let listing = client.list_themes().expect("themes");
+
+    assert!(!listing.truncated);
+    let numbers: Vec<u64> = listing.themes.iter().map(|theme| theme.number.0).collect();
+    assert_eq!(numbers, vec![7, 20]);
+    let theme = &listing.themes[0];
+    assert_eq!(theme.title, "Full refresh");
+    assert_eq!(theme.body, "Rebuild every screen.");
+    assert_eq!(theme.url, "https://github.com/o/r/issues/7");
+    assert_eq!((theme.sub_issues_total, theme.sub_issues_completed), (3, 1));
+    assert_eq!(theme.sub_issues.len(), 3);
+    assert_eq!(theme.sub_issues[0].state, IssueState::Open);
+    assert_eq!(theme.sub_issues[1].state, IssueState::Closed);
+    assert!(
+        theme.sub_issues[1].in_repository,
+        "the repository name is case-insensitive"
+    );
+    assert!(!theme.sub_issues[2].in_repository);
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(second["variables"]["after"], "cursor-1");
+    assert!(second["query"].as_str().unwrap().contains("states:OPEN"));
+}
+
+#[test]
+fn list_themes_stops_at_the_page_limit_and_says_so() {
+    let transport = FakeTransport::new();
+    for _ in 0..40 {
+        transport.enqueue(theme_page(serde_json::json!([]), Some("more")));
+    }
+    let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+
+    let listing = client.list_themes().expect("themes");
+
+    assert!(listing.truncated);
+    assert_eq!(client.transport().recorded().len(), 10);
+}

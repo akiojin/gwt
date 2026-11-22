@@ -1140,7 +1140,6 @@ test("Issue rows render monitor projections and send controls from the full cano
     kind: "quick_register_issue",
     title: "Investigate flaky release gate",
     launch: true,
-    auto_merge: false,
   });
 
   assert.equal(monitorBand(body).text(), "Stopped | Queue 3 | Active 0 · 0 issues · PM 0");
