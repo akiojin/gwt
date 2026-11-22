@@ -3944,6 +3944,67 @@ mod delivery_tests {
         );
     }
 
+    /// Issue #7785 AC-2: a tick without an exact turn acknowledgement stays
+    /// one operation. No further tick is decided while it is held, and the
+    /// turn boundary that releases it starts a full interval of its own.
+    #[test]
+    fn issue_7785_unconfirmed_tick_is_not_repeated_inside_the_interval() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let first = runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-10-10T01:00:00Z")
+            .expect("a quiet PM is owed the tick");
+        runtime
+            .project_state_for_root_mut(&repo)
+            .unwrap()
+            .pending_pm_wakes
+            .insert(
+                window_id.clone(),
+                PmWakeDecision {
+                    unconfirmed: true,
+                    ..first.clone()
+                },
+            );
+        for now in [
+            "2026-10-10T01:00:30Z",
+            "2026-10-10T01:01:00Z",
+            "2026-10-10T01:05:00Z",
+        ] {
+            assert_eq!(
+                runtime.pm_periodic_wake_decision_at(&repo, now),
+                None,
+                "no second tick while the first is unconfirmed ({now})"
+            );
+        }
+        let state = runtime.project_state_for_root_mut(&repo).unwrap();
+        assert_eq!(
+            state.pending_pm_wakes.remove(&window_id).unwrap().wake_id,
+            first.wake_id,
+            "the held operation is retried, never replaced"
+        );
+        // The PM's UserPromptSubmit released the wake and stamped its clock.
+        pm_registry::save_pm_loop_state(
+            &pm_registry::pm_loop_state_path_for_repo_path(&repo),
+            &pm_registry::PmLoopState {
+                last_user_prompt_at: Some("2026-10-10T01:05:10Z".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.pm_periodic_wake_decision_at(&repo, "2026-10-10T01:06:09Z"),
+            None
+        );
+        let next = runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-10-10T01:06:10Z")
+            .expect("the next tick is owed one full interval later");
+        assert_ne!(next.wake_id, first.wake_id);
+    }
+
     /// Issue #7694 AC-2: a wake that failed twice is held "until owner/pane
     /// replacement or GUI restart". The restored PM is that replacement, so
     /// the held wake must be delivered instead of blocking every later tick.
