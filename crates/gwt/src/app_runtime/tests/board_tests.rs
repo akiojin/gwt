@@ -2094,3 +2094,58 @@ fn app_runtime_knowledge_search_replies_through_async_dispatch() {
         })
     });
 }
+
+/// Issue #7772 AC-4: the physical owner consumes runtime-state hooks itself,
+/// so its Status event must carry the hook state that arms the PM idle wake.
+#[test]
+fn issue_7772_owner_status_carries_the_hook_state_that_arms_the_idle_wake() {
+    use gwt::project_runtime::events::OwnerEvent;
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (_repo, mut runtime, owner, probe) = board_notice_owner_fixture(&temp, "opencode");
+    let target = "tab-1::other-window";
+    let context = runtime.project_context("tab-1").unwrap();
+    let identity = owner.client().identity().cloned().unwrap();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    let wake_requests = |runtime: &AppRuntime| {
+        let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+            panic!("sample runtime records events on a stub proxy");
+        };
+        let recorded = recorded.lock().expect("recorded events");
+        recorded
+            .iter()
+            .filter(|event| matches!(event, UserEvent::PmAgentIdleWake { .. }))
+            .count()
+    };
+
+    let running = owner_runtime_status_event(&owner, &probe, "running", "UserPromptSubmit");
+    assert!(
+        matches!(
+            &running,
+            OwnerEvent::Status {
+                hook_status: Some(WindowProcessStatus::Running),
+                ..
+            }
+        ),
+        "{running:?}"
+    );
+    runtime.handle_project_owner_event(&context, 1, &identity, running);
+    assert_eq!(
+        runtime.window_hook_states.get(target),
+        Some(&WindowProcessStatus::Running)
+    );
+    assert_eq!(wake_requests(&runtime), 0);
+
+    let idle = owner_runtime_status_event(&owner, &probe, "idle", "Stop");
+    runtime.handle_project_owner_event(&context, 1, &identity, idle);
+    assert_eq!(
+        wake_requests(&runtime),
+        1,
+        "the owner-projected turn end must request one PM idle wake"
+    );
+}
