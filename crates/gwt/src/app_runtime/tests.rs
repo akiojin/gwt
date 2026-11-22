@@ -8342,6 +8342,7 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             last_spec_number: None,
             last_owner_project_key: None,
             assignment: None,
+            traits: Default::default(),
         })
         .collect(),
     });

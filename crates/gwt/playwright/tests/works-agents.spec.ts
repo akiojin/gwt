@@ -1249,6 +1249,57 @@ test.describe("Works and Agents approved baseline", () => {
     await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
   });
 
+  test("Issue #7647 the ledger shows and saves an agent's fixed traits", async ({ page }, info) => {
+    await page.locator('.project-bar [data-destination="agents"]').click();
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    const row = roster(page).locator('.roster-row[data-member-id="m-idle"]');
+    await row.click();
+    const traits = roster(page).locator(".roster-detail [data-member-traits]");
+    const save = traits.getByRole("button", { name: "Save traits", exact: true });
+    const saved = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_traits").map(message => message.action);
+    await expect(traits.getByRole("heading", { name: "Traits", exact: true })).toBeVisible();
+    await expect(traits.getByLabel("Reasoning level", { exact: true })).toHaveValue("");
+    await expect(traits.getByLabel("Reasoning level", { exact: true }).locator("option")).toHaveText(["Tool default", "Low", "Standard", "High", "Max"]);
+    await expect(traits.getByLabel("Speed", { exact: true }).locator("option")).toHaveText(["Tool default", "Normal", "Fast", "Fastest"]);
+    await expect(traits).toContainText("it never changes what is saved here");
+    await expect(save).toBeDisabled();
+    await expect(row.locator(".roster-row-traits")).toBeHidden();
+
+    await traits.getByLabel("Reasoning level", { exact: true }).selectOption("max");
+    await traits.getByLabel("Speed", { exact: true }).selectOption("fast");
+    await traits.getByLabel("Personality", { exact: true }).fill("Measure first, then change.\nReport blockers early.");
+    expect(await saved()).toEqual([]);
+    await expect(save).toBeEnabled();
+    await page.screenshot({ path: info.outputPath("agent-ledger-traits-draft.png") });
+    await save.click();
+    await expect(save).toBeDisabled();
+    expect(await saved()).toEqual([{ kind: "set_traits", member_id: "m-idle",
+      traits: { reasoning_level: "max", speed: "fast", personality: "Measure first, then change.\nReport blockers early." } }]);
+    await expect(row.locator(".roster-row-traits")).toHaveText("Reasoning Max · Speed Fast · Measure first, then change.");
+    await expect(traits.getByLabel("Personality", { exact: true })).toHaveValue("Measure first, then change.\nReport blockers early.");
+
+    // Each agent keeps its own traits, and the saved ones return with the agent.
+    await roster(page).locator('.roster-row[data-member-id="m-two"]').click();
+    await expect(traits.getByLabel("Reasoning level", { exact: true })).toHaveValue("");
+    await expect(traits.getByLabel("Personality", { exact: true })).toHaveValue("");
+    await row.click();
+    await expect(traits.getByLabel("Reasoning level", { exact: true })).toHaveValue("max");
+    await expect(traits.getByLabel("Speed", { exact: true })).toHaveValue("fast");
+
+    // Clearing a trait returns it to the tool's own setting.
+    await traits.getByLabel("Speed", { exact: true }).selectOption("");
+    await save.click();
+    await expect(row.locator(".roster-row-traits")).toHaveText("Reasoning Max · Measure first, then change.");
+    expect((await saved())[1].traits).toEqual({ reasoning_level: "max", personality: "Measure first, then change.\nReport blockers early." });
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
+    await page.screenshot({ path: info.outputPath("agent-ledger-traits-saved.png") });
+
+    await page.setViewportSize({ width: 400, height: 900 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+    const box = await traits.getByLabel("Personality", { exact: true }).boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+  });
+
   test("shared member and PM tuning retain identity, history and narrow layout", async ({ page }, info) => {
     await openRail(page, "agents");
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
@@ -1449,6 +1500,7 @@ async function installWorksAgentsBackend(page: Page) {
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
           if (message.action.kind === "move") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id), target = index + (message.action.direction === "up" ? -1 : 1); if (index >= 0 && target >= 0 && target < members.length) { [members[index], members[target]] = [members[target], members[index]]; revision++; } }
+          if (message.action.kind === "set_traits") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.traits = message.action.traits; revision++; } }
           if (message.action.kind === "remove") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id); if (index >= 0 && members[index].agent_member_id !== pmMemberId && !members[index].assignment) { members.splice(index, 1); revision++; } }
           if (message.action.kind === "activate") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member && !member.enabled) { member.enabled = true; revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));

@@ -3097,7 +3097,9 @@ pub(crate) fn prepare_owner_agent_admission(
                 )
                 .map_err(|error| error.to_string())?;
                 let matches = crate::agent_registry::member_profile(&prefs, member_id).is_some_and(
-                    |profile| {
+                    |mut profile| {
+                        // The candidate was started with the agent's traits.
+                        crate::agent_names::apply_member_traits(&prefs, &mut profile);
                         if !profile
                             .agent_id
                             .eq_ignore_ascii_case(config.agent_id.command())

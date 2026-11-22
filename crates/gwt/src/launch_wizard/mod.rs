@@ -19,7 +19,7 @@ mod view_model;
 use options::*;
 
 pub use memory_cache::LaunchWizardMemoryCache;
-pub(crate) use options::default_launch_tuning;
+pub(crate) use options::{apply_agent_traits, default_launch_tuning};
 
 pub use options::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,

@@ -3182,6 +3182,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                         last_spec_number: None,
                         last_owner_project_key: None,
                         assignment: None,
+                        traits: Default::default(),
                     });
                 if !configured {
                     registry
@@ -3264,6 +3265,21 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
             Ok(true)
         })
     })
+}
+
+/// The personality of a registered agent, read without taking writer locks.
+/// `None` when the member is unknown or has none.
+pub fn member_personality(member_id: &str) -> io::Result<Option<String>> {
+    Ok(load_proving(Mirrors::None)?
+        .filter(|registry| registry.phase == RegistryPhase::Active)
+        .and_then(|registry| registry.roster)
+        .and_then(|roster| {
+            roster
+                .members
+                .into_iter()
+                .find(|member| member.agent_member_id == member_id)
+        })
+        .and_then(|member| member.traits.personality))
 }
 
 /// The existing shared configuration revision, without acquiring writer locks.
@@ -6837,6 +6853,158 @@ mod tests {
         )
         .unwrap_err();
         assert!(edge.contains("already first"), "{edge}");
+    }
+
+    // Issue #7647 AC-1 / AC-2: traits are saved on the agent by the ledger
+    // alone, and no other ledger or tuning write changes them.
+    #[test]
+    fn ledger_traits_are_saved_on_the_member_and_kept_by_other_writes() {
+        use crate::agent_names::{AgentTraits, TraitReasoningLevel, TraitSpeed};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, _, _) = source();
+        ensure_active_for_project(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let read = || {
+            crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                AgentRosterAction::Read,
+                None,
+            )
+            .unwrap()
+        };
+        let added = ledger_add(&root, "Birch", false);
+        let birch = added.members[1].agent_member_id.clone();
+        assert!(
+            added.members.iter().all(|member| member.traits.is_unset()),
+            "a member starts without traits"
+        );
+        assert!(
+            !serde_json::to_string(&added).unwrap().contains("traits"),
+            "an unset member is stored as it was before traits existed"
+        );
+        let traits = AgentTraits {
+            reasoning_level: Some(TraitReasoningLevel::Max),
+            speed: Some(TraitSpeed::Fast),
+            personality: Some("  Verify before changing.  ".into()),
+        };
+        let saved = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SetTraits {
+                member_id: birch.clone(),
+                traits: traits.clone(),
+            },
+            Some(added.revision),
+        )
+        .unwrap();
+        assert!(saved.revision > added.revision);
+        let expected = AgentTraits {
+            personality: Some("Verify before changing.".into()),
+            ..traits.clone()
+        };
+        let of = |roster: &AgentRoster| {
+            roster
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == birch)
+                .unwrap()
+                .traits
+                .clone()
+        };
+        assert_eq!(of(&saved), expected);
+        assert_eq!(of(&read()), expected, "traits survive a reload");
+
+        // A session started for this agent runs with its traits.
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
+                .unwrap();
+        let mut candidate = member_profile(&prefs, &birch).unwrap();
+        assert_eq!(candidate.agent_id, "codex");
+        candidate.model = Some("unlisted-model".into());
+        crate::agent_names::apply_member_traits(&prefs, &mut candidate);
+        assert_eq!(candidate.reasoning.as_deref(), Some("xhigh"));
+        assert_eq!(candidate.codex_speed, gwt_agent::CodexSpeed::Fast);
+        let mut unregistered = candidate.clone();
+        unregistered.agent_member_id = None;
+        unregistered.reasoning = Some("low".into());
+        let before = unregistered.clone();
+        crate::agent_names::apply_member_traits(&prefs, &mut unregistered);
+        assert_eq!(unregistered, before, "only a registered agent has traits");
+
+        let stale = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SetTraits {
+                member_id: birch.clone(),
+                traits: AgentTraits::default(),
+            },
+            Some(added.revision),
+        )
+        .unwrap_err();
+        assert!(stale.contains("reload"), "{stale}");
+        let long = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SetTraits {
+                member_id: birch.clone(),
+                traits: AgentTraits {
+                    personality: Some("x".repeat(crate::agent_names::PERSONALITY_MAX_CHARS + 1)),
+                    ..AgentTraits::default()
+                },
+            },
+            Some(saved.revision),
+        )
+        .unwrap_err();
+        assert!(long.contains("limited to"), "{long}");
+        assert_eq!(of(&read()), expected, "a refused write changes nothing");
+
+        crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Move {
+                member_id: birch.clone(),
+                direction: crate::agent_names::RosterMoveDirection::Up,
+            },
+            Some(saved.revision),
+        )
+        .unwrap();
+        let core = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&birch)
+            .unwrap();
+        let tuned = set_member_tuning(&crate::agent_names::MemberTuning {
+            member_id: birch.clone(),
+            model: None,
+            reasoning: Some("high".into()),
+            expected_core_revision: core.1,
+            agent_id: None,
+            runtime_target: None,
+            skip_permissions: None,
+        });
+        assert_eq!(tuned.error, None);
+        let reserved = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "launch",
+            Some(1),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(reserved.agent_member_id, birch);
+        assert_eq!(reserved.traits, expected, "a launch reads the saved traits");
+        crate::agent_names::release_project_member(&root, &sessions, &birch, "launch").unwrap();
+        assert_eq!(
+            of(&read()),
+            expected,
+            "reordering, tuning and a launch leave the saved traits alone"
+        );
     }
 
     // Issue #7646 (A-26): deletion follows the live PM assignment and never

@@ -293,6 +293,13 @@
 .roster-history small { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--color-text-muted); }
 .roster-history button { text-align: start; color: var(--color-link); }
 .roster-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Issue 7647: an agent's fixed traits, edited in the member detail and summarized on its row. */
+.roster-row-traits { max-width: 100%; color: var(--color-text-muted); font-size: var(--type-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.roster-traits { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; margin-top: var(--space-3); border-top: 1px solid var(--color-border); padding-top: var(--space-2); }
+.roster-traits h4 { margin: 0; font-size: var(--type-sm); }
+.roster-traits textarea { min-width: 0; min-height: 88px; padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; line-height: 1.5; resize: vertical; }
+.roster-traits textarea:disabled { color: var(--color-text-disabled); }
+.roster-traits > [data-action="save-traits"] { align-self: flex-start; margin-top: var(--space-1); }
 /* Issue 7646: ledger order and deletion controls on every member row. */
 /* Buttons take their label's width, so the body of a row stays its selection target. */
 .roster-who > [data-action="activate"] { align-self: flex-start; }

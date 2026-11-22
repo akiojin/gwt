@@ -40,13 +40,13 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], rested = [], activated = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const opened = [], rested = [], activated = [], traitsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
   if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
-  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onMoveMember: (id, direction) => moved.push([id, direction]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { traitsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
@@ -1140,5 +1140,58 @@ test("AC-1/AC-2: the project's agents screen lists every member's history and th
   assert.match(host.querySelector('tr[data-session-id="s0"]').textContent, /recorded-model/);
   assert.deepEqual([...host.querySelectorAll('[aria-label="Planned assignments"] li')].map(item => `${item.dataset.memberId}:${item.dataset.issueNumber}`),
     ["m1:5002", "m1:5003", "m1:5004"]);
+  f.surface.dispose();
+});
+
+// Issue #7647 AC-1 / AC-2: the ledger shows and saves an agent's fixed traits.
+test("the ledger shows and saves each member's traits and keeps the draft until it is saved", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const traits = () => root.querySelector(".roster-detail [data-member-traits]");
+  const field = name => traits().querySelector(`[data-trait="${name}"]`);
+  const save = () => traits().querySelector('[data-action="save-traits"]');
+  // linkedom selects have no value setter and report no value before a choice.
+  const value = name => field(name).value ?? "";
+  const choose = (name, value) => { [...field(name).options].find(option => option.value === value).selected = true; field(name).dispatchEvent(new f.window.Event("change")); };
+  assert.deepEqual([...field("reasoning_level").options].map(option => [option.value, option.textContent]),
+    [["", "Tool default"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["max", "Max"]]);
+  assert.deepEqual([...field("speed").options].map(option => [option.value, option.textContent]),
+    [["", "Tool default"], ["normal", "Normal"], ["fast", "Fast"], ["fastest", "Fastest"]]);
+  assert.equal(field("personality").tagName, "TEXTAREA");
+  assert.equal(field("personality").getAttribute("maxlength"), "4000");
+  assert.equal(value("reasoning_level"), ""); assert.equal(value("personality"), "");
+  assert.equal(save().disabled, true, "nothing to save until a trait changes");
+  assert.match(traits().textContent, /never changes what is saved here/);
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-row-traits').hidden, true);
+
+  choose("reasoning_level", "max");
+  field("personality").value = "  Verify before changing.\nReport early.  "; field("personality").dispatchEvent(new f.window.Event("input"));
+  assert.equal(save().disabled, false);
+  assert.deepEqual(f.traitsSaved, [], "editing alone sends nothing");
+  f.activityModel.update(state => ({ ...state })); f.flush();
+  assert.equal(value("reasoning_level"), "max", "an unrelated update keeps the draft");
+  save().click();
+  assert.deepEqual(f.traitsSaved, [["m1", { reasoning_level: "max", personality: "Verify before changing.\nReport early." }]]);
+
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, traits: { reasoning_level: "max", personality: "Verify before changing.\nReport early." } } : member) })); f.flush();
+  assert.equal(save().disabled, true, "the draft is settled once the ledger holds it");
+  assert.equal(value("personality"), "Verify before changing.\nReport early.");
+  const summary = root.querySelector('.roster-row[data-member-id="m1"] .roster-row-traits');
+  assert.equal(summary.hidden, false);
+  assert.equal(summary.textContent, "Reasoning Max · Verify before changing.");
+  assert.equal(root.querySelector('.roster-row[data-member-id="m2"] .roster-row-traits').hidden, true);
+
+  choose("speed", "fast");
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(save().disabled, true, "another pending ledger change holds the save");
+  save().click(); assert.equal(f.traitsSaved.length, 1);
+  f.rosterModel.update(state => ({ ...state, pending_roster: null })); f.flush();
+  save().click();
+  assert.deepEqual(f.traitsSaved[1], ["m1", { reasoning_level: "max", speed: "fast", personality: "Verify before changing.\nReport early." }]);
+
+  root.querySelector('.roster-row[data-member-id="m2"]').click(); f.flush();
+  assert.equal(value("reasoning_level"), "", "each member has its own traits");
+  assert.match(styles, /\.roster-traits textarea\s*\{[^}]*resize:\s*vertical/s);
+  assert.match(source, /querySelectorAll\("button, select, input, textarea"\)/, "a split preview keeps the personality read-only");
   f.surface.dispose();
 });

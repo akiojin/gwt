@@ -13,11 +13,23 @@ const hours = value => finite(value) ? `${Math.round(value / 3600 * 10) / 10}h` 
 const activityPresentation = state => JSON.stringify([state.count, (state.agents || []).map(agent =>
   [agent.window_id, agent.session_id, agent.runtime_incarnation, agent.issue_number, agent.is_pm, agent.review_dispatch, agent.agent_name])
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
+// Issue #7647: an agent's fixed traits. The steps are common to every tool; the
+// launched tool takes the nearest step it has at or below the chosen one.
+const TRAIT_CHOICES = { reasoning_level: [["low", "Low"], ["standard", "Standard"], ["high", "High"], ["max", "Max"]],
+  speed: [["normal", "Normal"], ["fast", "Fast"], ["fastest", "Fastest"]] };
+const PERSONALITY_MAX_CHARS = 4000;
+const savedTraits = member => ({ reasoning_level: member?.traits?.reasoning_level || "", speed: member?.traits?.speed || "", personality: member?.traits?.personality || "" });
+const traitLabel = (name, value) => TRAIT_CHOICES[name].find(([id]) => id === value)?.[1] || "";
+const traitsSummary = member => {
+  const traits = savedTraits(member), excerpt = traits.personality.split("\n")[0].trim();
+  return [traits.reasoning_level && `Reasoning ${traitLabel("reasoning_level", traits.reasoning_level)}`,
+    traits.speed && `Speed ${traitLabel("speed", traits.speed)}`, excerpt].filter(Boolean).join(" · ");
+};
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
 export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
@@ -448,7 +460,21 @@ export function createAgentsSurface({ document, storage, executionModel, project
       const selectPm = document.createElement("button"); selectPm.type = "button"; selectPm.dataset.action = "select-pm";
       selectPm.addEventListener("click", () => { const latest = rosterModel.read().members.find(item => item.member_id === member.member_id); if (latest?.pm_project_key && latest.pm_project_key !== rosterModel.read().project_key) onNavigateProject(latest.pm_project_key); else if (latest?.enabled && latest.pm_eligible && !holdsPmRole(latest)) onSelectPm(member.member_id); });
       const tuning = document.createElement("section"); tuning.dataset.memberTuning = "";
-      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, tuning); head.append(avatar(member), who);
+      const traits = document.createElement("section"); traits.className = "roster-traits"; traits.dataset.memberTraits = ""; traits.setAttribute("aria-label", "Traits");
+      traits.innerHTML = `<h4>Traits</h4><p class="settings-help">Fixed for this agent on every tool. A launch can override a value once; it never changes what is saved here.</p>${
+        Object.entries({ reasoning_level: "Reasoning level", speed: "Speed" }).map(([name, title]) => `<label class="settings-field roster-name-field">${title}<select aria-label="${title}" data-trait="${name}"><option value="">Tool default</option>${
+          TRAIT_CHOICES[name].map(([value, text]) => `<option value="${value}">${text}</option>`).join("")}</select></label>`).join("")
+      }<label class="settings-field roster-name-field">Personality<textarea aria-label="Personality" data-trait="personality" rows="4" maxlength="${PERSONALITY_MAX_CHARS}" placeholder="Instructions this agent reads when a session starts"></textarea></label><p class="settings-help">The tool takes the nearest reasoning and speed step it has at or below the chosen one.</p><button type="button" data-action="save-traits">Save traits</button>`;
+      field.traits = traits; field.traitsDraft = null;
+      const draft = () => Object.fromEntries([...traits.querySelectorAll("[data-trait]")].map(control => [control.dataset.trait, control.value || ""]));
+      for (const control of traits.querySelectorAll("[data-trait]")) for (const type of ["change", "input"]) control.addEventListener(type, () => { field.traitsDraft = draft(); sync(); });
+      traits.querySelector('[data-action="save-traits"]').addEventListener("click", () => {
+        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+        if (disposed || !latest || !field.traitsDraft || !rosterReady(roster) || roster.pending_roster) return;
+        const next = { ...field.traitsDraft, personality: field.traitsDraft.personality.trim() };
+        onSetTraits(latest.member_id, Object.fromEntries(Object.entries(next).filter(([, value]) => value)));
+      });
+      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, traits, tuning); head.append(avatar(member), who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
@@ -473,6 +499,20 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const foreign = member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key;
     selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";
     selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.enabled || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
+    const saved = savedTraits(member), same = draft => !!draft && Object.keys(saved).every(name => (name === "personality" ? draft[name].trim() : draft[name]) === saved[name]);
+    // A draft stays until the ledger holds the same values, so a refused save loses nothing.
+    if (same(field.traitsDraft)) field.traitsDraft = null;
+    const held = !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
+    for (const control of field.traits.querySelectorAll("[data-trait]")) {
+      const value = (field.traitsDraft || saved)[control.dataset.trait];
+      if ((control.value || "") !== value) {
+        // Selecting one option of a single select deselects the others.
+        if (control.tagName === "SELECT") [...control.options].find(option => option.value === value).selected = true;
+        else control.value = value;
+      }
+      control.disabled = !rosterReady(rosterModel.read());
+    }
+    field.traits.querySelector('[data-action="save-traits"]').disabled = held || !field.traitsDraft;
     const role = configuredPm(member) ? "pm" : "implementation";
     renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
       onEdit: (patch, options) => tuningController?.editTuning(role, member.member_id, patch, options),
@@ -504,7 +544,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     if (!previewElement) return;
     const clone = element.cloneNode(true); clone.classList.add("agents-surface--preview"); clone.setAttribute("aria-label", "Agents read-only preview");
     for (const node of clone.querySelectorAll("[id]")) node.removeAttribute("id");
-    for (const control of clone.querySelectorAll("button, select, input")) { control.disabled = true; control.tabIndex = -1; }
+    for (const control of clone.querySelectorAll("button, select, input, textarea")) { control.disabled = true; control.tabIndex = -1; }
     for (const row of clone.querySelectorAll(".roster-row")) row.tabIndex = -1;
     previewElement.replaceChildren(clone);
   }
@@ -597,7 +637,8 @@ export function createAgentsSurface({ document, storage, executionModel, project
         order.append(button);
       }
       // The controls sit at the row's trailing edge, so the body of the row stays the selection target.
-      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state, order);
+      const traits = document.createElement("span"); traits.className = "roster-row-traits";
+      who.append(name, purpose, traits, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state, order);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
@@ -619,6 +660,8 @@ export function createAgentsSurface({ document, storage, executionModel, project
     }
     const purpose = row.querySelector(".roster-purpose");
     purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : member.enabled ? "Waiting for the next issue" : "Not selected for new work"; purpose.title = purpose.textContent;
+    const traits = row.querySelector(".roster-row-traits");
+    traits.textContent = traitsSummary(member); traits.title = traits.textContent; traits.hidden = !traits.textContent;
     const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
     if (cached.summariesKey !== summariesKey) {
       const assignments = row.querySelector(".roster-assignments"); assignments.replaceChildren();
