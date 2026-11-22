@@ -110,17 +110,58 @@ impl IssueMonitorPrefs {
             .collect()
     }
 
-    /// The saved pool as a preview shows it: limited to the project's
-    /// environments when no registered agent heads it.
+    /// The saved pool as launches use it now: registered agents on the
+    /// environment they start with, any other pool limited to the project's
+    /// environments.
     pub fn preview_launch_profile_pool(&self) -> Vec<IssueMonitorLaunchProfile> {
         let pool = self.launch_profile_pool();
         if pool
             .first()
             .is_some_and(|profile| profile.agent_member_id.is_some())
         {
-            return pool;
+            return self.agent_candidates_on_environment(pool);
         }
         self.environment_candidates(pool)
+    }
+
+    /// Issue #7647 (SPEC #7007 items 82 and 243): a registered agent is not
+    /// tied to a tool. Its sessions start with the first of the project's
+    /// environments that is not held by a refused launch; when every one is
+    /// held, the first is kept so the wait names it. `None` when the project
+    /// never saved a list, where an agent keeps the tool it was registered
+    /// with.
+    pub(super) fn environment_tool_for_agents(&self) -> Option<String> {
+        let tools = self.environment_tools()?;
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        tools
+            .iter()
+            .find(|tool| hold_reset_after(&self.provider_quota_holds, tool, now).is_none())
+            .or(tools.first())
+            .cloned()
+    }
+
+    /// Registered agents' saved candidates as they start now. The saved pool
+    /// itself keeps each agent's registered tool.
+    pub(super) fn agent_candidates_on_environment(
+        &self,
+        candidates: Vec<IssueMonitorLaunchProfile>,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let Some(tool) = self.environment_tool_for_agents() else {
+            return candidates;
+        };
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.on_tool(&tool))
+            .collect()
+    }
+
+    /// Whether `tool` is one of the project's saved environments, which any
+    /// registered agent may start a session with.
+    pub fn environment_lists_tool(&self, tool: &str) -> bool {
+        normalize_issue_monitor_provider(tool).is_some_and(|tool| {
+            self.environment_tools()
+                .is_some_and(|tools| tools.contains(&tool))
+        })
     }
 
     /// Order one tier's candidates by the project's environments and drop the
@@ -143,28 +184,22 @@ impl IssueMonitorPrefs {
         tier.sort_by_key(|(position, _)| *position);
         tier.into_iter().map(|(_, profile)| profile).collect()
     }
+}
 
-    /// The tool an Issue no registered agent is planned for starts with: the
-    /// first environment, in priority order, that some registered agent can
-    /// run and that is not held by a refused launch. When every such
-    /// environment is held, the first one is returned so the wait names it.
-    pub(super) fn environment_tool_for_unplanned_issue(
-        &self,
-        tools: &[String],
-        mut has_agent: impl FnMut(&str) -> bool,
-    ) -> Option<String> {
-        let now = gwt_core::timestamp::UtcTimestamp::now();
-        let mut held = None;
-        for tool in tools {
-            if !has_agent(tool) {
-                continue;
-            }
-            if hold_reset_after(&self.provider_quota_holds, tool, now).is_none() {
-                return Some(tool.clone());
-            }
-            held.get_or_insert_with(|| tool.clone());
+impl IssueMonitorLaunchProfile {
+    /// This candidate started with `tool`. Tuning saved for another tool does
+    /// not carry over: the agent's traits and the environment's runtime
+    /// options fill it in when the session starts.
+    pub fn on_tool(mut self, tool: &str) -> Self {
+        if normalize_issue_monitor_provider(&self.agent_id).as_deref() != Some(tool) {
+            self.agent_id = tool.to_string();
+            self.model = None;
+            self.reasoning = None;
+            self.version = None;
+            self.fast_mode = false;
+            self.codex_speed = Default::default();
         }
-        held
+        self
     }
 }
 
@@ -305,25 +340,54 @@ mod tests {
         assert_eq!(pick(&prefs, 42), None, "every environment is held");
     }
 
+    /// Issue #7647 AC-3: the tool comes from the project's list, not from
+    /// the agent.
     #[test]
-    fn registered_agents_follow_the_list_when_their_tool_is_held() {
+    fn registered_agents_start_with_the_environment_in_the_list_order() {
         let mut prefs = roster_prefs();
-        // Never saved: the agent at the head fixes the tool, as before.
+        // Never saved: each agent keeps the tool it was registered with.
         assert_eq!(prefs.current_launch_tools(), ["claude"]);
+        assert_eq!(
+            prefs.registered_launch_profiles_for_issue(42),
+            [candidate("claude", Some("m-claude"))]
+        );
         prefs
             .provider_quota_holds
             .insert("claude".into(), LATER.into());
         assert_eq!(pick(&prefs, 42), None);
         prefs.provider_quota_holds.clear();
 
+        // Saved: every agent starts with the first environment.
         prefs.execution_environments = listed(&[("claude", "claude"), ("codex", "codex")]);
-        assert_eq!(pick(&prefs, 42).as_deref(), Some("claude"));
+        let members = |pool: &[IssueMonitorLaunchProfile]| -> Vec<String> {
+            pool.iter()
+                .map(|profile| profile.agent_member_id.clone().unwrap())
+                .collect()
+        };
+        let pool = prefs.registered_launch_profiles_for_issue(42);
+        assert_eq!(tools(&pool), ["claude", "claude"]);
+        assert_eq!(members(&pool), ["m-claude", "m-codex"]);
+        assert_eq!(pool[0], candidate("claude", Some("m-claude")));
+        // Tuning saved for another tool is not carried over.
+        assert_eq!(
+            pool[1],
+            IssueMonitorLaunchProfile {
+                agent_member_id: Some("m-codex".into()),
+                ..environment_candidate("claude")
+            }
+        );
+        assert_eq!(prefs.preview_launch_profile_pool(), pool);
+        // The saved pool keeps each agent's registered tool.
+        assert_eq!(tools(&prefs.launch_profile_pool()), ["claude", "codex"]);
+
+        // A held environment is passed for the next one.
         prefs
             .provider_quota_holds
             .insert("claude".into(), LATER.into());
         let pool = prefs.registered_launch_profiles_for_issue(42);
-        assert_eq!(tools(&pool), ["codex"]);
-        assert_eq!(pool[0].agent_member_id.as_deref(), Some("m-codex"));
+        assert_eq!(tools(&pool), ["codex", "codex"]);
+        assert_eq!(members(&pool), ["m-claude", "m-codex"]);
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
 
         // Every environment held: the first one is kept so the wait names it.
         prefs
@@ -331,23 +395,23 @@ mod tests {
             .insert("codex".into(), LATER.into());
         assert_eq!(
             tools(&prefs.registered_launch_profiles_for_issue(42)),
-            ["claude"]
+            ["claude", "claude"]
         );
         assert_eq!(pick(&prefs, 42), None);
     }
 
     #[test]
-    fn a_listed_environment_no_registered_agent_can_run_is_passed_over() {
+    fn an_environment_no_agent_was_registered_with_is_used() {
         let mut prefs = roster_prefs();
         prefs.execution_environments = listed(&[("grok", "grok"), ("codex", "codex")]);
-        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
-
-        prefs.execution_environments = listed(&[("grok", "grok")]);
-        assert!(prefs.registered_launch_profiles_for_issue(42).is_empty());
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("grok"));
+        assert!(prefs.environment_lists_tool("grok"));
+        assert!(!prefs.environment_lists_tool("claude"));
+        assert!(!IssueMonitorPrefs::default().environment_lists_tool("codex"));
     }
 
     #[test]
-    fn an_issue_planned_for_an_agent_waits_when_its_tool_is_not_listed() {
+    fn an_issue_planned_for_an_agent_starts_it_with_the_environment() {
         let mut prefs = roster_prefs();
         prefs.pending_launch_deliveries.push(
             serde_json::from_value(serde_json::json!({
@@ -360,14 +424,34 @@ mod tests {
         );
         assert_eq!(pick(&prefs, 41).as_deref(), Some("codex"));
 
-        prefs.execution_environments = listed(&[("claude", "claude"), ("codex", "codex")]);
-        assert_eq!(
-            pick(&prefs, 41).as_deref(),
-            Some("codex"),
-            "the planned agent keeps its own tool"
-        );
         prefs.execution_environments = listed(&[("claude", "claude")]);
-        assert!(prefs.registered_launch_profiles_for_issue(41).is_empty());
+        let pool = prefs.registered_launch_profiles_for_issue(41);
+        assert_eq!(tools(&pool), ["claude"]);
+        assert_eq!(pool[0].agent_member_id.as_deref(), Some("m-codex"));
+    }
+
+    #[test]
+    fn registered_agents_tiers_are_those_of_the_environment() {
+        let mut prefs = roster_prefs();
+        prefs.launch_auto = true;
+        let tier_tools = |prefs: &IssueMonitorPrefs| -> Vec<(String, Option<String>)> {
+            prefs.effective_launch_tiers()[0]
+                .iter()
+                .map(|profile| (profile.agent_id.clone(), profile.agent_member_id.clone()))
+                .collect()
+        };
+        assert_eq!(
+            tier_tools(&prefs),
+            [("claude".to_string(), Some("m-claude".to_string()))]
+        );
+        prefs.execution_environments = listed(&[("codex", "codex")]);
+        assert_eq!(
+            tier_tools(&prefs),
+            [
+                ("codex".to_string(), Some("m-claude".to_string())),
+                ("codex".to_string(), Some("m-codex".to_string())),
+            ]
+        );
     }
 
     #[test]

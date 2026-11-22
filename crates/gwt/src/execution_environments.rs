@@ -489,6 +489,32 @@ pub fn apply_runtime(
     profile.fast_mode |= runtime.fast_mode;
 }
 
+/// A launch candidate as its session starts: the agent's fixed traits first
+/// (Issue #7647), then the runtime options of the execution environment it
+/// runs on, which win over the traits (item 189). Definitions that cannot be
+/// read change nothing, so a damaged file never stops a launch.
+pub fn candidate_as_started(
+    prefs: &crate::issue_monitor::IssueMonitorPrefs,
+    mut profile: crate::issue_monitor::IssueMonitorLaunchProfile,
+    model_chosen_by_tier: bool,
+) -> crate::issue_monitor::IssueMonitorLaunchProfile {
+    crate::agent_names::apply_member_traits(prefs, &mut profile);
+    match load() {
+        Ok(store) => {
+            if let Some(environment) =
+                environment_for_candidate(&store, &prefs.execution_environments, &profile.agent_id)
+            {
+                apply_runtime(&mut profile, &environment.runtime, model_chosen_by_tier);
+            }
+        }
+        Err(error) => tracing::warn!(
+            error = %error,
+            "execution environments are unreadable; the launch candidate keeps its own options"
+        ),
+    }
+    profile
+}
+
 /// The environment a project's candidate for `tool` runs on: the one the
 /// project's saved list names, else the one registered for the tool.
 pub fn environment_for_candidate<'store>(

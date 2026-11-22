@@ -46,7 +46,9 @@ Issues, SPECs, search, and Board context rather than from branch management.
   settings file show those values read-only. In Settings → Issues execution
   settings, **Available execution environments** lists the ones a project
   uses in priority order: a session starts on the first one that can be used,
-  skipping one that is held by a limit or signed out.
+  skipping one that is held by a limit or signed out. Once a project has saved
+  the list, a registered agent also starts on the environment chosen this way,
+  whatever tool it was registered with.
 
 ## Install
 

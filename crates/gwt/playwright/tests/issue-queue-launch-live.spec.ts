@@ -2315,6 +2315,45 @@ request.catch(() => {});
     expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
   });
 
+  test("Issue #7647 a registered agent starts on the project's environment whatever tool it was registered with", async ({ page }, info) => {
+    // The agents are registered with Claude Code, which this fixture does not
+    // provide: only the project's saved environment (Codex) can start.
+    const fixture = await startIssueQueueLaunchFixture(info, { page, monitorPreferences: {
+      launch_profile: { agent_id: "claude", model: "claude-only-model", runtime_target: "Host", skip_permissions: true },
+      execution_environments: [{ environment_id: "codex", tool: "codex" }],
+    } });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] });
+      await expect.poll(async () => (await fixture.launches()).length,
+        { timeout: 90_000, message: "the registered agent starts with the environment's tool" }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const record = await readFile(join(fixture.home, ".gwt/sessions", `${launch.gwt_session_id}.toml`), "utf8");
+      expect(record).toMatch(/^\[agent_id\]\r?\ntype = "Codex"/m);
+      expect(record).not.toContain("claude-only-model");
+      expect(record).toContain(`linked_issue_number = ${fixture.issueNumber}`);
+      const roster = await readCanonicalRoster(page);
+      const member = roster.members.find((member: any) => member.assignment?.issue_number === fixture.issueNumber);
+      expect(member, "the session belongs to a registered agent").toBeTruthy();
+      expect(member.agent_id, "the agent keeps the tool it was registered with").toBe("claude");
+      expect(record).toContain(member.agent_member_id);
+      const prefs = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+      expect(prefs.launch_profiles.map((profile: any) => profile.agent_id)).toContain("claude");
+      expect(prefs.launch_profiles.map((profile: any) => profile.agent_id)).not.toContain("codex");
+      await info.attach(`environment-tool-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned process cleanup").toEqual([]);
+  });
+
   test("AC34 actual provider exit removes the local Active agent without closing its Issue", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, { page });
     const errors: string[] = [];

@@ -551,6 +551,10 @@ fn member_runner_health(
         }
         // Members of the same tool/runtime share this installed runner. Retry
         // a failed probe next snapshot, rather than once per member this pass.
+        // Issue #7647: the runner inspected is the one the member starts with.
+        let profile = &prefs
+            .agent_candidates_on_environment(vec![profile.clone()])
+            .remove(0);
         let key = format!("{}:{:?}", profile.agent_id, profile.runtime_target);
         if let Err(error) = probes.entry(key).or_insert_with(|| probe(profile)) {
             failures.insert(id.clone(), format!("runner_health_check_failed: {error}"));

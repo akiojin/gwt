@@ -498,6 +498,10 @@ fn synchronize_roster_tools(
         .iter()
         .map(|profile| canonical_tool(&profile.agent_id))
         .collect::<Result<_, _>>()?;
+    // Issue #7647: an agent may be running any of the project's environments.
+    let listed = crate::issue_monitor::normalize_project_execution_environments(
+        prefs.execution_environments.clone(),
+    );
     let Some(roster) = prefs.agent_roster.as_mut() else {
         return Ok(());
     };
@@ -528,7 +532,9 @@ fn synchronize_roster_tools(
             .map(|session| session.agent_id.command().to_string());
         if let Some(fixed) = member.agent_id.as_deref() {
             let fixed = canonical_tool(fixed)?;
-            if observed.as_ref().is_some_and(|observed| observed != &fixed) {
+            if observed.as_ref().is_some_and(|observed| {
+                observed != &fixed && !listed.iter().any(|entry| &entry.tool == observed)
+            }) {
                 return Err(format!(
                     "Agent {} has a different live tool; waiting for its exact assignment",
                     member.name
@@ -1575,10 +1581,13 @@ fn reserve_project_member_inner(
     let inherited_member_id = inherited.as_deref();
     let selected_member_id = selected.as_deref();
     let requested_tool = requested_tool.map(canonical_tool).transpose()?;
-    let matches_tool = |member: &AgentMember| {
+    // Issue #7647: `listed` is set when the requested tool is one of the
+    // project's environments, which any registered agent may start with.
+    let matches_tool = |member: &AgentMember, listed: bool| {
         member.implementation_eligible()
             && requested_tool.as_ref().is_none_or(|tool| {
-                member.agent_id.as_ref() == Some(tool)
+                listed
+                    || member.agent_id.as_ref() == Some(tool)
                     || restored_session.is_some_and(|session| {
                         inherited_member_id == Some(member.agent_member_id.as_str())
                             && session.agent_id.command() == tool
@@ -1598,12 +1607,15 @@ fn reserve_project_member_inner(
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(root, prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
-        if selected_member_id.is_some_and(|id| !prefs.launch_profile_pool().iter().any(|profile| profile.agent_member_id.as_deref() == Some(id) && requested_tool.as_ref() == Some(&profile.agent_id))) {
+        let listed = requested_tool.as_deref().is_some_and(|tool| prefs.environment_lists_tool(tool));
+        let matches_tool = |member: &AgentMember| matches_tool(member, listed);
+        let runs = |profile: &crate::IssueMonitorLaunchProfile, tool: &String| listed || &profile.agent_id == tool;
+        if selected_member_id.is_some_and(|id| !prefs.launch_profile_pool().iter().any(|profile| profile.agent_member_id.as_deref() == Some(id) && requested_tool.as_ref().is_some_and(|tool| runs(profile, tool)))) {
             return Err(std::io::Error::other("Selected registered Agent profile changed; wait and reload before launching"));
         }
         let selected_member_id = selected_member_id.map(str::to_string).or_else(|| requested_tool.as_ref().filter(|_| restored_session.is_none()).and_then(|tool| prefs.launch_profile_pool().into_iter()
-            .find(|profile| &profile.agent_id == tool && profile.agent_member_id.as_ref().is_some_and(|id| prefs.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| &member.agent_member_id == id && member.enabled && member.assignment.is_none()))))
-            .or_else(|| prefs.launch_profile_pool().into_iter().find(|profile| &profile.agent_id == tool))
+            .find(|profile| runs(profile, tool) && profile.agent_member_id.as_ref().is_some_and(|id| prefs.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| &member.agent_member_id == id && member.enabled && member.assignment.is_none()))))
+            .or_else(|| prefs.launch_profile_pool().into_iter().find(|profile| runs(profile, tool)))
             .and_then(|profile| profile.agent_member_id)));
         let switch_exclusions: std::collections::BTreeMap<_, _> = prefs.agent_roster.as_ref().expect("initialized roster").members.iter().filter_map(|member| {
             prefs.agent_switch_admission_exclusion(issue_number, &member.agent_member_id,
@@ -4637,6 +4649,47 @@ mod tests {
             4,
             "bound selections never expand on resize"
         );
+        // Issue #7647 AC-3: with the project's environments saved, an agent
+        // registered with another tool starts with a listed one.
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.execution_environments = vec![crate::ProjectExecutionEnvironment {
+                environment_id: "codex".into(),
+                tool: "codex".into(),
+            }];
+            Ok(())
+        })
+        .unwrap();
+        let listed = reserve_project_member_for_agent(
+            &root,
+            &sessions,
+            "listed",
+            None,
+            None,
+            None,
+            None,
+            "codex",
+            Some(&second.agent_member_id),
+        );
+        assert!(listed.is_err(), "a busy agent is still not taken");
+        release_project_member(&root, &sessions, &second.agent_member_id, "two").unwrap();
+        let listed = reserve_project_member_for_agent(
+            &root,
+            &sessions,
+            "listed",
+            None,
+            None,
+            None,
+            None,
+            "codex",
+            Some(&second.agent_member_id),
+        )
+        .unwrap();
+        assert_eq!(listed.agent_member_id, second.agent_member_id);
+        assert_eq!(listed.agent_id.as_deref(), Some("claude"));
+        assert!(reserve_project_member_for_agent(
+            &root, &sessions, "unlisted", None, None, None, None, "grok", None
+        )
+        .is_err());
     }
 
     #[cfg(unix)]
