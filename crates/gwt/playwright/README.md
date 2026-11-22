@@ -11,6 +11,18 @@ The visual test runner supports Node.js 22.x, the version used by CI.
 Check `node --version` before running the suite. If another version is
 active, put Node.js 22.x first on `PATH` and try again.
 
+Node.js 26 cannot finish a trace ZIP with the pinned Playwright 1.49.1, so a
+test recorded with `--trace=on` passes its assertions and then times out
+(Issue #7494). Playwright 1.49.1 bundles yauzl 2.10.0 and fd-slicer 1.1.0.
+The fd-slicer read stream sets `destroyed = true` on itself before it pushes
+the end of the data. Node.js 22 still delivers the data buffered in such a
+stream; Node.js 26 does not, and never emits `end`. Playwright merges trace
+files by opening every entry at once, so any entry whose compressed size is
+over 64 KB (a font, for example) reaches its end while it still waits its
+turn, and the merge stops there. Small traces are not affected. The zip code
+bundled with Playwright 1.65.1 completes the same merge on Node.js 26; the
+update is tracked in Issue #7791.
+
 ```bash
 # from repo root — runs every spec; specs without GWT_PLAYWRIGHT_BASE_URL
 # skip themselves so the suite is safe to invoke without a running gwt.
