@@ -620,6 +620,7 @@ fn owner_output_backpressure_bounds_a_stream_and_preserves_other_project_and_sta
                 detail: None,
                 exit_confirmed: true,
                 exit_code: Some(0),
+                hook_status: None,
             },
         })
         .unwrap();

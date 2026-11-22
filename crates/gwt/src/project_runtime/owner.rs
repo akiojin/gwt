@@ -8331,6 +8331,7 @@ impl OwnerState {
                         .lock()
                         .ok()
                         .and_then(|pane| pane.last_exit().map(|exit| exit.exit_code)),
+                    hook_status: runtime.hook_status,
                 });
             }
             let pm_lifecycle = runtime
@@ -11589,7 +11590,7 @@ impl OwnerState {
             },
             None,
         );
-        let (raw_status, exit_code) = self
+        let (raw_status, exit_code, hook_status) = self
             .runtimes
             .get(&id)
             .filter(|runtime| runtime.incarnation == incarnation)
@@ -11605,9 +11606,10 @@ impl OwnerState {
                     } else {
                         None
                     },
+                    runtime.hook_status,
                 )
             })
-            .unwrap_or((status, None));
+            .unwrap_or((status, None, None));
         let _ = self.events.send(OwnerEvent::Status {
             id,
             incarnation,
@@ -11616,6 +11618,7 @@ impl OwnerState {
             exit_confirmed,
             raw_status,
             exit_code,
+            hook_status,
         });
     }
     fn pane_event(&mut self, event: PaneRuntimeEvent) {

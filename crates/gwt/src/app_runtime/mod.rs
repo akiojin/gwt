@@ -15568,6 +15568,7 @@ impl AppRuntime {
                 detail,
                 exit_confirmed,
                 exit_code,
+                hook_status,
             } => {
                 let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
                 else {
@@ -15580,6 +15581,12 @@ impl AppRuntime {
                 runtime.detail = detail.clone();
                 runtime.exit_confirmed = exit_confirmed;
                 runtime.exit_code = exit_code;
+                // The owner consumes runtime-state hooks itself; mirror its hook
+                // state so the idle wake can tell an observed turn from launch.
+                match hook_status {
+                    Some(hook_status) => self.window_hook_states.insert(id.clone(), hook_status),
+                    None => self.window_hook_states.remove(&id),
+                };
                 let mut events = self.flush_runtime_output_batch(&id);
                 events.extend(self.apply_owner_status_projection(&id, status, detail));
                 events
