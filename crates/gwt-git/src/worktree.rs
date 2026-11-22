@@ -19,22 +19,31 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REMOTE_TRACKING_FETCH_MAX_ATTEMPTS: usize = 3;
 const REMOTE_TRACKING_FETCH_RETRY_DELAY: Duration = Duration::from_millis(150);
 
-/// Background remote-branch publications still in flight (Issue #7670).
-static PENDING_REMOTE_BRANCH_PUBLICATIONS: std::sync::Mutex<Vec<JoinHandle<()>>> =
+/// A background remote-branch publication still in flight (Issue #7670),
+/// keyed by the repository and branch that started it (Issue #7723). The
+/// thread yields `Err("<branch>: <error>")` when its publication failed.
+struct RemoteBranchPublication {
+    repo_path: PathBuf,
+    branch: String,
+    handle: JoinHandle<std::result::Result<(), String>>,
+}
+static PENDING_REMOTE_BRANCH_PUBLICATIONS: std::sync::Mutex<Vec<RemoteBranchPublication>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Block until every background remote-branch publication started so far has
-/// finished. Launches never call this; it lets a caller that needs the remote
-/// branch (or a test) observe the publication instead of guessing its timing.
-pub fn wait_for_remote_branch_publications() {
-    let pending = std::mem::take(
-        &mut *PENDING_REMOTE_BRANCH_PUBLICATIONS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    for publication in pending {
-        let _ = publication.join();
-    }
+fn track_remote_branch_publication(
+    repo_path: &Path,
+    branch: &str,
+    handle: JoinHandle<std::result::Result<(), String>>,
+) {
+    let mut pending = PENDING_REMOTE_BRANCH_PUBLICATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pending.retain(|publication| !publication.handle.is_finished());
+    pending.push(RemoteBranchPublication {
+        repo_path: repo_path.to_path_buf(),
+        branch: branch.to_string(),
+        handle,
+    });
 }
 
 /// Information about a single worktree.
@@ -1164,25 +1173,61 @@ impl WorktreeManager {
                     pushed.and_then(|()| manager.fetch_remote_branch_tracking_ref(&branch));
                 let fetch_ms = fetch_started.elapsed().as_secs_f64() * 1000.0;
                 match result {
-                    Ok(()) => tracing::info!(target: "gwt.launch.timing", branch = %branch,
-                        base = %base_remote_ref, push_ms, fetch_ms,
-                        "remote work branch published after launch"),
-                    Err(error) => tracing::warn!(target: "gwt.launch.timing", branch = %branch,
-                        base = %base_remote_ref, push_ms, fetch_ms, %error,
-                        "remote work branch publication failed; the branch's first push creates it"),
+                    Ok(()) => {
+                        tracing::info!(target: "gwt.launch.timing", branch = %branch,
+                            base = %base_remote_ref, push_ms, fetch_ms,
+                            "remote work branch published after launch");
+                        Ok(())
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "gwt.launch.timing", branch = %branch,
+                            base = %base_remote_ref, push_ms, fetch_ms, %error,
+                            "remote work branch publication failed; the branch's first push creates it");
+                        Err(format!("{branch}: {error}"))
+                    }
                 }
             });
         match spawned {
-            Ok(handle) => {
-                let mut pending = PENDING_REMOTE_BRANCH_PUBLICATIONS
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pending.retain(|publication| !publication.is_finished());
-                pending.push(handle);
-            }
+            Ok(handle) => track_remote_branch_publication(&self.repo_path, new_branch, handle),
             Err(error) => tracing::warn!(target: "gwt.launch.timing", branch = new_branch, %error,
                 "remote work branch publication could not start; the branch's first push creates it"),
         }
+    }
+
+    /// Block, with no time limit, until the background publications this
+    /// repository started for `branch` have finished, and return their first
+    /// failure. Publications of other repositories and branches are neither
+    /// waited for nor reported (Issue #7723). Launches never call this; it
+    /// lets a caller that needs the remote branch (or a test) observe the
+    /// publication instead of guessing its timing. The repository is matched
+    /// by the path this manager was created with. A publication that had
+    /// already finished when a later one started is no longer tracked, so a
+    /// caller still checks the remote branch itself (Issue #7714).
+    pub fn wait_for_remote_branch_publication(
+        &self,
+        branch: &str,
+    ) -> std::result::Result<(), String> {
+        let own = {
+            let mut pending = PENDING_REMOTE_BRANCH_PUBLICATIONS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (own, others) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition::<Vec<_>, _>(|publication| {
+                    publication.repo_path == self.repo_path && publication.branch == branch
+                });
+            *pending = others;
+            own
+        };
+        let mut outcome = Ok(());
+        for publication in own {
+            let joined = publication
+                .handle
+                .join()
+                .unwrap_or_else(|_| Err(format!("{branch}: remote branch publication panicked")));
+            outcome = outcome.and(joined);
+        }
+        outcome
     }
 
     /// Delete the remote branch that corresponds to `local_branch`.
@@ -2139,6 +2184,42 @@ mod tests {
             stdout: Vec::new(),
             stderr: stderr.into(),
         }
+    }
+
+    /// Issue #7723: a wait observes only the publications registered for its
+    /// own repository and branch. The failing publications of another branch
+    /// and another repository are still in flight when the wait returns, so
+    /// they were neither waited for nor reported.
+    #[test]
+    fn remote_branch_publication_wait_ignores_other_repositories_and_branches() {
+        let own_repo = Path::new("/issue-7723/own-repo");
+        let other_repo = Path::new("/issue-7723/other-repo");
+        let held_failure = |message: &str| {
+            let message = message.to_string();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let handle = thread::spawn(move || {
+                let _ = released.recv();
+                Err(message)
+            });
+            (release, handle)
+        };
+        let (release_other_branch, other_branch) = held_failure("feature/config-env-2: failed");
+        let (release_other_repo, other_repo_publication) = held_failure("work/issue-7723: failed");
+        track_remote_branch_publication(own_repo, "feature/config-env-2", other_branch);
+        track_remote_branch_publication(other_repo, "work/issue-7723", other_repo_publication);
+        track_remote_branch_publication(own_repo, "work/issue-7723", thread::spawn(|| Ok(())));
+
+        assert_eq!(
+            WorktreeManager::new(own_repo).wait_for_remote_branch_publication("work/issue-7723"),
+            Ok(()),
+            "another repository's or branch's failure leaked into this wait"
+        );
+
+        drop((release_other_branch, release_other_repo));
+        let _ = WorktreeManager::new(own_repo)
+            .wait_for_remote_branch_publication("feature/config-env-2");
+        let _ =
+            WorktreeManager::new(other_repo).wait_for_remote_branch_publication("work/issue-7723");
     }
 
     #[test]

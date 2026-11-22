@@ -35,6 +35,9 @@ pub struct PmDeliveryReplayGuard {
     // A wake retains ordinary input until its exact provider turn ACK. Partial
     // body writes permit readback only; a complete body permits CR-only retry.
     pub retained_input: Option<(gwt_terminal::pty::PtyInputReservation, bool)>,
+    /// Issue #7701: retained input never outlives this instant, even when no
+    /// human input or turn boundary arrives to release it first.
+    pub retained_until: Instant,
 }
 
 pub type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;
@@ -943,6 +946,7 @@ pub fn authenticated_pm_pane_send_input_events(
                         ordinary_revision,
                         transaction_revision: reservation.transaction_revision(),
                         retained_input: None,
+                        retained_until: Instant::now(),
                     });
             }
             outcome
@@ -1324,7 +1328,15 @@ fn prepare_pane_name_for_window(
             .into_iter()
             .find(|member| member.agent_member_id == member_id)
             .ok_or("Registered Agent is missing")?;
-        if member.agent_id.as_deref() != session.as_ref().map(|session| session.agent_id.command())
+        let tool = session.as_ref().map(|session| session.agent_id.command());
+        // Issue #7647: an agent may run any of the project's environments.
+        if member.agent_id.as_deref() != tool
+            && !tool.is_some_and(|tool| {
+                crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                    &pane.project_root,
+                ))
+                .is_ok_and(|prefs| prefs.environment_lists_tool(tool))
+            })
         {
             return Err("Registered Agent has a different fixed tool".into());
         }

@@ -2033,3 +2033,239 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     assert_eq!(persisted.windows.len(), 1);
     assert_eq!(persisted.windows[0].id, first.id);
 }
+
+/// Run the queued decision-queue workers and feed their completions through
+/// the production handlers, the way the event loop does.
+fn drain_decision_queue(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued decision fixture workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("decision fixture event sink");
+    };
+    let completions = Arc::clone(completions);
+    let mut events = Vec::new();
+    loop {
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        let had_tasks = !queued.is_empty();
+        for task in queued {
+            task();
+        }
+        let completed = std::mem::take(&mut *completions.lock().unwrap());
+        let had_completions = !completed.is_empty();
+        for event in completed {
+            match runtime.accept_project_completion(event) {
+                Some(UserEvent::DecisionAnswersPending {
+                    project_root,
+                    deliveries,
+                }) => events.extend(runtime.deliver_decision_answers(&project_root, deliveries)),
+                Some(UserEvent::Dispatch(dispatched)) => events.extend(dispatched),
+                Some(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
+                    events.extend(runtime.handle_remote_runtime_command_complete(*completion))
+                }
+                _ => {}
+            }
+        }
+        if !had_tasks && !had_completions {
+            break;
+        }
+    }
+    events
+}
+
+fn decision_registration(session_id: &str, target: &str) -> gwt_core::decision_queue::Registration {
+    gwt_core::decision_queue::Registration {
+        issue: Some(7742),
+        kind: Some("product".into()),
+        target: Some(target.into()),
+        question: Some("Which storage should the queue use?".into()),
+        materials: Some("Both options pass the existing tests.".into()),
+        options: vec!["Keep JSON".into(), "Move to SQLite".into()],
+        recommendation: Some("Keep JSON".into()),
+        reason: None,
+        session_id: Some(session_id.into()),
+    }
+}
+
+/// Issue #7742 AC-2: the answer goes from gwtd straight into the pane of the
+/// session that waits for it. No PM session takes part in the delivery.
+#[test]
+fn decision_answer_is_delivered_to_the_waiting_session_without_a_pm() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let repo = temp.path().join("browser-input-project");
+    let session_id = probe.session.as_ref().unwrap().id.clone();
+    // The PM is gone: neither the registry nor this runtime knows one.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        &session_id,
+    )
+    .unwrap();
+    let context = runtime.test_context();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .pm_sessions
+        .clear();
+    assert!(
+        runtime.pm_session_for_root(&repo).is_none(),
+        "the delivery must not depend on a running PM"
+    );
+    let item = queue::register(&repo, &decision_registration(&session_id, "storage"))
+        .unwrap()
+        .item;
+    let queued = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::AnswerDecision {
+            id: window_id.clone(),
+            request_id: 5,
+            decision_id: item.id.clone(),
+            answer: "1. Keep JSON".into(),
+        },
+    );
+    assert!(
+        queued.is_empty(),
+        "the answer is recorded off the event loop"
+    );
+    // The answer is durable before any pane is written.
+    {
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            panic!("queued decision fixture workers");
+        };
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in queued {
+            task();
+        }
+    }
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+    let events = drain_decision_queue(&mut runtime);
+    let result = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::DecisionResult {
+                request_id: 5,
+                ok,
+                error,
+                decisions,
+                ..
+            } => Some((*ok, error.clone(), decisions.clone())),
+            _ => None,
+        })
+        .expect("the answer is acknowledged to its client");
+    assert_eq!((result.0, result.1), (true, None));
+    assert_eq!(result.2.unwrap().waiting_count, 0);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::WindowCommandError { .. })),
+        "the waiting session's own pane accepted the answer: {events:?}"
+    );
+    // The receipt is written only after the pane owner acknowledged the write.
+    assert!(
+        queue::pending_deliveries(&repo).unwrap().is_empty(),
+        "the answer reached the waiting session and is not delivered again"
+    );
+    assert!(runtime.decision_answers_in_flight.is_empty());
+    runtime.scan_decision_answers();
+    assert!(drain_decision_queue(&mut runtime).is_empty());
+
+    // An answer recorded by another process (the PM closing a decision through
+    // gwtd) is picked up by the scan and delivered the same way.
+    let second = queue::register(&repo, &decision_registration(&session_id, "ordering"))
+        .unwrap()
+        .item;
+    queue::answer(&repo, &second.id, "Newest first", queue::AnsweredBy::Pm).unwrap();
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+    runtime.scan_decision_answers();
+    drain_decision_queue(&mut runtime);
+    assert!(queue::pending_deliveries(&repo).unwrap().is_empty());
+
+    // A waiter without a live pane keeps its answer pending instead of losing it.
+    let third = queue::register(&repo, &decision_registration("gone-session", "retention"))
+        .unwrap()
+        .item;
+    queue::answer(&repo, &third.id, "Keep all", queue::AnsweredBy::Pm).unwrap();
+    runtime.scan_decision_answers();
+    drain_decision_queue(&mut runtime);
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+
+    // A foreign or missing window never reaches another project's queue.
+    let refused = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::DeferDecision {
+            id: "missing::window".into(),
+            request_id: 6,
+            decision_id: item.id,
+        },
+    );
+    assert!(refused
+        .iter()
+        .all(|event| !matches!(&event.event, BackendEvent::DecisionResult { ok: true, .. })));
+}
+
+/// Issue #7742 AC-3 / AC-4: the queue belongs to the project. Replacing the PM
+/// changes neither the waiting decisions nor their count, and deferring keeps
+/// the count while moving the decision to the tail.
+#[test]
+fn decision_queue_survives_pm_reassignment_and_defer_keeps_the_count() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let repo = temp.path().join("browser-input-project");
+    let session_id = probe.session.as_ref().unwrap().id.clone();
+    let first = queue::register(&repo, &decision_registration("waiting-agent", "storage"))
+        .unwrap()
+        .item;
+    let second = queue::register(&repo, &decision_registration("waiting-agent", "ordering"))
+        .unwrap()
+        .item;
+    let before = gwt::pm_current::load_decisions(&repo).unwrap();
+    assert_eq!(before.waiting_count, 2);
+
+    // The fixture's PM leaves and a different session takes over.
+    let prefs = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::deregister_pm(&prefs, &session_id).unwrap();
+    assert_eq!(gwt::pm_current::load_decisions(&repo).unwrap(), before);
+    let mut replacement = pm_registration_fixture("replacement-pm", &repo);
+    replacement.agent_id = "claude".into();
+    gwt::pm_registry::try_register_pm(&prefs, replacement, |_| false).unwrap();
+    assert_eq!(gwt::pm_current::load_decisions(&repo).unwrap(), before);
+
+    let queued = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::DeferDecision {
+            id: window_id,
+            request_id: 9,
+            decision_id: second.id.clone(),
+        },
+    );
+    assert!(queued.is_empty());
+    let events = drain_decision_queue(&mut runtime);
+    let after = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::DecisionResult {
+                request_id: 9,
+                ok: true,
+                action,
+                decisions,
+                ..
+            } if action == "defer" => decisions.clone(),
+            _ => None,
+        })
+        .expect("the deferral is acknowledged with the reordered queue");
+    assert_eq!(after.waiting_count, 2, "deferring is not a decision");
+    assert_eq!(
+        after
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.id.as_str(), second.id.as_str()],
+        "the deferred decision waits at the tail"
+    );
+}

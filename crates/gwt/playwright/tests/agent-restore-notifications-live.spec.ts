@@ -306,8 +306,8 @@ test("automatic restore errors stay in Notifications while manual errors open a 
         },
       }));
     }, restoreError);
-    await expect(bell.locator(".op-rail__badge")).toHaveText("1");
-    await expect(bell.locator(".op-rail__badge")).toHaveAttribute("data-has-error", "true");
+    await expect(bell.locator(".app-head__count")).toHaveText("1");
+    await expect(bell.locator(".app-head__count")).toHaveAttribute("data-has-error", "true");
     await expect(wizard).toBeHidden();
     await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
 
@@ -385,7 +385,7 @@ test("Issues fresh-session notifications retain each native conversation fallbac
           },
         }));
       }, message);
-      await expect(bell.locator(".op-rail__badge")).toHaveText(String(index + 1));
+      await expect(bell.locator(".app-head__count")).toHaveText(String(index + 1));
     }
 
     await bell.click();
@@ -441,7 +441,7 @@ test("degraded resume warnings retain the reason and Start Work recovery without
         },
       }));
     }, warning);
-    await expect(bell.locator(".op-rail__badge")).toHaveText("1");
+    await expect(bell.locator(".app-head__count")).toHaveText("1");
     await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
     await expect(page.locator("#wizard-modal")).toBeHidden();
 

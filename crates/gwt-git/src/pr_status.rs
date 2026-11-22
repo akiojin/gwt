@@ -3807,6 +3807,38 @@ where
     )?))
 }
 
+/// Issue #7697: the open-PR inventory with the auto-merge state of each row.
+///
+/// `auto_merge_requested` holds the numbers whose REST row carries a non-null
+/// `auto_merge`, so a scan can tell that something armed a PR without a
+/// request per candidate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenPrInventory {
+    pub numbers_by_branch: std::collections::HashMap<String, u64>,
+    pub auto_merge_requested: std::collections::BTreeSet<u64>,
+}
+
+/// [`try_fetch_open_pr_numbers_by_branch_for_monitor`] plus the auto-merge
+/// state, from the same single read.
+pub fn try_fetch_open_pr_inventory_for_monitor(repo_path: &Path) -> Result<OpenPrInventory> {
+    try_fetch_open_pr_inventory_with(repo_path, run_cached_list_command)
+}
+
+fn try_fetch_open_pr_inventory_with<F>(repo_path: &Path, run_gh: F) -> Result<OpenPrInventory>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let rows = try_fetch_open_pr_rows_with(repo_path, run_gh)?;
+    Ok(OpenPrInventory {
+        numbers_by_branch: open_pr_numbers_by_branch(&rows),
+        auto_merge_requested: rows
+            .iter()
+            .filter(|row| row.get("auto_merge").is_some_and(|value| !value.is_null()))
+            .filter_map(|row| row.get("number").and_then(serde_json::Value::as_u64))
+            .collect(),
+    })
+}
+
 fn try_fetch_open_pr_rows_with<F>(repo_path: &Path, mut run_gh: F) -> Result<Vec<serde_json::Value>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
@@ -4518,6 +4550,7 @@ where
         return AutoMergeMutationOutcome::AlreadyTargetState;
     }
 
+    let method = permitted_auto_merge_method(repository, repo_path, &mut run_gh);
     let number = number.to_string();
     let args = pinned_pr_command_args(
         repository,
@@ -4526,13 +4559,56 @@ where
             "merge",
             &number,
             "--auto",
-            "--squash",
+            method,
             "--match-head-commit",
             reviewed_head_sha,
         ],
     );
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     classify_auto_merge_command(run_gh(repo_path, &args))
+}
+
+/// Issue #7697: the merge method flag for an auto-merge arm.
+///
+/// A repository that forbids squash merges rejects `--squash`, so the arm
+/// reads which methods the repository allows and takes the first of squash,
+/// merge commit, rebase. An unreadable setting keeps the squash default; the
+/// read is not a mutation, so its failure never becomes the arm's outcome.
+fn permitted_auto_merge_method<F>(
+    repository: Option<&str>,
+    repo_path: &Path,
+    run_gh: &mut F,
+) -> &'static str
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    let pinned = repository.and_then(|repository| repository.split_once('/'));
+    let path = pinned.map_or_else(
+        || "repos/{owner}/{repo}".to_string(),
+        |(_host, slug)| format!("repos/{slug}"),
+    );
+    let mut args = vec!["api", path.as_str()];
+    if pinned.is_some() {
+        args.extend(["--hostname", "github.com"]);
+    }
+    let settings = run_gh(repo_path, &args)
+        .ok()
+        .filter(|output| output.success)
+        .and_then(|output| serde_json::from_str::<serde_json::Value>(&output.stdout).ok());
+    [
+        ("allow_squash_merge", "--squash"),
+        ("allow_merge_commit", "--merge"),
+        ("allow_rebase_merge", "--rebase"),
+    ]
+    .into_iter()
+    .find(|(setting, _)| {
+        settings
+            .as_ref()
+            .and_then(|settings| settings.get(setting))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    })
+    .map_or("--squash", |(_, flag)| flag)
 }
 
 fn merge_pr_auto_with<F>(
@@ -4568,17 +4644,25 @@ pub fn disarm_pr_auto_merge(
     number: u64,
     remote: &PrAutoMergeRemoteState,
 ) -> AutoMergeMutationOutcome {
-    disarm_pr_auto_merge_with(repo_path, number, remote, run_auto_merge_command)
+    disarm_pr_auto_merge_with(repo_path, number, remote, run_auto_merge_command, || {
+        fetch_pr_auto_merge_remote_state(repo_path, number)
+    })
 }
 
-fn disarm_pr_auto_merge_with<F>(
+/// Issue #7697 AC-6: a disarm is `Confirmed` only once a fresh readback shows
+/// GitHub no longer has auto-merge requested. `gh` exiting zero is not that
+/// proof, and a `gh` that ran and left the request in place is a definite
+/// failure the caller must hand to a human before required CI merges the PR.
+fn disarm_pr_auto_merge_with<F, R>(
     repo_path: &Path,
     number: u64,
     remote: &PrAutoMergeRemoteState,
     mut run_gh: F,
+    mut read_back: R,
 ) -> AutoMergeMutationOutcome
 where
     F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+    R: FnMut() -> Option<PrAutoMergeRemoteState>,
 {
     match remote {
         PrAutoMergeRemoteState::Open {
@@ -4600,10 +4684,42 @@ where
     }
 
     let number = number.to_string();
-    classify_auto_merge_command(run_gh(
-        repo_path,
-        &["pr", "merge", &number, "--disable-auto"],
-    ))
+    let command = run_gh(repo_path, &["pr", "merge", &number, "--disable-auto"]);
+    let failure = match command {
+        Err(AutoMergeCommandError::PreSubmit(message)) => {
+            return AutoMergeMutationOutcome::PreSubmit(message);
+        }
+        Err(AutoMergeCommandError::RemoteOutcomeUnknown(message)) => {
+            return AutoMergeMutationOutcome::RemoteOutcomeUnknown(message);
+        }
+        Ok(output) if output.success => None,
+        Ok(output) => Some(output.stderr.trim().to_string()),
+    };
+    match read_back() {
+        Some(
+            PrAutoMergeRemoteState::Open {
+                auto_merge_requested: false,
+                ..
+            }
+            | PrAutoMergeRemoteState::Closed { .. },
+        ) => AutoMergeMutationOutcome::Confirmed,
+        Some(PrAutoMergeRemoteState::Merged { .. }) => AutoMergeMutationOutcome::AuthorityMismatch(
+            "pull request merged before kill-switch disarm was confirmed".to_string(),
+        ),
+        Some(PrAutoMergeRemoteState::Open {
+            auto_merge_requested: true,
+            ..
+        }) => AutoMergeMutationOutcome::AuthorityMismatch(match failure {
+            Some(stderr) => {
+                format!("auto-merge is still requested on GitHub; the disarm failed: {stderr}")
+            }
+            None => "auto-merge is still requested on GitHub after the disarm reported success"
+                .to_string(),
+        }),
+        None => AutoMergeMutationOutcome::RemoteOutcomeUnknown(
+            "auto-merge readback unavailable after the disarm".to_string(),
+        ),
+    }
 }
 
 fn classify_auto_merge_command(
@@ -4621,7 +4737,32 @@ fn classify_auto_merge_command(
     }
 }
 
+/// Issue #7697 AC-6: run from the same directory as every other `gh` call.
+///
+/// A workspace home is not a Git repository (the bare repository is its
+/// child), so `gh pr merge` started there exited before reaching GitHub and
+/// no arm or disarm ever applied.
 fn run_auto_merge_command(
+    repo_path: &Path,
+    args: &[&str],
+) -> std::result::Result<GhCliOutput, AutoMergeCommandError> {
+    run_auto_merge_command_with(repo_path, args, spawn_auto_merge_command)
+}
+
+fn run_auto_merge_command_with<F>(
+    repo_path: &Path,
+    args: &[&str],
+    mut spawn_gh: F,
+) -> std::result::Result<GhCliOutput, AutoMergeCommandError>
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    let command_root =
+        crate::worktree::main_worktree_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    spawn_gh(&command_root, args)
+}
+
+fn spawn_auto_merge_command(
     repo_path: &Path,
     args: &[&str],
 ) -> std::result::Result<GhCliOutput, AutoMergeCommandError> {
@@ -6038,6 +6179,15 @@ mod tests {
                 auto_merge_requested: false,
             },
             |_p, args| {
+                if args.first() == Some(&"api") {
+                    // Issue #7697: the settings read is pinned like the arm.
+                    assert_eq!(args, ["api", "repos/o/r", "--hostname", "github.com"]);
+                    return Ok(GhCliOutput {
+                        success: true,
+                        stdout: r#"{"allow_squash_merge":false,"allow_merge_commit":true,"allow_rebase_merge":true}"#.to_string(),
+                        stderr: String::new(),
+                    });
+                }
                 calls += 1;
                 assert_eq!(
                     args,
@@ -6046,7 +6196,7 @@ mod tests {
                         "merge",
                         "7",
                         "--auto",
-                        "--squash",
+                        "--merge",
                         "--match-head-commit",
                         "abc123",
                         "--repo",
@@ -6063,6 +6213,85 @@ mod tests {
         assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
         assert!(confirmed.is_success());
         assert_eq!(calls, 1);
+    }
+
+    /// Issue #7697: squash stays the method wherever it is allowed or the
+    /// setting cannot be read; otherwise the first allowed method is used.
+    #[test]
+    fn arm_pr_auto_merge_uses_a_merge_method_the_repository_allows() {
+        let remote = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: false,
+        };
+        let method_for = |settings: Option<&str>| {
+            let mut method = String::new();
+            let outcome = arm_pr_auto_merge_with(
+                None,
+                Path::new("/tmp/repo"),
+                7,
+                "abc123",
+                &remote,
+                |_p, args| {
+                    if args.first() == Some(&"api") {
+                        assert_eq!(args, ["api", "repos/{owner}/{repo}"]);
+                        return Ok(GhCliOutput {
+                            success: settings.is_some(),
+                            stdout: settings.unwrap_or_default().to_string(),
+                            stderr: String::new(),
+                        });
+                    }
+                    method = args[4].to_string();
+                    Ok(GhCliOutput {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                },
+            );
+            assert_eq!(outcome, AutoMergeMutationOutcome::Confirmed);
+            method
+        };
+        assert_eq!(
+            method_for(Some(
+                r#"{"allow_squash_merge":true,"allow_merge_commit":true}"#
+            )),
+            "--squash"
+        );
+        assert_eq!(
+            method_for(Some(
+                r#"{"allow_squash_merge":false,"allow_merge_commit":false,"allow_rebase_merge":true}"#
+            )),
+            "--rebase"
+        );
+        assert_eq!(method_for(Some("{}")), "--squash", "settings not exposed");
+        assert_eq!(method_for(None), "--squash", "settings read failed");
+    }
+
+    /// Issue #7697: the inventory names the open PRs that have auto-merge
+    /// requested, from the same single read as the branch index.
+    #[test]
+    fn open_pr_inventory_reports_which_prs_have_auto_merge_requested() {
+        let mut calls = 0;
+        let inventory = try_fetch_open_pr_inventory_with(Path::new("/repo"), |_, _| {
+            calls += 1;
+            Ok(GhCliOutput {
+                success: true,
+                stdout: "HTTP/2.0 200 OK\n\r\n".to_owned()
+                    + r#"[{"number":7,"head":{"ref":"work/issue-43"},"auto_merge":{"merge_method":"merge"}},{"number":8,"head":{"ref":"work/issue-44"},"auto_merge":null},{"number":9,"head":{"ref":"work/issue-45"}}]"#,
+                stderr: String::new(),
+            })
+        })
+        .expect("open PR inventory");
+        assert_eq!(calls, 1);
+        assert_eq!(inventory.numbers_by_branch.get("work/issue-44"), Some(&8));
+        assert_eq!(
+            inventory
+                .auto_merge_requested
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [7]
+        );
     }
 
     #[test]
@@ -6115,6 +6344,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(
             already_disarmed,
@@ -6137,6 +6367,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(closed, AutoMergeMutationOutcome::AlreadyTargetState);
         assert!(closed.is_success());
@@ -6156,6 +6387,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(
             merged,
@@ -6170,35 +6402,178 @@ mod tests {
             head_sha: "abc123".to_string(),
             auto_merge_requested: true,
         };
-        let confirmed = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, args| {
-            calls += 1;
-            assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
-            Ok(GhCliOutput {
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
+        let disarmed = || {
+            Some(PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: false,
             })
-        });
+        };
+        let gh_exit = |success: bool, stderr: &str| {
+            Ok(GhCliOutput {
+                success,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+            })
+        };
+        let confirmed = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, args| {
+                calls += 1;
+                assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
+                gh_exit(true, "")
+            },
+            disarmed,
+        );
         assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
         assert_eq!(calls, 1);
 
-        let pre_submit = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
-            Err(AutoMergeCommandError::PreSubmit("not started".to_string()))
-        });
+        let pre_submit = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, _args| Err(AutoMergeCommandError::PreSubmit("not started".to_string())),
+            || unreachable!("gh never started, so nothing is read back"),
+        );
         assert_eq!(
             pre_submit,
             AutoMergeMutationOutcome::PreSubmit("not started".to_string())
         );
 
-        let ambiguous = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
-            Err(AutoMergeCommandError::RemoteOutcomeUnknown(
-                "response lost".to_string(),
-            ))
-        });
+        let ambiguous = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, _args| {
+                Err(AutoMergeCommandError::RemoteOutcomeUnknown(
+                    "response lost".to_string(),
+                ))
+            },
+            || unreachable!("the next attempt starts from its own readback"),
+        );
         assert_eq!(
             ambiguous,
             AutoMergeMutationOutcome::RemoteOutcomeUnknown("response lost".to_string())
         );
+    }
+
+    /// Issue #7697 AC-6: `gh` exiting zero does not prove the disarm. Only a
+    /// readback showing auto-merge no longer requested does, and a `gh` that
+    /// ran and left it requested is a failure a human has to resolve.
+    #[test]
+    fn issue_7697_disarm_is_confirmed_only_by_a_github_readback() {
+        let repo = Path::new("/tmp/repo");
+        let armed = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: true,
+        };
+        let gh_exit = |success: bool, stderr: &str| {
+            Ok(GhCliOutput {
+                success,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+            })
+        };
+        let disarm =
+            |success: bool, stderr: &'static str, after: Option<PrAutoMergeRemoteState>| {
+                disarm_pr_auto_merge_with(
+                    repo,
+                    7,
+                    &armed,
+                    |_p, _args| gh_exit(success, stderr),
+                    || after.clone(),
+                )
+            };
+
+        let still_armed = disarm(true, "", Some(armed.clone()));
+        assert_eq!(
+            still_armed,
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "auto-merge is still requested on GitHub after the disarm reported success"
+                    .to_string()
+            )
+        );
+        assert!(!still_armed.is_success());
+
+        // The production failure: `gh` exited 1 without reaching GitHub.
+        assert_eq!(
+            disarm(false, "fatal: not a git repository\n", Some(armed.clone())),
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "auto-merge is still requested on GitHub; the disarm failed: fatal: not a git repository"
+                    .to_string()
+            )
+        );
+
+        // A non-zero exit whose mutation did apply is still a disarm.
+        assert_eq!(
+            disarm(
+                false,
+                "warning",
+                Some(PrAutoMergeRemoteState::Closed {
+                    head_sha: "abc123".to_string(),
+                })
+            ),
+            AutoMergeMutationOutcome::Confirmed
+        );
+
+        assert_eq!(
+            disarm(
+                true,
+                "",
+                Some(PrAutoMergeRemoteState::Merged {
+                    head_sha: "abc123".to_string(),
+                })
+            ),
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "pull request merged before kill-switch disarm was confirmed".to_string()
+            )
+        );
+
+        assert_eq!(
+            disarm(true, "", None),
+            AutoMergeMutationOutcome::RemoteOutcomeUnknown(
+                "auto-merge readback unavailable after the disarm".to_string()
+            )
+        );
+    }
+
+    /// Issue #7697 AC-6: a workspace home is not a Git repository, so an arm
+    /// or disarm started there never reached GitHub.
+    #[test]
+    fn issue_7697_auto_merge_commands_run_from_the_child_bare_repository() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo = tmp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let expected = gwt_core::paths::normalize_windows_child_process_path(
+            &std::fs::canonicalize(&bare_repo).expect("canonical bare repo"),
+        );
+        let mut observed_cwd = None;
+
+        let output = run_auto_merge_command_with(
+            tmp.path(),
+            &["pr", "merge", "7", "--disable-auto"],
+            |cwd, _args| {
+                observed_cwd = Some(cwd.to_path_buf());
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        )
+        .expect("fake gh");
+
+        assert!(output.success);
+        assert_eq!(observed_cwd.as_deref(), Some(expected.as_path()));
     }
 
     #[test]

@@ -819,6 +819,13 @@ impl AppRuntime {
             runtime.input_in_flight = None;
             runtime.input_in_flight_reply = None;
         }
+        if let super::RemoteRuntimeCommandKind::Input {
+            reply_client: None,
+            request_id: Some(request_id),
+        } = &kind
+        {
+            self.settle_decision_answer(*request_id, result.is_ok());
+        }
         let observation = match result {
             Err(error) => {
                 if approval_resolution_started {

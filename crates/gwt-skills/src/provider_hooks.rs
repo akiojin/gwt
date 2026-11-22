@@ -640,7 +640,6 @@ fn openclaw_config(plugin_dir: &Path) -> Value {
             "native": "auto",
             "nativeSkills": "auto",
             "restart": true,
-            "ownerDisplay": "raw",
         },
         "plugins": {
             "enabled": true,

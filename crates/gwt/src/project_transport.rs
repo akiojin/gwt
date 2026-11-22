@@ -567,6 +567,11 @@ fn prepare_outbound_with_payload(
         crate::BackendEvent::AttachmentProgress { operation_id, .. } => {
             (Some(operation_id.clone()), None, None)
         }
+        // Issue #5561: an inbox replaces the previous one and carries every
+        // Issue body, so a client that is not draining keeps only the newest.
+        crate::BackendEvent::IssueMonitorInbox { .. } => {
+            (Some("issue_monitor_inbox".to_string()), None, None)
+        }
         _ => (None, None, None),
     };
     PreparedOutbound {
@@ -5114,6 +5119,41 @@ mod tests {
         assert!(
             payloads[0].contains("project_index_status"),
             "replacement keeps the original queue position"
+        );
+    }
+
+    // Issue #5561: every inbox broadcast carries every Issue body. A client
+    // that stops draining must hold only the newest inbox, not one per scan.
+    #[test]
+    fn client_queue_keeps_only_the_latest_issue_monitor_inbox() {
+        let queue = ClientQueue::default();
+        let mut latest = None;
+        for _ in 0..3 {
+            let prepared = prepare_owned_outbound(OutboundEvent::project(
+                project_a(),
+                BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            ));
+            latest = Some(prepared.payload.clone());
+            queue.enqueue(&prepared);
+        }
+
+        let state = queue.state.lock().unwrap();
+        let inboxes: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "issue_monitor_inbox")
+            .collect();
+        assert_eq!(inboxes.len(), 1, "queued inboxes must not accumulate");
+        let (
+            SharedOutboundPayload::Deferred(queued),
+            Some(SharedOutboundPayload::Deferred(latest)),
+        ) = (&inboxes[0].payload, latest.as_ref())
+        else {
+            panic!("inbox encoding must stay deferred");
+        };
+        assert!(
+            Arc::ptr_eq(queued, latest),
+            "the queued inbox is the newest one"
         );
     }
 

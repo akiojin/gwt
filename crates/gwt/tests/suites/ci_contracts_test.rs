@@ -1,5 +1,8 @@
 //! Issue #4135: ci contracts share one integration harness.
 
+#[cfg(unix)]
+#[path = "../auto_merge_workflow_contract_test.rs"]
+mod auto_merge_workflow_contract_test;
 #[path = "../bin_gwt_home_isolation_contract_test.rs"]
 mod bin_gwt_home_isolation_contract_test;
 #[path = "../ci_apt_lock_contract_test.rs"]

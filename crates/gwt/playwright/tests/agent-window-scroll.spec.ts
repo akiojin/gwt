@@ -288,7 +288,8 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
       expect(await page.locator(".op-rail").evaluate(element => element.scrollWidth - element.clientWidth),
         "the rail must not hide entries behind a sideways scroll").toBeLessThanOrEqual(0);
       const items = page.locator(".op-rail__item:visible");
-      expect(await items.count()).toBeGreaterThanOrEqual(11);
+      // The notification bell moved to the shared header (Issue #7740).
+      expect(await items.count()).toBeGreaterThanOrEqual(10);
       for (const item of await items.all()) {
         await expect(item).toBeInViewport({ ratio: 1 });
         const box = (await item.boundingBox())!;
@@ -417,15 +418,17 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
   test("tapping the rail does not leave an explanation over the surface", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
     const explanation = page.locator("#rail-control-explanation");
+    // The shared header also has an Agents entry (Issue #7740); this is the rail's.
+    const rail = page.locator(".op-rail");
     for (const name of ["Agents", "Board", "Works"]) {
-      await page.getByRole("button", { name, exact: true }).tap();
-      await expect(page.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
+      await rail.getByRole("button", { name, exact: true }).tap();
+      await expect(rail.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
       await page.waitForTimeout(300);
       await expect(explanation, `no explanation after tapping ${name}`).toBeHidden();
     }
     await page.screenshot({ path: info.outputPath("rail-tap-no-explanation.png") });
     await page.setViewportSize({ width: 1360, height: 900 });
-    await page.getByRole("button", { name: "Agents", exact: true }).hover();
+    await rail.getByRole("button", { name: "Agents", exact: true }).hover();
     await expect(explanation).toHaveText("Agents: project members, capacity and assignment history");
     await page.mouse.move(700, 450);
     await expect(explanation).toBeHidden();

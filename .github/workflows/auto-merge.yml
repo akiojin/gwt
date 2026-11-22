@@ -42,4 +42,21 @@ jobs:
             echo "PERSONAL_ACCESS_TOKEN not provided, skipping auto-merge"
             exit 0
           fi
+          # Issue #7700: a `work/issue-N` PR whose Issue N carries `auto-merge`
+          # goes to independent review, and gwt Issues arms it once a
+          # pass verdict is recorded. Arming here let required CI merge PR
+          # #7695 before its `fail` verdict arrived. An unreadable Issue fails
+          # the job instead of arming. Pinned by
+          # crates/gwt/tests/auto_merge_workflow_contract_test.rs.
+          if [[ "$HEAD_REF" =~ ^work/issue-([0-9]+)$ ]]; then
+            issue="${BASH_REMATCH[1]}"
+            if ! labels="$(gh issue view "$issue" --repo "$REPO" --json labels --jq '.labels[].name')"; then
+              echo "::error::could not read Issue #$issue; refusing to arm auto-merge for PR #$PR_NUMBER"
+              exit 1
+            fi
+            if grep -qixF 'auto-merge' <<<"$labels"; then
+              echo "Issue #$issue carries auto-merge: leaving PR #$PR_NUMBER for gwt Issues to arm after the review verdict"
+              exit 0
+            fi
+          fi
           gh pr merge "$PR_NUMBER" --auto --merge --repo "$REPO"

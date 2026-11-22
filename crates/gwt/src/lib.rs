@@ -37,6 +37,8 @@ pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod disk_space;
 pub mod error_report;
+pub mod execution_environments;
+pub mod first_run_setup;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_resources;
@@ -97,9 +99,11 @@ pub mod spec_tasks;
 pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
+pub mod themes;
 pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
+pub mod user_hooks;
 pub mod web_protocol_enums;
 pub mod window_registry;
 pub mod window_state;
@@ -199,8 +203,8 @@ pub use issue_monitor::{
     mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,
     mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
-    pending_autonomous_handoff_resumption_from_prefs, persist_issue_monitor_authority_fence,
-    persist_legacy_issue_monitor_shutdown_revoke_fence,
+    normalize_project_execution_environments, pending_autonomous_handoff_resumption_from_prefs,
+    persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
     prepare_autonomous_handoff_delivery_from_prefs,
     preserve_answered_handoff_resume_strategy_from_prefs,
     record_autonomous_handoff_delivery_failure_from_prefs, record_autonomous_question_handoff,
@@ -238,27 +242,29 @@ pub use issue_monitor::{
     IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
     IssueReadinessFailure, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
     MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
-    UPDATE_DRAIN_RELEASE_OPERATION,
+    PendingIssueMonitorEffect, ProjectExecutionEnvironment, AUTONOMOUS_WAIT_MAX_SECS,
+    IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    STRANDED_LAUNCHED_ROW_GRACE_SECS, UPDATE_DRAIN_RELEASE_OPERATION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
-    search_knowledge_bridge, search_knowledge_bridge_outcome, update_knowledge_phase,
-    KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
-    KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
+    search_knowledge_bridge, search_knowledge_bridge_outcome, set_knowledge_autonomous_target,
+    update_knowledge_phase, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
+    KnowledgeKind, KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
     KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry, KnowledgeWorkRefView,
 };
 pub use launch_wizard::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, has_gwt_spec_label,
     knowledge_launch_target_branch_name, load_agent_options, AgentOption, AgentSetupAffordance,
     AgentSetupKind, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
-    LaunchWizardAgentSetupView, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardAgentSetupView, LaunchWizardAssigneeCandidate, LaunchWizardAssigneeView,
+    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardExecutionEnvironmentView,
     LaunchWizardHolderDecisionView, LaunchWizardHydration, LaunchWizardIssueMonitorPoolImpactView,
-    LaunchWizardIssueMonitorPoolSetView, LaunchWizardIssueMonitorPoolView, LaunchWizardLaunchPath,
-    LaunchWizardLaunchRequest, LaunchWizardLiveSessionView, LaunchWizardMode,
-    LaunchWizardOptionView, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles,
-    LaunchWizardProgressStepView, LaunchWizardQuickStartView, LaunchWizardStartMethodKind,
+    LaunchWizardIssueMonitorPoolSetView, LaunchWizardIssueMonitorPoolView,
+    LaunchWizardIssuePlanView, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
+    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
+    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardProgressStepView,
+    LaunchWizardQuickStartView, LaunchWizardSkippedEnvironmentView, LaunchWizardStartMethodKind,
     LaunchWizardStartMethodView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
     LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
     ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
@@ -293,8 +299,8 @@ pub use protocol::{
     AgentPastContributorView, AgentRosterMemberView, AgentRosterView, AgentWorkFactsView,
     AppStateView, AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
     ContinueWorkOutcomeKind, CustomAgentErrorCode, FileAttachment, FocusCycleDirection,
-    FrontendEvent, GitHubRepositorySearchResultView, HubProjectView, HubStateView,
-    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
+    FrontendEvent, GitHubRepositorySearchResultView, HomeProjectConversationView, HubProjectView,
+    HubStateView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
     LocalAgentActivityAgentView, LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
     ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
     PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,

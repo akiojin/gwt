@@ -47,6 +47,7 @@ pub struct TestEnv {
     pub client: FakeIssueClient,
     pub cache_root: PathBuf,
     pub repo_path: PathBuf,
+    pub github_writer: Option<crate::session_launch::GithubWriter>,
     pub stdin: String,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -127,6 +128,7 @@ impl TestEnv {
             client: FakeIssueClient::new(),
             cache_root,
             repo_path,
+            github_writer: None,
             stdin: String::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -256,6 +258,9 @@ impl TestEnv {
 
 impl CliEnv for TestEnv {
     type Client = FakeIssueClient;
+    fn github_writer(&self) -> Option<crate::session_launch::GithubWriter> {
+        self.github_writer.clone()
+    }
     fn client(&self) -> &Self::Client {
         &self.client
     }

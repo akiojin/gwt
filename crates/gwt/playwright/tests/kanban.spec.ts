@@ -1250,7 +1250,6 @@ test.describe("Issue Bridge load recovery", () => {
       kind: "quick_register_issue",
       title: "Investigate flaky release gate",
       launch: true,
-      auto_merge: false,
     });
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
@@ -1395,6 +1394,39 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(sections.nth(1)).not.toHaveAttribute("open", "");
     await band.locator('[data-action="move-to-top"]').click();
 
+    // Issue #7729 AC-1 / AC-2: priority, the autonomous target and the
+    // sessions of the Issue are operated from its detail.
+    const operations = pane.locator(".issue-detail-operations");
+    await expect(operations).toHaveAttribute("aria-label", "Issue #3095 operations");
+    const priority = operations.locator('[data-operation="priority"]');
+    await expect(priority).toContainText(/Position \d+ of \d+ in the launch queue/);
+    await expect(priority.locator("[data-action]")).toHaveText(["Move to top", "↑ Move up", "↓ Move down"]);
+    const autonomous = operations.locator('[data-operation="autonomous"]');
+    await expect(autonomous).toContainText("Autonomous target");
+    await expect(autonomous).toContainText("Not included · Label: auto-merge");
+    await autonomous.getByRole("button", { name: "Include Issue #3095 in autonomous runs" }).click();
+    await expect(autonomous.locator('[data-action="set-autonomous-target"]')).toBeDisabled();
+    const includeRequest = await page.evaluate(() =>
+      window.__knowledgeLoadMessages.find((message) => message.kind === "set_issue_autonomous_target"));
+    expect(includeRequest).toMatchObject({ issue_number: 3095, enabled: true });
+    await page.evaluate((request) => {
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "knowledge_bridge_phase_updated", id: request.id, request_id: request.request_id, issue_number: 3095,
+        result: { kind: "ok", fresh_entry: {
+          number: 3095, title: "Autonomous Issue", state: "open", labels: ["auto-merge"],
+          autonomous_target: true, autonomous_target_label: "auto-merge",
+          is_spec: false, monitor_state: "queued", queue_position: 1, related_work_refs: [],
+        } },
+      });
+    }, includeRequest);
+    await expect(autonomous).toContainText("Included · Label: auto-merge");
+    await expect(autonomous.getByRole("button", { name: "Exclude Issue #3095 from autonomous runs" })).toBeEnabled();
+    const sessionsRow = operations.locator('[data-operation="sessions"]');
+    await expect(sessionsRow).toContainText("No current session · No past sessions");
+    const operationBox = await priority.boundingBox();
+    const paneBox = await pane.boundingBox();
+    expect(operationBox!.x + operationBox!.width).toBeLessThanOrEqual(paneBox!.x + paneBox!.width + 1);
+
     await issueSurface.locator('.knowledge-row[data-issue-number="3273"]').click();
     const gauge = pane.locator('.issue-detail-ac [role="progressbar"]');
     await expect(gauge).toHaveAttribute("aria-valuenow", "1");
@@ -1416,7 +1448,7 @@ test.describe("Issue Bridge load recovery", () => {
     expect(order.every((position) => position >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((left, right) => left - right));
 
-    // AC-24: "+ New" is a .modal-* dialog; Register sends auto_merge and closes.
+    // AC-24: "+ New" is a .modal-* dialog; Register sends the title and closes.
     await issueSurface.locator('[data-action="issue-new"]').click();
     const dialog = page.locator(".modal-backdrop.issue-new-popover.open .modal-shell");
     await expect(dialog).toBeVisible();
@@ -1427,7 +1459,9 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(dialog).toHaveCount(0);
     await issueSurface.locator('[data-action="issue-new"]').click();
     await dialog.locator('[data-role="issue-new-title"]').fill("Ship the popover");
-    await dialog.locator('[data-role="issue-new-auto-merge"]').check();
+    // Issue #7729 AC-1: auto-merge is the PR-side mark, not a registration option.
+    await expect(dialog.locator('input[type="checkbox"]')).toHaveCount(0);
+    await expect(dialog).not.toContainText(/auto-merge/i);
     await dialog.locator('[data-action="issue-new-register"]').click();
     await expect(dialog).toHaveCount(0);
 
@@ -1471,7 +1505,6 @@ test.describe("Issue Bridge load recovery", () => {
       kind: "quick_register_issue",
       title: "Ship the popover",
       launch: false,
-      auto_merge: true,
     });
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
@@ -3004,6 +3037,8 @@ async function installIssueBridgeBackend(
           phase: null,
           has_unknown_phase: false,
           is_spec: false,
+          autonomous_target: false,
+          autonomous_target_label: "auto-merge",
           monitor_state: "queued",
           queue_position: 2,
           exclusion_reason: null,

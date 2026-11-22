@@ -418,6 +418,10 @@ pub enum OwnerEvent {
         exit_confirmed: bool,
         raw_status: crate::WindowProcessStatus,
         exit_code: Option<u32>,
+        /// The owner's last provider hook state. The composed `status` cannot
+        /// tell a hook-observed Running from the launch placeholder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_status: Option<crate::WindowProcessStatus>,
     },
     WindowRemoved {
         id: String,

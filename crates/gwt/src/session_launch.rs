@@ -283,6 +283,153 @@ struct NamedIssueRecord {
     phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+}
+
+/// Who is writing a GitHub Issue or PR body. Issue #7707.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubWriter {
+    pub name: String,
+    pub detail: String,
+    pub role: GithubWriterRole,
+    pub session_id: String,
+    pub phase: String,
+}
+
+/// Visible signature role. Agents show a provider; a PM shows the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubWriterRole {
+    Agent,
+    Pm,
+    Issues,
+}
+
+impl GithubWriter {
+    fn visible_line(&self) -> String {
+        match self.role {
+            GithubWriterRole::Agent => format!("— {}（{}）", self.name, self.detail),
+            GithubWriterRole::Pm => format!("— PM {}（{}）", self.name, self.detail),
+            GithubWriterRole::Issues => "— gwt Issues".to_string(),
+        }
+    }
+
+    fn role_token(&self) -> &'static str {
+        match self.role {
+            GithubWriterRole::Agent => "agent",
+            GithubWriterRole::Pm => "pm",
+            GithubWriterRole::Issues => "issues",
+        }
+    }
+}
+
+/// Automatic settlement comments are written by gwt Issues, not by a pane.
+pub fn issues_github_writer() -> GithubWriter {
+    GithubWriter {
+        name: "gwt Issues".to_string(),
+        detail: "gwt".to_string(),
+        role: GithubWriterRole::Issues,
+        session_id: String::new(),
+        phase: "settlement".to_string(),
+    }
+}
+
+/// Build a writer from a named Session. `pm_host` selects the PM signature.
+pub fn github_writer_for_session(
+    session: &gwt_agent::Session,
+    pm_host: Option<&str>,
+) -> Option<GithubWriter> {
+    let name = session.agent_name.as_deref()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if let Some(host) = pm_host.map(str::trim).filter(|host| !host.is_empty()) {
+        return Some(GithubWriter {
+            name: name.to_string(),
+            detail: host.to_string(),
+            role: GithubWriterRole::Pm,
+            session_id: session.id.clone(),
+            phase: "write".to_string(),
+        });
+    }
+    let provider = session.display_name.trim();
+    if provider.is_empty() {
+        return None;
+    }
+    Some(GithubWriter {
+        name: name.to_string(),
+        detail: provider.to_string(),
+        role: GithubWriterRole::Agent,
+        session_id: session.id.clone(),
+        phase: "write".to_string(),
+    })
+}
+
+/// Resolve the ambient Session's writer. A missing name leaves the body unchanged.
+pub fn current_github_writer(repo: &Path) -> Option<GithubWriter> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    let pm_host = pm_host_for_repo(repo, &session.id);
+    github_writer_for_session(&session, pm_host.as_deref())
+}
+
+fn pm_host_for_repo(repo: &Path, session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let registered = crate::pm_registry::session_is_registered_pm(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
+        session_id,
+    ) || crate::pm_registry::pm_repository_key(repo).is_some_and(|key| {
+        crate::pm_registry::pm_registrations_for_repository(&key)
+            .iter()
+            .any(|record| record.registration.session_id == session_id)
+    });
+    if !registered {
+        return None;
+    }
+    let host = crate::process::current_hostname();
+    (!host.is_empty()).then_some(host)
+}
+
+/// Append one writer signature. The same writer is not added twice.
+pub fn stamp_github_body(body: &str, writer: Option<&GithubWriter>) -> String {
+    let Some(writer) = writer else {
+        return body.to_string();
+    };
+    if writer.name.trim().is_empty() || writer.detail.trim().is_empty() {
+        return body.to_string();
+    }
+    let visible = writer.visible_line();
+    let already_signed = body.lines().any(|line| line.trim() == visible)
+        || named_records_in(body)
+            .iter()
+            .any(|record| record.name == writer.name && record.provider == writer.detail);
+    if already_signed {
+        return body.to_string();
+    }
+    let record = NamedIssueRecord {
+        name: writer.name.clone(),
+        provider: writer.detail.clone(),
+        session_id: writer.session_id.clone(),
+        phase: writer.phase.clone(),
+        pr_number: None,
+        role: Some(writer.role_token().to_string()),
+    };
+    let metadata = serde_json::to_string(&record).expect("github writer metadata serializes");
+    let trimmed = body.trim_end();
+    if trimmed.is_empty() {
+        format!("{NAMED_ACTIVITY_PREFIX}{metadata} -->\n{visible}\n")
+    } else {
+        format!("{trimmed}\n\n{NAMED_ACTIVITY_PREFIX}{metadata} -->\n{visible}\n")
+    }
 }
 
 fn named_record(
@@ -299,17 +446,40 @@ fn named_record(
         session_id: session.id.clone(),
         phase: phase.to_string(),
         pr_number,
+        role: None,
     })
     .filter(|record| !record.name.is_empty())
 }
 
+fn named_records_in(body: &str) -> Vec<NamedIssueRecord> {
+    body.lines()
+        .filter_map(|line| {
+            let json = line
+                .trim()
+                .strip_prefix(NAMED_ACTIVITY_PREFIX)?
+                .strip_suffix(" -->")?;
+            serde_json::from_str(json).ok()
+        })
+        .collect()
+}
+
 fn named_record_from_body(body: &str) -> Option<NamedIssueRecord> {
-    body.lines().rev().find_map(|line| {
-        let json = line
-            .strip_prefix(NAMED_ACTIVITY_PREFIX)?
-            .strip_suffix(" -->")?;
-        serde_json::from_str(json).ok()
-    })
+    named_records_in(body).into_iter().next_back()
+}
+
+fn writer_from_record(record: &NamedIssueRecord) -> GithubWriter {
+    let role = match record.role.as_deref() {
+        Some("pm") => GithubWriterRole::Pm,
+        Some("issues") => GithubWriterRole::Issues,
+        _ => GithubWriterRole::Agent,
+    };
+    GithubWriter {
+        name: record.name.clone(),
+        detail: record.provider.clone(),
+        role,
+        session_id: record.session_id.clone(),
+        phase: record.phase.clone(),
+    }
 }
 
 fn record_named_comment<C: gwt_github::IssueClient + ?Sized>(
@@ -401,30 +571,32 @@ pub fn record_named_issue_activity<C: gwt_github::IssueClient + ?Sized>(
 
 /// Keep an immutable name/provider snapshot with the PR, independent of a live pane.
 pub fn with_named_pr_author(body: &str, session: Option<&gwt_agent::Session>) -> String {
-    let Some(record) = session.and_then(|session| named_record(session, "pr_author", None)) else {
+    let Some(session) = session else {
         return body.to_string();
     };
-    append_named_pr_author(body, &record)
+    if session.review_dispatch {
+        return body.to_string();
+    }
+    let repo = session
+        .project_state_root
+        .as_deref()
+        .unwrap_or(session.worktree_path.as_path());
+    let pm_host = pm_host_for_repo(repo, &session.id);
+    let Some(mut writer) = github_writer_for_session(session, pm_host.as_deref()) else {
+        return body.to_string();
+    };
+    writer.phase = "pr_author".to_string();
+    stamp_github_body(body, Some(&writer))
 }
 
 pub fn preserve_named_pr_author(body: &str, previous: &str) -> String {
-    let Some(record) =
-        named_record_from_body(previous).filter(|record| record.phase == "pr_author")
+    let Some(record) = named_records_in(previous)
+        .into_iter()
+        .find(|record| record.phase == "pr_author")
     else {
         return body.to_string();
     };
-    append_named_pr_author(body, &record)
-}
-
-fn append_named_pr_author(body: &str, record: &NamedIssueRecord) -> String {
-    if named_record_from_body(body).is_some_and(|existing| existing.name == record.name) {
-        return body.to_string();
-    }
-    let metadata = serde_json::to_string(record).expect("named PR metadata serializes");
-    format!(
-        "{body}\n\n{NAMED_ACTIVITY_PREFIX}{metadata} -->\nAgent: {} ({})\n",
-        record.name, record.provider
-    )
+    stamp_github_body(body, Some(&writer_from_record(&record)))
 }
 
 pub fn initialize_launch_session(
@@ -707,9 +879,137 @@ mod tests {
         session.agent_name = Some("Maya".into());
         let body = with_named_pr_author("Existing body", Some(&session));
         assert!(body.starts_with("Existing body"));
-        assert!(body.contains("Agent: Maya (Codex)"));
+        assert!(body.contains("— Maya（Codex）"));
+        assert!(body.contains("\"phase\":\"pr_author\""));
         assert_eq!(with_named_pr_author(&body, Some(&session)), body);
         assert_eq!(with_named_pr_author("legacy", None), "legacy");
+    }
+
+    fn agent_writer(name: &str, provider: &str) -> GithubWriter {
+        GithubWriter {
+            name: name.to_string(),
+            detail: provider.to_string(),
+            role: GithubWriterRole::Agent,
+            session_id: "session-1".to_string(),
+            phase: "write".to_string(),
+        }
+    }
+
+    #[test]
+    fn github_body_signature_names_the_agent_once_and_skips_an_unnamed_writer() {
+        let writer = agent_writer("サクラ", "Claude Code");
+        let stamped = stamp_github_body("本文", Some(&writer));
+        assert!(stamped.starts_with("本文\n\n<!-- gwt-agent-work "));
+        assert!(stamped.contains("\"role\":\"agent\""));
+        assert_eq!(
+            stamped
+                .lines()
+                .filter(|line| line.trim() == "— サクラ（Claude Code）")
+                .count(),
+            1
+        );
+        assert_eq!(stamp_github_body(&stamped, Some(&writer)), stamped);
+        let edited = stamped.replace("本文", "更新した本文");
+        assert_eq!(stamp_github_body(&edited, Some(&writer)), edited);
+        assert_eq!(stamp_github_body("人間の本文", None), "人間の本文");
+        assert_eq!(
+            stamp_github_body("空の担当者", Some(&agent_writer("", "Claude Code"))),
+            "空の担当者"
+        );
+    }
+
+    #[test]
+    fn github_body_signature_uses_the_pm_host_and_issues_writer() {
+        let pm = GithubWriter {
+            name: "ソノ・キムラ".to_string(),
+            detail: "ccs-win-125".to_string(),
+            role: GithubWriterRole::Pm,
+            session_id: "pm-1".to_string(),
+            phase: "write".to_string(),
+        };
+        let stamped = stamp_github_body("裁定", Some(&pm));
+        assert!(stamped.contains("\"role\":\"pm\""));
+        assert_eq!(
+            stamped
+                .lines()
+                .filter(|line| line.trim() == "— PM ソノ・キムラ（ccs-win-125）")
+                .count(),
+            1
+        );
+        let issues = issues_github_writer();
+        let settlement = stamp_github_body("close します", Some(&issues));
+        assert_eq!(
+            settlement
+                .lines()
+                .filter(|line| line.trim() == "— gwt Issues")
+                .count(),
+            1
+        );
+        assert!(settlement.contains("\"role\":\"issues\""));
+        assert_eq!(stamp_github_body(&settlement, Some(&issues)), settlement);
+        let both = stamp_github_body(&stamped, Some(&issues));
+        assert!(both.contains("— PM ソノ・キムラ（ccs-win-125）"));
+        assert!(both.contains("— gwt Issues"));
+    }
+
+    #[test]
+    fn current_github_writer_reads_the_named_session_and_pm_registration() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let _unset = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        assert!(current_github_writer(&repo).is_none());
+        drop(_unset);
+
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/issue-7707", gwt_agent::AgentId::GrokBuild);
+        session.agent_name = Some("テツヤ".into());
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save session");
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+        let writer = current_github_writer(&repo).expect("named session");
+        assert_eq!(writer.role, GithubWriterRole::Agent);
+        assert_eq!(writer.name, "テツヤ");
+        assert_eq!(writer.detail, "Grok Build");
+
+        session.agent_name = None;
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save unnamed session");
+        assert!(current_github_writer(&repo).is_none());
+
+        session.agent_name = Some("ソノ・キムラ".into());
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save pm session");
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        std::fs::create_dir_all(prefs_path.parent().unwrap()).unwrap();
+        crate::pm_registry::save_pm_prefs(
+            &prefs_path,
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: session.id.clone(),
+                    agent_id: "grok".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("save pm prefs");
+        let pm = current_github_writer(&repo).expect("pm session");
+        assert_eq!(pm.role, GithubWriterRole::Pm);
+        assert_eq!(pm.name, "ソノ・キムラ");
+        assert_eq!(pm.detail, crate::process::current_hostname());
+        assert!(!pm.detail.is_empty());
     }
 
     #[test]

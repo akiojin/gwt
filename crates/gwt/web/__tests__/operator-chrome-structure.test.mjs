@@ -1442,8 +1442,9 @@ test("Command Rail items are icon buttons with accessible names and flyout label
   const items = Array.from(
     document.querySelectorAll(".op-rail .op-rail__item:not([data-surface]):not(.op-rail__surface)"),
   );
-  // System keeps its notification and palette controls.
-  assert.equal(items.length, 2);
+  // System keeps its palette control; the bell moved to the shared header
+  // (Issue #7740).
+  assert.equal(items.length, 1);
   for (const item of items) {
     assert.ok(
       item.getAttribute("aria-label"),
@@ -1657,13 +1658,11 @@ test("surface changes preserve mounted terminal bodies without tab chrome", () =
   );
 });
 
-test("Project Bar brand prefix wraps GWT OPERATOR with bracket flank", () => {
+test("the shared header carries the brand as an element, not a pseudo-element (Issue #7740)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  // The pseudo-element content lives only in CSS, not in the DOM, so we
-  // assert the rule itself contains the bracket-flanked brand string.
-  const projectBarBefore = css.match(/\.project-bar::before\s*\{[\s\S]*?\}/);
-  assert.ok(projectBarBefore, "expected .project-bar::before rule");
-  assert.match(projectBarBefore[0], /content:\s*"⌜ GWT · OPERATOR ⌟"/);
+  // A phone gives the brand its own row, so it has to be a real box.
+  assert.equal(document.querySelector(".project-bar.app-head > .app-head__brand").textContent, "gwt");
+  assert.doesNotMatch(css, /\.project-bar::before/);
 });
 
 test("Mission Briefing splash has dismissible affordance (pointer-events + cursor)", () => {
@@ -1942,11 +1941,6 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
     {
       name: "runtime health popover",
       rule: componentsStyle.match(/\.op-runtime-health-detail\s*\{[^}]*\}/)?.[0],
-      token: "--z-popover",
-    },
-    {
-      name: "usage popover",
-      rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
       token: "--z-popover",
     },
     {
@@ -2463,7 +2457,7 @@ test("Launch wizard omits permission choices while preserving explicit provider 
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
     launchWizardSource,
-    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;/,
     "expected renderer to derive mutually exclusive Runtime/Confirm/setup gating",
   );
   assert.match(
@@ -2473,8 +2467,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     launchWizardSource,
-    /const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
-    "expected manual setup forms to be suppressed during Runtime confirmation",
+    /const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;/,
+    "expected manual setup forms to be suppressed during Runtime confirmation and the stages of an Issue launch (Issue #7771)",
   );
   assert.match(
     launchWizardSource,
@@ -2488,8 +2482,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     launchWizardSource,
-    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
-    "expected Branch controls to be part of setup forms only",
+    /if\s*\(\s*\(showSetupForms \|\| planStage === "plan"\)\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
+    "expected Branch controls to be part of setup forms, or of the plan stage of an Issue launch (Issue #7771)",
   );
   assert.match(
     launchWizardSource,
@@ -3630,36 +3624,19 @@ test("hydrated Launch Wizard has no Intake-specific copy override", () => {
   );
 });
 
-test("live Launch Wizard helper reuses only visible Work surfaces and owns only new ids", () => {
+test("live Launch Wizard helper opens the wizard without addressing or owning a window", () => {
+  const start = liveGwtHelperSource.indexOf("export async function openLiveLaunchWizardForBranch");
+  assert.notEqual(start, -1, "expected the shared live Launch Wizard helper");
+  const helper = liveGwtHelperSource.slice(start, liveGwtHelperSource.indexOf("\n}\n", start));
   assert.match(
-    liveGwtHelperSource,
-    /const preexistingWorkSurfaceIds = await liveWorkSurfaceIds\(page\);/,
-    "helper must snapshot every existing Work/legacy Branches id before create_window",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /async function topmostLiveWorkSurfaceId[\s\S]{0,400}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
-    "existing wizard targets must exclude hidden other-project Work surfaces",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /\.waitForFunction\(\(selector\) => \{[\s\S]{0,300}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
-    "materialized wizard targets must exclude hidden other-project Work surfaces",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /const createdWorkWindow = !preexistingWorkSurfaceIds\.has\(id\);/,
-    "cleanup ownership must come from the returned id, not from whether create_window was sent",
+    helper,
+    /kind:\s*"open_active_work_launch_wizard",\s*branch_name:\s*branchName/,
+    "helper must use the route that needs no Work/Branches window (Issue #7766)",
   );
   assert.doesNotMatch(
-    liveGwtHelperSource,
-    /const createdWorkWindow = !id;/,
-    "a hidden existing singleton must never be treated as helper-owned",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /cleanup:\s*async \(\) => \{\s*if \(!createdWorkWindow \|\| cleaned\) return;[\s\S]{0,700}?kind:\s*"close_window"/,
-    "cleanup must gate close_window on ownership of the returned id",
+    helper,
+    /"open_launch_wizard"|"create_window"|"close_window"/,
+    "the backend refuses an Issues window id, so the helper must not select, create, or close windows",
   );
 });
 
@@ -4852,26 +4829,12 @@ test("app.css must not redeclare display for the Workspace overview shell", () =
 
 // --- SPEC #3206 v2: notification center (bell + unread badge + drawer) ---
 
-test("SPEC #3206 v2: the System rail group carries the notification bell with an unread badge (FR-009)", () => {
-  const system = document.querySelector(".op-rail__group--system");
-  assert.ok(system, "System rail group exists");
-  const bell = system.querySelector('.op-rail__item[data-cmd="toggle-notifications"]');
-  assert.ok(bell, "bell lives in the System group and dispatches through data-cmd");
-  assert.equal(bell.id, "op-notifications-button");
-  assert.equal(bell.getAttribute("type"), "button");
-  assert.ok(bell.getAttribute("aria-label"), "icon-only button carries an aria-label");
-  assert.equal(bell.getAttribute("aria-controls"), "notification-center");
-  assert.equal(bell.getAttribute("aria-expanded"), "false", "drawer closed at rest");
-  const icon = bell.querySelector(".op-rail__icon");
-  assert.equal(icon?.getAttribute("aria-hidden"), "true");
-  const flyout = bell.querySelector(".op-rail__flyout");
-  assert.equal(flyout?.getAttribute("aria-hidden"), "true");
-  assert.ok(flyout.querySelector(".op-rail__flyout-label")?.textContent?.trim());
-  const badge = bell.querySelector(".op-rail__badge");
-  assert.ok(badge, "unread badge element is part of the bell");
-  assert.equal(badge.hidden, true, "badge hidden at rest (0 unread)");
-  assert.equal(badge.getAttribute("aria-hidden"), "true", "count is mirrored into the aria-label instead");
-  // FR-009 keeps the rail group order intact (no new group).
+test("SPEC #3206 v2: the notification bell lives in the shared header, not the rail (FR-009, Issue #7740)", () => {
+  // app-chrome.test.mjs owns the bell's own contract (id, count, aria state).
+  assert.equal(document.querySelector('.op-rail [data-cmd="toggle-notifications"]'), null);
+  assert.equal(document.querySelector(".op-rail #op-notifications-button"), null);
+  assert.ok(document.querySelector(".project-bar.app-head #app-head-nav"), "the header nav hosts the bell");
+  // The rail group order stays intact.
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
@@ -4889,7 +4852,7 @@ test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle,
     /if \(notificationCenter\.isOpen\(\)\) \{\s*\n\s*notificationCenter\.close\(\);\s*\n\s*event\.preventDefault\(\);/,
     "Esc closes the drawer through the shared keydown chain",
   );
-  assert.match(appSource, /import \{ createNotificationCenter, renderNotificationBell \} from "\/notification-center\.js";/);
+  assert.match(appSource, /import \{ createNotificationCenter \} from "\/notification-center\.js";/);
   assert.match(appSource, /const notificationCenter = createNotificationCenter\(\{\s*document/);
   assert.match(
     appSource,
@@ -4898,8 +4861,8 @@ test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle,
   );
   assert.match(
     appSource,
-    /notificationCenter\.onUnreadChange\(\(count, hasError\) =>[\s\S]{0,400}renderNotificationBell\(\{/,
-    "unread changes re-render the bell badge",
+    /const syncNotificationBell = \(\) => appChrome\.setNotifications\(\{[\s\S]{0,300}notificationCenter\.onUnreadChange\(syncNotificationBell\);\s*notificationCenter\.onOpenChange\(syncNotificationBell\);/,
+    "unread and drawer changes re-render the header bell",
   );
 });
 
@@ -4912,8 +4875,8 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
       defined.add(m[1]);
     }
   }
-  const blocks = frontendStyle.match(/\.(?:notification-center|op-rail__badge)[^{}]*\{[^}]*\}/g) ?? [];
-  assert.ok(blocks.length >= 8, `expected the .notification-center / .op-rail__badge rule family (got ${blocks.length})`);
+  const blocks = frontendStyle.match(/\.(?:notification-center|app-head__count)[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 8, `expected the .notification-center / .app-head__count rule family (got ${blocks.length})`);
   for (const block of blocks) {
     assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/, `raw hex in ${block.split("\n")[0]}`);
     assert.doesNotMatch(block, /\brgba?\(/, `raw rgb in ${block.split("\n")[0]}`);
@@ -4927,7 +4890,7 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
   assert.match(frontendStyle, /\.notification-center__item\[data-severity="critical"\]\s*\{[^}]*--color-state-blocked/);
   assert.match(frontendStyle, /\.notification-center__item\[data-severity="warning"\]\s*\{[^}]*--color-state-needs-input/);
   assert.match(frontendStyle, /\.notification-center__severity\[data-severity="critical"\]\s*\{[^}]*border-radius/);
-  assert.match(frontendStyle, /\.op-rail__badge\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
+  assert.match(frontendStyle, /\.app-head__count\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
   // history scrolls inside the drawer body
   assert.match(frontendStyle, /\.notification-center__body\s*\{[^}]*overflow-y:\s*auto/);
   // User ruling 2026-09-04: errors are read in ONE place, so the Issue
@@ -4967,4 +4930,13 @@ test("window navigation publishes the selected pane without changing layout", ()
   assert.match(body, /navigation:\s*\{/);
   assert.match(body, /windowId, notifyFocus, serial:/);
   assert.doesNotMatch(body, /activate_window_tab|splitSurfaces\.close|pendingFrameWindowId/);
+});
+
+// Issue #7646 AC-1: the agent ledger opens from the header. Issue #7740 moved
+// the entry into the shared header's nav (app-chrome.test.mjs).
+test("Issue #7646: the shared header opens the agent ledger", () => {
+  assert.equal(document.getElementById("open-agents-button"), null, "the old top-bar entry is gone");
+  assert.match(appSource, /agents: \(\) => openAgents\("ledger"\),/);
+  // Issue #7649: the rail's Agents is the project's agents screen.
+  assert.match(appSource, /surface === "agents" \? openAgents\("project"\) : openSurface\(surface\)/);
 });

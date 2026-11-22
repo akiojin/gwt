@@ -285,6 +285,27 @@ impl PmLaunchProfile {
         self
     }
 
+    /// Issue #7647 (SPEC #7007 item 26): the reasoning level and speed of the
+    /// agent serving as Project Manager, mapped to this profile's tool the way
+    /// an implementation session maps them. An unset trait keeps the
+    /// profile's value.
+    pub fn with_traits(mut self, traits: &crate::agent_names::AgentTraits) -> Self {
+        let mut candidate = crate::IssueMonitorLaunchProfile {
+            model: self.model.clone(),
+            reasoning: self.reasoning.clone(),
+            codex_speed: self.codex_speed.unwrap_or_default(),
+            fast_mode: self.fast_mode.unwrap_or(false),
+            ..crate::IssueMonitorLaunchProfile::for_tool(&self.agent_id)
+        };
+        crate::launch_wizard::apply_agent_traits(&mut candidate, traits);
+        self.reasoning = candidate.reasoning;
+        if traits.speed.is_some() {
+            self.codex_speed = Some(candidate.codex_speed);
+            self.fast_mode = Some(candidate.fast_mode);
+        }
+        self
+    }
+
     /// Canonicalize user-entered optional tuning without changing the agent
     /// identity or the legacy optional schema. Blank values mean provider
     /// defaults; non-blank values are persisted and launched without their UI
@@ -580,7 +601,27 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
     ))
 }
 
+/// Claude Code 2.1.328 hands pasted input to its hooks and native transcript
+/// inside `<pasted_content id="…">`, and gwt delivers every PM notification by
+/// paste (Issue #7785). Returns the pasted text and whatever follows it.
+pub fn split_provider_paste_envelope(text: &str) -> Option<(&str, &str)> {
+    let (id, rest) = text
+        .trim_start()
+        .strip_prefix("<pasted_content id=\"")?
+        .split_once("\">")?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let (pasted, rest) = rest.split_once(&format!("</pasted_content id=\"{id}\">"))?;
+    Some((pasted.trim_matches(['\r', '\n']), rest))
+}
+
 pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, String)> {
+    // Only a paste that is the whole prompt is the delivery itself.
+    let prompt = match split_provider_paste_envelope(prompt) {
+        Some((pasted, rest)) if rest.trim().is_empty() => pasted,
+        _ => prompt,
+    };
     let prompt = prompt.strip_suffix('\r').unwrap_or(prompt);
     let marker_start = prompt.rfind(" [gwt-delivery:")?;
     let body = &prompt[..marker_start];
@@ -8991,8 +9032,29 @@ mod tests {
         let legacy = format!("{body} [gwt-delivery:{operation_id}:{hash}]\r");
         assert_eq!(
             parse_protected_pm_delivery_prompt(&legacy),
+            Some((operation_id.to_string(), hash.clone()))
+        );
+        // Issue #7785: Claude Code 2.1.328 reports pasted input in this envelope.
+        let marked = legacy.trim_end_matches('\r');
+        let pasted =
+            format!("\n\n<pasted_content id=\"c676\">\n{marked}\n</pasted_content id=\"c676\">\n");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&pasted),
             Some((operation_id.to_string(), hash))
         );
+        for not_only_the_delivery in [
+            format!("{pasted}これは何？"),
+            format!("これは何？{pasted}"),
+            pasted.replace(
+                "</pasted_content id=\"c676\">",
+                "</pasted_content id=\"other\">",
+            ),
+        ] {
+            assert!(
+                parse_protected_pm_delivery_prompt(&not_only_the_delivery).is_none(),
+                "{not_only_the_delivery}"
+            );
+        }
     }
 
     #[test]

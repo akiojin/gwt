@@ -78,12 +78,20 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `RestartWindow` | 対象外 | — | 現在のウィンドウと出力履歴を保って保存済みペインを再開する。 |
 | `TerminalInput` | 一部対応 | `pane.send` | 自分のペインに一行を送信できる。GUI の対話的な端末入力はキー入力や改行をそのまま扱う。 |
 | `LoadPmConversation` | 読み取り | — | 正規 PM ペインに結び付く会話の履歴を表示用に読む。 |
+| `LoadHomeConversation` | 読み取り | — | ホームの会話に出す、開いている各プロジェクトの判断キューを読む。 |
+| `HomePmSend` | 対象外 | — | ホームからプロジェクトを指定して、そのプロジェクトの登録済み PM ペインへ文を送る。宛先のセッションはホストが解決する。 |
+| `GetFirstRunSetup` | 読み取り | — | 初回セットアップに出す、登録済みのツール、台帳のエージェント、PM の指名、セットアップの要否を読む。`refresh` は導入済みツールを検出し直す。 |
+| `SaveFirstRunSetup` | 対象外 | — | この端末の PM の指名（台帳のエージェント、または新しいエージェントの名前）を保存する。初回セットアップの画面からの操作に限る（Issue #7731）。 |
 | `LoadPmReports` | 一部対応 | `pm.report.list` | 永続化された PM レポートを取得できる。GUI は現在の PM ペインと表示 revision に応じた差分も返す。 |
 | `LoadPmRequestTask` | 対応 | `pm.request_tasks.read` | PM への依頼タスクとその詳細を取得する。 |
 | `ReopenPmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 再開するドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |
 | `CancelPmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 取消のドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |
 | `UpdatePmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 項目更新のドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |
 | `CompletePmRequestTask` | 一部対応 | `pm.request_tasks.apply` | 完了のドメイン操作を共有する。GUI は操作者として、envelope は正規 PM として処理する。 |
+| `HomeAnswerDecision` | 対応 | `decision.answer` | ホームからプロジェクトを指定して、そのプロジェクトの判断キューの判断へ回答する。PM が動いていなくても記録され、gwtd が待機セッションへ配送する。 |
+| `HomeDeferDecision` | 対応 | `decision.defer` | ホームから、判断を判断待ちのままキューの末尾へ回す。件数は変わらない。 |
+| `AnswerDecision` | 対応 | `decision.answer` | 判断キューの判断へ回答する。GUI は操作者として、envelope は正規 PM または利用者の直接呼び出しとして記録し、どちらも gwtd が待機セッションへ配送する。 |
+| `DeferDecision` | 対応 | `decision.defer` | 判断を判断待ちのままキューの末尾へ回す。件数は変わらない。 |
 | `PaneSendInput` | 対応 | `pane.send` | agent transport で呼び出し元自身のペインに入力を送る。 |
 | `PmPaneSendInput` | 対応 | `pm.message.send` | PM 権限を確認して同じプロジェクトの対象ペインへ送信する。 |
 | `AgentIssueMonitorScanNow` | GUI 内部 | — | agent transport 専用の即時スキャン要求。envelope の再キュー等が内部の通知経路として使う場合がある。 |
@@ -105,6 +113,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `RequestWorkAdvisory` | 読み取り | — | Start Work で重複作業を調べるための候補を取得する。 |
 | `SelectKnowledgeBridgeEntry` | GUI 内部 | — | Knowledge ウィンドウ内の選択とプレビューを更新する。 |
 | `UpdateKnowledgeBridgePhase` | 一部対応 | `issue.label` | ラベルを操作できる。GUI は一覧の変更を既存フェーズラベルの置換として扱う。 |
+| `SetIssueAutonomousTarget` | 対応 | `issue.label` | 課題を自律駆動の対象に含める／外す。対象の印である `auto-merge` ラベルを付け外しする。 |
 | `RunBranchCleanup` | 一部対応 | `branch.prune_merged` | マージ済みブランチの削除に対応する。GUI は候補選択、作業ツリーの削除オプションと進捗も扱う。 |
 | `RunWorkspaceCleanup` | 対象外 | — | ブランチに紐づく作業ツリーの除去を、利用中のセッションと削除オプションを確認して実行する。 |
 | `SyncBranchCleanup` | GUI 内部 | — | 再接続したブラウザへ実行中のクリーンアップの履歴を再配信する。 |
@@ -133,9 +142,18 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `SetIssueMonitorAutonomousMode` | 対応 | `issue.monitor.config.set` | プロジェクトの自動実行モードを切り替える。 |
 | `GetUpdateSettings` | 対応 | `update.settings.status` | 更新の適用設定と現在の状態を取得する。 |
 | `GetHookDoctor` | 対応 | `hook.doctor` | プロジェクトの hook を診断し、明示された場合に修復する。 |
+| `UpdateUserHooks` | 一部対応 | `hook.doctor` | 登録済みフックの監査結果は同じ診断で読める。スクリプトの登録と削除は、利用者が画面で明示した操作に限る。 |
 | `SetAutoApplyUpdates` | 対応 | `update.settings.set` | アプリ全体の自動更新適用を変更する。envelope は既存の承認契約を使う。 |
 | `GetIssueMonitorProfiles` | 対応 | `issue.monitor.profiles` | 保存済みの Issues 起動プロファイルを取得する。 |
 | `IssueMonitorProfilesSet` | 対応 | `issue.monitor.profiles.set` | Issues が使う起動プロファイル群を更新する。 |
+| `LoadThemes` | 読み取り | — | テーマ画面に出す、プロジェクトのテーマ（sub-issue を持つ Issue）と今日の完了数を読む（Issue #7643）。 |
+| `DeleteTheme` | 対象外 | — | テーマを削除する（テーマの GitHub Issue を not planned で閉じる）。テーマ画面の確認ダイアログを経る操作に限る（Issue #7643）。 |
+| `GetExecutionEnvironments` | 読み取り | — | 実行環境の定義、アカウント、開いているプロジェクトの優先度リストを取得する。 |
+| `AddExecutionEnvironment` | 対象外 | — | アカウントと経由ツールの組をホストに登録する。実行環境の画面からの操作に限る（Issue #7741）。 |
+| `UpdateExecutionEnvironment` | 対象外 | — | 実行環境の名前と実行時指定を変更する。実行環境の画面からの操作に限る（Issue #7741）。 |
+| `DeleteExecutionEnvironment` | 対象外 | — | 実行環境を削除し、各プロジェクトのリストから外す。確認画面を経る操作に限る（Issue #7741）。 |
+| `SetProjectExecutionEnvironments` | 対象外 | — | プロジェクトの利用可能な実行環境リストを優先度順で保存する。プロジェクト設定からの操作に限る（Issue #7741）。 |
+| `SetPmExecutionEnvironments` | 対象外 | — | この端末の PM 専用の実行環境リストを優先度順で保存する。空のリストは保存側で拒否する。アプリ設定からの操作に限る（Issue #7732）。 |
 | `SetIssueMonitorMaxActiveAgents` | 対応 | `issue.monitor.config.set` | Issues の同時稼働エージェント上限を変更する。 |
 | `SetIssueMonitorAllowedLabels` | 対応 | `issue.monitor.config.set` | Issues の対象ラベルを変更する。 |
 | `GetRepositoryLabels` | 読み取り | — | Issues の設定候補としてリポジトリのラベルを取得する。 |

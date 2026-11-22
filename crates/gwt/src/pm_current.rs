@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 mod reports;
 mod tasks;
-pub use reports::PmReportsReader;
+pub use reports::{load_decisions, PmReportsReader};
 pub use tasks::{task_detail, PmTaskDetail, PmTaskOverview};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

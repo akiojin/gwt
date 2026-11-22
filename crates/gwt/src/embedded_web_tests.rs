@@ -2976,8 +2976,10 @@ fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
         "expected Launch Wizard to derive a dedicated Runtime confirmation state",
     );
     assert!(
-        html.contains("const showSetupForms = showManualSetup && !isRuntimeConfirmation;"),
-        "expected setup form rendering to be disabled during Runtime confirmation",
+        html.contains(
+            "const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;"
+        ),
+        "expected setup form rendering to be disabled during Runtime confirmation and the stages of an Issue launch (Issue #7771)",
     );
     assert!(
             html.contains("renderWizardSummary();")
@@ -2986,7 +2988,8 @@ fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
             "expected Runtime confirmation to keep the read-only summary while hiding selection/setup rows",
         );
     assert!(
-        html.contains("showSetupForms && launchWizard.show_branch_controls !== false")
+        html.contains("(showSetupForms || planStage === \"plan\")")
+            && html.contains("&& launchWizard.show_branch_controls !== false")
             && html.contains("showSetupForms && launchWizard.show_linked_issue"),
         "expected branch and linked issue controls to be gated to setup forms \
              (linked issue uses dedicated show_linked_issue flag per SPEC-2014 FR-057)",
@@ -3992,7 +3995,7 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
         "SPEC #3206 FR-012: retired region CSS must not ship",
     );
 
-    // The replacement is wired: registered + imported, bell in the rail, and
+    // The replacement is wired: registered + imported, bell in the header, and
     // the autonomous fan-out records into the notification center history.
     assert!(
         root_js_module_assets()
@@ -4006,9 +4009,9 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
         "SPEC #3206 v2: app.js must import and mount the notification center on <body>",
     );
     assert!(
-        html.contains("id=\"op-notifications-button\"")
-            && html.contains("data-cmd=\"toggle-notifications\""),
-        "SPEC #3206 FR-009: the rail must carry the notification bell",
+        module_graph.contains("view.elementId = \"op-notifications-button\"")
+            && js.contains("notifications: () => notificationCenter.toggle()"),
+        "SPEC #3206 FR-009 / Issue #7740: the shared header must carry the notification bell",
     );
     assert!(
         js.contains("case \"issue_monitor_toast\"") && js.contains("kind: \"issue-monitor\""),

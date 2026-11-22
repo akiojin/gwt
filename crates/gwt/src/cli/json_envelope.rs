@@ -1719,6 +1719,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.health" => hook_health(params)?,
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
+        "decision.register" | "decision.list" | "decision.attach" | "decision.merge"
+        | "decision.answer" | "decision.defer" => {
+            decision_operation(envelope.operation.as_str(), params)?
+        }
         "discussion.update" => discussion_update(params)?,
         "discuss.resolve" => discuss_proposal(params, DiscussEnvelopeAction::Resolve)?,
         "discuss.park" => discuss_proposal(params, DiscussEnvelopeAction::Park)?,
@@ -2671,6 +2675,78 @@ fn issue_spec_create(params: &Map<String, Value>) -> Result<CliCommand, CliParse
         body: required_string(params, "body")?,
         labels: optional_string_vec(params, "labels")?,
     }))
+}
+
+/// Issue #7742: `decision.*`. Registration fields stay optional here so the
+/// queue itself reports every missing field of the kind in one refusal.
+fn decision_operation(
+    operation: &str,
+    params: &Map<String, Value>,
+) -> Result<CliCommand, CliParseError> {
+    use crate::cli::decision::DecisionCommand;
+    let command = match operation {
+        "decision.register" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "issue",
+                    "kind",
+                    "target",
+                    "question",
+                    "materials",
+                    "options",
+                    "recommendation",
+                    "reason",
+                ],
+                operation,
+            )?;
+            DecisionCommand::Register(Box::new(gwt_core::decision_queue::Registration {
+                issue: optional_u64(params, "issue")?,
+                kind: optional_string(params, "kind")?,
+                target: optional_string(params, "target")?,
+                question: optional_string(params, "question")?,
+                materials: optional_string(params, "materials")?,
+                options: optional_string_vec(params, "options")?,
+                recommendation: optional_string(params, "recommendation")?,
+                reason: optional_string(params, "reason")?,
+                session_id: None,
+            }))
+        }
+        "decision.list" => {
+            reject_unknown_params(params, &["issue", "include_closed"], operation)?;
+            DecisionCommand::List {
+                issue: optional_u64(params, "issue")?,
+                include_closed: optional_bool(params, "include_closed")?.unwrap_or(false),
+            }
+        }
+        "decision.attach" => {
+            reject_unknown_params(params, &["id"], operation)?;
+            DecisionCommand::Attach {
+                id: required_string(params, "id")?,
+            }
+        }
+        "decision.merge" => {
+            reject_unknown_params(params, &["into", "ids"], operation)?;
+            DecisionCommand::Merge {
+                into: required_string(params, "into")?,
+                ids: optional_string_vec(params, "ids")?,
+            }
+        }
+        "decision.answer" => {
+            reject_unknown_params(params, &["id", "answer"], operation)?;
+            DecisionCommand::Answer {
+                id: required_string(params, "id")?,
+                answer: required_string(params, "answer")?,
+            }
+        }
+        _ => {
+            reject_unknown_params(params, &["id"], operation)?;
+            DecisionCommand::Defer {
+                id: required_string(params, "id")?,
+            }
+        }
+    };
+    Ok(CliCommand::Decision(command))
 }
 
 fn memory_add(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {

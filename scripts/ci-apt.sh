@@ -578,7 +578,25 @@ recover_interrupted_install() {
 # its exit status. Only Ubuntu hosts count, so a dead third-party source on a
 # developer machine is not mistaken for a mirror outage.
 mirror_unreachable() {
-  grep -aqE "(Could not resolve|Temporary failure resolving|Could not connect to|Cannot initiate the connection to|Failed to connect to) '?[A-Za-z0-9.-]*ubuntu[.]com" "${ATTEMPT_LOG}"
+  grep -aqE "(Could not resolve|Temporary failure resolving|Could not connect to|Cannot initiate the connection to|Failed to connect to) '?[A-Za-z0-9.-]*ubuntu[.]com" "${ATTEMPT_LOG}" ||
+    failed_ubuntu_inrelease | grep -aqE "^[^ ]+ (Could not wait for server fd|SSL connection failed)"
+}
+
+# Issue #7717: apt names the host on the "Err:N <url> ... InRelease" line and
+# gives the reason on the next one. Prints "<url> <reason>" per failed fetch
+# from an Ubuntu host.
+failed_ubuntu_inrelease() {
+  awk '/^Err:[0-9]+ https?:\/\/[A-Za-z0-9.-]*ubuntu[.]com\/.* InRelease *$/ {
+    url = $2
+    if ((getline reason) > 0) { sub(/^ +/, "", reason); print url " " reason }
+  }' "${ATTEMPT_LOG}"
+}
+
+# Issue #7717 AC-2: no InRelease was fetched and the Ubuntu ones failed, so the
+# install that follows runs without an index.
+index_missing() {
+  ! grep -aqE '^(Hit|Get):[0-9]+ .* InRelease *$' "${ATTEMPT_LOG}" &&
+    [[ -n "$(failed_ubuntu_inrelease)" ]]
 }
 
 # Issue #7081 AC-5: the newest archive per package from the restored cache.
@@ -648,8 +666,13 @@ run_once() {
       return "${MIRROR_UNREACHABLE}"
     fi
     ((status == 0)) || return "${status}"
-    run_apt_get install -y "${PACKAGES[@]}" || return $?
-    return 0
+    local without_index=0
+    index_missing && without_index=1
+    run_apt_get install -y "${PACKAGES[@]}" || status=$?
+    if ((status != 0 && without_index)) && grep -aq '^E: Unable to locate package ' "${ATTEMPT_LOG}"; then
+      return "${MIRROR_UNREACHABLE}"
+    fi
+    return "${status}"
   fi
   run_apt_get "${ARGS[@]}" || status=$?
   if [[ " ${ARGS[*]} " == *" update "* ]] && mirror_unreachable; then

@@ -4074,6 +4074,15 @@ impl OwnerState {
                     let writers = self.pty_writers.clone();
                     let sender = self.sender.clone();
                     spawn_owner_worker(move || {
+                        // Issue #7701: human input outranks an unconfirmed wake.
+                        if let Err(error) = super::pm_delivery::release_retained_wake(
+                            &entry,
+                            None,
+                            super::pm_delivery::RetainedWakeRelease::HumanInput,
+                            std::time::Instant::now(),
+                        ) {
+                            tracing::warn!(%error, "PM wake input retention was not released");
+                        }
                         let result = match bytes {
                             Some(bytes) => super::agent_dispatch::write_current_raw_input(
                                 &writers, &id, &entry, &bytes,
@@ -8322,6 +8331,7 @@ impl OwnerState {
                         .lock()
                         .ok()
                         .and_then(|pane| pane.last_exit().map(|exit| exit.exit_code)),
+                    hook_status: runtime.hook_status,
                 });
             }
             let pm_lifecycle = runtime
@@ -10432,7 +10442,10 @@ impl OwnerState {
         if self.stopping || self.closing.contains_key(&id) {
             return;
         }
-        if event.source_event.as_deref() == Some("UserPromptSubmit") {
+        if matches!(
+            event.source_event.as_deref(),
+            Some("UserPromptSubmit" | "Stop")
+        ) {
             let captured = self.runtimes.get(&id).and_then(|runtime| {
                 let session = runtime.agent.as_ref()?.active.session_id.clone();
                 let entry = self.pty_writers.read().ok()?.get(&id).cloned()?;
@@ -10446,10 +10459,9 @@ impl OwnerState {
                 let sender = self.sender.clone();
                 let window_id = id.clone();
                 spawn_owner_worker(move || {
-                    let result = super::pm_delivery::release_acknowledged_wake(
-                        &root, &window_id, &session, &entry, None,
-                    )
-                    .map(|_| ());
+                    let result = super::pm_delivery::release_wake_at_turn_boundary(
+                        &root, &window_id, &session, &entry,
+                    );
                     let _ = sender.send(OwnerMessage::PmWakeAcknowledged { result });
                 });
             }
@@ -11578,7 +11590,7 @@ impl OwnerState {
             },
             None,
         );
-        let (raw_status, exit_code) = self
+        let (raw_status, exit_code, hook_status) = self
             .runtimes
             .get(&id)
             .filter(|runtime| runtime.incarnation == incarnation)
@@ -11594,9 +11606,10 @@ impl OwnerState {
                     } else {
                         None
                     },
+                    runtime.hook_status,
                 )
             })
-            .unwrap_or((status, None));
+            .unwrap_or((status, None, None));
         let _ = self.events.send(OwnerEvent::Status {
             id,
             incarnation,
@@ -11605,6 +11618,7 @@ impl OwnerState {
             exit_confirmed,
             raw_status,
             exit_code,
+            hook_status,
         });
     }
     fn pane_event(&mut self, event: PaneRuntimeEvent) {

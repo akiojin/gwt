@@ -68,14 +68,13 @@ test.describe("Issues candidate pool", () => {
       await page.locator('.op-rail [data-surface="agents"]').click();
       await sendLiveGwtEvent(page, { kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
       let roster = await freshRoster(rosterCursor);
-      const tool = page.getByLabel("Tool for new member", { exact: true });
+      // Issue #7647: the ledger asks for no tool, so a member that must be
+      // registered with one is added through the roster operation.
       const register = async (agentId: string) => {
-        await expect(tool.locator(`option[value="${agentId}"]`)).toHaveCount(1);
-        await tool.selectOption(agentId);
         const beforeIds = new Set(roster.members.map((member: any) => member.agent_member_id));
         const cursor = await sequence();
-        await page.getByLabel("Name for new member", { exact: true }).fill(`Candidate ${roster.revision}`);
-        await page.locator('.roster-capacity [data-action="add"]').click();
+        await sendLiveGwtEvent(page, { kind: "agent_roster", expected_revision: roster.revision,
+          action: { kind: "add", agent_id: agentId, name: `Candidate ${roster.revision}` } });
         const next = await freshRoster(cursor, roster.revision);
         const added = next.members.filter((member: any) => !beforeIds.has(member.agent_member_id));
         expect(added).toHaveLength(1);

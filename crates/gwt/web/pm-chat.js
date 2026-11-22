@@ -26,6 +26,38 @@ function reportDisplayText(report) {
   return lines.join('\n');
 }
 
+// One decision of the gwtd decision queue (Issue #7742), in the one shape
+// every surface that draws it reads: the Decide queue, this conversation and
+// the Home conversation. Options become numbered choices; a decision without
+// options keeps the free-form reply and carries its text.
+export function decisionItemFromQueue(item) {
+  return {
+    id: String(item.id),
+    question: item.question || 'Decision needed',
+    result: item.materials || null,
+    impact: item.impact ?? null,
+    owner: item.owner || (item.issue != null ? `Issue #${item.issue}` : null),
+    recommendation: item.recommendation ?? null,
+    reason: item.reason ?? null,
+    options: item.options?.length ? [...item.options] : null,
+    detailText: item.detail_text ?? null,
+    createdAt: item.created_at ?? null,
+    deferred: item.deferred_seq != null,
+  };
+}
+
+// A decision reads as a PM message: what happened, the question, the
+// recommendation with its reason, and the impact, as prose (design item 226).
+export function decisionMessageLines(item) {
+  if (item.detailText) return [item.detailText];
+  return [
+    item.result && item.result !== item.question ? item.result : null,
+    item.question,
+    item.recommendation ? `I recommend: ${item.recommendation}.${item.reason ? ` ${item.reason}` : ''}` : null,
+    item.impact,
+  ].filter(Boolean);
+}
+
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
@@ -33,6 +65,8 @@ export function createPmWindowModel() {
   let requestSequence = 0;
   let paneResultSequence = 0;
   const requests = new Map();
+  const validDecisions = decisions => Boolean(decisions) && Array.isArray(decisions.items)
+    && Number.isSafeInteger(decisions.waiting_count);
   const validVersion = version => version && typeof version.epoch === 'string' && version.epoch.length > 0
     && Number.isSafeInteger(version.revision) && version.revision > 0;
   function requestPmReports(windowId, resync = false) {
@@ -56,7 +90,8 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null, taskDetail: null, taskMutation: null, conversation: null, chatSend: null, paneResult: null };
+      requestTasks: null, requestTasksError: null, taskDetail: null, taskMutation: null, conversation: null, chatSend: null, paneResult: null,
+      decisions: null, decisionRequest: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -105,6 +140,9 @@ export function createPmWindowModel() {
           requestTasks: taskError ? previous.requestTasks : (taskOverview || null),
           requestTasksError: taskError,
           current: currentFailed ? previous.current : (event.current || null),
+          // The gwtd decision queue (Issue #7742). An unreadable queue sends
+          // none: the last applied queue stays.
+          decisions: validDecisions(event.decisions) ? event.decisions : previous.decisions,
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
             content: report.structured ? { type: 'text', body: reportDisplayText(report) }
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
@@ -113,6 +151,15 @@ export function createPmWindowModel() {
         if (next.taskDetail?.data && (taskError || (taskOverview?.revision > next.taskDetail.revision))) {
           next.taskDetail = { ...next.taskDetail, stale: true };
         }
+      } else if (event.kind === 'decision_result') {
+        // The result carries the queue as it is after the operation, so the
+        // removal or the new order shows without waiting for the next poll.
+        const request = previous?.decisionRequest;
+        if (request?.status !== 'pending' || event.request_id !== request.requestId) return state;
+        next = { ...next,
+          decisions: event.ok && validDecisions(event.decisions) ? event.decisions : previous.decisions,
+          decisionRequest: { ...request, status: event.ok ? 'ok' : 'failed',
+            error: event.ok ? null : event.error || 'The decision queue refused the request.' } };
       } else if (event.kind === 'pm_request_task') {
         const mutation = previous?.taskMutation;
         const selected = previous?.taskDetail;
@@ -222,6 +269,34 @@ export function createPmWindowModel() {
     'The PM connection is not connected. Reconnect, then send again.');
   const expirePmChatSend = (windowId, sequence = null) => failPendingChatSend(windowId,
     'Delivery was not confirmed. Check the execution log before sending again.', sequence);
+  // Answers and deferrals go to the gwtd decision queue, never through the
+  // PM pane. One decision request is in flight per window.
+  function requestPmDecision(windowId, decisionId, action, answer) {
+    const previous = model.read().windows[windowId];
+    if (!previous?.sessionId || !decisionId || previous.decisionRequest?.status === 'pending') return null;
+    if (action === 'answer' && !String(answer ?? '').trim()) return null;
+    const requestId = ++requestSequence;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      decisionRequest: { requestId, decisionId, action, status: 'pending', error: null },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return action === 'answer'
+      ? { kind: 'answer_decision', id: windowId, request_id: requestId, decision_id: decisionId, answer: String(answer).trim() }
+      : { kind: 'defer_decision', id: windowId, request_id: requestId, decision_id: decisionId };
+  }
+  const requestPmDecisionAnswer = (windowId, decisionId, answer) => requestPmDecision(windowId, decisionId, 'answer', answer);
+  const requestPmDecisionDefer = (windowId, decisionId) => requestPmDecision(windowId, decisionId, 'defer');
+  function failPendingDecisionRequest(windowId, error, requestId = null) {
+    const previous = model.read().windows[windowId], request = previous?.decisionRequest;
+    if (request?.status !== 'pending' || (requestId !== null && requestId !== request.requestId)) return false;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      decisionRequest: { ...request, status: 'failed', error },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return true;
+  }
+  const markPmDecisionUnavailable = windowId => failPendingDecisionRequest(windowId,
+    'The connection is not available. Reconnect, then try again.');
+  const expirePmDecision = (windowId, requestId = null) => failPendingDecisionRequest(windowId,
+    'The decision queue did not confirm the request. Reload, then check the decision before trying again.', requestId);
   function requestPmConversation(windowId) {
     return model.read().windows[windowId]?.sessionId ? { kind: 'load_pm_conversation', id: windowId } : null;
   }
@@ -278,11 +353,11 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, requestPmDecisionAnswer, requestPmDecisionDefer, markPmDecisionUnavailable, expirePmDecision, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onTaskReopen = () => {}, onSend = () => {}, onOpenTerminal = () => false,
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onTaskReopen = () => {}, onSend = () => {}, onAnswerDecision = () => {}, onDeferDecision = () => {}, onOpenTerminal = () => false,
   onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
@@ -336,14 +411,16 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     onReviewDecisions: () => showView('decide'),
     onViewProgress: () => showView('progress'),
   });
-  // SPEC #7007 T-010: the Decide island aggregates only decision reports.
-  // Answers travel the existing PM reply path (the chat send); the view
-  // tracks the in-flight answer and the answers this pane confirmed during
-  // the session, but never marks a decision resolved — only a later reports
-  // snapshot can retire it.
+  // SPEC #7007 T-010 / T-023, Issue #7742: waiting decisions are read from
+  // the gwtd decision queue and drawn in exactly two places — the Decide
+  // island (the queue) and the PM conversation, where each one reads as a PM
+  // message. Answers and deferrals are queue operations: gwtd delivers an
+  // answer straight to the waiting session, and the queue it returns is the
+  // only thing that retires or reorders a decision here.
   const taskDecisions = createTaskDecisions({ document,
     onAnswerDecision: (item, optionIndex) => answerDecision(item, optionIndex),
-    onReplyInChat: () => { showView('chat'); draft.focus(); },
+    onReplyInChat: item => replyToDecision(item),
+    onDeferDecision: item => deferDecision(item),
   });
   // SPEC #7007 T-012: the Progress island reads the same window snapshot
   // as Home and Decide. Its detail action reuses the existing task detail
@@ -374,11 +451,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const chatLog = element('div', 'pm-chat__conversation');
   chatLog.setAttribute('role', 'log');
   chatLog.setAttribute('aria-label', 'PM conversation messages');
-  const chatDecisionReports = element('section', 'pm-chat__decision-reports');
-  chatDecisionReports.setAttribute('aria-label', 'Decision reports');
-  const chatDecisionList = element('div', 'pm-chat__decision-list');
-  chatDecisionReports.append(element('h2', '', 'Decision reports'),
-    element('p', '', 'Saved PM reports, separate from the native conversation.'), chatDecisionList);
   const composer = element('form', 'pm-chat__composer');
   composer.setAttribute('aria-label', 'Message PM');
   const draft = element('textarea', 'pm-chat__draft');
@@ -389,7 +461,15 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   sendButton.type = 'submit';
   const composerStatus = element('p', 'pm-chat__composer-status');
   composerStatus.setAttribute('aria-live', 'polite');
-  composer.append(draft, sendButton, composerStatus);
+  // A free-form answer to one decision: while a reply target is set, the
+  // composer's next message is recorded as the answer to that decision.
+  const replyChip = element('div', 'pm-chat__reply-target');
+  replyChip.hidden = true;
+  const replyLabel = element('span', 'pm-chat__reply-target-label');
+  const cancelReply = element('button', '', 'Cancel reply');
+  cancelReply.type = 'button';
+  replyChip.append(replyLabel, cancelReply);
+  composer.append(replyChip, draft, sendButton, composerStatus);
   chatBody.append(chatActions, chatNotice, chatLog, composer);
   const tasksBody = element('section', 'pm-chat__tasks');
   tasksBody.setAttribute('aria-label', 'Request tasks');
@@ -460,7 +540,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const filter = element('label', 'pm-chat__filter', 'Report kind');
   const kindSelect = element('select', '');
   kindSelect.setAttribute('aria-label', 'Report kind');
-  const kindLabels = { all: 'All reports', qa: 'Q&A', progress: 'Progress', decision: 'Decision', blocker: 'Blocker' };
+  const kindLabels = { all: 'All reports', qa: 'Q&A', progress: 'Progress', blocker: 'Blocker' };
   for (const [kind, label] of Object.entries(kindLabels)) {
     const option = element('option', '', label);
     option.value = kind;
@@ -545,10 +625,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   // Derive the Home island state from the same window snapshot the other
   // views read, so every surface reports the same numbers (SPEC #7007 AC-6).
   // Unknown stays unknown: decisions are counted only once reports have
-  // loaded, and no completed-today source exists yet, so it stays null.
+  // loaded. What was completed today is shown on the Themes screen, never
+  // on this entry screen (Issue 7643).
   function renderHome(state, decisions) {
     const overview = state?.requestTasks ?? null;
-    taskHome.receive({ overview, decisionsWaiting: decisions.waiting, completedToday: null,
+    taskHome.receive({ overview, decisionsWaiting: decisions.waiting,
       stale: Boolean(state?.requestTasksError) && overview !== null });
   }
   // Progress reads the same snapshot: the request-task overview plus the
@@ -576,92 +657,81 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (disposed) return;
     taskLog.receive(groups || []);
   }
-  // Decide aggregates the same decision reports Home counts (AC-6), newest
-  // first. Typed packets expose their options; untyped decision reports keep
-  // the plain reply path and carry their display text instead.
-  const answeredDecisions = new Map();
+  // Decide lists the gwtd decision queue in the order the backend returns
+  // it (newest first, deferred decisions at the tail). Typed options become
+  // numbered choices; a decision without options keeps the free-form reply.
   let pendingDecision = null;
   let decisionSendError = null;
-  let observedPaneReceipt = 0;
+  let settledDecisionRequest = 0;
+  // The composer draft that is travelling as a free-form answer.
+  let draftAnswer = null;
+  let deferFromChat = false;
+  let deferNotice = null;
+  let deferCount = 0;
+  let replyTarget = null;
+  let latestDecisions = { items: [], answered: {}, waiting: null };
   const chatDecisionRows = new Map();
   const decisionControls = new WeakMap();
   function decisionItems(state) {
-    return (state?.reports || []).filter(report => report.kind === 'decision').map(report => {
-      const summary = report.structured?.summary ?? null;
-      const packet = summary?.decision ?? null;
-      const displayText = reportDisplayText(report);
-      return {
-        id: String(report.id),
-        question: packet?.question || summary?.result || displayText.split('\n')[0] || 'Decision needed',
-        result: summary?.result ?? null,
-        impact: summary?.impact ?? null,
-        owner: summary?.owner ?? null,
-        recommendation: packet?.recommendation ?? null,
-        reason: packet?.reason ?? null,
-        options: packet ? [...packet.options] : null,
-        detailText: packet ? null : displayText,
-        createdAt: report.created_at ?? null,
-      };
-    }).reverse();
+    return (state?.decisions?.items || []).map(decisionItemFromQueue);
   }
-  function observeDecisionSend(send) {
-    if (!pendingDecision || !send || send.sequence <= pendingDecision.afterSequence) return;
-    if (send.status === 'sent') {
-      answeredDecisions.set(pendingDecision.id, pendingDecision.optionText);
-      pendingDecision = null;
-      decisionSendError = null;
-    } else if (send.status === 'failed') {
-      decisionSendError = { id: pendingDecision.id,
-        message: send.error || 'The answer could not be sent.' };
-      pendingDecision = null;
+  // The queue's own result settles an answer or a deferral exactly once.
+  function observeDecisionRequest(request, items) {
+    pendingDecision = request?.status === 'pending' ? { id: request.decisionId, action: request.action } : null;
+    if (!request || request.status === 'pending' || request.requestId === settledDecisionRequest) return null;
+    settledDecisionRequest = request.requestId;
+    const fromDraft = draftAnswer === request.decisionId;
+    draftAnswer = null;
+    if (request.status !== 'ok') {
+      decisionSendError = { id: request.decisionId, message: request.error
+        || (request.action === 'defer' ? 'The decision could not be deferred.' : 'The answer could not be sent.') };
+      return null;
     }
-  }
-  // A result without a correlation ID never settles the composer send, but
-  // its window receipt still settles a Decide answer waiting on it: the pane
-  // serializes sends, so the first result receipted after the answer was
-  // sent is that answer's outcome.
-  function observePaneResult(result) {
-    if (!result || result.receipt <= observedPaneReceipt) return;
-    observedPaneReceipt = result.receipt;
-    if (!pendingDecision || result.receipt <= pendingDecision.afterReceipt) return;
-    if (result.ok) {
-      answeredDecisions.set(pendingDecision.id, pendingDecision.optionText);
-      pendingDecision = null;
-      decisionSendError = null;
-    } else {
-      decisionSendError = { id: pendingDecision.id,
-        message: result.error || 'The answer could not be sent.' };
-      pendingDecision = null;
+    decisionSendError = null;
+    if (request.action === 'defer') {
+      const others = items.some(item => item.id !== request.decisionId);
+      deferCount += 1;
+      deferNotice = { id: request.decisionId, message: others
+        ? 'Kept waiting and moved to the end of the queue.'
+        : 'Kept waiting. No other decision is waiting.' };
+      return others && deferFromChat ? 'focus-next' : null;
     }
+    deferNotice = { id: null, message: 'Answer sent. The waiting session continues with it.' };
+    if (fromDraft) draft.value = '';
+    if (replyTarget === request.decisionId) replyTarget = null;
+    return null;
   }
-  // SPEC #5016 AC-HS1: the one derivation of the waiting-decision count.
-  // A decision answered in this session no longer waits: Home reads this
-  // count, and Decide lists the same items with the same answered map.
+  // Issue #7742 AC-4: the waiting count is the queue's own `waiting_count`,
+  // taken as-is. Home, Decide and the shared attention model all read this
+  // one value; nothing here recounts the items.
   function deriveDecisions(state) {
-    observeDecisionSend(state?.chatSend ?? null);
-    observePaneResult(state?.paneResult ?? null);
     const items = decisionItems(state);
-    const answered = {};
-    for (const [id, optionText] of answeredDecisions) answered[id] = optionText;
-    const waiting = state?.loaded ? items.filter(item => !answered[item.id]).length : null;
-    return { items, answered, waiting };
+    const effect = observeDecisionRequest(state?.decisionRequest ?? null, items);
+    const waiting = state?.loaded && state.decisions ? state.decisions.waiting_count : null;
+    if (!items.some(item => item.id === replyTarget)) replyTarget = null;
+    latestDecisions = { items, answered: {}, waiting, effect };
+    return latestDecisions;
   }
   function renderDecisionSurfaces(state) {
     const decisions = deriveDecisions(state);
     renderHome(state, decisions);
     renderDecisions(state, decisions);
-    renderReportDecisions(decisions);
+    renderChatDecisions(decisions);
+    renderReplyTarget(decisions);
     publishWaitingDecisions(decisions);
+    if (decisions.effect === 'focus-next') {
+      chatDecisionRows.get(decisions.items[0]?.id)?.querySelector('button:not([disabled])')?.focus();
+    }
     return decisions;
   }
-  // SPEC #5016 HSK: the shared attention model gets the same waiting set
-  // that Home counts; `null` while reports are not loaded.
-  function publishWaitingDecisions({ items, answered, waiting }) {
-    const ids = waiting == null ? null : items.filter(item => !answered[item.id]).map(item => item.id);
-    const key = JSON.stringify(ids);
+  // SPEC #5016 HSK: the shared attention model gets the same waiting count
+  // that Home shows; `null` while the queue is not loaded.
+  function publishWaitingDecisions({ items, waiting }) {
+    const ids = waiting == null ? null : items.map(item => item.id);
+    const key = JSON.stringify([waiting, ids]);
     if (key === publishedWaiting) return;
     publishedWaiting = key;
-    onDecisionsWaiting(ids && { waiting: ids.length, ids });
+    onDecisionsWaiting(ids && { waiting, ids });
   }
   // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
   // shared attention model; `null` when this window has not observed them.
@@ -672,52 +742,81 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     publishedReviews = key;
     onReviewAttention(items);
   }
-  function renderDecisions(state, { items, answered }) {
+  function renderDecisions(state, { items, answered, waiting }) {
     taskDecisions.receive({
       loaded: Boolean(state?.loaded),
       error: state?.error ?? null,
       decisions: items,
-      // The island's in-flight flag follows the answer's own lifecycle; the
-      // shared composer send slot is guarded separately in answerDecision.
+      waiting,
       sending: pendingDecision != null,
-      pendingId: pendingDecision?.id ?? null,
+      pendingId: pendingDecision?.action === 'answer' ? pendingDecision.id : null,
       sendError: decisionSendError,
       answered,
+      deferNotice: deferNotice?.message ?? null,
+      deferCount,
     });
   }
-  function answerDecision(item, optionIndex) {
-    if (disposed || answeredDecisions.has(item.id) || chatSend?.status === 'pending' || pendingDecision) return;
-    const optionText = item.options?.[optionIndex];
-    if (optionText == null) return;
-    pendingDecision = { id: item.id, optionText, afterSequence: chatSend?.sequence ?? 0,
-      afterReceipt: latestState?.paneResult?.receipt ?? 0 };
+  // Every answer — a numbered option or a free-form reply — is one queue
+  // operation, so both surfaces settle the same decision the same way.
+  function sendDecisionAnswer(item, answerText, fromDraft = false) {
     decisionSendError = null;
-    onSend(`Answer to "${item.question}": ${optionIndex + 1}. ${optionText}`);
-    const send = latestState?.chatSend ?? null;
-    if (pendingDecision && (!send || send.sequence <= pendingDecision.afterSequence
-      || send.status !== 'pending')) {
-      // The reply path refused the send (no session, or another send already
-      // in flight): keep the decision actionable and say why on its card.
+    deferNotice = null;
+    draftAnswer = fromDraft ? item.id : null;
+    if (onAnswerDecision(item.id, answerText) === false) {
+      // The request was not issued (no session, or another one in flight):
+      // keep the decision actionable and say why on its card.
+      draftAnswer = null;
       decisionSendError = { id: item.id,
         message: 'The answer could not be sent. Reconnect, then try again.' };
-      pendingDecision = null;
     }
     renderDecisionSurfaces(latestState);
+    syncComposer();
   }
-  function replyInChat() {
+  function answerDecision(item, optionIndex) {
+    if (disposed || pendingDecision) return;
+    const optionText = item.options?.[optionIndex];
+    if (optionText == null) return;
+    sendDecisionAnswer(item, `${optionIndex + 1}. ${optionText}`);
+  }
+  function replyToDecision(item) {
     if (disposed || latestState?.chatSend?.status === 'pending' || pendingDecision) return;
+    replyTarget = item.id;
+    renderReplyTarget(latestDecisions);
     showChat();
     draft.focus();
   }
+  function clearReplyTarget() {
+    if (disposed) return;
+    replyTarget = null;
+    renderReplyTarget(latestDecisions);
+    draft.focus();
+  }
+  function renderReplyTarget({ items }) {
+    const target = items.find(item => item.id === replyTarget);
+    const text = target ? `Replying to: ${target.question}` : '';
+    if (replyLabel.textContent !== text) replyLabel.textContent = text;
+    replyChip.hidden = !target;
+  }
+  // Deferring is not an answer: the queue keeps the decision waiting and
+  // moves it to its tail, so the next one comes first on both surfaces.
+  function deferDecision(item, fromChat = false) {
+    if (disposed || pendingDecision) return;
+    decisionSendError = null;
+    deferNotice = null;
+    deferFromChat = fromChat;
+    if (onDeferDecision(item.id) === false) {
+      decisionSendError = { id: item.id,
+        message: 'The decision could not be deferred. Reconnect, then try again.' };
+    }
+    renderDecisionSurfaces(latestState);
+  }
   function renderDecisionControls(controls, item, answered) {
-    const busy = pendingDecision != null || latestState?.chatSend?.status === 'pending';
+    const busy = pendingDecision != null;
     const error = decisionSendError?.id === item.id ? decisionSendError.message : null;
-    const itemDigest = JSON.stringify(item);
+    // Deferral only reorders the queue; it must not rebuild a focused choice.
+    const itemDigest = JSON.stringify({ ...item, deferred: null });
     let view = decisionControls.get(controls);
     if (!view || view.itemDigest !== itemDigest) {
-      const nodes = [];
-      if (item.recommendation) nodes.push(element('p', '',
-        `Recommended: ${item.recommendation}${item.reason ? ` — ${item.reason}` : ''}`));
       const status = element('p', '');
       status.setAttribute('role', 'status');
       status.setAttribute('tabindex', '-1');
@@ -731,11 +830,14 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
         button.addEventListener('click', () => answerDecision(item, index));
         options.append(button);
       }
-      const reply = element('button', '', 'Other: reply in chat');
+      const reply = element('button', '', 'Other: write a reply');
       reply.type = 'button';
-      reply.addEventListener('click', replyInChat);
-      options.append(reply);
-      controls.replaceChildren(...nodes, status, alert, retry, options);
+      reply.addEventListener('click', () => replyToDecision(item));
+      const later = element('button', '', 'Decide later');
+      later.type = 'button';
+      later.addEventListener('click', () => deferDecision(item, true));
+      options.append(reply, later);
+      controls.replaceChildren(status, alert, retry, options);
       view = { itemDigest, status, alert, retry, options, busy: false, focusedControl: null };
       decisionControls.set(controls, view);
     }
@@ -746,7 +848,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     // started here, while leaving a deliberate move to another control alone.
     const focusStayed = ownsFocus || (view.focusedControl && (!active || active === document.body));
     const statusText = answered ? `Answer sent: ${answered}`
-      : pendingDecision?.id === item.id ? 'Sending answer…' : '';
+      : pendingDecision?.id === item.id && pendingDecision.action === 'answer' ? 'Sending answer…'
+        : deferNotice?.id === item.id ? deferNotice.message : '';
     if (view.status.textContent !== statusText) view.status.textContent = statusText;
     if (view.alert.textContent !== (error || '')) view.alert.textContent = error || '';
     view.alert.hidden = view.retry.hidden = !error;
@@ -766,35 +869,47 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     }
     view.busy = busy;
   }
-  function renderReportDecisions({ items, answered }) {
-    chatDecisionReports.hidden = !items.length;
-    if (items.length && chatDecisionReports.parentNode !== chatLog) chatLog.append(chatDecisionReports);
-    else if (!items.length) chatDecisionReports.remove();
+  // The conversation shows each decision as a PM message: what happened,
+  // the question, the recommendation with its reason and the impact read as
+  // prose, and the choices are quick replies inside that message.
+  // Home shows the same decisions of every open project as one conversation
+  // (SPEC #7007 T-021, Issue #7639); Decide stays the queue side.
+  function decisionMessage(item) {
+    const row = element('article', 'pm-chat__bubble pm-chat__bubble--assistant pm-chat__decision');
+    row.dataset.decisionId = item.id;
+    row.setAttribute('aria-label', 'PM decision');
+    row.append(element('p', 'pm-chat__decision-meta'), element('div', 'pm-chat__decision-text'),
+      element('div', 'pm-chat__decision-controls'));
+    return row;
+  }
+  function renderChatDecisions({ items, answered }) {
     const nodes = items.map(item => {
       let row = chatDecisionRows.get(item.id);
       if (!row) {
-        row = element('div', 'pm-chat__decision-report');
-        row.dataset.decisionId = item.id;
-        row.append(element('h3', ''), element('p', ''), element('div', 'pm-chat__decision-controls'));
+        row = decisionMessage(item);
         chatDecisionRows.set(item.id, row);
       }
-      if (row.firstChild.textContent !== item.question) row.firstChild.textContent = item.question;
-      const summary = row.children[1];
-      if (summary.textContent !== (item.result || '')) summary.textContent = item.result || '';
-      summary.hidden = !item.result;
+      const meta = answered[item.id] ? 'Decision answered' : item.deferred ? 'Decision waiting · Deferred' : 'Decision waiting';
+      if (row.firstChild.textContent !== meta) row.firstChild.textContent = meta;
+      const lines = decisionMessageLines(item);
+      const text = row.children[1];
+      if (text.dataset.digest !== JSON.stringify(lines)) {
+        text.dataset.digest = JSON.stringify(lines);
+        text.replaceChildren(...lines.map(line => element('p', '', line)));
+      }
       renderDecisionControls(row.lastChild, item, answered[item.id]);
       return row;
     });
-    if (nodes.length !== chatDecisionList.children.length
-      || nodes.some((node, index) => chatDecisionList.children[index] !== node)) chatDecisionList.replaceChildren(...nodes);
-    const ids = new Set(items.map(item => item.id));
-    for (const id of chatDecisionRows.keys()) if (!ids.has(id)) chatDecisionRows.delete(id);
-    // Answer-only updates do not change report content. Refresh its controls
-    // independently so Copy, disclosure and reading position stay intact.
-    for (const row of transcript.children) {
-      const item = items.find(item => item.id === row.dataset.reportId);
-      const controls = row.querySelector('.pm-chat__decision-controls');
-      if (item && controls) renderDecisionControls(controls, item, answered[item.id]);
+    for (const [id, row] of chatDecisionRows) {
+      if (nodes.includes(row)) continue;
+      row.remove();
+      chatDecisionRows.delete(id);
+    }
+    // Move only the rows that are out of place, so a focused choice stays put.
+    let cursor = [...chatLog.children].find(node => node.classList.contains('pm-chat__decision')) || null;
+    for (const node of nodes) {
+      if (node === cursor) cursor = cursor.nextSibling;
+      else chatLog.insertBefore(node, cursor);
     }
   }
   function renderTasks(state) {
@@ -997,10 +1112,12 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       nodes.push(bubbleFor(messages[end - 1]));
       start = end;
     }
-    // Keep the report-derived section attached while replacing native messages;
-    // native order stays intact and a focused report control keeps its focus.
-    for (const node of [...chatLog.children]) if (node !== chatDecisionReports) node.remove();
-    for (const node of nodes) chatLog.insertBefore(node, chatDecisionReports.parentNode === chatLog ? chatDecisionReports : null);
+    // Keep the decision messages attached while replacing native messages;
+    // native order stays intact and a focused choice keeps its focus.
+    const decisionRows = new Set(chatDecisionRows.values());
+    for (const node of [...chatLog.children]) if (!decisionRows.has(node)) node.remove();
+    const firstDecision = chatLog.firstChild;
+    for (const node of nodes) chatLog.insertBefore(node, firstDecision);
     chatNotice.textContent = !conversation ? 'Loading PM conversation…'
       : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
         : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
@@ -1008,11 +1125,14 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (following) chatLog.scrollTop = chatLog.scrollHeight;
   }
   function syncComposer() {
-    const pending = chatSend?.status === 'pending';
+    // A free-form decision answer freezes the draft the same way a chat send does.
+    const pending = chatSend?.status === 'pending' || (pendingDecision != null && draftAnswer === pendingDecision.id);
     // The sent text stays visible but frozen, so a confirmation clears only what was sent.
     draft.readOnly = pending;
     sendButton.disabled = pending || !draft.value.trim();
+    const replyError = decisionSendError && decisionSendError.id === replyTarget ? decisionSendError.message : null;
     const text = pending ? 'Sending…'
+      : replyError ? `Not sent: ${String(replyError).replace(/[.\s]+$/, '')}. Your message is kept.`
       : chatSend?.status === 'failed' ? `Not sent: ${String(chatSend.error).replace(/[.\s]+$/, '')}. Your message is kept.` : '';
     if (composerStatus.textContent !== text) composerStatus.textContent = text;
   }
@@ -1029,6 +1149,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   function submitDraft(event) {
     event?.preventDefault();
     if (disposed || chatSend?.status === 'pending' || !draft.value.trim()) return;
+    const target = latestDecisions.items.find(item => item.id === replyTarget);
+    if (target) {
+      if (!pendingDecision) sendDecisionAnswer(target, draft.value.trim(), true);
+      return;
+    }
     draftSend = { sequence: null };
     onSend(draft.value);
     if (draftSend?.sequence === null) draftSend = null;
@@ -1117,7 +1242,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
-    const decisions = renderDecisionSurfaces(state);
+    renderDecisionSurfaces(state);
     renderTasks(state);
     renderProgress(state);
     renderChat(state.conversation);
@@ -1125,7 +1250,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
     publishReviewAttention(state.current?.facts);
-    const reports = state.reports;
+    // Decisions are drawn only by Decide and the conversation (T-023); the
+    // gwtd decision queue is their source, not these reports (Issue #7742).
+    const reports = state.reports.filter(report => report.kind !== 'decision');
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
     if (digest !== nextDigest) {
@@ -1177,12 +1304,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
             row.append(details);
           }
         }
-        const decision = decisions.items.find(item => item.id === String(report.id));
-        if (decision) {
-          const controls = element('div', 'pm-chat__decision-controls');
-          renderDecisionControls(controls, decision, decisions.answered[decision.id]);
-          row.append(controls);
-        }
         return row;
       });
       transcript.replaceChildren(...nodes);
@@ -1200,13 +1321,14 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     terminalStatus.hidden = true;
     terminalStatus.textContent = '';
     expandedReports.clear();
-    answeredDecisions.clear();
     pendingDecision = null;
     decisionSendError = null;
-    observedPaneReceipt = 0;
+    draftAnswer = null;
+    deferNotice = null;
+    replyTarget = null;
+    replyChip.hidden = true;
+    latestDecisions = { items: [], answered: {}, waiting: null };
     chatDecisionRows.clear();
-    chatDecisionList.replaceChildren();
-    chatDecisionReports.hidden = true;
     taskRows.clear();
     taskList.replaceChildren();
     tasksDigest = '';
@@ -1248,6 +1370,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
     terminalButton.removeEventListener('click', openTerminal);
+    cancelReply.removeEventListener('click', clearReplyTarget);
     kindSelect.removeEventListener('change', filterReports);
     root.replaceChildren();
     root.classList.remove('pm-chat', 'pm-chat--logs', 'pm-chat--chat');
@@ -1265,6 +1388,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   completedButton.addEventListener('click', filterTasks);
   logButton.addEventListener('click', showLog);
   terminalButton.addEventListener('click', openTerminal);
+  cancelReply.addEventListener('click', clearReplyTarget);
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
