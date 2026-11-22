@@ -356,6 +356,96 @@ fn issue6842_same_delivery_preparation_without_progress_is_bounded() {
     );
 }
 
+/// Issue #7726: closing or stopping an Issue withdraws its delivery from the
+/// durable prefs. The exhausted preparation then has no delivery to reject,
+/// and the GUI used to read its missing prefs stamp as "prefs changed" and
+/// prepare again — forever, with no durable row left for a stop to address.
+#[test]
+fn issue7726_exhausted_preparation_of_a_withdrawn_delivery_ends_instead_of_repreparing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "withdrawn-delivery",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let _owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let repo = fixture.project_root.clone();
+    let delivery_id = fixture.delivery_id.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let prepare = |fixture: &mut MonitorRelaunchFixture| {
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &repo,
+                3165,
+                LinkedIssueKind::Spec,
+                delivery_id.clone(),
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            )
+    };
+    for _ in 0..3 {
+        prepare(&mut fixture);
+        drain_queued_blocking_tasks(&queued);
+        drop(take_issue4803_monitor_preparation(&fixture.recorded_events));
+        fixture.runtime.issue_monitor_launch_preparations.clear();
+    }
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.pending_launch_deliveries.clear();
+    prefs.launching_issues.clear();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+
+    prepare(&mut fixture);
+    drain_queued_blocking_tasks(&queued);
+    let exhausted = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    assert!(
+        exhausted.rejection.is_none(),
+        "a withdrawn delivery leaves nothing durable to reject"
+    );
+    let events = fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(exhausted);
+    drain_queued_blocking_tasks(&queued);
+
+    assert!(
+        !fixture
+            .recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_))),
+        "an exhausted delivery must not be prepared again"
+    );
+    assert!(
+        fixture.runtime.issue_monitor_launch_preparations.is_empty(),
+        "the ended delivery releases the project preparation lane"
+    );
+    assert!(
+        matches!(
+            fixture.runtime.issue_monitor_launch_deliveries.get(delivery_id.as_deref().unwrap()),
+            Some(super::super::IssueMonitorLaunchDeliveryState::LaunchFailed { message, .. })
+                if message.contains("3 preparations")
+        ),
+        "the delivery ends as a failed launch"
+    );
+    assert!(
+        events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, issue_number: Some(3165), .. }
+                if level == "error"
+        )),
+        "the bounded failure is reported for its Issue: {events:?}"
+    );
+}
+
 #[test]
 fn monitor_scan_recovery_failure_emits_one_attention_notice() {
     let temp = tempdir().unwrap();
