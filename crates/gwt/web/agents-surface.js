@@ -27,14 +27,14 @@ const traitsSummary = member => {
 };
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
   onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><label class="settings-field">Model for new member<input class="settings-input" type="text" aria-label="Model for new member" list="roster-registration-models" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-models"></datalist></label><label class="settings-field">Reasoning for new member<input class="settings-input" type="text" aria-label="Reasoning for new member" list="roster-registration-reasoning" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-reasoning"></datalist></label><p class="settings-help" data-registration-catalog-status role="status" hidden></p><button type="button" data-action="retry-registration-catalog" hidden>Retry model catalog</button><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
-    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
+    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. The tool a session starts with comes from the project's available execution environments, not from the member. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" data-project-only hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
   if (executionModel) {
@@ -44,25 +44,11 @@ export function createAgentsSurface({ document, storage, executionModel, project
       document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
     } });
   }
-  const toolSelect = element.querySelector('[aria-label="Tool for new member"]');
   const nameInput = element.querySelector('[aria-label="Name for new member"]');
-  const modelInput = element.querySelector('[aria-label="Model for new member"]');
-  const reasoningInput = element.querySelector('[aria-label="Reasoning for new member"]');
-  const registrationCatalogStatus = element.querySelector("[data-registration-catalog-status]");
-  const retryRegistrationCatalog = element.querySelector('[data-action="retry-registration-catalog"]');
   const registrationEligible = element.querySelector('[aria-label="PM eligible for new member"]');
   registrationEligible.checked = false;
   let nameTouched = false, registeredDraft = null;
   const registrationComposing = new Set();
-  let registrationTools = [], renderedTools = "";
-  let registrationTool = "";
-  function syncRegistrationTool() {
-    const next = toolSelect.value || "";
-    if (!next || next === registrationTool) return;
-    registrationTool = next;
-    modelInput.value = ""; reasoningInput.value = "";
-    registrationComposing.delete(modelInput); registrationComposing.delete(reasoningInput);
-  }
   const registrationError = element.querySelector("#roster-registration-error");
   const registrationMessage = document.createElement("span");
   const showConflict = document.createElement("button");
@@ -82,59 +68,20 @@ export function createAgentsSurface({ document, storage, executionModel, project
       && member.name === registeredDraft.name)) {
       if (!registrationComposing.has(nameInput) && name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
       if (registrationEligible.checked === registeredDraft.pm_eligible) registrationEligible.checked = false;
-      if (!registrationComposing.has(modelInput) && modelInput.value.trim() === registeredDraft.model) modelInput.value = "";
-      if (!registrationComposing.has(reasoningInput) && reasoningInput.value.trim() === registeredDraft.reasoning) reasoningInput.value = "";
       registeredDraft = null;
     }
     const draft = nameInput.value.trim();
     const conflict = registrationConflict();
     const error = !draft ? "Enter a display name." : conflict
-      ? `${conflict.name} (${conflict.agent_id || conflict.provider || "Unknown tool"}) is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
+      ? `${conflict.name} is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
     registrationMessage.textContent = nameTouched ? error : "";
     showConflict.hidden = !nameTouched || !conflict;
     registrationError.hidden = !nameTouched || !error;
     nameInput.setAttribute("aria-invalid", String(nameTouched && !!error));
     for (const button of element.querySelectorAll('[data-action="add"]')) {
-      button.disabled = !!error || registrationComposing.size > 0 || registrationTools.length === 0 || !rosterReady(roster);
-      button.title = registrationTools.length ? "Register this name with the selected tool." : "Loading supported and custom coding tools…";
+      button.disabled = !!error || registrationComposing.size > 0 || !rosterReady(roster);
+      button.title = "Register this name.";
     }
-    const choices = Array.isArray(roster.tuning_choices) ? roster.tuning_choices : roster.tuning_choices?.agents || [];
-    const entry = choices.find(agent => agent.id === toolSelect.value);
-    const selectedModel = entry?.models?.find(model => model.value === modelInput.value.trim());
-    for (const [input, suggestions] of [
-      [modelInput, [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]],
-      [reasoningInput, (selectedModel?.reasoning_options || entry?.reasoning_options || []).map(option => typeof option === "string" ? option : option.value)],
-    ]) {
-      const list = input.parentElement.querySelector("datalist"); list.replaceChildren();
-      for (const value of suggestions) {
-        const option = document.createElement("option"); option.value = value;
-        if (input === modelInput) option.label = entry?.models?.find(model => model.value === value)?.label || value;
-        list.append(option);
-      }
-      input.disabled = !rosterReady(roster);
-    }
-    registrationCatalogStatus.textContent = entry?.model_catalog_warning || "";
-    registrationCatalogStatus.hidden = !registrationCatalogStatus.textContent;
-    retryRegistrationCatalog.hidden = !registrationCatalogStatus.textContent || !onReloadProfile;
-  }
-  function syncTools() {
-    const builtins = supportedAgentsModel?.read().agents;
-    const custom = customAgentsModel?.read().catalog;
-    registrationTools = builtins && custom?.loaded ? [...builtins,
-      ...custom.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id }))] : [];
-    const key = JSON.stringify(registrationTools.map(tool => [tool.id, tool.name]));
-    if (key !== renderedTools) {
-      const selected = toolSelect.value || registrationTool; toolSelect.replaceChildren();
-      for (const tool of registrationTools) {
-        const option = document.createElement("option"); option.value = tool.id; option.textContent = tool.name || tool.id;
-        option.selected = tool.id === selected; toolSelect.append(option);
-      }
-      if (!registrationTools.some(tool => tool.id === selected) && toolSelect.firstElementChild) toolSelect.firstElementChild.selected = true;
-      renderedTools = key;
-    }
-    toolSelect.disabled = registrationTools.length === 0;
-    syncRegistrationTool();
-    syncRegistration();
   }
   const selectionKey = "gwt:ui:agents-selected-member";
   const savedSelection = storage?.get(selectionKey);
@@ -372,26 +319,14 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const current = liveWork(member), key = member ? JSON.stringify([member.member_id,
       current?.window_id, current?.session_id, current?.runtime_incarnation]) : null;
     if (renderedDetail?.key !== key) renderedDetail = null;
-    let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions, saved = renderedDetail?.saved;
+    let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions;
     // Refresh presentation around unchanged native controls without detaching
     // their keyboard targets. A different member/runtime retires those controls.
-    for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions && child !== saved) child.remove();
+    for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions) child.remove();
     if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
     if (plans.parentElement !== panel) panel.insertBefore(plans, actions || null);
     if (head.parentElement !== panel) panel.prepend(head);
-    panel.insertBefore(stats(member), saved || currentWork || plans);
-    if (!saved) {
-      saved = document.createElement("section"); saved.className = "roster-history roster-saved-settings";
-      saved.innerHTML = `<h4>Saved manual candidate</h4><p class="roster-description"></p><label class="settings-field roster-saved-revision">Saved manual candidate revision<input class="settings-input" type="text" readonly aria-label="Saved manual candidate revision"></label><p class="roster-description">Automatic launches use tier settings. Current work uses its own recorded launch settings.</p>`;
-      saved.querySelector("input").title = "Content identity of saved manual settings. Same settings have the same revision; this is not chronological order.";
-    }
-    const revision = saved.querySelector("input"), revisionValue = member.saved_manual_revision || "—";
-    if (revision.value !== revisionValue) revision.value = revisionValue;
-    const profile = member.saved_manual_profile;
-    saved.querySelector("p").textContent = profile
-      ? `Tool: ${profile.agent_id || "—"} · Model: ${profile.model || "—"} · Reasoning: ${profile.reasoning || "—"} · Runtime: ${profile.runtime_target || "—"}${profile.runtime_target === "Docker" && profile.docker_service ? ` (${profile.docker_service})` : ""} · Permissions: ${profile.skip_permissions === true ? "Skip prompts" : profile.skip_permissions === false ? "Ask" : "—"}`
-      : "Unavailable";
-    if (saved.parentElement !== panel) panel.insertBefore(saved, currentWork || plans);
+    panel.insertBefore(stats(member), currentWork || plans);
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
     const ol = history.querySelector("ol");
     if (current) {
@@ -430,7 +365,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     }
     actions.querySelector('[data-action="rest"]').disabled = !member.enabled || configuredPm(member) || rosterModel.read().members.filter(member => member.enabled).length <= 1;
     panel.insertBefore(history, actions);
-    renderedDetail = { key, currentWork, actions, saved };
+    renderedDetail = { key, currentWork, actions };
   }
   function memberNameField(member) {
     let field = nameFields.get(member.member_id);
@@ -479,7 +414,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
     field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
-    field.head.querySelector("p").textContent = `Registered tool: ${member.provider || "—"} · Member since ${date(member.created_at)} UTC`;
+    field.head.querySelector("p").textContent = `Member since ${date(member.created_at)} UTC`;
     let memberId = field.head.querySelector(".roster-member-id");
     if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
     memberId.textContent = `Member ID: ${member.member_id}`;
@@ -513,8 +448,12 @@ export function createAgentsSurface({ document, storage, executionModel, project
       control.disabled = !rosterReady(rosterModel.read());
     }
     field.traits.querySelector('[data-action="save-traits"]').disabled = held || !field.traitsDraft;
+    // Issue #7647 (SPEC #7007 item 27): a member has no tool of its own, so
+    // the ledger offers none, nor a model or reasoning for it. Only the
+    // Project Manager keeps those here, until it has its own list of
+    // execution environments (item 194).
     const role = configuredPm(member) ? "pm" : "implementation";
-    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
+    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { launchFields: role === "pm", target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
       onEdit: (patch, options) => tuningController?.editTuning(role, member.member_id, patch, options),
       onRetry: () => tuningController?.retryTuning(role, member.member_id) });
     return field.head;
@@ -733,7 +672,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     if (ledger) tab = "team";
     element.dataset.view = view;
     element.querySelector(".roster-heading h2").textContent = ledger ? "Agents" : "Agent history & plans";
-    for (const node of element.querySelectorAll(".roster-detail > .roster-plans, .roster-detail > .roster-history:not(.roster-saved-settings)")) node.dataset.projectOnly = "";
+    for (const node of element.querySelectorAll(".roster-detail > .roster-plans, .roster-detail > .roster-history")) node.dataset.projectOnly = "";
     for (const node of element.querySelectorAll("[data-project-only]")) node.hidden = ledger;
     historyPlansStore.update(state => state.members === members && state.schedule === schedule && state.rosterRevision === roster.revision ? state
       : { members, pmMemberIds: members.filter(holdsPmRole).map(member => member.member_id), rosterRevision: roster.revision, schedule });
@@ -745,18 +684,12 @@ export function createAgentsSurface({ document, storage, executionModel, project
   }
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => {
     nameTouched = true; syncRegistration();
-    if (button.disabled || !registrationTools.some(tool => tool.id === toolSelect.value)) return;
-    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked,
-      model: modelInput.value.trim(), reasoning: reasoningInput.value.trim(), ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
-    onAddMember(toolSelect.value, registeredDraft.name, registeredDraft.pm_eligible,
-      registeredDraft.model || registeredDraft.reasoning ? { model: registeredDraft.model || null, reasoning: registeredDraft.reasoning || null } : undefined);
+    if (button.disabled) return;
+    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked, ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
+    onAddMember(registeredDraft.name, registeredDraft.pm_eligible);
   });
   registrationEligible.addEventListener("change", syncPreview);
-  toolSelect.addEventListener("change", () => {
-    syncRegistrationTool(); syncRegistration(); syncPreview();
-  });
-  retryRegistrationCatalog.addEventListener("click", () => onReloadProfile?.());
-  for (const input of [nameInput, modelInput, reasoningInput]) {
+  for (const input of [nameInput]) {
     input.addEventListener("compositionstart", () => { registrationComposing.add(input); syncRegistration(); });
     input.addEventListener("compositionend", () => { registrationComposing.delete(input); syncRegistration(); syncPreview(); });
     input.addEventListener("input", event => {
@@ -771,15 +704,13 @@ export function createAgentsSurface({ document, storage, executionModel, project
     button.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); tab = event.key === "Home" ? "team" : event.key === "End" ? "past" : tab === "team" ? "past" : "team"; sync(); element.querySelector(`[data-tab="${tab}"]`).focus(); });
   }
   pmSettingsPanel?.mount(element.querySelector('[data-role="pm-project-operations"]'));
-  sync(); syncTools();
+  sync();
   const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
   const running = element.querySelector(".roster-active");
   running.textContent = "Running —";
   if (summaryModel) unsubscribers.push(summaryModel.subscribeFrame(state => state.running, count => {
     running.textContent = `Running ${number(count)}`;
   }));
-  if (supportedAgentsModel) unsubscribers.push(supportedAgentsModel.subscribeFrame(state => state.agents, syncTools));
-  if (customAgentsModel) unsubscribers.push(customAgentsModel.subscribeFrame(state => state.catalog, syncTools));
   if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));

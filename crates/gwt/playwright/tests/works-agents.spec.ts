@@ -739,11 +739,17 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Recommended capacity 6");
     await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
     await expect(roster(page).locator(".roster-detail .roster-stat")).toHaveCount(4);
-    await expect(roster(page).locator(".roster-detail")).toContainText("Codex");
-    await expect(roster(page).locator(".roster-detail")).toContainText("Member since 2026-10-20");
+    // Issue #7647 AC-3: a member has no tool, model or reasoning of its own.
+    await expect(roster(page).locator(".roster-detail-heading")).toContainText("Member since 2026-10-20");
+    await expect(roster(page).locator(".roster-detail-heading")).not.toContainText("Registered tool");
+    for (const label of ["Tool for new member", "Model for new member", "Reasoning for new member"])
+      await expect(roster(page).getByLabel(label, { exact: true })).toHaveCount(0);
+    for (const key of ["agent_id", "model", "reasoning"])
+      await expect(roster(page).locator(`.roster-detail [data-member-tuning-field="${key}"]`)).toBeHidden();
+    await expect(roster(page).locator(".roster-description").first()).toContainText("available execution environments");
     await expect(roster(page).locator(".roster-detail-heading")).not.toContainText("Fixture model");
-    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: saved-manual-model");
-    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Automatic launches use tier settings");
+    await expect(roster(page).locator(".roster-saved-settings")).toHaveCount(0);
+    await expect(roster(page).locator(".roster-detail")).not.toContainText("saved-manual-model");
     await expect(roster(page).locator(".roster-current-config")).toHaveText("Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringMatching(/Now.*#4777.*Current issue/), expect.stringContaining("Later slice"), expect.stringContaining("Earlier slice"),
@@ -765,9 +771,6 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-past tbody tr")).toContainText("2026-10-20");
     await page.screenshot({ path: info.outputPath("agents-approved-past.png") });
     await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
-    const newMemberTool = roster(page).getByRole("combobox", { name: "Tool for new member", exact: true });
-    await expect(newMemberTool.locator("option")).toHaveText(["Codex", "Claude Code"]);
-    await newMemberTool.selectOption("codex");
     await roster(page).getByLabel("Name for new member", { exact: true }).fill("Dahlia");
     await roster(page).locator('.roster-capacity [data-action="add"]').click();
     await expect(roster(page).locator(".roster-count")).toHaveText("4");
@@ -790,7 +793,6 @@ test.describe("Works and Agents approved baseline", () => {
     expect(beforeRest.saved_implementation_core.model).toBe("retained-model");
     expect(beforeRest.history).toHaveLength(2);
     await roster(page).locator('.roster-row[data-member-id="m-added"]').click();
-    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
     ]);
@@ -798,13 +800,12 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia", pm_eligible: false }, 3], [{ kind: "rest", member_id: "m-added" }, 5]]);
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", name: "Dahlia", pm_eligible: false }, 3], [{ kind: "rest", member_id: "m-added" }, 5]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
     const resting = roster(page).locator('.roster-row[data-member-id="m-added"]');
     const restingRecord = { ...beforeRest, enabled: false };
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
-    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
     ]);
@@ -864,7 +865,6 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(resting).toHaveAttribute("aria-selected", "true");
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
     expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual(beforeReconnect);
-    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
     ]);
@@ -880,7 +880,7 @@ test.describe("Works and Agents approved baseline", () => {
     const beforeActivation = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
     await roster(page).getByLabel("Name for new member", { exact: true }).fill(" DAHLIA ");
     const conflict = roster(page).locator("#roster-registration-error");
-    await expect(conflict).toContainText("Dahlia (codex) is resting");
+    await expect(conflict).toContainText("Dahlia is resting");
     await expect(roster(page).locator('.roster-capacity [data-action="add"]')).toBeDisabled();
     await conflict.getByRole("button", { name: "Show member", exact: true }).click();
     await expect(resting).toBeFocused();
@@ -925,8 +925,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4 · Busy 1 / Team 3");
-    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: saved-manual-model");
-    await expect(roster(page).locator(".roster-history:not(.roster-saved-settings)")).toContainText("Later slice");
+    await expect(roster(page).locator(".roster-history")).toContainText("Later slice");
     await expect(roster(page).locator(".roster-now, .roster-detail .roster-open")).toHaveCount(0);
     const afterBusyRest = (await sent(page)).slice(beforeBusyRest.length);
     expect(afterBusyRest.filter(message => message.kind === "agent_roster" && message.action.kind !== "read")
@@ -1006,19 +1005,15 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(full(page)).toBeVisible();
   });
 
-  test("Agents recovers lost registration catalogs on reconnect without losing the name draft", async ({ page }, info) => {
+  test("Agents registration needs no tool catalog and keeps the name draft across a reconnect", async ({ page }, info) => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.holdCatalogs());
     await openRail(page, "agents");
     const name = roster(page).getByLabel("Name for new member", { exact: true });
-    const tool = roster(page).getByRole("combobox", { name: "Tool for new member", exact: true });
     const register = roster(page).locator('.roster-capacity [data-action="add"]');
     await name.fill("Maple");
-    await expect(tool).toBeDisabled();
-    await expect(register).toBeDisabled();
+    await expect(register).toBeEnabled();
     await name.evaluate(node => { (window as any).__catalogDraftInput = node; });
     await page.evaluate(() => (window as any).__worksAgentsFixture.reconnectCatalogs());
-    await expect(tool.locator("option")).toHaveText(["Codex", "Claude Code"]);
-    await expect(tool).toBeEnabled();
     await expect(register).toBeEnabled();
     await expect(name).toHaveValue("Maple");
     expect(await name.evaluate(node => node === (window as any).__catalogDraftInput)).toBe(true);
@@ -1105,7 +1100,7 @@ test.describe("Works and Agents approved baseline", () => {
       "Recorded name: — · Tool: — · Recorded model: —",
       "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
     ]);
-    await expect(page.locator(".agents-surface--preview .roster-saved-settings")).toContainText("Model: saved-manual-model");
+    await expect(page.locator(".agents-surface--preview .roster-saved-settings")).toHaveCount(0);
     await expect(page.locator(".agents-surface--preview .roster-current-config")).toHaveText("Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   });
 
@@ -1220,7 +1215,6 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(dialog).toBeHidden();
 
     // Reassigning the Project Manager lifts the guard from the live state.
-    await roster(page).getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
     await roster(page).getByLabel("Name for new member", { exact: true }).fill("Dahlia");
     await roster(page).getByLabel("PM eligible for new member", { exact: true }).check();
     await roster(page).locator('.roster-capacity [data-action="add"]').click();
@@ -1304,7 +1298,10 @@ test.describe("Works and Agents approved baseline", () => {
     await openRail(page, "agents");
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
     const detail = roster(page).locator('.roster-detail');
-    await detail.locator('[data-member-tuning-field="model"]').fill("unlisted-implementation");
+    // Issue #7647 AC-3: an implementation member's ledger entry offers where
+    // it runs and its permissions, but no tool, model or reasoning.
+    await expect(detail.locator('[data-member-tuning-field="model"]')).toBeHidden();
+    await detail.locator('[data-member-tuning-field="runtime_target"]').selectOption("Docker");
     await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
     let writes = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_tuning");
     expect(writes).toHaveLength(1); expect(writes[0].action.member_id).toBe("m-idle");
@@ -1485,7 +1482,8 @@ async function installWorksAgentsBackend(page: Page) {
             if (!member || member.saved_implementation_core_revision !== message.action.expected_core_revision) {
               this.emit({ kind: "agent_roster_error", project_key: projectKey, request_id: message.request_id, message: "Core changed" }); return;
             }
-            member.saved_implementation_core = { ...member.saved_implementation_core, model: message.action.model, reasoning: message.action.reasoning };
+            member.saved_implementation_core = { ...member.saved_implementation_core, model: message.action.model, reasoning: message.action.reasoning,
+              ...Object.fromEntries(["runtime_target", "skip_permissions"].filter(field => Object.hasOwn(message.action, field)).map(field => [field, message.action[field]])) };
             revision++; member.saved_implementation_core_revision = `core-${member.agent_member_id}-${revision}`;
             this.emit({ ...rosterSnapshot(), request_id: message.request_id }); return;
           }
@@ -1497,7 +1495,7 @@ async function installWorksAgentsBackend(page: Page) {
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
           if (message.action.kind === "set_pm_eligibility") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.pm_eligible = message.action.eligible; revision++; } }
           if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && member.enabled && !member.assignment) { for (const other of members) if (other.agent_member_id === pmMemberId) { other.is_pm = false; other.pm_project_key = null; } pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
-          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
+          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id || "codex", name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
           if (message.action.kind === "move") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id), target = index + (message.action.direction === "up" ? -1 : 1); if (index >= 0 && target >= 0 && target < members.length) { [members[index], members[target]] = [members[target], members[index]]; revision++; } }
           if (message.action.kind === "set_traits") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.traits = message.action.traits; revision++; } }

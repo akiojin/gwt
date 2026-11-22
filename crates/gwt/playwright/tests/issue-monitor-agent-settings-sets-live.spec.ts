@@ -78,7 +78,6 @@ test.describe("Issues Agent Settings sets", () => {
       const initialCapacity = roster.capacity;
       const newMembers: string[] = [];
       for (let index = 0; index < 2; index += 1) {
-        await page.getByLabel("Tool for new member", { exact: true }).selectOption("codex");
         const cursor = await sequence();
         await page.getByLabel("Name for new member", { exact: true }).fill(`Settings member ${roster.revision}`);
         await expect(page.locator('.roster-capacity [data-action="add"]')).toBeEnabled();

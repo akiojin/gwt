@@ -60,7 +60,6 @@ test("Issue #6933 Codex cache drives both pickers and warns about saved retired 
     const agents = page.locator('.agents-surface:not(.agents-surface--preview)');
     const name = `Codex catalog ${theme}`;
     await agents.getByRole("textbox", { name: "Name for new member" }).fill(name);
-    await agents.getByRole("combobox", { name: "Tool for new member" }).selectOption("codex");
     await agents.locator('.roster-capacity [data-action="add"]').click();
     const row = agents.locator('.roster-row').filter({ hasText: name });
     await expect(row).toHaveCount(1);
