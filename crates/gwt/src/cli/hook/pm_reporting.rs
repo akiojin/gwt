@@ -1186,6 +1186,87 @@ mod tests {
         }
     }
 
+    /// Issue #7785: Claude Code 2.1.328 wraps pasted input, which is how gwt
+    /// delivers every notification. The envelope alone is not human text.
+    #[test]
+    fn pasted_automatic_notifications_pass_but_pasted_human_text_requires_qa() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let pasted = |text: &str| {
+            format!("\n\n<pasted_content id=\"c676\">\n{text}\n</pasted_content id=\"c676\">\n")
+        };
+        let marked = |body: &str| {
+            format!(
+                "{body} [gwt-delivery:00000000-0000-4000-8000-000000000001:{}]",
+                crate::pm_registry::pm_delivery_prompt_sha256(body)
+            )
+        };
+        let suffix = format!(
+            " {} {} {}",
+            crate::pm_registry::PM_STEERING_WAKE_CLAUSE,
+            crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE,
+            crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE
+        );
+        let tick = format!(
+            "{}{suffix}",
+            crate::pm_registry::PM_PERIODIC_WAKE_INSTRUCTION
+        );
+        let monitor = format!("[gwt] Monitor activity while the PM was idle (needs_human:7772). Reconcile now: fresh `issue.monitor.status`, triage new items, inventory PRs with `pr.list` (stale/SUPERSEDED/owner-closed rows: digest, never auto-close).{suffix}");
+        let board = crate::pm_registry::protected_pm_delivery_prompt(
+            "00000000-0000-4000-8000-000000000001",
+            "Board update",
+        )
+        .unwrap();
+        let idle = "[gwt] Agent idle: 修正担当 (#3932). Reconcile pane.list and issue.monitor.status; steer the idle agents.";
+        let automatic = [
+            pasted(&marked(&tick)),
+            pasted(&marked(&monitor)),
+            pasted(board.trim_end_matches('\r')),
+            pasted(idle),
+            format!("{}{}", pasted(&marked(&tick)), pasted(idle)),
+        ];
+        for prompt in &automatic {
+            // A native record is present, so only the classification keeps Stop silent.
+            let _native = native_human_fixture(home.path(), &worktree, prompt);
+            handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
+                .unwrap();
+            assert!(
+                capture_qa_turn(&worktree).unwrap().is_none(),
+                "pasted automatic notification must not arm QA: {prompt}"
+            );
+            assert_eq!(
+                handle_stop(&worktree, Some("pm-session")),
+                HookOutput::Silent
+            );
+        }
+        for prompt in [
+            "状況を教えて".to_owned(),
+            pasted("このログを見て、状況を教えて"),
+            format!("{}これは何を意味しますか？", pasted(&marked(&tick))),
+            format!("これは何を意味しますか？{}", pasted(idle)),
+            pasted(&format!("{idle}\nこれは何？")),
+        ] {
+            let _native = native_human_fixture(home.path(), &worktree, &prompt);
+            handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
+                .unwrap();
+            assert!(
+                matches!(
+                    handle_stop(&worktree, Some("pm-session")),
+                    HookOutput::StopBlock { .. }
+                ),
+                "human input must still require QA: {prompt}"
+            );
+        }
+    }
+
     #[test]
     fn ordinary_agent_prompts_do_not_create_pm_reporting_obligations() {
         let _env = gwt_core::test_support::env_lock()

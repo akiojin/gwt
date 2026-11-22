@@ -567,6 +567,19 @@ pub(crate) fn internal_prompt(text: &str) -> bool {
     }
     let mut remaining = text.trim();
     while !remaining.is_empty() {
+        // Issue #7785: a pasted block is what it contains. Text on its
+        // closing line, like any other text around it, is human.
+        if let Some((pasted, rest)) = crate::pm_registry::split_provider_paste_envelope(remaining) {
+            let end = rest.find('\n').unwrap_or(rest.len());
+            if !rest[..end].trim().is_empty() || !internal_prompt(pasted) {
+                return false;
+            }
+            remaining = rest[end..].trim_start();
+            if remaining.is_empty() {
+                return true;
+            }
+            continue;
+        }
         // Native providers join text blocks with newlines. Consume only
         // complete notifications; any human text leaves the whole turn human.
         // Task envelopes can span lines; all other generated notifications
