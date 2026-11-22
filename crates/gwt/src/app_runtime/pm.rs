@@ -2772,6 +2772,11 @@ impl AppRuntime {
         let profile = prefs
             .settings
             .launch_profile_with_agent_defaults(project_root);
+        // Issue #7647: the selected agent's traits decide reasoning and speed.
+        let profile = match &member {
+            Some(member) => profile.with_traits(&member.traits),
+            None => profile,
+        };
         // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
         // skill that managed-asset materialization writes into this worktree.
         // Writing it here instead would be futile — the launch's own asset

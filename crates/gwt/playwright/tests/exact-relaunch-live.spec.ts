@@ -751,28 +751,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(register).toBeDisabled();
       await name.fill(` ${before.members[0].name.toLowerCase()} `);
       await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].name);
-      await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].agent_id);
       await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(name).toHaveAttribute("aria-invalid", "true");
       await expect(register).toBeDisabled();
       await name.fill("  Maple contributor  ");
-      await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
-      const registrationModel = surface.getByRole("combobox", { name: "Model for new member", exact: true });
-      const registrationReasoning = surface.getByRole("combobox", { name: "Reasoning for new member", exact: true });
-      await registrationModel.fill("private-registration-model");
-      await registrationReasoning.fill("ultracode");
-      const invalidSequence = await cursor(page);
-      await register.click();
-      await page.waitForFunction(after => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
-        entry.sequence > after && entry.payload.kind === "agent_roster" && entry.payload.roster.error?.includes("unsupported")), invalidSequence);
-      const invalid = await readRoster(page);
-      expect(invalid.revision).toBe(before.revision);
-      expect(invalid.members).toEqual(before.members);
-      await expect(name).toHaveValue("  Maple contributor  ");
-      await expect(registrationModel).toHaveValue("private-registration-model");
-      await expect(registrationReasoning).toHaveValue("ultracode");
-      await registrationReasoning.fill("high");
-      await surface.locator(".roster-capacity").screenshot({ path: info.outputPath(`registration-model-reasoning-${theme}.png`) });
       await expect(register).toBeEnabled();
       const sequence = await cursor(page);
       await register.click();
@@ -783,7 +765,6 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
       expect(member.agent_id).toBe("codex");
       expect(member.assignment).toBeNull();
-      expect(member.saved_implementation_core).toMatchObject({ agent_id: "codex", model: "private-registration-model", reasoning: "high" });
       await expect(name).toHaveValue("");
       // A stale writer must not replace the registered identity or this draft.
       await name.fill("Retry contributor");
@@ -811,7 +792,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(rested.members.find(value => value.agent_member_id === retryMember.agent_member_id)?.enabled).toBe(false);
       await name.fill("  RETRY CONTRIBUTOR  ");
       await expect(name).toHaveAttribute("aria-invalid", "true");
-      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor (codex) is resting and uses this name. ");
+      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor is resting and uses this name. ");
       await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(register).toBeDisabled();
       await name.fill("");
@@ -997,7 +978,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(secondBefore.project_key).toBe(secondProjectKey);
       expect(secondBefore.members.some(member => member.agent_member_id === memberId)).toBe(true);
       await secondSurface.getByRole("textbox", { name: "Name for new member", exact: true }).fill("Project B selected member");
-      await secondSurface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
       const beforeSpare = await cursor(secondPage);
       await secondSurface.locator('.roster-capacity [data-action="add"]').click();
       const spareRoster = await rosterAfter(secondPage, beforeSpare, secondBefore.revision);
@@ -1024,7 +1004,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(savedReply.kind, savedReply.message).toBe("issue_monitor_profiles");
       expect(savedReply.profiles).toContainEqual(expect.objectContaining(savedCandidate));
       let savedRevision: string | undefined;
-      const revisionInput = surface.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
       const assertSaved = async () => {
         const roster = await readRoster(page);
         const member = roster.members.find(value => value.agent_member_id === memberId)!;
@@ -1033,12 +1012,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         savedRevision ??= member.saved_manual_revision!;
         expect(member.saved_manual_revision).toBe(savedRevision);
         await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
-        await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
-        await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
-        await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
-        await expect(revisionInput).toHaveValue(savedRevision!);
-        await expect(revisionInput).toHaveAttribute("readonly", "");
-        expect(await revisionInput.evaluate((node: HTMLInputElement) => node.readOnly)).toBe(true);
       };
       const secondCandidatesBefore = await (async () => {
         const after = await cursor(secondPage);
@@ -1076,27 +1049,19 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         expect(candidates).toEqual(secondCandidatesBefore);
         expect(candidates[0]).toMatchObject(secondDefaults);
         await secondSurface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
-        await expect(secondSurface.locator(".roster-saved-settings")).toContainText("Permissions: Skip prompts");
-        await expect(secondSurface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
-        await expect(secondSurface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
       };
       await assertSaved();
       await assertSharedSaved();
-      await revisionInput.focus();
-      await page.keyboard.press("End");
-      expect(await revisionInput.evaluate((node: HTMLInputElement) => node.selectionStart)).toBe(savedRevision!.length);
       const beforeTuningRoster = await readRoster(page);
       const beforeCoreRevision = (beforeTuningRoster.members.find(value => value.agent_member_id === memberId) as any)?.saved_implementation_core_revision;
       expect(beforeCoreRevision).toBeTruthy();
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-      await expect(revisionInput).toBeFocused();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
       const settings = page.locator('.workspace-window[data-preset="settings"] [data-settings-candidates]');
       await expect(settings).toBeVisible();
       await page.getByRole("button", { name: "Split view", exact: true }).click();
       await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
-      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
       await surface.evaluate(node => { (window as any).__savedCandidateRoster = node; });
       const beforeInlineSave = await cursor(page);
       const candidate = settings.locator(`fieldset[data-agent-member-id="${memberId}"]`);
@@ -1126,9 +1091,10 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(tuned.saved_implementation_core_revision).toBeTruthy();
       expect(tuned.saved_implementation_core_revision).not.toBe(beforeCoreRevision);
       // No manual read, host change or reload can mask a missing ACK invalidation.
-      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: high");
-      await expect(revisionInput).not.toHaveValue(savedRevision!);
-      savedRevision = await revisionInput.inputValue();
+      await expect.poll(async () => (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!.saved_manual_revision).not.toBe(savedRevision);
+      const retuned = (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!;
+      expect(retuned.saved_manual_profile).toMatchObject({ reasoning: "high" });
+      savedRevision = retuned.saved_manual_revision!;
       expect(savedRevision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
@@ -1136,15 +1102,19 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await assertSharedSaved();
       // Exercise the same saved core from Agents, through the actual writer.
       const detail = surface.locator(".roster-detail");
+      // Issue #7647: the ledger offers no tool, model or reasoning for an
+      // implementation member. Settings holds them for a pooled candidate.
+      const launchTuning = candidate;
       const checkCatalogRecovery = async (role: string) => {
+        const scope = role === "implementation" ? launchTuning : detail;
         const cache = join(fixture.home, ".codex/models_cache.json");
         await writeFile(cache, "{broken");
         let after = await cursor(page);
-        await detail.locator('[data-action="reload-tuning"]').click();
+        await scope.locator('[data-action="reload-tuning"]').click();
         await rosterAfter(page, after);
-        await expect(detail.locator('[data-model-catalog-status]')).toContainText("live Codex model catalog is unavailable");
+        await expect(scope.locator('[data-model-catalog-status]')).toContainText("live Codex model catalog is unavailable");
         await detail.screenshot({ path: info.outputPath(`catalog-${role}-unavailable-${theme}.png`) });
-        const input = detail.locator('[data-member-tuning-field="model"]');
+        const input = scope.locator('[data-member-tuning-field="model"]');
         const original = await input.inputValue(), writes = tuningRequests.length + pmProfileRequests.length;
         await input.evaluate(node => { (window as any).__catalogDraftInput = node; });
         await input.dispatchEvent("compositionstart");
@@ -1154,9 +1124,9 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
           supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max", "ultra"].map(effort => ({ effort })),
         })) }));
         after = await cursor(page);
-        await detail.locator('[data-action="retry-model-catalog"]').click();
+        await scope.locator('[data-action="retry-model-catalog"]').click();
         await rosterAfter(page, after);
-        await expect(detail.locator('[data-model-catalog-status]')).toBeHidden();
+        await expect(scope.locator('[data-model-catalog-status]')).toBeHidden();
         await expect(input.locator('..').locator('datalist option[value="catalog-recovered-4777"]')).toHaveCount(1);
         expect(await input.evaluate(node => node === (window as any).__catalogDraftInput)).toBe(true);
         await expect(input).toHaveValue("未確定-model");
@@ -1168,7 +1138,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         await expect.poll(() => tuningRequests.length + pmProfileRequests.length).toBe(writes + 1);
         await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
       };
-      const agentReasoning = detail.locator('[data-member-tuning-field="reasoning"]');
+      const agentReasoning = launchTuning.locator('[data-member-tuning-field="reasoning"]');
       const requestsBeforeComposition = tuningRequests.length;
       await agentReasoning.dispatchEvent("compositionstart");
       await agentReasoning.fill("ultracode");
@@ -1194,13 +1164,16 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await detail.locator('[data-action="retry-tuning"]').click();
       await expect.poll(() => tuningRequests.length).toBe(requestsBeforeComposition + 2);
       await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
-      await expect(revisionInput).not.toHaveValue(savedRevision!);
-      savedRevision = await revisionInput.inputValue();
+      await expect.poll(async () => (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!.saved_manual_revision).not.toBe(savedRevision);
+      const retunedAgain = (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!;
+      expect(retunedAgain.saved_manual_profile).toMatchObject({ reasoning: "medium" });
+      savedRevision = retunedAgain.saved_manual_revision!;
       savedCandidate.reasoning = "medium";
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       await assertSharedSaved();
-      await checkCatalogRecovery("implementation");
-      const agentModel = detail.locator('[data-member-tuning-field="model"]');
+      // Issue #7647: the ledger no longer offers an implementation member a
+      // model, so its catalog recovery is exercised for the Project Manager below.
+      const agentModel = launchTuning.locator('[data-member-tuning-field="model"]');
       const requestsBeforeCustom = tuningRequests.length;
       await agentModel.fill("private-model-4777");
       await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 1);
@@ -1211,11 +1184,10 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(custom.error).toBeNull();
       expect(custom.members.find((value: any) => value.agent_member_id === memberId).saved_manual_profile.model).toBe("private-model-4777");
       await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
-      await expect(detail.locator('[data-model-unavailable]')).toContainText("an unlisted model may still be supported");
+      await expect(launchTuning.locator('[data-model-unavailable]')).toContainText("an unlisted model may still be supported");
       await agentModel.fill(savedCandidate.model);
       await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 2);
       await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
-      await expect(revisionInput).toHaveValue(savedRevision!);
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       const beforeSettings = await cursor(secondPage);
       await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_configure_profile" });
@@ -1257,7 +1229,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       const beforeLiveEdits = (await readRoster(page)).members.find(member => member.agent_member_id === memberId)!;
       const saveLiveField = async (field: string, value: string) => {
         const offset = tuningRequests.length;
-        await detail.locator(`[data-member-tuning-field="${field}"]`).selectOption(value);
+        await (["agent_id", "model", "reasoning"].includes(field) ? launchTuning : detail).locator(`[data-member-tuning-field="${field}"]`).selectOption(value);
         await expect.poll(() => tuningRequests.length).toBe(offset + 1);
         const request = tuningRequests[offset];
         const reply = await page.waitForFunction(id => ((window as any).__gwtPlaywrightMessages || []).find(entry =>
@@ -1273,8 +1245,11 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         expect(await fixture.launches()).toEqual(liveLaunches);
         await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       };
-      for (const [field, value] of [["agent_id", "claude"], ["runtime_target", "Docker"],
-        ["skip_permissions", "false"], ["agent_id", "codex"], ["runtime_target", ""], ["skip_permissions", ""]])
+      // Issue #7647: the ledger offers where a member runs and its permissions,
+      // not its tool.
+      await expect(detail.locator('[data-member-tuning-field="agent_id"]')).toBeHidden();
+      for (const [field, value] of [["runtime_target", "Docker"],
+        ["skip_permissions", "false"], ["runtime_target", ""], ["skip_permissions", ""]])
         await saveLiveField(field, value);
       const beforeLiveReset = await cursor(page);
       await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 477754, profiles: [savedCandidate] });
@@ -1299,11 +1274,9 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
       await assertSharedSaved();
       await secondPage.setViewportSize({ width: 400, height: 1000 });
-      await secondSurface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
       expect(await secondSurface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await secondPage.screenshot({ path: info.outputPath(`common-saved-project-b-${theme}.png`) });
       await page.setViewportSize({ width: 400, height: 1000 });
-      await surface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
       expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await page.screenshot({ path: info.outputPath(`saved-current-native-${theme}.png`) });
       await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_EXIT\r" });
@@ -1352,7 +1325,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await assertHistory();
       await assertSharedSaved();
       await expect(secondPage.locator("html")).toHaveAttribute("data-theme", theme);
-      await secondSurface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
       expect(await secondSurface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await secondPage.screenshot({ path: info.outputPath(`common-restored-project-b-${theme}.png`) });
       await page.setViewportSize({ width: 400, height: 1000 });
@@ -1363,14 +1335,10 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await page.getByRole("button", { name: "Split view", exact: true }).click();
       await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
       const preview = page.locator(".agents-surface--preview");
-      const previewRevision = preview.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
-      await expect(previewRevision).toHaveValue(savedRevision!);
-      await expect(previewRevision).toBeDisabled();
       await page.setViewportSize({ width: 400, height: 1000 });
       expect(await preview.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await page.getByRole("button", { name: "Close split", exact: true }).click();
       await page.setViewportSize({ width: 1280, height: 1000 });
-      await expect(revisionInput).toHaveValue(savedRevision!);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       // A separate registered PM preserves the original implementation candidate and its history.
       const pmSettingsPath = join(fixture.home, ".gwt/projects", firstProjectKey, "project-state/pm.json");
@@ -1405,7 +1373,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       };
       const beforePmAdd = await readRoster(page);
       await surface.getByRole("textbox", { name: "Name for new member", exact: true }).fill("Project A PM member");
-      await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
       await surface.getByRole("checkbox", { name: "PM eligible for new member", exact: true }).check();
       const pmRoster = await pmMutation("add", () => surface.locator('.roster-capacity [data-action="add"]').click());
       expect(pmRoster.members).toHaveLength(beforePmAdd.members.length + 1);
@@ -1562,7 +1529,20 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(originalBytes);
         return member as RosterMember;
       };
-      await saveExecution("agent_id", "claude", { agent_id: "claude", model: null, reasoning: null });
+      // Issue #7647: the ledger offers no tool for a member, so the saved
+      // tool is changed through the roster operation.
+      await expect(detail.locator('[data-member-tuning-field="agent_id"]')).toBeHidden();
+      const beforeToolChange = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", project_key: firstProjectKey, request_id: "issue-7647-tool",
+        action: { kind: "set_tuning", member_id: memberId, agent_id: "claude", model: null, reasoning: null,
+          expected_core_revision: (beforeExecutionMember as any).saved_implementation_core_revision } });
+      const toolChanged = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === "issue-7647-tool" && entry.payload.kind === "agent_roster")?.payload.roster,
+      beforeToolChange).then(handle => handle.jsonValue());
+      expect(toolChanged.error).toBeNull();
+      expect(toolChanged.members.find((member: RosterMember) => member.agent_member_id === memberId).saved_implementation_core)
+        .toMatchObject({ agent_id: "claude", model: null, reasoning: null });
+      expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(originalBytes);
       await saveExecution("runtime_target", "Docker", { runtime_target: "Docker" });
       await saveExecution("skip_permissions", "false", { runtime_target: "Docker", skip_permissions: false });
       await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
@@ -2431,7 +2411,6 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       const initialRoster = await checkMemberLinks(page, firstWindow, first.gwt_session_id!, "initial");
       await page.locator(".op-rail").getByRole("button", { name: "Agents", exact: true }).click();
       const enabledBefore = new Set(initialRoster.members.filter(member => member.enabled).map(member => member.agent_member_id));
-      await page.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
       await page.getByLabel("Name for new member", { exact: true }).fill("Relaunch helper");
       const beforeAdd = await cursor(page);
       await page.locator('.roster-capacity [data-action="add"]').click();

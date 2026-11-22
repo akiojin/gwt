@@ -72,12 +72,12 @@ test.describe("Agent history and planned assignments", () => {
     await expect(rail(page)).toHaveAttribute("aria-pressed", "false");
     await expect(surface(page).getByRole("list", { name: "Team members" }).locator(".roster-row")).toHaveCount(3);
     for (const hidden of [".agent-history-plans", ".roster-tabs", ".roster-past", ".roster-plans",
-      ".roster-detail > .roster-history:not(.roster-saved-settings)"]) {
+      ".roster-detail > .roster-history"]) {
       await expect(surface(page).locator(hidden).first(), hidden).toBeHidden();
     }
     await expect(surface(page).getByText("Assignment history")).toBeHidden();
     await expect(surface(page).getByText("Next planned issues")).toBeHidden();
-    await expect(surface(page).locator(".roster-saved-settings")).toBeVisible();
+    await expect(surface(page).locator(".roster-saved-settings")).toHaveCount(0);
 
     // The project's screen is one click away and shows them again.
     await rail(page).click();

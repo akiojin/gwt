@@ -34,22 +34,29 @@ pub fn normalize_project_execution_environments(
 }
 
 fn environment_candidate(tool: &str) -> IssueMonitorLaunchProfile {
-    IssueMonitorLaunchProfile {
-        agent_member_id: None,
-        agent_id: tool.to_string(),
-        model: None,
-        reasoning: None,
-        version: None,
-        session_mode: Default::default(),
-        skip_permissions: false,
-        fast_mode: false,
-        codex_speed: Default::default(),
-        runtime_inherit: false,
-        runtime_target: Default::default(),
-        docker_service: None,
-        docker_lifecycle_intent: Default::default(),
-        windows_shell: None,
-        prefer_for: Vec::new(),
+    IssueMonitorLaunchProfile::for_tool(tool)
+}
+
+impl IssueMonitorLaunchProfile {
+    /// A candidate that starts `tool` with the tool's own defaults.
+    pub fn for_tool(tool: &str) -> Self {
+        Self {
+            agent_member_id: None,
+            agent_id: tool.to_string(),
+            model: None,
+            reasoning: None,
+            version: None,
+            session_mode: Default::default(),
+            skip_permissions: false,
+            fast_mode: false,
+            codex_speed: Default::default(),
+            runtime_inherit: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+            prefer_for: Vec::new(),
+        }
     }
 }
 

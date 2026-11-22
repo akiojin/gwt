@@ -458,7 +458,7 @@ function reconcileCandidateSave(panel, event) {
 }
 
 export function renderMemberTuningControls(host, options) {
-  const { target, choices = null, available = true, onEdit = () => {}, onRetry = () => {}, onReload = null, onReloadCatalog = null } = options;
+  const { target, choices = null, available = true, launchFields = true, onEdit = () => {}, onRetry = () => {}, onReload = null, onReloadCatalog = null } = options;
   const editable = available && target?.available !== false;
   const document = host.ownerDocument;
   host.dataset.memberTuningHost = "";
@@ -467,6 +467,11 @@ export function renderMemberTuningControls(host, options) {
     host.replaceChildren(); host.memberTuningIdentity = identity;
     const owns = control => host.memberTuningIdentity === identity && host.isConnected && control.isConnected && host.contains(control);
     const title = document.createElement("h4"); title.textContent = target?.canonical.role === "pm" ? "Saved Project Manager profile" : "Saved implementation settings"; host.append(title);
+    // Issue #7647: the agent ledger offers no tool, model or reasoning for a
+    // member; those controls stay in the document, unshown, for the shared
+    // state below.
+    const launchHost = launchFields ? host : host.appendChild(Object.assign(document.createElement("div"), { hidden: true }));
+    if (!launchFields) launchHost.dataset.memberTuningLaunch = "";
     for (const [key, caption] of [["agent_id", "Tool"], ["model", "Model"], ["reasoning", "Reasoning"]]) {
       const label = document.createElement("label"); label.className = "settings-field";
       const text = document.createElement("span"); text.textContent = caption;
@@ -481,10 +486,10 @@ export function renderMemberTuningControls(host, options) {
           if (input.value !== host.memberTuningAgentId) for (const field of host.querySelectorAll('input[data-member-tuning-field]')) { field.memberComposing = false; field.value = ""; }
           host.memberTuningOptions.onEdit({ agent_id: input.value });
         });
-        label.append(text, input); host.append(label); continue;
+        label.append(text, input); launchHost.append(label); continue;
       }
       const list = document.createElement("datalist"); list.id = `member-tuning-${key}-${Math.random().toString(36).slice(2)}`;
-      input.setAttribute("list", list.id); label.append(text, input, list); host.append(label);
+      input.setAttribute("list", list.id); label.append(text, input, list); launchHost.append(label);
       const edit = composing => { if (owns(input) && !input.disabled) host.memberTuningOptions.onEdit({ [key]: input.value }, { composing }); };
       input.addEventListener("compositionstart", () => { input.memberComposing = owns(input); if (input.memberComposing) edit(true); });
       input.addEventListener("compositionend", () => { const completed = input.memberComposing && owns(input); input.memberComposing = false; if (completed) edit(false); });
@@ -531,14 +536,14 @@ export function renderMemberTuningControls(host, options) {
     modelUnavailable.className = "settings-help";
     modelUnavailable.setAttribute("role", "status");
     modelUnavailable.dataset.modelUnavailable = "";
-    host.append(modelUnavailable);
+    launchHost.append(modelUnavailable);
     const catalogStatus = document.createElement("p");
     catalogStatus.className = "settings-help"; catalogStatus.setAttribute("role", "status");
-    catalogStatus.dataset.modelCatalogStatus = ""; host.append(catalogStatus);
+    catalogStatus.dataset.modelCatalogStatus = ""; launchHost.append(catalogStatus);
     const retryCatalog = document.createElement("button"); retryCatalog.type = "button"; retryCatalog.className = "wizard-button";
     retryCatalog.textContent = "Retry model catalog"; retryCatalog.dataset.action = "retry-model-catalog";
     retryCatalog.addEventListener("click", () => { if (owns(retryCatalog) && !retryCatalog.disabled) host.memberTuningOptions.onReloadCatalog?.(); });
-    host.append(retryCatalog);
+    launchHost.append(retryCatalog);
     const revision = document.createElement("p"); revision.className = "settings-help"; revision.dataset.memberTuningRevision = ""; host.append(revision);
     const status = document.createElement("p"); status.className = "settings-status"; status.dataset.memberTuningStatus = ""; status.setAttribute("role", "status"); host.append(status);
     const retry = document.createElement("button"); retry.type = "button"; retry.className = "wizard-button"; retry.textContent = "Retry profile"; retry.dataset.action = "retry-tuning";

@@ -2196,6 +2196,11 @@ fn reserve_new_pm_member_inner(
         }
         confirm_durable()?;
         let previous = registry.clone();
+        // Issue #7647: the selected agent's traits decide reasoning and speed.
+        let profile = match selected_pm_member(&registry, key.as_str()) {
+            Some(member) => profile.with_traits(&member.traits),
+            None => profile,
+        };
         if let Some(draft) = draft {
             let selected = selected_pm_member(&registry, key.as_str());
             let bootstrap_replay = draft.member_id.is_none()
@@ -5752,6 +5757,56 @@ mod tests {
             inherited.profile.codex_speed,
             Some(gwt_agent::CodexSpeed::Ultrafast)
         );
+        // Issue #7647 AC-1: the Project Manager's own traits decide its
+        // reasoning and speed, over its launch profile.
+        let traits = crate::agent_names::AgentTraits {
+            reasoning_level: Some(crate::agent_names::TraitReasoningLevel::Low),
+            speed: Some(crate::agent_names::TraitSpeed::Normal),
+            personality: None,
+        };
+        crate::agent_names::mutate_project_roster(
+            &defaults_root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::SetTraits {
+                member_id: inherited.member.agent_member_id.clone(),
+                traits: traits.clone(),
+            },
+            Some(
+                crate::agent_names::read_project_roster(&defaults_root, &sessions)
+                    .unwrap()
+                    .revision,
+            ),
+        )
+        .unwrap();
+        let with_traits = effective.clone().with_traits(&traits);
+        assert_eq!(with_traits.reasoning.as_deref(), Some("low"));
+        assert_eq!(with_traits.codex_speed, Some(gwt_agent::CodexSpeed::Off));
+        assert_eq!(with_traits.model, effective.model);
+        let draft = |reasoning, codex_speed| PmLaunchDraft {
+            member_id: Some(inherited.member.agent_member_id.as_str()),
+            profile_revision: &revision,
+            agent_id: "codex",
+            model: Some("gpt-6-astra"),
+            reasoning: Some(reasoning),
+            codex_speed,
+            fast_mode: false,
+        };
+        let reserve = |draft: &PmLaunchDraft<'_>| {
+            reserve_new_pm_member_from_draft(
+                &defaults_root,
+                &sessions,
+                &crate::pm_registry::pm_worktree_path_for_repo_path(&defaults_root),
+                "inherited-defaults",
+                draft,
+            )
+        };
+        assert!(
+            reserve(&draft("high", gwt_agent::CodexSpeed::Ultrafast)).is_err(),
+            "a draft prepared before the traits is refused"
+        );
+        let prepared = reserve(&draft("low", gwt_agent::CodexSpeed::Off))
+            .expect("the draft prepared with the traits is admitted");
+        assert_eq!(prepared.profile, with_traits);
     }
 
     #[test]

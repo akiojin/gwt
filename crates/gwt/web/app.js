@@ -6168,9 +6168,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
-        onAddMember: (agentId, name, pmEligible, tuning) => {
+        onAddMember: (name, pmEligible) => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
-          requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, ...tuning });
+          requestAgentRoster({ kind: "add", name, pm_eligible: pmEligible });
         },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
