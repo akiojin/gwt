@@ -464,9 +464,10 @@ async function exportShard(cargo, profileDir, runArgs, partition, destination) {
   }
   const env = coverageEnvironment(cargo, runArgs, profileDir);
   const objects = currentObjects(cargo, runArgs, profileDir, env);
+  // Issue #7724: an enumeration deadline names the stalled binary on stderr.
   const inventory = spawnSync(cargo, [
     "nextest", "list", ...runArgs, "--message-format", "json",
-  ], { encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024 });
+  ], { encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] });
   if (inventory.status !== 0) throw new Error("could not inventory coverage tests");
   writeJson(path.join(destination, "workspace-test-evidence/inventory.json"), JSON.parse(inventory.stdout));
   // Nextest's default store is workspace-relative even when llvm-cov redirects

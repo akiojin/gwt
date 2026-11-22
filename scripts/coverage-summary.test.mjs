@@ -69,7 +69,7 @@ function writeExecutable(file, source) {
 
 function sandbox(
   fixtures,
-  { testExit = 0, covered = 95, artifactExit = 0 } = {},
+  { testExit = 0, covered = 95, artifactExit = 0, listExit = 0 } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-coverage-summary-"));
   const fixtureDir = path.join(root, "fixtures");
@@ -144,6 +144,7 @@ if (args[0] === "metadata") {
 }
 if (args[0] === "nextest" && args[1] === "list") {
   if (args.includes("--partition") || !process.env.RUSTFLAGS.includes("instrument-coverage")) process.exit(2);
+  if (${listExit} !== 0) { console.error("Test enumeration timed out after 60s (pid 1): gwt-123abc --list"); process.exit(${listExit}); }
   console.log(JSON.stringify({ "rust-suites": { gwt: { testcases: { unit: { ignored: false, "filter-match": { status: "matches" } } } } } }));
   process.exit(0);
 }
@@ -292,6 +293,16 @@ test("coverage shards export only current objects and report the merged profiles
   assert.equal(stale.status, 4, stale.text);
   assert.ok(!fs.existsSync(canonicalJunit));
   assert.ok(!fs.existsSync(path.join(first, "manifest.json")));
+});
+
+test("a stalled shard enumeration names the test binary in the log", () => {
+  const box = sandbox({ "gwt-111_0.profraw": profile(4096) }, { listExit: 104 });
+  const result = run(box, ["--workspace", "--all-features"], [
+    "--nextest", "--partition", "slice:1/2", "--export-dir", path.join(box.root, "shard"),
+  ]);
+  assert.equal(result.status, 4, result.text);
+  assert.match(result.text, /Test enumeration timed out after 60s.*gwt-123abc --list/);
+  assert.match(result.text, /FAIL \[report-failure\] could not inventory coverage tests/);
 });
 
 test("coverage shard aggregation rejects mismatched, missing and changed artifacts and removes stale reports", () => {
