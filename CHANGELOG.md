@@ -1,6 +1,96 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.173.0] - 2026-11-22
+
+### Bug Fixes
+
+- **workspace:** Done Work への再試行で fresh launch escalation を出さない
+- **skills:** OpenClaw が拒否する commands.ownerDisplay を外す
+- **ci:** 独立レビュー対象の PR を auto-merge.yml が verdict 前に arm しない
+- **ci:** Auto-merge.yml の文言を Issues の名称に合わせる
+- **issue-monitor:** 起動できない待ち行列メンバーを Auto-refill の上限に数えない
+- **agents:** 台帳の入口と行操作が既存の画面操作を妨げないようにする
+- **gui:** スマホ幅で上部バーが 3 行にならないよう実行環境の入口を短い表記にする
+- **test:** 設計文書を旧名称の検査対象から外す
+- **environments:** 候補が 1 つのときは未サインインの確認を起動準備に任せる
+- **agents:** ツールの導入・更新の可否を対象ツールごとに判定する
+- **git:** 遠隔ブランチ公開の待ち合わせを repo と branch で絞る
+- **gui:** 課題詳細の Open terminal に固有の操作 ID を与える
+- **gui:** プロジェクトを既に持つ端末を台帳の状態だけで初回セットアップへ送らない
+- **gui:** Issues のキュー操作を daemon のコミット待ちごとイベントループ外の lane へ移す
+- **gui:** Issues 窓の Workspace 行の ▶ と Launch Agent から起動ウィザードを開けるようにする
+- **gwtd:** 全体ヘルプに decision 系統の説明を追加する
+- **agents:** インストール時にシェル設定へ PATH を自動登録する
+- **pm:** Owner 管理のペインが idle になったら常駐 PM に即時通知する
+- **pm:** 貼り付けの包みで届いた自動通知を配送確認と Q&A 判定で認識する
+- **issue-monitor:** Auto-merge の解除を GitHub の readback で確認し、失敗を needs_human にする
+
+### Documentation
+
+- **design:** Issue #7007 の設計正本（項目 1〜252）とモック v3 を develop に取り込む
+- 実行環境の登録・編集とプロジェクトの優先度リストを README に追記する
+- 自律駆動の対象に含める手順を README に追記する
+- **gui:** 初回セットアップの画面メッセージを GUI と envelope の対応台帳に登録する
+
+### Features
+
+- **pm:** 判断の表示と回答を判断待ち画面と PM との会話に一本化する
+- **agents:** エージェント台帳に並べ替えと削除を追加しヘッダーから開けるようにする
+- **gui:** 実行環境の画面を追加し使用量の表示をアカウントに一元化する
+- **gui:** 全ページ共通のヘッダーとフッターを導入し上部バーの入口を一本化する
+- **environments:** 実行環境のモデルとプロジェクトの優先度リストを追加する
+- **gui:** 実行環境の登録・編集・削除とプロジェクトの優先度リストの画面を追加する
+- **wizard:** 起動ウィザードに実行環境の順位・上書きの区別・実行場所の由来を表示する
+- **gui:** ホームを Project Manager との会話にし、プロジェクト一覧をヘッダーの Projects へ移す
+- **agents:** プロジェクトのエージェント画面に全員分の履歴と担当予定を出し台帳から外す
+- **gui:** プロジェクトにテーマ画面を追加し、今日の完了数を実データで表示する
+- **gui:** テーマの削除を GitHub Issue の not planned クローズにする
+- **gui:** Hook Center に登録済みフックの一覧とスクリプトの登録を追加する
+- **gui:** 検索の範囲を 9 種に揃え健全性を範囲単位で数える
+- **issues:** 起動候補で実行場所の継承・Docker のサービスとライフサイクルを指定する
+- **gui:** 課題詳細に優先度・自律駆動の対象・セッションの操作を置く
+- **gui:** 初回セットアップ画面を追加し Tool 登録と PM の指名を済ませてから始められるようにする
+- **gui:** 通知を判断・完了報告・情報の3分類で表示し分類ごとの件数を出す
+- **gui:** PM 専用の実行環境リストをアプリ設定に持ち最後の1件を外せないようにする
+- **gwtd:** 判断キューを gwtd の機能として追加する
+- **gui:** ホームの判断を判断キューから読み、回答と先送りをキュー操作にする
+- **agents:** エージェント台帳に特性を追加し起動時に反映する
+- **agents:** 登録エージェントをプロジェクトの実行環境の Tool で起動する
+- **agents:** Project Manager の推論と速度に特性を反映する
+- **agents:** 台帳からメンバーの Tool・Model・Reasoning の指定を外す
+- **gui:** 課題つきの新規起動を 3 段構成にする
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7339 の作業状態を記録
+- **work:** Issue #7740 の Work 更新を記録する
+- **work:** Issue #7741 の Work 更新を記録する
+- **work:** PR #7747 の Work イベントを記録する
+- **work:** Issue #7639 の Work 更新を記録する
+- **work:** Issue #7649 の Work 更新を記録する
+- **work:** Issue #7730 の Work 更新を記録する
+- **work:** Issue #7729 の Work 更新を記録する
+- **work:** Issue #7729 の Work 更新を記録する
+- **work:** Issue #7755 の Work 更新を記録する
+- **work:** Issue #7749 の Work 更新を記録する
+- **work:** Issue #7766 の Work 更新を記録する
+- **work:** Issue #7742 の Work イベントを記録する
+- **work:** Issue #7647 の Work イベントを記録する
+- **work:** Record Issue #7697 delivery work events
+- **work:** Record Issue #7697 successor work events
+
+### Testing
+
+- **settings:** Supported Agents の説明文の契約をツール単位の規則に合わせる
+- **monitor:** 共有スロット返却テストで ack 期限切れと操作の拒否を取り違えない
+- **e2e:** MacOS の headed Chromium を実カーソルの届かない画面隅へ移す
+- **settings:** Supported Agents の実機 E2E を現行の画面と起動経路に追従させる
+- **e2e:** 実機ヘルパーの起動ウィザードを窓に依存しない経路で開く
+- **e2e:** 起動ウィザードと PM 起床の実機スペックを現行の挙動に合わせる
+- **monitor:** 並び替え保存テストでワーカーの完了を待ってから順序を読む
+- **issue-monitor:** Fake gh が disarm 後の readback に解除済みを返す
+
 ## [9.172.0] - 2026-11-19
 
 ### Bug Fixes
