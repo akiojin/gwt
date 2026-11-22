@@ -127,8 +127,10 @@ impl LaunchWizardState {
         let show_manual_setup = self.show_manual_setup();
         let show_runtime_confirmation = self.show_runtime_confirmation();
         let fast_mode = self.fast_mode_enabled_for_current_agent();
-        let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
-        let show_opencode_options = show_manual_setup && self.current_agent_is_opencode();
+        // Issue #7771: the assignee stage stands where the settings form was.
+        let show_setup_form = show_manual_setup && !self.issue_plan_active();
+        let show_hermes_options = show_setup_form && self.current_agent_supports_hermes_options();
+        let show_opencode_options = show_setup_form && self.current_agent_is_opencode();
         LaunchWizardView {
             title: match self.wizard_mode {
                 LaunchWizardMode::StartWork => "Start Work".to_string(),
@@ -184,13 +186,13 @@ impl LaunchWizardState {
             ),
             selected_execution_mode: self.mode.clone(),
             skip_permissions: self.effective_skip_permissions(),
-            show_agent_settings: show_manual_setup && self.launch_target_is_agent(),
-            show_reasoning: show_manual_setup
+            show_agent_settings: show_setup_form && self.launch_target_is_agent(),
+            show_reasoning: show_setup_form
                 && self.launch_target_is_agent()
                 && self.agent_uses_reasoning_step(),
             show_runtime_target: show_runtime_confirmation && self.has_docker_workflow(),
             show_windows_shell: self.runtime_context_resolved
-                && show_manual_setup
+                && show_setup_form
                 && self.show_windows_shell_selection(),
             show_docker_service: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
                 && show_runtime_confirmation
@@ -199,21 +201,22 @@ impl LaunchWizardState {
                 && show_runtime_confirmation,
             show_execution_mode: false,
             show_skip_permissions: false,
-            show_fast_mode: show_manual_setup && self.effective_agent_id() == "claude",
-            show_codex_speed: show_manual_setup && self.agent_is_codex(),
+            show_fast_mode: show_setup_form && self.effective_agent_id() == "claude",
+            show_codex_speed: show_setup_form && self.agent_is_codex(),
             codex_speed: self.codex_speed,
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
             opencode_needs_setup: show_opencode_options
                 && self.agent_needs_configuration("opencode"),
-            agent_setup: self.agent_setup_view(show_manual_setup),
+            agent_setup: self.agent_setup_view(show_setup_form),
             // Issue #4079 AC-2: only the app runtime knows the saved candidate
             // pool, so it fills this in when the wizard is Issues
             // Agent Settings form.
             issue_monitor_pool_impact: None,
             issue_monitor_pool: None,
             execution_environment: None,
+            issue_plan: self.issue_plan_view(),
             hermes_provider: self.hermes_provider.clone(),
             hermes_provider_options: self.hermes_choices.providers.clone(),
             hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
@@ -225,7 +228,12 @@ impl LaunchWizardState {
             hermes_skill_options: self.hermes_choices.skills.clone(),
             hermes_max_turns: self.hermes_max_turns.clone(),
             hermes_safe_mode: self.hermes_safe_mode,
-            show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
+            show_branch_controls: self.wizard_mode == LaunchWizardMode::Branch
+                && if self.issue_plan_active() {
+                    show_runtime_confirmation
+                } else {
+                    show_manual_setup
+                },
             show_start_methods,
             show_back_button,
             show_manual_setup,
@@ -398,6 +406,26 @@ impl LaunchWizardState {
                 .is_none()
                 .then(|| "No running session".to_string()),
         });
+        if self.issue_plan_enabled() {
+            // Issue #7771: "Configure and start" plans the Issue's agent, so
+            // a plain shell gets its own way in.
+            methods[0].summary = "Choose the assignee and plan the launch".to_string();
+            methods.push(LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::OpenShell.value().to_string(),
+                label: "Open a shell".to_string(),
+                badge: "Shell".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::OpenShell,
+                    true,
+                    recommended_method,
+                ),
+                recommended: false,
+                summary: "Plain shell on this branch".to_string(),
+                detail: None,
+                enabled: true,
+                disabled_reason: None,
+            });
+        }
         methods
     }
 
@@ -552,7 +580,8 @@ impl LaunchWizardState {
     }
 
     fn launch_summary_view(&self) -> Vec<LaunchWizardSummaryView> {
-        let mut summary = if self.wizard_mode == LaunchWizardMode::StartWork {
+        let mut summary = self.issue_plan_summary_view();
+        summary.extend(if self.wizard_mode == LaunchWizardMode::StartWork {
             vec![LaunchWizardSummaryView {
                 label: "Workspace".to_string(),
                 value: "Current project".to_string(),
@@ -562,7 +591,7 @@ impl LaunchWizardState {
                 label: "Branch".to_string(),
                 value: self.branch_name.clone(),
             }]
-        };
+        });
         summary.push(LaunchWizardSummaryView {
             label: "Target".to_string(),
             value: match self.launch_target {
@@ -716,6 +745,9 @@ impl LaunchWizardState {
         if self.show_start_methods() {
             return "Choose start method".to_string();
         }
+        if let Some(label) = self.issue_plan_primary_action_label() {
+            return label.to_string();
+        }
         match self.launch_path {
             LaunchWizardLaunchPath::FocusSession => "Focus".to_string(),
             LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup
@@ -758,11 +790,14 @@ impl LaunchWizardState {
             LaunchWizardLaunchPath::FocusSession => self
                 .selected_live_session_index
                 .is_some_and(|index| self.context.live_sessions.get(index).is_some()),
-            LaunchWizardLaunchPath::ManualSetup => true,
+            LaunchWizardLaunchPath::ManualSetup => !self.issue_plan_blocks_submit(),
         }
     }
 
     fn progress_steps_view(&self) -> Vec<LaunchWizardProgressStepView> {
+        if self.issue_plan_rail() {
+            return self.issue_plan_progress_steps_view();
+        }
         let path_label = match self.launch_path {
             LaunchWizardLaunchPath::QuickStart => "Quick Start",
             LaunchWizardLaunchPath::ManualSetup => "Setup",

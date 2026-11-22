@@ -6,6 +6,7 @@ use std::{
 use crate::BranchListEntry;
 
 pub mod codex_models;
+mod issue_plan;
 mod launch_request;
 mod memory_cache;
 mod options;
@@ -215,6 +216,9 @@ pub enum LaunchWizardStartMethodKind {
     ContinueLastSession,
     OpenSessionPicker,
     FocusRunningSession,
+    /// Issue #7771: open a plain shell from a launch that plans an Issue's
+    /// agent in three stages, where the settings form is not shown.
+    OpenShell,
 }
 
 impl LaunchWizardStartMethodKind {
@@ -225,6 +229,7 @@ impl LaunchWizardStartMethodKind {
             LaunchWizardStartMethodKind::ContinueLastSession => "continue_last_session",
             LaunchWizardStartMethodKind::OpenSessionPicker => "open_session_picker",
             LaunchWizardStartMethodKind::FocusRunningSession => "focus_running_session",
+            LaunchWizardStartMethodKind::OpenShell => "open_shell",
         }
     }
 }
@@ -415,6 +420,46 @@ pub struct LaunchWizardSkippedEnvironmentView {
     pub reason: String,
 }
 
+/// Issue #7771: a registered agent offered as the assignee of a launch that
+/// starts work on an Issue, with what its sessions start as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchWizardAssigneeCandidate {
+    pub agent_member_id: String,
+    pub name: String,
+    pub traits: crate::agent_names::AgentTraits,
+    /// Why this agent cannot take the launch now. `None` when it can.
+    pub unavailable_reason: Option<String>,
+    /// The tool and tuning the agent starts with: its traits on the
+    /// project's execution environment.
+    pub profile: Option<LaunchWizardPreviousProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardAssigneeView {
+    pub agent_member_id: String,
+    pub name: String,
+    pub selected: bool,
+    pub available: bool,
+    pub status: String,
+    pub reasoning: String,
+    pub speed: String,
+    pub personality: Option<String>,
+}
+
+/// Issue #7771 (SPEC #7007 mock v3): the three stages of a launch that
+/// starts work on an Issue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardIssuePlanView {
+    /// `"assignee"`, `"plan"` or `"confirm"`. `None` while the start method
+    /// is still being chosen.
+    pub stage: Option<String>,
+    pub issue_number: u64,
+    pub assignees: Vec<LaunchWizardAssigneeView>,
+    pub branch: String,
+    pub branch_detail: String,
+    pub permissions: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
     pub title: String,
@@ -501,6 +546,10 @@ pub struct LaunchWizardView {
     /// list, for a launch that starts an agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_environment: Option<LaunchWizardExecutionEnvironmentView>,
+    /// Issue #7771: present when this launch plans an Issue's agent in three
+    /// stages. Absent for every other launch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_plan: Option<LaunchWizardIssuePlanView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
@@ -1358,4 +1407,8 @@ pub struct LaunchWizardState {
     /// SPEC-2359 US-83 / FR-444: eligible existing remote branches offered by the
     /// "open existing branch" picker. Set at hydration / Start Work open.
     pub open_branch_candidates: Vec<String>,
+    /// Issue #7771: registered agents offered as the assignee. Non-empty only
+    /// for a launch that plans an Issue's agent in three stages.
+    assignee_candidates: Vec<LaunchWizardAssigneeCandidate>,
+    selected_assignee_id: Option<String>,
 }

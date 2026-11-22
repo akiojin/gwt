@@ -162,6 +162,19 @@ impl IssueMonitorPrefs {
             .collect()
     }
 
+    /// Issue #7771: a registered agent's saved candidate as a launch chosen
+    /// by hand starts it — on the project's environment when the project
+    /// saved a list, else on the tool the agent was registered with. `None`
+    /// when the project keeps no candidate for the agent, which a launch
+    /// cannot reserve.
+    pub fn member_launch_candidate(&self, member_id: &str) -> Option<IssueMonitorLaunchProfile> {
+        let saved = self
+            .launch_profile_pool()
+            .into_iter()
+            .find(|profile| profile.agent_member_id.as_deref() == Some(member_id))?;
+        self.agent_candidates_on_environment(vec![saved]).pop()
+    }
+
     /// Whether `tool` is one of the project's saved environments, which any
     /// registered agent may start a session with.
     pub fn environment_lists_tool(&self, tool: &str) -> bool {

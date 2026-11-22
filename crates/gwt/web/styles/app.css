@@ -5825,6 +5825,46 @@ body {
   color: var(--color-text-strong);
 }
 
+/* Issue 7771 — the traits of a registered agent in the stages of a launch on
+   an Issue, and the row that names the assignee. */
+.assignee-traits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.assignee-trait {
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.assignee-trait b {
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.issue-plan-assignee {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.issue-plan-change-assignee {
+  justify-self: start;
+}
+/* end issue-plan */
+
 /* Issue 7652 — the note under the agent settings that says a launch's choices
    are overrides for that launch. */
 .launch-override-note {

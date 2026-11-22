@@ -2457,7 +2457,7 @@ test("Launch wizard omits permission choices while preserving explicit provider 
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
     launchWizardSource,
-    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;/,
     "expected renderer to derive mutually exclusive Runtime/Confirm/setup gating",
   );
   assert.match(
@@ -2467,8 +2467,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     launchWizardSource,
-    /const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
-    "expected manual setup forms to be suppressed during Runtime confirmation",
+    /const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;/,
+    "expected manual setup forms to be suppressed during Runtime confirmation and the stages of an Issue launch (Issue #7771)",
   );
   assert.match(
     launchWizardSource,
@@ -2482,8 +2482,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     launchWizardSource,
-    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
-    "expected Branch controls to be part of setup forms only",
+    /if\s*\(\s*\(showSetupForms \|\| planStage === "plan"\)\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
+    "expected Branch controls to be part of setup forms, or of the plan stage of an Issue launch (Issue #7771)",
   );
   assert.match(
     launchWizardSource,
