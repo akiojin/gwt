@@ -95,6 +95,8 @@ impl LaunchWizardState {
             settings_revisited: false,
             resolved_branch_name: None,
             open_branch_candidates: Vec::new(),
+            assignee_candidates: Vec::new(),
+            selected_assignee_id: None,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -482,7 +484,9 @@ impl LaunchWizardState {
             LaunchWizardAction::SetLaunchTarget { target } => {
                 self.set_launch_target(target);
             }
-            LaunchWizardAction::SetAgentMember { .. } => {}
+            LaunchWizardAction::SetAgentMember { agent_member_id } => {
+                self.select_assignee(&agent_member_id);
+            }
             LaunchWizardAction::SetAgent { agent_id } => {
                 self.set_agent_id(&agent_id);
             }
@@ -717,6 +721,11 @@ impl LaunchWizardState {
             LaunchWizardLaunchPath::ManualSetup => {}
         }
 
+        if self.issue_plan_blocks_submit() {
+            self.error = Some("Choose a registered agent that can take this launch".to_string());
+            return;
+        }
+
         if self.is_new_branch {
             let trimmed = self.branch_name.trim();
             if trimmed.is_empty() {
@@ -738,6 +747,13 @@ impl LaunchWizardState {
         // み発生する。即起動系（manual_setup_initialized=false）は経由しない（FR-129）。
         if self.manual_setup_initialized && self.runtime_context_resolved && !self.runtime_confirmed
         {
+            // Issue #7771: the plan stage holds the branch, so a changed
+            // branch asks again where the session can run before Confirm.
+            if self.issue_plan_active() && self.branch_changed_since_resolution() {
+                self.runtime_context_resolved = false;
+                self.finish_launch_request();
+                return;
+            }
             self.runtime_confirmed = true;
             return;
         }
@@ -859,6 +875,18 @@ impl LaunchWizardState {
     }
 
     fn use_start_method(&mut self, method: LaunchWizardStartMethodKind) {
+        // Issue #7771: only "Configure and start" walks the three stages. A
+        // launch that reuses saved settings or a session is not one of them,
+        // even after the stages were visited and left.
+        if self.issue_plan_enabled()
+            && !matches!(
+                method,
+                LaunchWizardStartMethodKind::ConfigureAndStart
+                    | LaunchWizardStartMethodKind::OpenShell
+            )
+        {
+            self.manual_setup_initialized = false;
+        }
         match method {
             LaunchWizardStartMethodKind::ConfigureAndStart => {
                 if !self.manual_setup_initialized {
@@ -869,6 +897,24 @@ impl LaunchWizardState {
                 self.start_method_selected = true;
                 self.runtime_confirmed = false;
                 self.settings_revisited = false;
+                self.step = LaunchWizardStep::LaunchTarget;
+                self.selected = step_default_selection(self.step, self);
+                self.completion = None;
+                if self.issue_plan_enabled() {
+                    // Sets the target and starts the assignee as its traits say.
+                    self.set_launch_target(LaunchTargetKind::Agent);
+                }
+            }
+            LaunchWizardStartMethodKind::OpenShell => {
+                if !self.issue_plan_enabled() {
+                    self.error = Some("Choose Configure and start to open a shell".to_string());
+                    return;
+                }
+                self.manual_setup_initialized = true;
+                self.start_method_selected = true;
+                self.runtime_confirmed = false;
+                self.settings_revisited = false;
+                self.set_launch_target(LaunchTargetKind::Shell);
                 self.step = LaunchWizardStep::LaunchTarget;
                 self.selected = step_default_selection(self.step, self);
                 self.completion = None;
@@ -1065,7 +1111,10 @@ impl LaunchWizardState {
         self.restore_agent_draft_or_defaults()
     }
 
-    fn apply_previous_agent_preferences(&mut self, profile: LaunchWizardPreviousProfile) {
+    pub(super) fn apply_previous_agent_preferences(
+        &mut self,
+        profile: LaunchWizardPreviousProfile,
+    ) {
         self.apply_saved_model(profile.model.as_deref());
         self.apply_restored_reasoning(profile.reasoning.clone());
         self.sync_reasoning_state();
@@ -1251,6 +1300,7 @@ impl LaunchWizardState {
             self.codex_speed = Default::default();
         } else {
             self.restore_agent_draft_or_defaults();
+            self.apply_assignee_profile();
         }
     }
 

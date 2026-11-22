@@ -499,6 +499,28 @@ impl AppRuntime {
         )
     }
 
+    /// Issue #7771: a launch planned for an Issue starts as the registered
+    /// agent chosen in its first stage.
+    pub(crate) fn spawn_agent_window_as_member(
+        &mut self,
+        tab_id: &str,
+        config: gwt_agent::LaunchConfig,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        launch_feedback_context: Option<LaunchFeedbackContext>,
+        agent_member_id: String,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        self.spawn_agent_window_with_options(
+            tab_id,
+            config,
+            AgentWindowSpawnOptions {
+                selected_agent_member_id: Some(agent_member_id),
+                workspace_resume_context,
+                launch_feedback_context,
+                ..Default::default()
+            },
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_agent_window_with_monitor_intent(
         &mut self,

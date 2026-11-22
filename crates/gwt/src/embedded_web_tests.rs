@@ -2976,8 +2976,10 @@ fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
         "expected Launch Wizard to derive a dedicated Runtime confirmation state",
     );
     assert!(
-        html.contains("const showSetupForms = showManualSetup && !isRuntimeConfirmation;"),
-        "expected setup form rendering to be disabled during Runtime confirmation",
+        html.contains(
+            "const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;"
+        ),
+        "expected setup form rendering to be disabled during Runtime confirmation and the stages of an Issue launch (Issue #7771)",
     );
     assert!(
             html.contains("renderWizardSummary();")
@@ -2986,7 +2988,8 @@ fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
             "expected Runtime confirmation to keep the read-only summary while hiding selection/setup rows",
         );
     assert!(
-        html.contains("showSetupForms && launchWizard.show_branch_controls !== false")
+        html.contains("(showSetupForms || planStage === \"plan\")")
+            && html.contains("&& launchWizard.show_branch_controls !== false")
             && html.contains("showSetupForms && launchWizard.show_linked_issue"),
         "expected branch and linked issue controls to be gated to setup forms \
              (linked issue uses dedicated show_linked_issue flag per SPEC-2014 FR-057)",

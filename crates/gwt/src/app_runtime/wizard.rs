@@ -2168,6 +2168,12 @@ impl AppRuntime {
         );
         Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
+        if linked_issue_number.is_some() && workspace_resume_context.is_none() {
+            wizard.enable_issue_plan(issue_plan_assignee_candidates(
+                project_root,
+                &self.installed_tools(),
+            ));
+        }
         let origin = if workspace_resume_context.is_some() {
             super::LaunchWizardOrigin::WorkspaceResume
         } else {
@@ -6767,7 +6773,14 @@ impl AppRuntime {
                     issue_number,
                     linked_issue_kind,
                 ) {
-                    Ok(()) => vec![self.launch_wizard_state_outbound(&context)],
+                    Ok(()) => {
+                        let candidates =
+                            issue_plan_assignee_candidates(&project_root, &self.installed_tools());
+                        if let Some(session) = self.launch_wizard_for_mut(&context) {
+                            session.wizard.enable_issue_plan(candidates);
+                        }
+                        vec![self.launch_wizard_state_outbound(&context)]
+                    }
                     Err(error) => vec![OutboundEvent::reply(
                         &client_id,
                         knowledge_error_event(id, knowledge_kind, error, None, None),
@@ -7755,7 +7768,17 @@ impl AppRuntime {
                             issue_monitor_autonomous_submit_started: false,
                             issue_monitor_review_dispatch: false,
                         });
-                    if let Some(target) = session.agent_kanban_target.clone() {
+                    if let Some(agent_member_id) =
+                        session.wizard.issue_plan_assignee_id().map(str::to_string)
+                    {
+                        runtime.spawn_agent_window_as_member(
+                            &session.tab_id,
+                            *config,
+                            workspace_resume_context,
+                            launch_feedback_context,
+                            agent_member_id,
+                        )
+                    } else if let Some(target) = session.agent_kanban_target.clone() {
                         runtime.spawn_agent_window_in_agent_kanban(
                             &session.tab_id,
                             *config,
@@ -8115,6 +8138,79 @@ impl AppRuntime {
             }
         }
     }
+}
+
+/// Issue #7771: the registered agents a launch on an Issue can be assigned
+/// to, in roster order, each as its sessions start here: its traits on the
+/// project's execution environment (Issue #7647). An agent that cannot take
+/// the launch stays on the list with the reason. A roster or settings that
+/// cannot be read offers nobody, which leaves the launch on the settings
+/// form.
+fn issue_plan_assignee_candidates(
+    project_root: &Path,
+    installed: &[String],
+) -> Vec<gwt::LaunchWizardAssigneeCandidate> {
+    let Ok(prefs) =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+    else {
+        return Vec::new();
+    };
+    let Some(roster) = prefs.agent_roster.as_ref() else {
+        return Vec::new();
+    };
+    let is_installed = |tool: &str| {
+        gwt_agent::resolve_agent_id(tool).is_some_and(|agent| {
+            installed
+                .iter()
+                .any(|id| gwt_agent::resolve_agent_id(id).as_ref() == Some(&agent))
+        })
+    };
+    roster
+        .members
+        .iter()
+        .map(|member| {
+            let profile = prefs
+                .member_launch_candidate(&member.agent_member_id)
+                .map(|candidate| {
+                    gwt::execution_environments::candidate_as_started(&prefs, candidate, false)
+                });
+            let unavailable_reason = if !member.implementation_eligible() {
+                Some("Reserved as Project Manager.".to_string())
+            } else if !member.enabled {
+                Some("Resting. Activate this agent in Agents to choose it.".to_string())
+            } else if let Some(assignment) = member.assignment.as_ref() {
+                Some(match assignment.issue_number {
+                    Some(number) => format!(
+                        "Working on #{number} now. It can be chosen once that work ends."
+                    ),
+                    None => "Working on another launch now. It can be chosen once that work ends."
+                        .to_string(),
+                })
+            } else {
+                match profile.as_ref() {
+                    None => Some(
+                        "Not one of this project's launch candidates. Add it under Configure Issues."
+                            .to_string(),
+                    ),
+                    Some(profile) if !is_installed(&profile.agent_id) => Some(format!(
+                        "{} is not installed on this machine.",
+                        gwt_agent::resolve_agent_id(&profile.agent_id).map_or_else(
+                            || profile.agent_id.clone(),
+                            |agent| agent.display_name().to_string(),
+                        )
+                    )),
+                    Some(_) => None,
+                }
+            };
+            gwt::LaunchWizardAssigneeCandidate {
+                agent_member_id: member.agent_member_id.clone(),
+                name: member.name.clone(),
+                traits: member.traits.clone(),
+                unavailable_reason,
+                profile: profile.map(Into::into),
+            }
+        })
+        .collect()
 }
 
 fn agent_settings_launch_defaults(
