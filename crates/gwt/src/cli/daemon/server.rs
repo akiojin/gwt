@@ -23103,7 +23103,7 @@ if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  if [ -f "$GWT_FAKE_ARM_DONE" ]; then
+  if [ -f "$GWT_FAKE_ARM_DONE" ] && [ ! -f "$GWT_FAKE_DISARM_DONE" ]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"abc","autoMergeRequest":{"enabledAt":"2026-07-27T00:00:00Z"},"mergeCommit":null}'
   else
     printf '%s\n' '{"state":"OPEN","headRefOid":"abc","autoMergeRequest":null,"mergeCommit":null}'
@@ -28856,7 +28856,11 @@ exit 1
             &fake_gh,
             r#"#!/bin/sh
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  printf '%s\n' '{"state":"OPEN","headRefOid":"sha-b","autoMergeRequest":{"enabledAt":"2026-07-27T00:00:00Z"},"mergeCommit":null}'
+  if [ -f "$GWT_TEST_DISARM_MARKER" ]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"sha-b","autoMergeRequest":null,"mergeCommit":null}'
+  else
+    printf '%s\n' '{"state":"OPEN","headRefOid":"sha-b","autoMergeRequest":{"enabledAt":"2026-07-27T00:00:00Z"},"mergeCommit":null}'
+  fi
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "merge" ] && [ "$4" = "--disable-auto" ]; then
@@ -30346,7 +30350,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   while [ ! -f "$GWT_FAKE_EFFECT_RELEASE" ]; do
     sleep 0.02
   done
-  if [ -f "$GWT_FAKE_ARM_DONE" ]; then
+  if [ -f "$GWT_FAKE_ARM_DONE" ] && [ ! -f "$GWT_FAKE_DISARM_DONE" ]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"abc","autoMergeRequest":{"enabledAt":"2026-07-27T00:00:00Z"},"mergeCommit":null}'
   else
     printf '%s\n' '{"state":"OPEN","headRefOid":"abc","autoMergeRequest":null,"mergeCommit":null}'
