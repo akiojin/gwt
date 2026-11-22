@@ -40,13 +40,13 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], rested = [], activated = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const opened = [], rested = [], activated = [], traitsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
   if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
-  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { traitsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
@@ -176,25 +176,21 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
   assert.equal(f.surface.element.querySelectorAll(".roster-row").length, 2);
   assert.equal(f.surface.element.querySelectorAll(".roster-detail .roster-stat").length, 4);
-  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Codex.*2026-10-20/s);
+  // Issue #7647 AC-3: a member has no tool of its own in the ledger.
+  assert.match(f.surface.element.querySelector(".roster-detail-heading").textContent, /Member since 2026-10-20/);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail-heading").textContent, /Registered tool|Codex/);
+  for (const key of ["agent_id", "model", "reasoning"])
+    assert.equal(f.surface.element.querySelector(`[data-member-tuning-field="${key}"]`)?.closest("[data-member-tuning-launch]")?.hidden, true, `${key} is not offered for an implementation member`);
+  assert.doesNotMatch(f.surface.element.textContent, /registered tool|Choose a name and tool/i);
   assert.doesNotMatch(f.surface.element.querySelector(".roster-detail-heading").textContent, /GPT-6/);
-  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Saved manual candidate.*Unavailable.*Automatic launches use tier settings/s);
+  assert.equal(f.surface.element.querySelector(".roster-saved-settings"), null, "no saved tool, model or reasoning is shown for a member");
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: — · Tool: — · Recorded model: —");
-  const revisionInput = f.surface.element.querySelector(".roster-saved-revision input");
-  assert.ok(revisionInput, "saved manual settings have a revision readout");
-  assert.equal(revisionInput.value, "—");
-  assert.ok(revisionInput.hasAttribute("readonly"), "revision is never an editable setting");
-  assert.equal(revisionInput.getAttribute("aria-label"), "Saved manual candidate revision");
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id !== "m1" ? member : { ...member,
     saved_manual_profile: { agent_id: "codex", model: "saved-model", reasoning: "high", runtime_target: "Docker", docker_service: "worker", skip_permissions: false },
     saved_manual_revision: `manual-profile-v1:${"a".repeat(64)}`,
     history: [...member.history, { session_id: "s1", role: "implementation", name: "Launch author", provider: "codex", model: "launch-model" }],
   }) })); f.flush();
-  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model.*Reasoning: high.*Runtime: Docker.*worker.*Permissions: Ask/s);
-  assert.equal(f.surface.element.querySelector(".roster-saved-revision input"), revisionInput, "revision readout retains the keyboard target");
-  assert.equal(revisionInput.value, `manual-profile-v1:${"a".repeat(64)}`);
-  assert.ok(f.surface.element.querySelector(".roster-saved-settings").previousElementSibling.classList.contains("roster-stats"), "refresh preserves aggregates before saved settings");
-  assert.match(revisionInput.title, /Same settings.*same revision/);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail").textContent, /saved-model/);
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   assert.equal(f.surface.element.querySelector('.roster-current-role').textContent, 'Role: Implementation');
   assert.deepEqual([...f.surface.element.querySelectorAll('.roster-history-role')].map(node => node.textContent), ['Role: —', 'Role: Project Manager']);
@@ -205,15 +201,12 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.equal(history[2].querySelector(".roster-history-config")?.textContent, "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model");
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, name: "Renamed current", provider: "codex", model: "current-model" })) })); f.flush();
   assert.equal(f.surface.element.querySelector(".roster-detail h3").textContent, "Renamed current");
-  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model/);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail").textContent, /saved-model/);
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent), [
     "Recorded name: — · Tool: — · Recorded model: —", "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
   ]);
   const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
-  assert.equal(preview.querySelector(".roster-saved-settings").textContent, f.surface.element.querySelector(".roster-saved-settings").textContent);
-  assert.equal(preview.querySelector(".roster-saved-revision input").value, revisionInput.value);
-  assert.ok(preview.querySelector(".roster-saved-revision input").disabled);
   assert.equal(preview.querySelector(".roster-current-config").textContent, f.surface.element.querySelector(".roster-current-config").textContent);
   assert.deepEqual([...preview.querySelectorAll(".roster-history-config")].map(node => node.textContent), [...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent));
   assert.equal(f.surface.selectMember("m2"), true);
@@ -408,7 +401,10 @@ test("Agents planned controls use Operator styles and stay inert in split previe
   assert.match(styles, /\.roster-plan-controls\s*\{[^}]*flex-wrap:\s*wrap/s);
   assert.match(styles, /\.agents-surface select\s*\{[^}]*var\(--color-/s);
   assert.doesNotMatch(styles, /#[0-9a-f]{3,8}\b|rgba?\(/i);
-  assert.doesNotMatch(source, /role=["']dialog|modal-backdrop|position:\s*fixed/);
+  assert.doesNotMatch(source, /position:\s*fixed/);
+  // Issue #7646: the only modal is the delete confirmation on the shared primitive.
+  assert.equal(source.match(/modal-backdrop/g).length, 1);
+  assert.equal(f.surface.element.querySelector('[role="dialog"], .modal-backdrop'), null, "planned controls stay inline");
   f.surface.dispose();
 });
 
@@ -434,7 +430,7 @@ test("Agents add and rest actions target a member and Past shows measured contri
   name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
   f.surface.element.querySelector('[data-action="add"]').click();
   f.surface.element.querySelector('.roster-detail [data-action="rest"]').click();
-  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple", pm_eligible: false }]); assert.deepEqual(f.rested, ["m1"]);
+  assert.deepEqual(f.added, [{ name: "Maple", pm_eligible: false }]); assert.deepEqual(f.rested, ["m1"]);
   f.surface.element.querySelector('[data-tab="past"]').click();
   assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
   assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
@@ -543,7 +539,8 @@ test("resting registration collisions identify the member and reactivate only th
   const input = f.surface.element.querySelector('[aria-label="Name for new member"]');
   input.value = " MAPLE "; input.dispatchEvent(new f.window.Event("input"));
   const error = f.surface.element.querySelector("#roster-registration-error");
-  assert.match(error.textContent, /Maple.*codex.*resting/i);
+  assert.match(error.textContent, /Maple is resting/i);
+  assert.doesNotMatch(error.textContent, /codex/i);
   assert.equal(f.surface.element.querySelector('[data-action="add"]').disabled, true);
   error.querySelector("button").click();
   const row = f.surface.element.querySelector('[data-member-id="rest-target"]');
@@ -727,73 +724,10 @@ test("Agents continues only server-eligible saved work through the existing corr
 });
 
 
-test("registration selects catalog tuning without sending until Register and retains rejected drafts", async () => {
-  let reloads = 0;
-  const f = await fixture({ onReloadProfile: () => { reloads += 1; } });
-  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "catalog-model", reasoning_options: [{ value: "high" }] }] }] } })); f.flush();
-  const host = f.surface.element;
-  const name = host.querySelector('[aria-label="Name for new member"]');
-  const model = host.querySelector('[aria-label="Model for new member"]');
-  const reasoning = host.querySelector('[aria-label="Reasoning for new member"]');
-  assert.ok(model && reasoning, "registration exposes model and reasoning inputs");
-  assert.equal(model.className, "settings-input");
-  assert.equal(model.parentElement.querySelector('option[value="catalog-model"]').value, "catalog-model");
-  name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
-  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
-  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
-  assert.equal(reasoning.parentElement.querySelector('option[value="high"]').value, "high");
-  name.dispatchEvent(new f.window.Event("compositionstart"));
-  f.supportedAgentsModel.update(state => ({ agents: state.agents.filter(agent => agent.id !== "codex") })); f.flush();
-  assert.equal(model.value, "", "fallback to another tool clears the previous tool's tuning");
-  assert.equal(reasoning.value, "");
-  assert.equal(host.querySelector('[data-action="add"]').disabled, true, "tool fallback preserves name composition");
-  name.dispatchEvent(new f.window.Event("compositionend"));
-  f.supportedAgentsModel.update(() => ({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] })); f.flush();
-  host.querySelector('[aria-label="Tool for new member"] option[value="codex"]').selected = true;
-  host.querySelector('[aria-label="Tool for new member"]').dispatchEvent(new f.window.Event("change"));
-  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
-  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
-  assert.equal(f.added.length, 0);
-  reasoning.dispatchEvent(new f.window.Event("compositionstart"));
-  host.querySelector('[data-action="add"]').click();
-  assert.equal(f.added.length, 0, "Register never sends an unfinished IME value");
-  reasoning.dispatchEvent(new f.window.Event("compositionend"));
-  host.querySelector('[data-action="add"]').click();
-  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple", pm_eligible: false, tuning: { model: "catalog-model", reasoning: "high" } }]);
-  model.focus();
-  f.rosterModel.update(state => ({ ...state, error: "Unsupported reasoning; review and retry", tuning_choices: { agents: [] } })); f.flush();
-  assert.equal(model.value, "  catalog-model  "); assert.equal(reasoning.value, " high ");
-  assert.equal(host.querySelector('[aria-label="Model for new member"]'), model);
-  assert.equal(f.document.activeElement, model);
-  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", model_catalog_warning: "Catalog unavailable. Retry without losing your draft.", models: [] }] } })); f.flush();
-  assert.match(host.querySelector('[data-registration-catalog-status]').textContent, /Catalog unavailable/);
-  const retry = host.querySelector('[data-action="retry-registration-catalog"]');
-  assert.equal(retry.hidden, false); retry.click(); assert.equal(reloads, 1);
-  assert.equal(f.added.length, 1, "catalog Retry is only a read");
-  assert.equal(model.value, "  catalog-model  ");
-  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "recovered-model" }] }] } })); f.flush();
-  assert.equal(retry.hidden, true); assert.equal(model.value, "  catalog-model  ");
-  assert.equal(model.parentElement.querySelector('option[value="recovered-model"]').value, "recovered-model");
-  f.supportedAgentsModel.update(() => ({ agents: [] })); f.customAgentsModel.update(() => ({ catalog: { loaded: false, agents: [] } })); f.flush();
-  assert.equal(model.value, "  catalog-model  ");
-  f.supportedAgentsModel.update(() => ({ agents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] }));
-  f.customAgentsModel.update(() => ({ catalog: { loaded: true, agents: [] } })); f.flush();
-  assert.equal(host.querySelector('[aria-label="Tool for new member"]').value, "codex");
-  assert.equal(model.value, "  catalog-model  ", "same tool after unavailable catalog retains tuning");
-  const tool = host.querySelector('[aria-label="Tool for new member"]');
-  tool.querySelector('[value="claude"]').selected = true; tool.dispatchEvent(new f.window.Event("change"));
-  assert.equal(model.value, ""); assert.equal(reasoning.value, "");
-  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
-  assert.equal(preview.querySelector('[aria-label="Model for new member"]').disabled, true);
-  assert.equal(preview.querySelector('[aria-label="Reasoning for new member"]').disabled, true);
-  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
-  assert.match(app, /kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, \.\.\.tuning/);
-  f.surface.dispose();
-});
-
-test("Agents registers an explicit name with its selected catalog tool and preserves rejected drafts", async () => {
+test("Agents registers an explicit name alone, with no tool, model or reasoning, and preserves rejected drafts", async () => {
   const f = await fixture();
-  const select = f.surface.element.querySelector('[aria-label="Tool for new member"]');
+  for (const label of ["Tool for new member", "Model for new member", "Reasoning for new member"])
+    assert.equal(f.surface.element.querySelector(`[aria-label="${label}"]`), null, `${label} is not asked`);
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
   assert.ok(name, "registration exposes an accessible display name field");
   assert.equal(name.classList.contains("settings-input"), true, "registration reuses the tokenized shared input primitive");
@@ -806,17 +740,13 @@ test("Agents registers an explicit name with its selected catalog tool and prese
   assert.equal(register.disabled, true, "normalized duplicates are rejected");
   assert.equal(name.getAttribute("aria-invalid"), "true");
   input("  Maple  ");
-  assert.deepEqual([...select.options].map(option => option.value), ["codex", "claude", "custom-cli"]);
-  select.querySelector('[value="custom-cli"]').selected = true;
+  assert.equal(register.title, "Register this name.");
   register.click();
-  assert.deepEqual(f.added, [{ tool: "custom-cli", name: "Maple", pm_eligible: false }]);
+  assert.deepEqual(f.added, [{ name: "Maple", pm_eligible: false }]);
   f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
   assert.equal(name.value, "  Maple  ", "backend rejection retains the draft");
   name.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null })); f.flush();
   assert.ok(f.surface.element.querySelector('[aria-label="Name for new member"]') === name && f.document.activeElement === name);
-  select.focus();
-  assert.ok(f.surface.element.querySelector('[aria-label="Tool for new member"]') === select && f.document.activeElement === select);
-  assert.equal(select.value, "custom-cli");
   const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
   assert.equal(preview.querySelector('[aria-label="Name for new member"]').disabled, true);
   assert.equal(register.disabled, false, "a rejected request can be retried");
@@ -1024,4 +954,169 @@ test("Agents labels its project execution and opens the existing shared PM edito
   [...f.surface.element.querySelectorAll('button')].find(button => button.textContent === 'Project Manager settings').click();
   assert.deepEqual(request, { target: 'project-manager', surface_owner: 'pm' });
   assert.deepEqual(f.added, []); f.surface.dispose();
+});
+
+// Issue #7646 AC-3: the ledger order is the assignee priority, so every row
+// carries its own move controls.
+test("ledger rows reorder members and disable moves at the list edges", async () => {
+  const f = await fixture();
+  const control = (id, action) => f.surface.element.querySelector(`.roster-row[data-member-id="${id}"] [data-action="${action}"]`);
+  assert.equal(control("m1", "move-up").disabled, true);
+  assert.equal(control("m1", "move-down").disabled, false);
+  assert.equal(control("m2", "move-up").disabled, false);
+  assert.equal(control("m2", "move-down").disabled, true);
+  assert.equal(control("m2", "move-up").getAttribute("aria-label"), "Move Two up");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-order-position').textContent, "2");
+  control("m2", "move-up").click();
+  control("m1", "move-down").click();
+  assert.deepEqual(f.moved, [["m2", "up"], ["m1", "down"]]);
+  f.rosterModel.update(state => ({ ...state, members: [...state.members].reverse() })); f.flush();
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-list .roster-row")].map(row => row.dataset.memberId), ["m2", "m1"]);
+  assert.equal(control("m2", "move-up").disabled, true);
+  assert.equal(control("m1", "move-down").disabled, true);
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(control("m1", "move-up").disabled, true, "a pending member change holds further moves");
+  f.surface.dispose();
+});
+
+// Issue #7646 (A-26): deletion is confirmed in the shared dialog, and the
+// Project Manager guard reads the live assignment instead of a static flag.
+test("ledger deletion confirms in a shared dialog and follows the current Project Manager", async () => {
+  const f = await fixture();
+  const dialog = () => f.document.querySelector("#roster-delete-modal");
+  const remove = id => f.surface.element.querySelector(`.roster-row[data-member-id="${id}"] [data-action="remove"]`);
+  assert.equal(dialog().classList.contains("modal-backdrop"), true);
+  assert.equal(dialog().classList.contains("open"), false);
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_eligible: true, pm_project_key: "project" } : member) })); f.flush();
+  remove("m2").click();
+  const shell = dialog().querySelector(".modal-shell");
+  assert.equal(dialog().classList.contains("open"), true);
+  assert.equal(shell.getAttribute("role"), "dialog"); assert.equal(shell.getAttribute("aria-modal"), "true");
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Two cannot be deleted");
+  assert.match(shell.querySelector(".modal-body").textContent, /Two is the Project Manager.*Select another Project Manager/);
+  assert.equal(shell.querySelector('[data-role="roster-delete-confirm"]'), null, "the current Project Manager offers no delete");
+  shell.querySelector('[data-role="roster-delete-cancel"]').click();
+  assert.equal(dialog().classList.contains("open"), false);
+  // Reassigning the Project Manager lifts the guard without a reload.
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: null } : member) })); f.flush();
+  remove("m2").click();
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Delete Two?");
+  assert.match(shell.querySelector(".modal-body").textContent, /every project/);
+  // The guard is read again at confirmation, not at the time the dialog opened.
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: "project" } : member) }));
+  shell.querySelector('[data-role="roster-delete-confirm"]').click();
+  assert.deepEqual(f.removed, []);
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Two cannot be deleted");
+  shell.querySelector('[data-role="roster-delete-cancel"]').click();
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: null } : member) })); f.flush();
+  remove("m2").click(); shell.querySelector('[data-role="roster-delete-confirm"]').click();
+  assert.deepEqual(f.removed, ["m2"]);
+  assert.equal(dialog().classList.contains("open"), false);
+  // A member with live work is not deletable either.
+  remove("m1").click();
+  assert.match(shell.querySelector(".modal-body").textContent, /One is assigned to work/);
+  assert.equal(shell.querySelector('[data-role="roster-delete-confirm"]'), null);
+  f.surface.dispose();
+  assert.equal(dialog(), null, "the dialog leaves with its surface");
+});
+
+test("ledger row controls keep Operator tokens and touch targets", () => {
+  assert.match(styles, /\.roster-order\s*\{[^}]*var\(--space-/);
+  const block = styles.match(/\.roster-order[^{]*\{[^}]*\}/g).join("\n");
+  assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
+});
+
+// Issue #7649 (SPEC #7007 T-031): history and planned assignments belong to
+// the project's agents screen. The ledger shows neither.
+const historyAndPlans = surface => ({
+  pastTab: surface.element.querySelector(".roster-tabs"),
+  past: surface.element.querySelector(".roster-past"),
+  plans: surface.element.querySelector(".roster-plans"),
+  current: surface.element.querySelector(".roster-current-work"),
+  history: surface.element.querySelector(".roster-history:not(.roster-current-work)"),
+  project: surface.element.querySelector(".agent-history-plans-host"),
+});
+
+test("AC-3: the ledger shows no history, current work or planned assignments", async () => {
+  const f = await fixture({ schedule: planned() });
+  assert.equal(f.surface.element.dataset.view, "project");
+  f.surface.element.querySelector('[data-tab="past"]').click();
+  f.surface.setView("ledger");
+  assert.equal(f.surface.element.dataset.view, "ledger");
+  assert.equal(f.surface.element.querySelector("h2").textContent, "Agents");
+  for (const [name, node] of Object.entries(historyAndPlans(f.surface))) {
+    assert.ok(node, `${name} exists`);
+    assert.equal(node.hidden, true, `${name} is hidden in the ledger`);
+  }
+  assert.equal(f.surface.element.querySelector(".roster-team").hidden, false, "the ledger always shows the member list");
+  assert.match(styles, /\.agents-surface \[hidden\],[^{]*\{ display: none !important; \}/, "hidden parts take no space");
+});
+
+test("AC-1/AC-2: the project's agents screen lists every member's history and the assignment plan", async () => {
+  const f = await fixture({ schedule: planned() });
+  f.surface.setView("ledger"); f.surface.setView("project");
+  assert.equal(f.surface.element.querySelector("h2").textContent, "Agent history & plans");
+  for (const [name, node] of Object.entries(historyAndPlans(f.surface))) assert.equal(node.hidden, name === "past", `${name} follows the project view`);
+  const host = f.surface.element.querySelector(".agent-history-plans-host");
+  assert.equal(host.closest(".roster-team") !== null, true);
+  const rows = [...host.querySelectorAll('table[aria-label="Agent history"] tbody tr')].map(row => row.dataset.sessionId);
+  assert.deepEqual(rows, ["s2", "s0"]);
+  assert.equal(host.querySelector('tr[data-session-id="s0"]').dataset.role, "pm");
+  assert.match(host.querySelector('tr[data-session-id="s0"]').textContent, /recorded-model/);
+  assert.deepEqual([...host.querySelectorAll('[aria-label="Planned assignments"] li')].map(item => `${item.dataset.memberId}:${item.dataset.issueNumber}`),
+    ["m1:5002", "m1:5003", "m1:5004"]);
+  f.surface.dispose();
+});
+
+// Issue #7647 AC-1 / AC-2: the ledger shows and saves an agent's fixed traits.
+test("the ledger shows and saves each member's traits and keeps the draft until it is saved", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const traits = () => root.querySelector(".roster-detail [data-member-traits]");
+  const field = name => traits().querySelector(`[data-trait="${name}"]`);
+  const save = () => traits().querySelector('[data-action="save-traits"]');
+  // linkedom selects have no value setter and report no value before a choice.
+  const value = name => field(name).value ?? "";
+  const choose = (name, value) => { [...field(name).options].find(option => option.value === value).selected = true; field(name).dispatchEvent(new f.window.Event("change")); };
+  assert.deepEqual([...field("reasoning_level").options].map(option => [option.value, option.textContent]),
+    [["", "Tool default"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["max", "Max"]]);
+  assert.deepEqual([...field("speed").options].map(option => [option.value, option.textContent]),
+    [["", "Tool default"], ["normal", "Normal"], ["fast", "Fast"], ["fastest", "Fastest"]]);
+  assert.equal(field("personality").tagName, "TEXTAREA");
+  assert.equal(field("personality").getAttribute("maxlength"), "4000");
+  assert.equal(value("reasoning_level"), ""); assert.equal(value("personality"), "");
+  assert.equal(save().disabled, true, "nothing to save until a trait changes");
+  assert.match(traits().textContent, /never changes what is saved here/);
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-row-traits').hidden, true);
+
+  choose("reasoning_level", "max");
+  field("personality").value = "  Verify before changing.\nReport early.  "; field("personality").dispatchEvent(new f.window.Event("input"));
+  assert.equal(save().disabled, false);
+  assert.deepEqual(f.traitsSaved, [], "editing alone sends nothing");
+  f.activityModel.update(state => ({ ...state })); f.flush();
+  assert.equal(value("reasoning_level"), "max", "an unrelated update keeps the draft");
+  save().click();
+  assert.deepEqual(f.traitsSaved, [["m1", { reasoning_level: "max", personality: "Verify before changing.\nReport early." }]]);
+
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, traits: { reasoning_level: "max", personality: "Verify before changing.\nReport early." } } : member) })); f.flush();
+  assert.equal(save().disabled, true, "the draft is settled once the ledger holds it");
+  assert.equal(value("personality"), "Verify before changing.\nReport early.");
+  const summary = root.querySelector('.roster-row[data-member-id="m1"] .roster-row-traits');
+  assert.equal(summary.hidden, false);
+  assert.equal(summary.textContent, "Reasoning Max · Verify before changing.");
+  assert.equal(root.querySelector('.roster-row[data-member-id="m2"] .roster-row-traits').hidden, true);
+
+  choose("speed", "fast");
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(save().disabled, true, "another pending ledger change holds the save");
+  save().click(); assert.equal(f.traitsSaved.length, 1);
+  f.rosterModel.update(state => ({ ...state, pending_roster: null })); f.flush();
+  save().click();
+  assert.deepEqual(f.traitsSaved[1], ["m1", { reasoning_level: "max", speed: "fast", personality: "Verify before changing.\nReport early." }]);
+
+  root.querySelector('.roster-row[data-member-id="m2"]').click(); f.flush();
+  assert.equal(value("reasoning_level"), "", "each member has its own traits");
+  assert.match(styles, /\.roster-traits textarea\s*\{[^}]*resize:\s*vertical/s);
+  assert.match(source, /querySelectorAll\("button, select, input, textarea"\)/, "a split preview keeps the personality read-only");
+  f.surface.dispose();
 });

@@ -3749,15 +3749,32 @@ fn restore_gwtd_after_deferral_cancellable(
         }
         Err(error) => return format!("gwtd artifact restoration: failed: {error}"),
     };
-    match execute_command_with_artifact_guard_cancellable(
-        worktree, &command, true, None, host, None, artifacts, check,
-    ) {
+    let run = |command: &str| {
+        execute_command_with_artifact_guard_cancellable(
+            worktree, command, true, None, host, None, artifacts, check,
+        )
+    };
+    let report = |command: &str, result| match result {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
             "gwtd artifact restoration: failed (`{command}`, exit {code}); \
              restore from the checkout root before GitHub operations: {output}"
         ),
         Err(error) => format!("gwtd artifact restoration: failed (`{command}`): {error}"),
+    };
+    match run(&command) {
+        Ok((code, signal, output, streams)) if code != 0 => {
+            // Issue #7319: Cargo cannot delete a running gwtd.exe (os error 5).
+            // Rename frees the output path; the holder keeps the parked image.
+            #[cfg(windows)]
+            if let Some(locked) = driver::locked_gwtd_image_path(&output) {
+                if driver::park_running_image(&locked).is_ok() {
+                    return report(&command, run(&command));
+                }
+            }
+            report(&command, Ok((code, signal, output, streams)))
+        }
+        other => report(&command, other),
     }
 }
 
@@ -10054,6 +10071,90 @@ fn default_integration_test_builds_a_guarded_binary() {
         );
         assert!(recovery.contains("gwtd.rs"), "{recovery}");
         assert_eq!(load(dir.path()).unwrap().unwrap(), persisted);
+    }
+
+    /// Issue #7319: after admission deferral, restoration runs
+    /// `cargo build -p gwt --bin gwtd`. Windows refuses to delete a running
+    /// `gwtd.exe` with os error 5. The holder must stay alive and the new
+    /// executable must still be published.
+    #[cfg(windows)]
+    #[test]
+    fn deferred_restoration_replaces_a_running_gwtd_image() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", &target);
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src/bin")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        let source = package.join("src/bin/gwtd.rs");
+        fs::write(
+            &source,
+            "fn main() {\n    \
+             if std::env::args().any(|arg| arg == \"--hold\") {\n        \
+             let mut byte = [0u8; 1];\n        \
+             let _ = std::io::Read::read(&mut std::io::stdin(), &mut byte);\n    \
+             }\n}\n",
+        )
+        .unwrap();
+        let built = gwt_core::process::hidden_command("cargo")
+            .args(["build", "-p", "gwt", "--bin", "gwtd", "--offline"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(built.success(), "fixture gwtd build failed");
+        let exe = target.join("debug").join("gwtd.exe");
+        struct HolderKill(std::process::Child);
+        impl Drop for HolderKill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut holder = HolderKill(
+            gwt_core::process::hidden_command(&exe)
+                .arg("--hold")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        fs::write(&source, "fn main() { println!(\"operational\"); }\n").unwrap();
+
+        let restored = restore_gwtd_after_deferral_cancellable(
+            dir.path(),
+            "cargo test -p gwt --bin gwtd",
+            &VerificationHost::Inherit,
+            None,
+            None,
+        );
+
+        assert!(
+            restored.contains("gwtd artifact restoration: restored"),
+            "{restored}"
+        );
+        assert!(!restored.contains("os error 5"), "{restored}");
+        assert!(holder.0.try_wait().unwrap().is_none(), "holder exited");
+        let output = gwt_core::process::hidden_command(&exe).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "operational"
+        );
     }
 
     // Issue #5094 AC-2: fail-fast still restores the operational gwtd.

@@ -14,6 +14,10 @@ pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     type Client = E::Client;
 
+    fn github_writer(&self) -> Option<crate::session_launch::GithubWriter> {
+        self.inner.github_writer()
+    }
+
     fn github_repository(&self) -> io::Result<(String, String)> {
         self.inner.github_repository()
     }

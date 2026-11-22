@@ -4238,8 +4238,22 @@ fn agent_roster_view_from_snapshot(
             .filter(|entry| entry.origin_session_id.as_deref() == Some(session_id))
             .collect::<Vec<_>>()
     };
+    // Issue #7649: history names the execution environment a row's tool runs
+    // on. Unreadable definitions leave it unknown without failing the roster.
+    let environments = gwt::execution_environments::load().ok();
+    let project_environments = environments
+        .as_ref()
+        .map(|store| gwt::execution_environments::project_list(store, prefs).1)
+        .unwrap_or_default();
     let history_for = |session: &gwt_agent::Session| {
         let posts = posts_for(&session.id);
+        let environment = environments.as_ref().and_then(|store| {
+            gwt::execution_environments::environment_for_candidate(
+                store,
+                &project_environments,
+                session.agent_id.command(),
+            )
+        });
         let title = posts
             .iter()
             .filter(|entry| entry.title_summary.is_some())
@@ -4260,6 +4274,10 @@ fn agent_roster_view_from_snapshot(
             }
             .map(str::to_string),
             model: session.model.clone(),
+            reasoning: session.reasoning_level.clone(),
+            environment: environment.map(|environment| environment.name.clone()),
+            environment_model: environment
+                .and_then(|environment| environment.runtime.model.clone()),
             issue_number: session.linked_issue_number,
             title,
             result: Some(format!("{:?}", session.status)),
@@ -6876,6 +6894,82 @@ mod bounded_cache_merge_tests {
         .expect_err("a valid but uninitialized snapshot must return an error without panicking");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("not initialized"));
+    }
+
+    // Issue #7649 AC-1: a history row names the reasoning the session was
+    // launched with and the execution environment its tool runs on.
+    #[test]
+    fn roster_history_records_reasoning_and_execution_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let context = ProjectContext {
+            tab_id: "project-tab".into(),
+            project_key: gwt_core::repo_hash::compute_path_hash(&root),
+            generation: 1,
+            project_root: root.clone(),
+        };
+        gwt::execution_environments::mutate(|store| {
+            store.register_account("codex");
+            store
+                .update_environment(
+                    "codex",
+                    Some("Codex pool"),
+                    Some(gwt::execution_environments::RuntimeOptions {
+                        model: Some("environment-model".into()),
+                        ..Default::default()
+                    }),
+                )
+                .map_err(std::io::Error::from)?;
+            Ok(())
+        })
+        .unwrap();
+        let roster: gwt::agent_names::AgentRoster = serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"member-1","agent_id":"codex","name":"One","enabled":true,"created_at":"2026-10-25T00:00:00Z"
+        }]})).unwrap();
+        let prefs = gwt::IssueMonitorPrefs {
+            agent_roster: Some(roster),
+            ..Default::default()
+        };
+        let mut codex = gwt_agent::Session::new(&root, "own", gwt_agent::AgentId::Codex);
+        codex.agent_member_id = Some("member-1".into());
+        codex.reasoning_level = Some("high".into());
+        let mut unregistered = codex.clone();
+        unregistered.id = "unregistered-tool".into();
+        unregistered.agent_id = gwt_agent::AgentId::ClaudeCode;
+        unregistered.reasoning_level = None;
+        let history = |session: gwt_agent::Session| {
+            serde_json::to_value(
+                agent_roster_view(
+                    &context,
+                    &prefs,
+                    &[Arc::new(session)],
+                    &[],
+                    true,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                )
+                .unwrap()
+                .members
+                .remove(0)
+                .history
+                .remove(0),
+            )
+            .unwrap()
+        };
+        let recorded = history(codex);
+        assert_eq!(recorded["reasoning"], "high");
+        assert_eq!(recorded["environment"], "Codex pool");
+        assert_eq!(recorded["environment_model"], "environment-model");
+        assert!(
+            recorded["model"].is_null(),
+            "the environment's model never rewrites the session's recorded model"
+        );
+        // A tool with no registered environment stays unknown.
+        let unknown = history(unregistered);
+        assert!(unknown["reasoning"].is_null());
+        assert!(unknown["environment"].is_null());
+        assert!(unknown["environment_model"].is_null());
     }
 
     #[test]

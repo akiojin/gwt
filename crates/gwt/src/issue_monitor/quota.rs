@@ -59,6 +59,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: Default::default(),
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),

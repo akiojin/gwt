@@ -94,7 +94,7 @@ test("aggregate updates hidden project title/favicon, focus acknowledges unread,
     const svg = decodeURIComponent(document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href);
     return svg.includes(getComputedStyle(document.documentElement).getPropertyValue("--color-state-blocked").trim());
   })).toBe(true);
-  await expect(hub).toHaveTitle("gwt — Hub");
+  await expect(hub).toHaveTitle("gwt — Home");
   await expect(hub.locator('link[rel="icon"]')).toHaveAttribute("href", "data:,");
   expect(await page.evaluate(() => (window as any).__metadataSent.filter((event: any) => event.kind === "project_aggregate_ack"))).toEqual([]);
   await page.bringToFront();
@@ -133,7 +133,7 @@ test("live server projects the seeded agent aggregate and keeps Hub metadata fix
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute("data-state", "blocked");
   await page.screenshot({ path: testInfo.outputPath("live-project-metadata.png") });
   await gotoLiveGwt(page, base!, { hub: true });
-  await expect(page).toHaveTitle("gwt — Hub");
+  await expect(page).toHaveTitle("gwt — Home");
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute("href", "data:,");
   expect(errors).toEqual([]);
 });

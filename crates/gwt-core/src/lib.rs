@@ -13,6 +13,7 @@ pub mod coordination;
 pub mod daemon;
 pub mod daemon_pipe_name;
 pub mod deadline_budget;
+pub mod decision_queue;
 pub mod error;
 pub mod error_ledger;
 pub mod fd_limit;

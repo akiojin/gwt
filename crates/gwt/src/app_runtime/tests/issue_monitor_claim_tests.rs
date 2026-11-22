@@ -959,10 +959,10 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     );
     tasks.lock().unwrap().pop().unwrap()();
     let completion = recorded.lock().unwrap().pop().unwrap();
-    let UserEvent::IssueMonitorMaxActivePrepared(prepared) = completion else {
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) = completion else {
         panic!("Max active completion expected");
     };
-    let max_events = runtime.issue_monitor_max_active_prepared_events(*prepared);
+    let max_events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
     assert!(max_events.iter().any(|event| matches!(
         &event.event, BackendEvent::IssueMonitorStatus { status }
             if status.max_active_agents_override == Some(3)
@@ -999,10 +999,10 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
 
     tasks.lock().unwrap().pop().unwrap()();
     let completion = recorded.lock().unwrap().pop().unwrap();
-    let UserEvent::IssueMonitorMaxActivePrepared(prepared) = completion else {
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) = completion else {
         panic!("Auto completion expected");
     };
-    runtime.issue_monitor_max_active_prepared_events(*prepared);
+    runtime.issue_monitor_lane_control_prepared_events(*prepared);
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     assert_eq!(
         persisted.max_active_agents_mode,
@@ -1016,7 +1016,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     assert_eq!(change.max_active_agents_override, None);
     assert_eq!(persisted.priority_order, vec![99, 42]);
     assert_eq!(persisted.pending_effects, journal);
-    assert!(runtime.issue_monitor_max_active_saves.is_empty());
+    assert!(runtime.issue_monitor_control_lanes.is_empty());
     assert!(tasks.lock().unwrap().is_empty());
 
     let deferred = recorded
@@ -1090,7 +1090,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
         &event.event, BackendEvent::IssueMonitorToast { level, message, .. }
             if level == "error" && message.contains("worker unavailable")
     )));
-    assert!(runtime.issue_monitor_max_active_saves.is_empty());
+    assert!(runtime.issue_monitor_control_lanes.is_empty());
     assert_eq!(
         gwt::load_issue_monitor_prefs(&prefs_path)
             .unwrap()
@@ -1148,13 +1148,13 @@ fn app_runtime_max_active_save_orders_reopened_profile_after_old_worker() {
     );
 
     tasks.lock().unwrap().pop().unwrap()();
-    let UserEvent::IssueMonitorMaxActivePrepared(prepared) =
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) =
         recorded.lock().unwrap().pop().unwrap()
     else {
         panic!("the runtime must receive the old completion to release its lane");
     };
     assert!(runtime
-        .issue_monitor_max_active_prepared_events(*prepared)
+        .issue_monitor_lane_control_prepared_events(*prepared)
         .is_empty());
     assert_eq!(
         gwt::load_issue_monitor_prefs(&prefs_path)
@@ -1362,6 +1362,132 @@ fn app_runtime_allowed_labels_failure_distinguishes_busy_from_unknown() {
     }
 }
 
+/// Issue #7758 AC-2: a queue push waits for the daemon's durable commit under
+/// the durable budget. The GUI hot-path budget is spent here, so a push that
+/// still depended on it would report an error instead of the commit.
+#[test]
+fn app_runtime_issue_monitor_queue_push_does_not_use_the_gui_hot_path_budget() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default())
+        .expect("seed prefs");
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&repo),
+    )
+    .expect("owner daemon");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let _hot_path = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+        &gwt::daemon_publisher::ISSUE_MONITOR_CONTROL_BUDGET,
+        std::time::Duration::ZERO,
+    );
+    let _durable = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+        &gwt::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+    );
+
+    assert!(runtime
+        .handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::IssueMonitorQueuePush {
+                issue_numbers: vec![43],
+            },
+        )
+        .is_empty());
+    tasks.lock().unwrap().pop().expect("lane worker")();
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) =
+        recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("queue push completion expected");
+    };
+    let events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
+
+    assert!(
+        events.iter().any(|event| {
+            serde_json::to_value(&event.event).expect("queue result wire shape")
+                == serde_json::json!({
+                    "kind": "issue_monitor_queue_result", "operation": "push",
+                    "issue_numbers": [43], "error": null,
+                })
+        }),
+        "the daemon commit is reported, not a deadline: {events:?}"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(persisted
+        .terminal_queues
+        .values()
+        .flat_map(|queue| &queue.entries)
+        .any(|entry| entry.number == 43));
+    owner_fixture_block_on(owner.shutdown());
+}
+
+/// Issue #7758 AC-3: an uncertain outcome is reported once. The lane neither
+/// sends the command again nor writes it locally.
+#[test]
+fn app_runtime_issue_monitor_queue_push_unknown_outcome_is_not_sent_again() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default())
+        .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    assert!(runtime
+        .handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::IssueMonitorQueuePush {
+                issue_numbers: vec![43],
+            },
+        )
+        .is_empty());
+    // The worker's own result is replaced by the deadline it could have met.
+    tasks.lock().unwrap().pop().expect("lane worker")();
+    let UserEvent::IssueMonitorLaneControlPrepared(mut prepared) =
+        recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("queue push completion expected");
+    };
+    let before = fs::read(&prefs_path).expect("prefs bytes");
+    prepared.result = Err(
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+            "publish ack timeout after 5000ms".to_string(),
+        ),
+    );
+
+    let events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
+
+    assert!(
+        events.iter().any(|event| {
+            serde_json::to_value(&event.event).expect("queue result wire shape")
+                == serde_json::json!({
+                    "kind": "issue_monitor_queue_result", "operation": "push",
+                    "issue_numbers": [43], "error": "publish ack timeout after 5000ms",
+                })
+        }),
+        "the origin client learns the outcome is unknown: {events:?}"
+    );
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "the command is not sent again"
+    );
+    assert!(recorded.lock().unwrap().is_empty());
+    assert_eq!(fs::read(&prefs_path).expect("prefs bytes"), before);
+}
+
 // SPEC #3165 TQ-9: the row's "Add to queue" action is the user's way to put an
 // Issue into this terminal's implementation queue. It is the requested feature's
 // main direction — "remove" is only its counterpart — so the GUI must reach
@@ -1406,6 +1532,10 @@ fn app_runtime_issue_monitor_queue_push_adds_only_to_the_local_terminal_queue() 
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -1413,6 +1543,27 @@ fn app_runtime_issue_monitor_queue_push_adds_only_to_the_local_terminal_queue() 
             issue_numbers: vec![43],
         },
     );
+
+    // Issue #7758 AC-2: the durable commit is awaited off the event loop.
+    assert!(events.is_empty(), "queue push must leave the GUI thread");
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    assert!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .terminal_queues[&host]
+            .entries
+            .iter()
+            .all(|entry| entry.number != 43),
+        "nothing is written on the GUI thread"
+    );
+    tasks.lock().unwrap().pop().unwrap()();
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) =
+        recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("queue push completion expected");
+    };
+    let events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
+    assert!(tasks.lock().unwrap().is_empty());
 
     assert!(!events.is_empty(), "push answers with a refreshed snapshot");
     assert!(
@@ -1491,13 +1642,26 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
 
-    let events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::IssueMonitorQueueRemove {
-            issue_numbers: vec![42],
-        },
-    );
+    assert!(runtime
+        .handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::IssueMonitorQueueRemove {
+                issue_numbers: vec![42],
+            },
+        )
+        .is_empty());
+    tasks.lock().unwrap().pop().expect("lane worker")();
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) =
+        recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("queue removal completion expected");
+    };
+    let events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
 
     assert!(
         !events.is_empty(),
@@ -1535,9 +1699,25 @@ fn app_runtime_issue_monitor_queue_result_reports_daemon_and_local_commit_outcom
     fs::create_dir_all(&repo).expect("create repo");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let context = runtime.test_context();
-    for (publication, expected_error) in [
-        (Ok(()), None),
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    // The lane worker's completion, as the event loop receives it.
+    let completion = |runtime: &mut AppRuntime, event: FrontendEvent| {
+        assert!(runtime
+            .handle_frontend_event("client-1".to_string(), event)
+            .is_empty());
+        tasks.lock().unwrap().pop().expect("lane worker")();
+        let UserEvent::IssueMonitorLaneControlPrepared(prepared) =
+            recorded.lock().unwrap().pop().unwrap()
+        else {
+            panic!("queue completion expected");
+        };
+        prepared
+    };
+    for (result, expected_error) in [
+        (Ok(None), None),
         (
             Err(IssueMonitorControlPublishError::Rejected(
                 "control rejected".into(),
@@ -1551,14 +1731,16 @@ fn app_runtime_issue_monitor_queue_result_reports_daemon_and_local_commit_outcom
             Some("ack timed out"),
         ),
     ] {
-        let events = runtime.issue_monitor_control_result_events_with_queue_result(
-            &context,
-            "client-1",
-            publication,
-            "queue-move",
-            Some(("move", vec![42])),
-            |_| panic!("an ACK or uncertain/rejected control must not apply local fallback"),
+        let mut prepared = completion(
+            &mut runtime,
+            FrontendEvent::IssueMonitorQueueMove {
+                issue_number: 42,
+                position: 0,
+            },
         );
+        // A daemon ACK or an uncertain/rejected control applies no local fallback.
+        prepared.result = result;
+        let events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
         assert!(events
             .iter()
             .all(|event| event.target == DispatchTarget::Client("client-1".into())));
@@ -1571,17 +1753,15 @@ fn app_runtime_issue_monitor_queue_result_reports_daemon_and_local_commit_outcom
         )));
     }
 
+    // No daemon is running, so the worker reaches the local fallback itself.
     runtime.issue_monitor_fallback_commit_timeout = Duration::ZERO;
-    let events = runtime.issue_monitor_control_result_events_with_queue_result(
-        &context,
-        "client-1",
-        Err(IssueMonitorControlPublishError::TransportUnavailable(
-            "daemon unavailable".into(),
-        )),
-        "queue-push",
-        Some(("push", vec![42])),
-        |monitor| monitor.terminal_queue_push(&[42], "operator", "2026-10-23T00:00:00Z"),
+    let prepared = completion(
+        &mut runtime,
+        FrontendEvent::IssueMonitorQueuePush {
+            issue_numbers: vec![42],
+        },
     );
+    let events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
     let error = events
         .iter()
         .find_map(|event| match &event.event {
@@ -5947,6 +6127,10 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
     .expect("seed explicitly queued issues");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
 
     // Issue #5083: both writers must preserve the most recently accepted order,
     // including when the GUI was initialized before the CLI changed it.
@@ -5993,13 +6177,29 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
     );
     assert_saved_order(&mut env, &[3167, 3165, 3166]);
 
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::IssueMonitorQueueMove {
-            issue_number: 3166,
-            position: 0,
-        },
-    );
+    assert!(runtime
+        .handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::IssueMonitorQueueMove {
+                issue_number: 3166,
+                position: 0,
+            },
+        )
+        .is_empty());
+    // Issue #7782: the move commits on the blocking lane, so the saved order is
+    // readable only after that worker's completion reaches the runtime.
+    assert_saved_order(&mut env, &[3167, 3165, 3166]);
+    tasks.lock().unwrap().pop().expect("lane worker")();
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) =
+        recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("queue move completion expected");
+    };
+    let move_events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
+    assert!(move_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorQueueResult { error: None, .. }
+    )));
     assert_saved_order(&mut env, &[3166, 3167, 3165]);
 
     assert_eq!(
@@ -6066,7 +6266,6 @@ fn app_runtime_quick_register_issue_creates_cache_entry_without_queue_admission(
         FrontendEvent::QuickRegisterIssue {
             title: "Investigate Intake registration".to_string(),
             launch: false,
-            auto_merge: false,
         },
     );
 
@@ -6127,10 +6326,10 @@ fn app_runtime_quick_register_issue_creates_cache_entry_without_queue_admission(
         .all(|queue| queue.entries.is_empty()));
 }
 
-// SPEC #3885 T-033 (FR-022): the "+ New" popover's auto-merge checkbox labels
-// the Issue at creation time.
+// Issue #7729 AC-1: registration no longer labels the Issue. `auto-merge` is
+// the PR-side mark; autonomy is opted into from the Issue detail.
 #[test]
-fn app_runtime_quick_register_issue_applies_the_auto_merge_label() {
+fn app_runtime_quick_register_issue_creates_the_issue_without_labels() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6158,14 +6357,13 @@ fn app_runtime_quick_register_issue_applies_the_auto_merge_label() {
         FrontendEvent::QuickRegisterIssue {
             title: "Ship the popover".to_string(),
             launch: false,
-            auto_merge: true,
         },
     );
 
     let cached = Cache::new(issue_cache_root(&repo))
         .load_entry(IssueNumber(1))
         .expect("quick issue written to cache");
-    assert_eq!(cached.snapshot.labels, vec!["auto-merge".to_string()]);
+    assert!(cached.snapshot.labels.is_empty());
 }
 
 #[test]
@@ -6192,7 +6390,6 @@ fn app_runtime_quick_register_issue_permission_error_includes_reason_and_fallbac
         FrontendEvent::QuickRegisterIssue {
             title: "Investigate Intake registration".to_string(),
             launch: false,
-            auto_merge: false,
         },
     );
 

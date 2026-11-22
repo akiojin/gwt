@@ -29,7 +29,7 @@ export function createProjectPageMetadata({
   let attentionSyncPending = false;
   function render() {
     if (!project) {
-      documentRef.title = "gwt — Hub";
+      documentRef.title = "gwt — Home";
       try { documentRef.querySelector('link[rel="icon"]')?.setAttribute("href", "data:,"); } catch { /* optional favicon */ }
       return;
     }

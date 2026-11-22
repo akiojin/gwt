@@ -285,6 +285,27 @@ impl PmLaunchProfile {
         self
     }
 
+    /// Issue #7647 (SPEC #7007 item 26): the reasoning level and speed of the
+    /// agent serving as Project Manager, mapped to this profile's tool the way
+    /// an implementation session maps them. An unset trait keeps the
+    /// profile's value.
+    pub fn with_traits(mut self, traits: &crate::agent_names::AgentTraits) -> Self {
+        let mut candidate = crate::IssueMonitorLaunchProfile {
+            model: self.model.clone(),
+            reasoning: self.reasoning.clone(),
+            codex_speed: self.codex_speed.unwrap_or_default(),
+            fast_mode: self.fast_mode.unwrap_or(false),
+            ..crate::IssueMonitorLaunchProfile::for_tool(&self.agent_id)
+        };
+        crate::launch_wizard::apply_agent_traits(&mut candidate, traits);
+        self.reasoning = candidate.reasoning;
+        if traits.speed.is_some() {
+            self.codex_speed = Some(candidate.codex_speed);
+            self.fast_mode = Some(candidate.fast_mode);
+        }
+        self
+    }
+
     /// Canonicalize user-entered optional tuning without changing the agent
     /// identity or the legacy optional schema. Blank values mean provider
     /// defaults; non-blank values are persisted and launched without their UI

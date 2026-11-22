@@ -108,6 +108,9 @@ root_js_modules! {
     "hook-center-panel.js" => "renderHookCenterPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
+    // Issue #7702: IME composition commit gate. app.js imports it at module
+    // top level, so a missing asset 404s and the splash never clears.
+    "terminal-input-commit.js" => "createTerminalInputCommitGate",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
@@ -200,6 +203,28 @@ root_js_modules! {
     // pm-chat.js and app.js import this at module top level, so the asset
     // MUST be registered or the ES module load 404s and the splash hangs.
     "task-log.js" => "createTaskLog",
+    // Issue #7648 (SPEC #7007 T-030) — Execution environments island host.
+    // app.js and provider-usage-surface.js import this at module top level,
+    // so the asset MUST be registered or the ES module load 404s and the
+    // splash hangs.
+    "execution-environments.js" => "createExecutionEnvironments",
+    // Issue #7740 — the header and footer every page shares. app.js,
+    // hub-app.js and frontend-route.js import this at module top level, so
+    // the asset MUST be registered or the ES module load 404s.
+    "app-chrome.js" => "createAppChrome",
+    // Issue #7639 — host of the Home conversation with the Project Manager.
+    // hub-app.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load 404s.
+    "home-conversation.js" => "createHomeConversation",
+    // Issue #7731 — host of the first-run setup. hub-app.js and
+    // settings-surface.js import this at module top level, so the asset
+    // MUST be registered or the ES module load 404s.
+    "first-run-setup.js" => "createFirstRunSetup",
+    // Issue #7741 — host of a project's available execution environments
+    // list. app.js imports this at module top level, so the asset
+    // MUST be registered or the ES module load 404s and the splash hangs.
+    "project-execution-environments.js" => "renderProjectExecutionEnvironments",
+    "project-themes.js" => "createProjectThemes",
     // SPEC #7007 T-014 — typed window command error presentation.
     // app.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.

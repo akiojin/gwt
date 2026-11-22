@@ -57,7 +57,7 @@ test("Hub metadata remains fixed despite aggregate and name input", () => {
   controller.setProjectName("Repo A");
   controller.update({ running_count: 7, unread: true });
   controller.reportAttention();
-  assert.equal(document.title, "gwt — Hub");
+  assert.equal(document.title, "gwt — Home");
   assert.deepEqual(sent, []);
   assert.equal(document.querySelector('link[rel="icon"]').getAttribute("href"), "data:,");
 });

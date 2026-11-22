@@ -571,10 +571,15 @@ fn terminal_work_error(
             details.recovery_operation = None;
         }
     }
-    let mut error = AgentWorkspaceUpdateError::new(
-        AgentWorkspaceUpdateErrorCode::TerminalWork,
-        "the assigned Work is terminal; inspect its terminal event before recovery",
-    );
+    // Issue #7339 (#6419): a retried Done update lands here after the first
+    // attempt succeeded. Say so, so the caller stops instead of escalating.
+    let message = if item.discarded {
+        "the assigned Work is terminal; inspect its terminal event before recovery"
+    } else {
+        "the assigned Work is terminal (Done); if its terminal event is this Session's own earlier Done update, that update already succeeded and must not be retried; otherwise inspect its terminal event before recovery"
+    };
+    let mut error =
+        AgentWorkspaceUpdateError::new(AgentWorkspaceUpdateErrorCode::TerminalWork, message);
     error.recovery_operations = details
         .as_ref()
         .and_then(|details| details.recovery_operation.clone())

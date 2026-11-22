@@ -1,44 +1,28 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { accountRows } from "../execution-environments.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 
+// Issue #7648: the account card is drawn on demand into the Execution
+// environments account detail, so each read renders the current snapshot.
+function usageCard(surface, document, provider) {
+  let container = document.getElementById("usage-slot");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "usage-slot";
+    document.body.appendChild(container);
+  }
+  surface.renderAccountUsage(container, provider);
+  return container.querySelector(".op-usage-card");
+}
+
 test("Usage severity styles use Operator tokens without raw color fallbacks", () => {
-  assert.match(
-    componentsCss,
-    /\.op-status-strip__cell--usage\s*\{[^}]*flex-wrap:\s*wrap;[^}]*overflow:\s*visible;/s,
-  );
-  assert.match(
-    componentsCss,
-    /\.op-usage-sum\s*\{[^}]*inline-size:\s*7ch;/s,
-  );
-  assert.match(componentsCss, /\.op-usage-sum--models\s*\{[^}]*flex-wrap:\s*wrap;[^}]*inline-size:\s*auto;/s);
-  assert.match(componentsCss, /\.op-usage-model\s*\{[^}]*white-space:\s*nowrap;/s);
-  assert.doesNotMatch(componentsCss.match(/\.op-status-strip\s*\{([^}]*)\}/s)[1], /flex-wrap:/,
-    "without Usage, preserve the existing status-strip layout");
-  assert.match(componentsCss, /#app:has\(#op-strip-usage:not\(\[hidden\]\)\)\s*\{[^}]*--usage-strip-row-size:\s*auto;/s);
-  assert.match(componentsCss, /\.op-status-strip:has\(> #op-strip-usage:not\(\[hidden\]\)\)\s*\{[^}]*flex-wrap:\s*wrap;/s);
-  assert.match(
-    componentsCss,
-    /\.op-usage-more\s*\{[^}]*color:\s*var\(--color-status-strip-fg\);/s,
-  );
-  assert.match(
-    componentsCss,
-    /\.op-usage-sum\[data-severity="normal"\]\s*\{[^}]*color:\s*var\(--color-status-strip-fg\);/s,
-  );
-  assert.match(
-    componentsCss,
-    /\.op-usage-sum\[data-severity="warning"\]\s*\{[^}]*color:\s*var\(--color-state-needs-input\);/s,
-  );
-  assert.match(
-    componentsCss,
-    /\.op-usage-sum\[data-severity="danger"\]\s*\{[^}]*color:\s*var\(--color-state-blocked\);/s,
-  );
   assert.match(
     componentsCss,
     /\.op-usage-bar__fill\[data-severity="warning"\]\s*\{[^}]*background:\s*var\(--color-state-needs-input\);/s,
@@ -47,166 +31,132 @@ test("Usage severity styles use Operator tokens without raw color fallbacks", ()
     componentsCss,
     /\.op-usage-bar__fill\[data-severity="danger"\]\s*\{[^}]*background:\s*var\(--color-state-blocked\);/s,
   );
+  assert.doesNotMatch(componentsCss, /op-strip-usage/, "the status-strip usage cell is gone");
+  assert.doesNotMatch(componentsCss, /\.op-usage-hover/, "the usage hover popover is gone");
 });
 
-test("Claude keeps both named weekly models visible independently of session focus", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML("<button id='op-strip-usage'></button>");
-  const account = { provider: "claude_code", state: { kind: "ok" }, windows: [
-    { kind: "five_hour", used_percent: 100 },
-    { kind: "opus_weekly", used_percent: 70 },
-    { kind: "fable_weekly", used_percent: 20 },
-  ] };
-  const strip = document.getElementById("op-strip-usage");
-  for (const model of ["fable", "opus", "codex"]) {
-    applyProviderUsage(document, { accounts: [account], sessions: [{ model, active: true }] });
-    assert.deepEqual([...strip.querySelectorAll("[data-window-kind]")].map(el => el.textContent),
-      ["Fable weekly 20%", "Opus weekly 70%"]);
-    assert.equal(strip.querySelectorAll("[data-provider]").length, 1);
-    assert.equal(strip.querySelector("[data-provider]").dataset.severity, "danger");
-    assert.match(strip.getAttribute("aria-label"), /shared quota 100% danger/);
-  }
-  account.windows[1].used_percent = 80;
-  applyProviderUsage(document, { accounts: [account] });
-  assert.equal(strip.querySelector('[data-window-kind="fable_weekly"]').textContent, "Fable weekly 20%");
-  assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').textContent, "Opus weekly 80%");
-  assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').dataset.severity, "warning");
-});
-
-test("Claude model summaries distinguish zero, missing, degraded and stale values", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML("<button id='op-strip-usage'></button>");
-  const strip = document.getElementById("op-strip-usage");
-  const account = { provider: "claude_code", state: { kind: "ok" }, windows: [
-    { kind: "weekly", used_percent: 95 },
-    { kind: "fable_weekly", used_percent: 0 },
-  ] };
-  for (const invalid of [undefined, null, "", "unknown"]) {
-    account.windows[2] = { kind: "opus_weekly", used_percent: invalid };
-    applyProviderUsage(document, { accounts: [account] });
-    assert.equal(strip.querySelector('[data-window-kind="fable_weekly"]').textContent, "Fable weekly 0%");
-    assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').textContent, "Opus weekly —");
-    assert.match(strip.getAttribute("aria-label"), /Opus weekly not provided/);
-  }
-  account.windows = [{ kind: "opus_weekly", used_percent: 0 }];
-  applyProviderUsage(document, { accounts: [account] });
-  assert.match(strip.textContent, /Fable weekly —.*Opus weekly 0%/);
-  for (const [kind, value] of [["disabled", "off"], ["no_data", "—"], ["unavailable", "n/a"]]) {
-    account.state = { kind, reason: "connection failed" };
-    applyProviderUsage(document, { accounts: [account] });
-    assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').textContent, `Opus weekly ${value}`);
-    if (kind === "unavailable") assert.match(strip.getAttribute("aria-label"), /connection failed/);
-  }
-  account.state = { kind: "stale", age_secs: 420 };
-  applyProviderUsage(document, { accounts: [account] });
-  assert.match(strip.textContent, /Opus weekly 0%.*stale/);
-  assert.match(strip.getAttribute("aria-label"), /stale 7m/);
-  account.state = { kind: "unknown" };
-  account.windows.push({ kind: "weekly", used_percent: 20 });
-  applyProviderUsage(document, { accounts: [account] });
-  assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').dataset.severity, undefined);
-  assert.equal(strip.querySelector('[data-provider]').dataset.severity, undefined);
-  assert.doesNotMatch(strip.getAttribute("aria-label"), /normal|20%/);
-});
-
-test("Three-provider selection retains both Claude models and their own severity", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML("<button id='op-strip-usage'></button>");
-  for (const [value, severity] of [[79, "normal"], [80, "warning"], [94, "warning"], [95, "danger"]]) {
-    applyProviderUsage(document, { accounts: [
-      { provider: "codex", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 20 }] },
-      { provider: "claude_code", state: { kind: "ok" }, windows: [
-        { kind: "five_hour", used_percent: 99 },
-        { kind: "fable_weekly", used_percent: value },
-        { kind: "opus_weekly", used_percent: 0 },
-      ] },
-      { provider: "custom", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 30 }] },
-    ] });
-    assert.equal(document.querySelector('[data-provider]').dataset.provider, "claude_code");
-    assert.equal(document.querySelectorAll('[data-window-kind]').length, 2);
-    assert.equal(document.querySelector('[data-window-kind="fable_weekly"]').dataset.severity, severity);
-    assert.equal(document.querySelector('.op-usage-more').textContent, "+2");
-  }
-});
-
-test("Status strip labels each provider and removes symbol-only usage shorthand", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-  const snapshot = {
-    accounts: [
-      {
-        provider: "codex",
-        windows: [{ kind: "weekly", used_percent: 10 }],
-        state: { kind: "ok" },
-      },
-      {
-        provider: "claude_code",
-        windows: [{ kind: "weekly", used_percent: 29 }],
-        state: { kind: "ok" },
-      },
-    ],
-  };
-
-  applyProviderUsage(document, snapshot);
-
-  const strip = document.getElementById("op-strip-usage");
-  assert.equal(
-    strip.querySelector('[data-provider="codex"]').textContent.trim(),
-    "CX 10%",
-  );
-  assert.equal(
-    strip.querySelector('[data-provider="claude_code"]').textContent.trim(),
-    "CC Fable weekly — Opus weekly —",
-  );
-  assert.doesNotMatch(strip.textContent, /[⬡◇]/);
-});
-
-test("Codex full subscription distinguishes available credits from exhausted credits", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML("<button id='op-strip-usage'></button>");
+test("Codex full subscription distinguishes available credits from exhausted credits", () => {
   const account = { provider: "codex", state: { kind: "ok" }, limit_reached: false,
     windows: [{ kind: "weekly", used_percent: 100 }],
     credits: { has_credits: true, unlimited: false, balance: 37669.9 } };
-  const strip = document.getElementById("op-strip-usage");
-  applyProviderUsage(document, { accounts: [account] });
-  assert.match(strip.textContent, /CX.*Using credits.*37,669\.9/);
-  assert.doesNotMatch(strip.getAttribute("aria-label"), /limit reached/);
-  assert.equal(strip.querySelector("[data-provider]").dataset.limit, undefined);
-  assert.match(componentsCss, /\.op-usage-sum--credits\s*\{[^}]*inline-size:\s*auto;/s);
-  assert.match(componentsCss, /\.op-usage-sum--credits\s*\{[^}]*white-space:\s*normal;/s);
+  let [row] = accountRows({ accounts: [account] });
+  assert.match(row.usage, /Using credits.*37,669\.9/);
+  assert.equal(row.usingCredits, true);
+  assert.equal(row.limitReached, false);
   account.credits.has_credits = false;
-  applyProviderUsage(document, { accounts: [account] });
-  assert.match(strip.getAttribute("aria-label"), /limit reached/);
-  assert.equal(strip.querySelector("[data-provider]").dataset.limit, "true");
+  [row] = accountRows({ accounts: [account] });
+  assert.equal(row.limitReached, true);
   delete account.credits;
-  applyProviderUsage(document, { accounts: [account] });
-  assert.equal(strip.querySelector("[data-provider]").textContent, "CX 100%");
-  assert.equal(strip.querySelector("[data-provider]").dataset.limit, undefined);
+  [row] = accountRows({ accounts: [account] });
+  assert.equal(row.usage, "100% used");
+  assert.equal(row.limitReached, false);
 });
 
-test("Codex popover derives credit pace only from distinct same-account observations", async () => {
+test("Account row summarizes the provider window nearest its limit", () => {
+  const [row] = accountRows({ accounts: [{ provider: "codex", state: { kind: "ok" }, windows: [
+    { kind: "weekly", used_percent: 29 },
+    { kind: "five_hour", used_percent: 96 },
+  ] }] });
+  assert.equal(row.usage, "96% used");
+});
+
+test("Account row excludes missing usage values from its summary", () => {
+  const [row] = accountRows({ accounts: [{ provider: "codex", state: { kind: "ok" }, windows: [
+    { kind: "weekly", used_percent: null },
+    { kind: "five_hour", used_percent: "" },
+    { kind: "opus_weekly", used_percent: "unknown" },
+  ] }] });
+  assert.equal(row.usage, null);
+  assert.equal(row.severity, "");
+});
+
+test("Claude account summary uses shared windows while Codex keeps all windows", () => {
+  const modelWindows = ["fable_weekly", "opus_weekly", "sonnet_weekly"].map(
+    (kind) => ({ kind, used_percent: 100 }),
+  );
+  const account = { provider: "claude_code", state: { kind: "ok" }, limit_reached: false };
+  const cases = [
+    {
+      windows: [...modelWindows, { kind: "five_hour", used_percent: 29 }, { kind: "weekly", used_percent: 12 }],
+      usage: "29% used", severity: "normal",
+    },
+    {
+      windows: [...modelWindows, { kind: "five_hour", used_percent: 12 }, { kind: "weekly", used_percent: 96 }],
+      usage: "96% used", severity: "danger",
+    },
+    { windows: modelWindows, usage: null, severity: "" },
+  ];
+  for (const { windows, usage, severity } of cases) {
+    const [row] = accountRows({ accounts: [{ ...account, windows }] });
+    assert.equal(row.usage, usage);
+    assert.equal(row.severity, severity);
+    assert.equal(row.limitReached, false);
+  }
+
+  const [codex] = accountRows({ accounts: [{ provider: "codex", state: { kind: "ok" }, windows: [
+    { kind: "weekly", used_percent: 29 },
+    { kind: "code_review_weekly", used_percent: 100 },
+  ] }] });
+  assert.equal(codex.usage, "100% used");
+});
+
+test("Account row classifies usage at the 80 and 95 percent boundaries", () => {
+  for (const [percent, expected] of [[79, "normal"], [80, "warning"], [94, "warning"], [95, "danger"]]) {
+    const [row] = accountRows({ accounts: [{ provider: "codex", state: { kind: "ok" },
+      windows: [{ kind: "weekly", used_percent: percent }] }] });
+    assert.equal(row.severity, expected, `${percent}% should be ${expected}`);
+  }
+  const [limited] = accountRows({ accounts: [{ provider: "codex", state: { kind: "ok" }, limit_reached: true,
+    windows: [{ kind: "weekly", used_percent: 1 }] }] });
+  assert.equal(limited.severity, "danger");
+  assert.equal(limited.limitReached, true);
+  assert.equal(limited.usage, "1% used");
+});
+
+test("Settings usage panel only links to Accounts", async () => {
   const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
-  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const { document, window } = parseHTML("<html><body><section id='usage-panel'></section></body></html>");
   const previous = { document: globalThis.document, window: globalThis.window,
     CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
   Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
     requestAnimationFrame: callback => callback() });
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
   try {
-    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const surface = createProviderUsageSurface({ renderWorkspaceWindows: () => {} });
+    surface.applyProviderUsageUi({ accounts: [{ provider: "codex", state: { kind: "ok" },
+      windows: [{ kind: "weekly", used_percent: 42 }] }], consumption: [], sessions: [] });
+    const panel = document.getElementById("usage-panel");
+    surface.renderUsagePanel(panel);
+    surface.renderUsagePanel(panel);
+    assert.equal(panel.querySelectorAll("button").length, 1, "re-rendering replaces the panel");
+    assert.equal(panel.querySelector("input"), null);
+    assert.doesNotMatch(panel.textContent, /42%/, "usage is not repeated in Settings");
+    const opened = [];
+    document.addEventListener("environments:open", event => opened.push(event.detail?.view));
+    const button = panel.querySelector("button");
+    assert.equal(button.textContent, "Open Accounts");
+    button.click();
+    assert.deepEqual(opened, ["accounts"]);
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
+test("Codex account card derives credit pace only from distinct same-account observations", async () => {
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
+  const { document, window } = parseHTML("<html><body></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  try {
+    const surface = createProviderUsageSurface({ renderWorkspaceWindows() {} });
     const update = (balance, fetched_at, account_id = "account-a", state = { kind: "ok" }) => {
       surface.applyProviderUsageUi({ accounts: [{ provider: "codex", account_id, fetched_at, state,
         limit_reached: false, windows: [{ kind: "weekly", used_percent: 100 }],
         credits: { has_credits: true, unlimited: false, balance } }], sessions: [], consumption: [] });
     };
     update(100, "2031-01-02T10:00:00Z");
-    const anchor = document.getElementById("usage-anchor");
-    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(anchor);
-    const card = () => document.querySelector('.op-usage-card[data-provider="codex"]');
+    const card = () => usageCard(surface, document, "codex");
     assert.match(card().textContent, /Using credits.*100 credits/);
     assert.doesNotMatch(card().textContent, /\/hour|Limit reached/);
     update(90, "2031-01-02T10:30:00Z");
@@ -225,150 +175,12 @@ test("Codex popover derives credit pace only from distinct same-account observat
     Object.assign(globalThis, previous);
   }
 });
-
-test("Status strip summarizes the provider window nearest its limit", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-
-  applyProviderUsage(document, {
-    accounts: [
-      {
-        provider: "codex",
-        windows: [
-          { kind: "weekly", used_percent: 29 },
-          { kind: "five_hour", used_percent: 96 },
-        ],
-        state: { kind: "ok" },
-      },
-    ],
-  });
-
-  assert.equal(
-    document.querySelector('[data-provider="codex"]').textContent.trim(),
-    "CX 96%",
-  );
-});
-
-test("Status strip excludes missing usage values from its summary", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-
-  applyProviderUsage(document, {
-    accounts: [
-      {
-        provider: "codex",
-        windows: [
-          { kind: "weekly", used_percent: null },
-          { kind: "five_hour", used_percent: "" },
-          { kind: "opus_weekly", used_percent: "unknown" },
-        ],
-        state: { kind: "ok" },
-      },
-    ],
-  });
-
-  const summary = document.querySelector('[data-provider="codex"]');
-  assert.equal(summary.textContent.trim(), "CX —");
-  assert.equal(summary.dataset.severity, undefined);
-});
-
-test("Claude status summary uses shared windows while Codex keeps all windows", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-  const modelWindows = ["fable_weekly", "opus_weekly", "sonnet_weekly"].map(
-    (kind) => ({ kind, used_percent: 100 }),
-  );
-  const account = { provider: "claude_code", state: { kind: "ok" }, limit_reached: false };
-  const cases = [
-    {
-      windows: [...modelWindows, { kind: "five_hour", used_percent: 29 }, { kind: "weekly", used_percent: 12 }],
-      value: "CC Fable weekly 100% Opus weekly 100%", severity: "normal",
-    },
-    {
-      windows: [...modelWindows, { kind: "five_hour", used_percent: 12 }, { kind: "weekly", used_percent: 96 }],
-      value: "CC Fable weekly 100% Opus weekly 100%", severity: "danger",
-    },
-    { windows: modelWindows, value: "CC Fable weekly 100% Opus weekly 100%", severity: undefined },
-  ];
-  for (const { windows, value, severity } of cases) {
-    applyProviderUsage(document, { accounts: [{ ...account, windows }] });
-    const summary = document.querySelector('[data-provider="claude_code"]');
-    assert.equal(summary.textContent.trim(), value);
-    assert.equal(summary.dataset.severity, severity);
-    assert.equal(summary.dataset.limit, undefined);
-    assert.doesNotMatch(document.getElementById("op-strip-usage").title, /limit reached/);
-  }
-
-  applyProviderUsage(document, {
-    accounts: [{ provider: "codex", state: { kind: "ok" }, windows: [
-      { kind: "weekly", used_percent: 29 },
-      { kind: "code_review_weekly", used_percent: 100 },
-    ] }],
-  });
-  assert.equal(document.querySelector('[data-provider="codex"]').textContent.trim(), "CX 100%");
-});
-
-test("Status strip classifies usage at the 80 and 95 percent boundaries", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-  const cases = [
-    { percent: 79, expected: "normal" },
-    { percent: 80, expected: "warning" },
-    { percent: 94, expected: "warning" },
-    { percent: 95, expected: "danger" },
-  ];
-
-  for (const { percent, expected } of cases) {
-    applyProviderUsage(document, {
-      accounts: [
-        {
-          provider: "codex",
-          windows: [{ kind: "weekly", used_percent: percent }],
-          state: { kind: "ok" },
-        },
-      ],
-    });
-    assert.equal(
-      document.querySelector('[data-provider="codex"]').dataset.severity,
-      expected,
-      `${percent}% should be ${expected}`,
-    );
-  }
-
-  applyProviderUsage(document, {
-    accounts: [
-      {
-        provider: "codex",
-        windows: [{ kind: "weekly", used_percent: 1 }],
-        limit_reached: true,
-        state: { kind: "ok" },
-      },
-    ],
-  });
-  assert.equal(
-    document.querySelector('[data-provider="codex"]').dataset.severity,
-    "danger",
-  );
-  assert.equal(
-    document.getElementById("op-strip-usage").getAttribute("aria-label"),
-    "Provider usage: Codex 1% limit reached",
-  );
-});
-
-test("Usage popover bars use the same 80 and 95 percent severity boundaries", async () => {
+test("Account card bars use the same 80 and 95 percent severity boundaries", async () => {
   const { createProviderUsageSurface } = await import(
     pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
-    "<html><body><div id='usage-anchor'></div></body></html>",
+    "<html><body></body></html>",
   );
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
@@ -378,12 +190,9 @@ test("Usage popover bars use the same 80 and 95 percent severity boundaries", as
   globalThis.window = window;
   globalThis.CustomEvent = window.CustomEvent;
   globalThis.requestAnimationFrame = (cb) => cb();
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
 
   try {
     const surface = createProviderUsageSurface({
-      send: () => {},
       renderWorkspaceWindows: () => {},
     });
     surface.applyProviderUsageUi({
@@ -404,12 +213,9 @@ test("Usage popover bars use the same 80 and 95 percent severity boundaries", as
       consumption: [],
       sessions: [],
     });
-    const anchor = document.getElementById("usage-anchor");
-    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(anchor);
 
     assert.deepEqual(
-      [...document.querySelectorAll(".op-usage-bar__fill")].map(
+      [...usageCard(surface, document, "codex").querySelectorAll(".op-usage-bar__fill")].map(
         (fill) => fill.dataset.severity,
       ),
       ["normal", "normal", "warning", "warning", "warning", "danger"],
@@ -427,11 +233,9 @@ test("Usage popover bars use the same 80 and 95 percent severity boundaries", as
       consumption: [],
       sessions: [],
     });
-    assert.equal(
-      document.querySelector(".op-usage-bar__fill").dataset.severity,
-      "danger",
-    );
-    assert.match(document.body.textContent, /Limit reached/);
+    const limited = usageCard(surface, document, "codex");
+    assert.equal(limited.querySelector(".op-usage-bar__fill").dataset.severity, "danger");
+    assert.match(limited.textContent, /Limit reached/);
   } finally {
     globalThis.document = previousDocument;
     globalThis.window = previousWindow;
@@ -439,14 +243,12 @@ test("Usage popover bars use the same 80 and 95 percent severity boundaries", as
     globalThis.requestAnimationFrame = previousRequestAnimationFrame;
   }
 });
-
-test("Empty usage snapshot closes the popover and clears trigger state", async () => {
+test("Account card shows the account label", async () => {
   const { createProviderUsageSurface } = await import(
     pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
-  const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
+    "<html><body></body></html>",
   );
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
@@ -456,257 +258,6 @@ test("Empty usage snapshot closes the popover and clears trigger state", async (
   globalThis.window = window;
   globalThis.CustomEvent = window.CustomEvent;
   globalThis.requestAnimationFrame = (cb) => cb();
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
-
-  try {
-    const surface = createProviderUsageSurface({
-      send: () => {},
-      renderWorkspaceWindows: () => {},
-    });
-    window.__operatorShell = {
-      applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
-    };
-    const populated = {
-      accounts: [
-        {
-          provider: "codex",
-          windows: [{ kind: "weekly", used_percent: 100 }],
-          limit_reached: true,
-          state: { kind: "ok" },
-        },
-      ],
-      consumption: [],
-      sessions: [],
-    };
-    surface.applyProviderUsageUi(populated);
-    const strip = document.getElementById("op-strip-usage");
-    strip.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(strip);
-    assert.equal(strip.getAttribute("aria-expanded"), "true");
-
-    surface.applyProviderUsageUi({ accounts: [], consumption: [], sessions: [] });
-
-    assert.equal(strip.hidden, true);
-    assert.equal(strip.getAttribute("aria-expanded"), "false");
-    assert.equal(strip.getAttribute("aria-label"), "Provider usage and limits");
-    assert.equal(strip.title, "Provider usage & limits");
-    assert.equal(strip.dataset.limit, undefined);
-    assert.equal(document.getElementById("provider-usage-popover").hidden, true);
-
-    surface.applyProviderUsageUi(populated);
-    assert.equal(strip.hidden, false);
-    assert.equal(strip.getAttribute("aria-expanded"), "false");
-  } finally {
-    delete window.__operatorShell;
-    globalThis.document = previousDocument;
-    globalThis.window = previousWindow;
-    globalThis.CustomEvent = previousCustomEvent;
-    globalThis.requestAnimationFrame = previousRequestAnimationFrame;
-  }
-});
-
-test("Usage popover keeps keyboard focus within the trigger-popover boundary", async () => {
-  const { createProviderUsageSurface } = await import(
-    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
-  );
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document, window } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-  const previousDocument = globalThis.document;
-  const previousWindow = globalThis.window;
-  const previousCustomEvent = globalThis.CustomEvent;
-  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
-  globalThis.document = document;
-  globalThis.window = window;
-  globalThis.CustomEvent = window.CustomEvent;
-  globalThis.requestAnimationFrame = (cb) => cb();
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
-
-  try {
-    const snapshot = {
-      accounts: [
-        {
-          provider: "claude_code",
-          windows: [],
-          state: { kind: "disabled" },
-        },
-      ],
-      consumption: [],
-      sessions: [],
-    };
-    const surface = createProviderUsageSurface({
-      send: () => {},
-      renderWorkspaceWindows: () => {},
-    });
-    surface.applyProviderUsageUi(snapshot);
-    applyProviderUsage(document, snapshot);
-    const strip = document.getElementById("op-strip-usage");
-    strip.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    strip.dispatchEvent(new window.Event("focus"));
-    const popover = document.getElementById("provider-usage-popover");
-    const action = popover.querySelector(".op-usage-card__reason--action");
-    assert.equal(popover.getAttribute("tabindex"), "0");
-
-    strip.onblur({ relatedTarget: action });
-    action.dispatchEvent(new window.Event("focusin", { bubbles: true }));
-    await new Promise((resolveWait) => setTimeout(resolveWait, 220));
-
-    assert.equal(popover.hidden, false);
-    assert.equal(strip.getAttribute("aria-expanded"), "true");
-
-    const escapeEvent = new window.Event("keydown", { bubbles: true });
-    escapeEvent.key = "Escape";
-    popover.dispatchEvent(escapeEvent);
-    assert.equal(popover.hidden, true);
-    assert.equal(strip.getAttribute("aria-expanded"), "false");
-
-    window.__gwtShowUsageHover(strip);
-    const refreshedAction = popover.querySelector(".op-usage-card__reason--action");
-    let popoverFocusRestored = false;
-    Object.defineProperty(document, "activeElement", {
-      configurable: true,
-      value: refreshedAction,
-    });
-    popover.focus = () => {
-      popoverFocusRestored = true;
-    };
-    surface.applyProviderUsageUi(snapshot);
-    assert.equal(popoverFocusRestored, true);
-  } finally {
-    globalThis.document = previousDocument;
-    globalThis.window = previousWindow;
-    globalThis.CustomEvent = previousCustomEvent;
-    globalThis.requestAnimationFrame = previousRequestAnimationFrame;
-  }
-});
-
-test("Status strip compacts three providers while keeping the full accessible summary", async () => {
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-
-  applyProviderUsage(document, {
-    accounts: [
-      {
-        provider: "codex",
-        windows: [{ kind: "weekly", used_percent: 40 }],
-        state: { kind: "ok" },
-      },
-      {
-        provider: "claude_code",
-        windows: [{ kind: "weekly", used_percent: 70 }],
-        state: { kind: "ok" },
-      },
-      {
-        provider: "custom_provider",
-        windows: [{ kind: "weekly", used_percent: 95 }],
-        state: { kind: "ok" },
-      },
-    ],
-  });
-
-  const strip = document.getElementById("op-strip-usage");
-  const visibleSummaries = strip.querySelectorAll(".op-usage-sum");
-  assert.equal(visibleSummaries.length, 1);
-  assert.equal(visibleSummaries[0].dataset.provider, "custom_provider");
-  assert.equal(visibleSummaries[0].textContent.trim(), "CU 95%");
-  assert.equal(strip.querySelector(".op-usage-more").textContent, "+2");
-  assert.equal(
-    strip.getAttribute("aria-label"),
-    "Provider usage: Codex 40% normal, Claude Code, Fable weekly not provided, Opus weekly not provided, shared quota 70% normal, CU 95% danger",
-  );
-  assert.equal(
-    strip.title,
-    "Provider usage: Codex 40% normal, Claude Code, Fable weekly not provided, Opus weekly not provided, shared quota 70% normal, CU 95% danger",
-  );
-});
-
-test("Keyboard focus opens the same labeled usage popover", async () => {
-  const { createProviderUsageSurface } = await import(
-    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
-  );
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document, window } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-  const previousDocument = globalThis.document;
-  const previousWindow = globalThis.window;
-  const previousCustomEvent = globalThis.CustomEvent;
-  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
-  globalThis.document = document;
-  globalThis.window = window;
-  globalThis.CustomEvent = window.CustomEvent;
-  globalThis.requestAnimationFrame = (cb) => cb();
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
-
-  try {
-    const snapshot = {
-      accounts: [
-        {
-          provider: "codex",
-          windows: [
-            {
-              kind: "weekly",
-              used_percent: 42,
-              resets_at: "2026-08-31T01:00:00Z",
-            },
-          ],
-          state: { kind: "ok" },
-        },
-      ],
-      consumption: [],
-      sessions: [],
-    };
-    const surface = createProviderUsageSurface({
-      send: () => {},
-      renderWorkspaceWindows: () => {},
-    });
-    surface.applyProviderUsageUi(snapshot);
-    applyProviderUsage(document, snapshot);
-    const strip = document.getElementById("op-strip-usage");
-    strip.getBoundingClientRect = () => ({ left: 24, top: 640 });
-
-    strip.dispatchEvent(new window.Event("focus"));
-
-    const popover = document.querySelector(".op-usage-hover");
-    assert.ok(popover, "focus should create the usage popover");
-    assert.equal(popover.id, "provider-usage-popover");
-    assert.equal(popover.getAttribute("role"), "region");
-    assert.equal(popover.getAttribute("aria-label"), "Usage & Limits");
-    assert.equal(strip.getAttribute("aria-controls"), popover.id);
-    assert.equal(strip.getAttribute("aria-expanded"), "true");
-    assert.match(popover.textContent, /Weekly\s*42%\s*↻/);
-  } finally {
-    globalThis.document = previousDocument;
-    globalThis.window = previousWindow;
-    globalThis.CustomEvent = previousCustomEvent;
-    globalThis.requestAnimationFrame = previousRequestAnimationFrame;
-  }
-});
-
-test("Usage hover shows account label while status strip stays compact", async () => {
-  const { createProviderUsageSurface } = await import(
-    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
-  );
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document, window } = parseHTML(
-    "<html><body><div id='op-strip-usage'></div><div id='usage-anchor'></div></body></html>",
-  );
-  const previousDocument = globalThis.document;
-  const previousWindow = globalThis.window;
-  const previousCustomEvent = globalThis.CustomEvent;
-  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
-  globalThis.document = document;
-  globalThis.window = window;
-  globalThis.CustomEvent = window.CustomEvent;
-  globalThis.requestAnimationFrame = (cb) => cb();
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
 
   try {
     const snapshot = {
@@ -723,21 +274,11 @@ test("Usage hover shows account label while status strip stays compact", async (
       sessions: [],
     };
     const surface = createProviderUsageSurface({
-      send: () => {},
       renderWorkspaceWindows: () => {},
     });
     surface.applyProviderUsageUi(snapshot);
-    applyProviderUsage(document, snapshot);
 
-    const strip = document.getElementById("op-strip-usage");
-    assert.match(strip.textContent, /USAGE/);
-    assert.doesNotMatch(strip.textContent, /codex@example\.com/);
-
-    const anchor = document.getElementById("usage-anchor");
-    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(anchor);
-
-    assert.match(document.body.textContent, /Account:\s*codex@example\.com/);
+    assert.match(usageCard(surface, document, "codex").textContent, /Account:\s*codex@example\.com/);
   } finally {
     globalThis.document = previousDocument;
     globalThis.window = previousWindow;
@@ -745,125 +286,12 @@ test("Usage hover shows account label while status strip stays compact", async (
     globalThis.requestAnimationFrame = previousRequestAnimationFrame;
   }
 });
-
-test("Usage snapshot owns its data so strip and hover stay consistent", async () => {
-  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
-  const { applyProviderUsage } = await importOperatorShell();
-  const { document, window } = parseHTML(
-    "<html><body><button id='op-strip-usage'></button></body></html>",
-  );
-  const previous = {
-    document: globalThis.document,
-    window: globalThis.window,
-    requestAnimationFrame: globalThis.requestAnimationFrame,
-    cancelAnimationFrame: globalThis.cancelAnimationFrame,
-  };
-  const frames = new Map();
-  let frameId = 0;
-  const flush = () => {
-    for (const callback of frames.values()) callback();
-    frames.clear();
-  };
-  Object.assign(globalThis, { document, window,
-    requestAnimationFrame: callback => { frames.set(++frameId, callback); return frameId; },
-    cancelAnimationFrame: id => frames.delete(id),
-  });
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
-  window.__operatorShell = { applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot) };
-  const payload = {
-    accounts: [{ provider: "codex", windows: [{ kind: "weekly", used_percent: 10 }], state: { kind: "ok" } }],
-    sessions: [],
-    consumption: [],
-  };
-  try {
-    let workspaceRefreshes = 0;
-    const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => workspaceRefreshes++ });
-    assert.equal(workspaceRefreshes, 0, "factory construction must not call a late-bound Workspace view");
-    surface.applyProviderUsageUi(payload);
-    assert.equal(workspaceRefreshes, 0, "views wait for the shared frame");
-    flush();
-    // A caller changing the received payload must not change model data.
-    payload.accounts[0].windows[0].used_percent = 70;
-    const strip = document.getElementById("op-strip-usage");
-    strip.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(strip);
-    const popover = document.getElementById("provider-usage-popover");
-    assert.match(strip.textContent, /CX 10%/);
-    assert.match(popover.textContent, /Weekly\s*10%/);
-    flush(); // Finish the popover's independent positioning frame.
-
-    surface.applyProviderUsageUi({ ...payload, accounts: [] });
-    surface.applyProviderUsageUi(payload);
-    assert.match(strip.textContent, /CX 10%/, "burst updates do not render intermediate snapshots");
-    assert.equal(frames.size, 1);
-    flush();
-    assert.match(strip.textContent, /CX 70%/);
-    assert.match(popover.textContent, /Weekly\s*70%/);
-    assert.equal(workspaceRefreshes, 2);
-  } finally {
-    flush();
-    Object.assign(globalThis, previous);
-  }
-});
-
-test("Mounted usage panel follows snapshots while preserving local controls", async () => {
-  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
-  const { document, window } = parseHTML("<html><body><section id='usage-panel'></section></body></html>");
-  const previous = { document: globalThis.document, window: globalThis.window,
-    requestAnimationFrame: globalThis.requestAnimationFrame };
-  Object.assign(globalThis, { document, window, requestAnimationFrame: callback => callback() });
-  const usage = (kind) => ({ accounts: [{ provider: "claude_code", state: { kind } }] });
-  try {
-    const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => {} });
-    const panel = document.getElementById("usage-panel");
-    surface.applyProviderUsageUi(usage("disabled"));
-    surface.renderUsagePanel(panel);
-    const checkbox = panel.querySelector("input");
-    assert.equal(checkbox.checked, false);
-    surface.applyProviderUsageUi(usage("ok"));
-    assert.equal(checkbox.checked, true);
-    assert.equal(panel.querySelector("input"), checkbox, "snapshot must preserve the mounted control");
-
-    checkbox.checked = false;
-    checkbox.dispatchEvent(new window.Event("change"));
-    assert.equal(checkbox.checked, false, "the local toggle remains immediate");
-    surface.applyProviderUsageUi(usage("ok"));
-    assert.equal(checkbox.checked, true, "the next canonical snapshot reflects backend truth");
-
-    surface.renderUsagePanel(panel);
-    const remountedCheckbox = panel.querySelector("input");
-    surface.applyProviderUsageUi(usage("disabled"));
-    assert.equal(remountedCheckbox.checked, false);
-    assert.equal(checkbox.checked, true, "remount must release the old control's subscription");
-    panel.remove();
-    remountedCheckbox.checked = true;
-    surface.applyProviderUsageUi(usage("disabled"));
-    assert.equal(remountedCheckbox.checked, true, "disconnected controls must not receive model updates");
-  } finally {
-    Object.assign(globalThis, previous);
-  }
-});
-
-async function importOperatorShell() {
-  const modulePath = resolve(here, "../operator-shell.js");
-  const source = readFileSync(modulePath, "utf8")
-    .replace('from "/theme-manager.js"', `from "${pathToFileURL(resolve(here, "../theme-manager.js")).href}"`)
-    .replace('from "/hotkey.js"', `from "${pathToFileURL(resolve(here, "../hotkey.js")).href}"`)
-    .replace('from "/theme-toggle.js"', `from "${pathToFileURL(resolve(here, "../theme-toggle.js")).href}"`);
-  const tmpDir = resolve(here, "../../../../.tmp-tests");
-  mkdirSync(tmpDir, { recursive: true });
-  const tmpModule = resolve(tmpDir, "provider-usage-operator-shell-import.mjs");
-  writeFileSync(tmpModule, source);
-  return import(pathToFileURL(tmpModule).href);
-}
-
-test("Usage popover labels unknown windows by their reported length (Issue #3860)", async () => {
+test("Account card labels unknown windows by their reported length (Issue #3860)", async () => {
   const { createProviderUsageSurface } = await import(
     pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
-    "<html><body><div id='usage-anchor'></div></body></html>",
+    "<html><body></body></html>",
   );
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
@@ -873,12 +301,9 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
   globalThis.window = window;
   globalThis.CustomEvent = window.CustomEvent;
   globalThis.requestAnimationFrame = (cb) => cb();
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
 
   try {
     const surface = createProviderUsageSurface({
-      send: () => {},
       renderWorkspaceWindows: () => {},
     });
     surface.applyProviderUsageUi({
@@ -896,11 +321,9 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
       consumption: [],
       sessions: [],
     });
-    const anchor = document.getElementById("usage-anchor");
-    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(anchor);
 
-    const labels = [...document.querySelectorAll(".op-usage-win__lbl")];
+    const card = usageCard(surface, document, "codex");
+    const labels = [...card.querySelectorAll(".op-usage-win__lbl")];
     assert.deepEqual(
       labels.map((label) => label.textContent),
       ["Weekly", "Unknown (1-day)", "Unknown"],
@@ -915,7 +338,7 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
     assert.equal(labels[2].title, "");
     // AC-5: the unknown window's value is still rendered, not dropped.
     assert.deepEqual(
-      [...document.querySelectorAll(".op-usage-win__pct")].map((pct) => pct.textContent),
+      [...card.querySelectorAll(".op-usage-win__pct")].map((pct) => pct.textContent),
       ["5%", "40%", "12%"],
     );
   } finally {
@@ -925,29 +348,23 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
     globalThis.requestAnimationFrame = previousRequestAnimationFrame;
   }
 });
-
-test("Claude usage popover labels Fable weekly with its reported usage and reset", async () => {
+test("Claude account card labels Fable weekly with its reported usage and reset", async () => {
   const { createProviderUsageSurface } = await import(
     pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
-  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const { document, window } = parseHTML("<html><body></body></html>");
   const previous = { document: globalThis.document, window: globalThis.window,
     CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
   Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
     requestAnimationFrame: callback => callback() });
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
   try {
-    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const surface = createProviderUsageSurface({ renderWorkspaceWindows() {} });
     const resetsAt = "2031-01-02T03:04:05Z";
     surface.applyProviderUsageUi({ accounts: [{ provider: "claude_code", state: { kind: "ok" }, limit_reached: true,
       windows: [{ kind: "fable_weekly", used_percent: 0, resets_at: resetsAt }] }],
       consumption: [], sessions: [] });
-    const anchor = document.getElementById("usage-anchor");
-    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(anchor);
 
-    const row = document.querySelector('.op-usage-card[data-provider="claude_code"] .op-usage-win');
+    const row = usageCard(surface, document, "claude_code").querySelector(".op-usage-win");
     assert.equal(row.querySelector(".op-usage-win__lbl").textContent, "Fable weekly");
     assert.equal(row.querySelector(".op-usage-win__pct").textContent, "0%");
     assert.equal(row.querySelector(".op-usage-bar__fill").style.width, "0%");
@@ -960,6 +377,7 @@ test("Claude usage popover labels Fable weekly with its reported usage and reset
     surface.applyProviderUsageUi({ accounts: [{ provider: "claude_code", state: { kind: "stale", age_secs: 420 },
       windows: [{ kind: "fable_weekly", used_percent: null },
         { kind: "opus_weekly", used_percent: "invalid" }] }], sessions: [], consumption: [] });
+    usageCard(surface, document, "claude_code");
     assert.deepEqual([...document.querySelectorAll(".op-usage-win__pct")].map(el => el.textContent), ["—", "—"]);
     assert.equal(document.querySelectorAll(".op-usage-bar").length, 0);
     assert.match(document.querySelector(".op-usage-card").textContent, /stale 7m/);
@@ -967,30 +385,27 @@ test("Claude usage popover labels Fable weekly with its reported usage and reset
     Object.assign(globalThis, previous);
   }
 });
-
 test("Claude usage credits preserve supplied amounts and missing values", async () => {
   const { createProviderUsageSurface } = await import(
     pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
-  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const { document, window } = parseHTML("<html><body></body></html>");
   const previous = { document: globalThis.document, window: globalThis.window,
     CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
   Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
     requestAnimationFrame: callback => callback() });
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
   try {
-    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const surface = createProviderUsageSurface({ renderWorkspaceWindows() {} });
     const account = { provider: "claude_code", state: { kind: "ok" },
       windows: [{ kind: "weekly", used_percent: 12 }] };
-    const applyExtraUsage = extraUsage => surface.applyProviderUsageUi({
-      accounts: [{ ...account, extra_usage: extraUsage }], consumption: [], sessions: [],
-    });
+    const applyExtraUsage = extraUsage => {
+      surface.applyProviderUsageUi({
+        accounts: [{ ...account, extra_usage: extraUsage }], consumption: [], sessions: [],
+      });
+      usageCard(surface, document, "claude_code");
+    };
     applyExtraUsage({ is_enabled: true, used_credits: 24.5, monthly_limit: 100,
       utilization: 24.5, currency: "USD", disabled_reason: null });
-    const anchor = document.getElementById("usage-anchor");
-    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(anchor);
 
     let credits = document.querySelector('[data-usage-credits="true"]');
     assert.ok(credits, "enabled usage credits should be visible");
@@ -1022,13 +437,12 @@ test("Claude usage credits preserve supplied amounts and missing values", async 
     Object.assign(globalThis, previous);
   }
 });
-
-test("Usage popover lists per-session tokens and context per provider, capped (Issue #3862)", async () => {
+test("Account card lists per-session tokens and context per provider, capped (Issue #3862)", async () => {
   const { createProviderUsageSurface } = await import(
     pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
-    "<html><body><div id='usage-anchor'></div></body></html>",
+    "<html><body></body></html>",
   );
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
@@ -1038,12 +452,9 @@ test("Usage popover lists per-session tokens and context per provider, capped (I
   globalThis.window = window;
   globalThis.CustomEvent = window.CustomEvent;
   globalThis.requestAnimationFrame = (cb) => cb();
-  window.innerWidth = 1200;
-  window.innerHeight = 800;
 
   try {
     const surface = createProviderUsageSurface({
-      send: () => {},
       renderWorkspaceWindows: () => {},
       sessionLabel: (sessionId) =>
         sessionId === "sess-claude-a" ? "Issue #3862 popover" : null,
@@ -1113,15 +524,12 @@ test("Usage popover lists per-session tokens and context per provider, capped (I
         },
       ],
     });
-    const anchor = document.getElementById("usage-anchor");
-    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
-    window.__gwtShowUsageHover(anchor);
 
     // Claude card: sessions are visible even while account usage is disabled
     // (per-session data is local and opt-in free); the account reason stays.
-    const claudeCard = document.querySelector('.op-usage-card[data-provider="claude_code"]');
+    const claudeCard = usageCard(surface, document, "claude_code");
     assert.ok(claudeCard, "claude card renders");
-    assert.match(claudeCard.textContent, /Enable in Settings/);
+    assert.match(claudeCard.textContent, /Usage collection is off/);
     const claudeSess = claudeCard.querySelector(".op-usage-sess");
     assert.ok(claudeSess, "claude sessions block renders");
     assert.match(claudeSess.querySelector(".op-usage-sess__head").textContent, /Sessions/);
@@ -1151,8 +559,8 @@ test("Usage popover lists per-session tokens and context per provider, capped (I
     assert.equal(noData.querySelector(".op-usage-sess__tokens").textContent, "—");
 
     // Codex card: 7 sessions are capped to 5 rows plus a "+N more" line so the
-    // popover never grows unbounded (the reason the old list was removed).
-    const codexCard = document.querySelector('.op-usage-card[data-provider="codex"]');
+    // card never grows unbounded (the reason the old list was removed).
+    const codexCard = usageCard(surface, document, "codex");
     const codexSess = codexCard.querySelector(".op-usage-sess");
     assert.match(codexSess.querySelector(".op-usage-sess__head").textContent, /Sessions \(7\)/);
     const codexRows = [...codexSess.querySelectorAll(".op-usage-sess__row")];
@@ -1166,12 +574,64 @@ test("Usage popover lists per-session tokens and context per provider, capped (I
       consumption: [],
       sessions: [],
     });
-    assert.equal(document.querySelector(".op-usage-sess"), null);
-    assert.match(document.body.textContent, /No data yet/);
+    const emptyCard = usageCard(surface, document, "codex");
+    assert.equal(emptyCard.querySelector(".op-usage-sess"), null);
+    assert.match(emptyCard.textContent, /No data yet/);
   } finally {
     globalThis.document = previousDocument;
     globalThis.window = previousWindow;
     globalThis.CustomEvent = previousCustomEvent;
     globalThis.requestAnimationFrame = previousRequestAnimationFrame;
+  }
+});
+
+test("Usage snapshot owns its data and batches Workspace refreshes per frame", async () => {
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
+  const { document, window } = parseHTML("<html><body><div id='slot'></div></body></html>");
+  const previous = {
+    document: globalThis.document,
+    window: globalThis.window,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
+  };
+  const frames = new Map();
+  let frameId = 0;
+  const flush = () => {
+    for (const callback of frames.values()) callback();
+    frames.clear();
+  };
+  Object.assign(globalThis, { document, window,
+    requestAnimationFrame: callback => { frames.set(++frameId, callback); return frameId; },
+    cancelAnimationFrame: id => frames.delete(id),
+  });
+  const payload = {
+    accounts: [{ provider: "codex", windows: [{ kind: "weekly", used_percent: 10 }], state: { kind: "ok" } }],
+    sessions: [],
+    consumption: [],
+  };
+  try {
+    let workspaceRefreshes = 0;
+    const surface = createProviderUsageSurface({ renderWorkspaceWindows: () => workspaceRefreshes++ });
+    assert.equal(workspaceRefreshes, 0, "factory construction must not call a late-bound Workspace view");
+    surface.applyProviderUsageUi(payload);
+    assert.equal(workspaceRefreshes, 0, "views wait for the shared frame");
+    flush();
+    assert.equal(workspaceRefreshes, 1);
+    // A caller changing the received payload must not change model data.
+    payload.accounts[0].windows[0].used_percent = 70;
+    const slot = document.getElementById("slot");
+    surface.renderAccountUsage(slot, "codex");
+    assert.match(slot.textContent, /Weekly\s*10%/);
+
+    surface.applyProviderUsageUi({ ...payload, accounts: [] });
+    surface.applyProviderUsageUi(payload);
+    assert.equal(frames.size, 1, "burst updates share one frame");
+    flush();
+    assert.equal(workspaceRefreshes, 2);
+    surface.renderAccountUsage(slot, "codex");
+    assert.match(slot.textContent, /Weekly\s*70%/);
+  } finally {
+    flush();
+    Object.assign(globalThis, previous);
   }
 });

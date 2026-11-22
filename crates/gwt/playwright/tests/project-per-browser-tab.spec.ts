@@ -184,7 +184,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
         await expect(page.locator("#project-home-link")).toHaveCount(0);
         const hubTab = await context.newPage();
-        await hubTab.goto(new URL("/", base!).href);
+        await hubTab.goto(liveGwtProjectsUrl(base!));
         await expect(hubTab.locator("[data-hub]")).toBeVisible();
         const projectPopup = hubTab.waitForEvent("popup");
         await hubTab.locator(`[data-hub-list="open"] a[href="/p/${projectB.project_key}"]`).click();
@@ -220,7 +220,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         const hub = page.locator("[data-hub]");
         await expect(hub).toBeVisible();
         await expectTheme(page, theme);
-        await expect(page).toHaveTitle("gwt — Hub");
+        await expect(page).toHaveTitle("gwt — Home");
         for (const selector of ["#app", "#project-tabs", "#op-rail", ".workspace-window"]) {
           await expect(page.locator(selector)).toHaveCount(0);
         }

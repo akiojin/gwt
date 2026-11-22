@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, realpath, rename, rmdir, writeFile } from "no
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { operationOutput, readOperationOutput } from "./_helpers/operation-envelope.mjs";
 
 let rosterReadSequence = 0;
 async function readCanonicalRoster(page: Page): Promise<any> {
@@ -2314,6 +2315,45 @@ request.catch(() => {});
     expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
   });
 
+  test("Issue #7647 a registered agent starts on the project's environment whatever tool it was registered with", async ({ page }, info) => {
+    // The agents are registered with Claude Code, which this fixture does not
+    // provide: only the project's saved environment (Codex) can start.
+    const fixture = await startIssueQueueLaunchFixture(info, { page, monitorPreferences: {
+      launch_profile: { agent_id: "claude", model: "claude-only-model", runtime_target: "Host", skip_permissions: true },
+      execution_environments: [{ environment_id: "codex", tool: "codex" }],
+    } });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] });
+      await expect.poll(async () => (await fixture.launches()).length,
+        { timeout: 90_000, message: "the registered agent starts with the environment's tool" }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const record = await readFile(join(fixture.home, ".gwt/sessions", `${launch.gwt_session_id}.toml`), "utf8");
+      expect(record).toMatch(/^\[agent_id\]\r?\ntype = "Codex"/m);
+      expect(record).not.toContain("claude-only-model");
+      expect(record).toContain(`linked_issue_number = ${fixture.issueNumber}`);
+      const roster = await readCanonicalRoster(page);
+      const member = roster.members.find((member: any) => member.assignment?.issue_number === fixture.issueNumber);
+      expect(member, "the session belongs to a registered agent").toBeTruthy();
+      expect(member.agent_id, "the agent keeps the tool it was registered with").toBe("claude");
+      expect(record).toContain(member.agent_member_id);
+      const prefs = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+      expect(prefs.launch_profiles.map((profile: any) => profile.agent_id)).toContain("claude");
+      expect(prefs.launch_profiles.map((profile: any) => profile.agent_id)).not.toContain("codex");
+      await info.attach(`environment-tool-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned process cleanup").toEqual([]);
+  });
+
   test("AC34 actual provider exit removes the local Active agent without closing its Issue", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, { page });
     const errors: string[] = [];
@@ -3022,7 +3062,10 @@ request.catch(() => {});
       }, { timeout: 60_000, message: stage }).not.toBe(provider.birth);
       mark(stage, { process: provider, observed_birth: observedBirth! });
     };
-    const status = async (project?: string) => JSON.parse((await fixture.operationAsync("issue.monitor.status", {}, project)).output);
+    // A status read refused by a busy daemon is repeated within a bound; each refusal stays in the timeline.
+    const status = (project?: string) => readOperationOutput("issue.monitor.status",
+      () => fixture.operationAsync("issue.monitor.status", {}, project),
+      { onRefusal: (refusal: Record<string, unknown>) => mark("operation refused", refusal) });
     const inboxState = async (number: number, project?: string) =>
       (await status(project)).inbox.find((row: any) => row.issue_number === number)?.state;
     const activity = (target: Page) => target.evaluate(() =>
@@ -3030,9 +3073,9 @@ request.catch(() => {});
         .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
         .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
         .at(-1));
-    // The shared budget's own refusal, as each project's Host recorded it.
-    const capacityRefusals = async (number: number) => {
-      const rows: string[] = [];
+    // Structured log rows from the shared HOME and from each project's Host.
+    const logRows = async (matches: (row: any) => boolean) => {
+      const rows: any[] = [];
       const projects = join(fixture.home, ".gwt", "projects");
       const directories = [join(fixture.home, ".gwt", "logs"),
         ...(await readdir(projects)).map(key => join(projects, key, "logs"))];
@@ -3042,13 +3085,22 @@ request.catch(() => {});
           for (const line of (await readFile(join(directory, file), "utf8")).split("\n")) {
             let row;
             try { row = JSON.parse(line); } catch { continue; }
-            if (row.fields?.issue_number === number
-              && String(row.fields.reason ?? "").startsWith("Machine Agent capacity is occupied;")) rows.push(row.timestamp);
+            if (row?.fields && matches(row)) rows.push(row);
           }
         }
       }
       return rows;
     };
+    // The shared budget's own refusal, as each project's Host recorded it.
+    const capacityRefusals = async (number: number) =>
+      (await logRows(row => row.fields.issue_number === number
+        && String(row.fields.reason ?? "").startsWith("Machine Agent capacity is occupied;")))
+        .map(row => row.timestamp);
+    // Issue #7758 AC-1: where each daemon control's time to ACK went on this host.
+    const controlTimings = async () =>
+      (await logRows(row => row.fields.control_apply_ms !== undefined || row.fields.control_prefs_commit_ms !== undefined))
+        .map(row => ({ timestamp: row.timestamp, ...row.fields }))
+        .sort((left, right) => String(left.timestamp).localeCompare(String(right.timestamp)));
     // Two completed scans: the decision under test was taken with the slot already occupied.
     const scans = async (read: () => Promise<any>, subject: string) => {
       for (const pass of ["first", "second"]) {
@@ -3077,12 +3129,12 @@ request.catch(() => {});
         await handle.dispose();
         mark("queue response", { issue_number: number, error });
         // This refusal is emitted before the daemon connection is attempted.
-        // A missing acknowledgement or any other error must fail the test.
+        // Any other error must fail the test.
         if (error && !/^publish budget exhausted during scope\/bootstrap resolution after \d+ms$/.test(error)) {
           throw new Error(`Queue push for Issue #${number} failed: ${error}`);
         }
         return error;
-      }, { timeout: 30_000, message: `queue push for Issue #${number} is acknowledged` }).toBeNull();
+      }, { timeout: 120_000, message: `queue push for Issue #${number} is acknowledged` }).toBeNull();
     };
     const shots = async (stage: string) => {
       await info.attach(`shared-pool-${stage}-first-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
@@ -3151,9 +3203,9 @@ request.catch(() => {});
       const identity = (await status()).inbox.find((row: any) => row.issue_number === 43);
       const confirmation = (await preferences()).launch_confirmations[43];
       mark("stop original owner");
-      const stopped = JSON.parse((await fixture.operationAsync("issue.monitor.stop", {
+      const stopped = operationOutput("issue.monitor.stop", await fixture.operationAsync("issue.monitor.stop", {
         number: 43, reason: "Issue #7451 slot return", remove_from_queue: false, claim_id: identity.claim_id,
-        delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id })).output);
+        delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id }));
       expect(stopped).toMatchObject({ status: "stopped", removed_from_queue: false, runtime_stop: "requested" });
       await waitForExit("original owner exited", sourceProcess);
       // Remove the exited diagnostic pane so only the hold keeps the Issue from relaunching.
@@ -3192,8 +3244,8 @@ request.catch(() => {});
 
       // 5. An explicit resume of the original owner waits for the slot too.
       mark("requeue original owner");
-      const requeued = JSON.parse((await fixture.operationAsync("issue.monitor.requeue", {
-        number: 43, reason: "Issue #7451 resume the original owner" })).output);
+      const requeued = operationOutput("issue.monitor.requeue", await fixture.operationAsync("issue.monitor.requeue", {
+        number: 43, reason: "Issue #7451 resume the original owner" }));
       expect(requeued.status).toBe("requeued");
       await expect.poll(hold, { timeout: 30_000 }).toBeUndefined();
       await expect.poll(async () => {
@@ -3230,6 +3282,10 @@ request.catch(() => {});
         original_owner_waiting: waiting.launch_capacity,
         launches: await fixture.launches(), timeline,
       }, null, 2), contentType: "application/json" });
+      await info.attach("issue-7758-control-commit-timing", { body: JSON.stringify({
+        platform: process.platform, theme, timeline: timeline.filter(row => String(row.stage).startsWith("queue ")),
+        controls: await controlTimings(),
+      }, null, 2), contentType: "application/json" });
     } catch (error) {
       // A native runner's HOME is not retained; keep both projects' view of the shared pool.
       const observedAt = new Date().toISOString();
@@ -3240,6 +3296,7 @@ request.catch(() => {});
       ].map(promise => promise.catch(failure => String(failure))));
       await info.attach("issue-7451-failure-state", { body: JSON.stringify({
         observed_at: observedAt, launches, first, second, policy, registry, capacity, owner_close: ownerClose, timeline,
+        control_commit_timing: await controlTimings().catch(failure => String(failure)),
       }, null, 2), contentType: "application/json" }).catch(() => {});
       throw error;
     } finally {

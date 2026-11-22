@@ -1,5 +1,8 @@
 import { mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { renderMemberTuningControls } from "./settings-surface.js";
+import { createFocusTrap } from "./focus-trap.js";
+import { createUiStateStore } from "./ui-state-store.js";
+import { mountIsland } from "./react/islands.js";
 
 const configuredPm = member => !!member?.pm_project_key;
 const holdsPmRole = member => !!member && (member.is_pm || !!member.pm_project_key || member.assignment?.role === "pm");
@@ -10,17 +13,29 @@ const hours = value => finite(value) ? `${Math.round(value / 3600 * 10) / 10}h` 
 const activityPresentation = state => JSON.stringify([state.count, (state.agents || []).map(agent =>
   [agent.window_id, agent.session_id, agent.runtime_incarnation, agent.issue_number, agent.is_pm, agent.review_dispatch, agent.agent_name])
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
+// Issue #7647: an agent's fixed traits. The steps are common to every tool; the
+// launched tool takes the nearest step it has at or below the chosen one.
+const TRAIT_CHOICES = { reasoning_level: [["low", "Low"], ["standard", "Standard"], ["high", "High"], ["max", "Max"]],
+  speed: [["normal", "Normal"], ["fast", "Fast"], ["fastest", "Fastest"]] };
+const PERSONALITY_MAX_CHARS = 4000;
+const savedTraits = member => ({ reasoning_level: member?.traits?.reasoning_level || "", speed: member?.traits?.speed || "", personality: member?.traits?.personality || "" });
+const traitLabel = (name, value) => TRAIT_CHOICES[name].find(([id]) => id === value)?.[1] || "";
+const traitsSummary = member => {
+  const traits = savedTraits(member), excerpt = traits.personality.split("\n")[0].trim();
+  return [traits.reasoning_level && `Reasoning ${traitLabel("reasoning_level", traits.reasoning_level)}`,
+    traits.speed && `Speed ${traitLabel("speed", traits.speed)}`, excerpt].filter(Boolean).join(" · ");
+};
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
-  element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
+  element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><label class="settings-field">Model for new member<input class="settings-input" type="text" aria-label="Model for new member" list="roster-registration-models" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-models"></datalist></label><label class="settings-field">Reasoning for new member<input class="settings-input" type="text" aria-label="Reasoning for new member" list="roster-registration-reasoning" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-reasoning"></datalist></label><p class="settings-help" data-registration-catalog-status role="status" hidden></p><button type="button" data-action="retry-registration-catalog" hidden>Retry model catalog</button><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
-    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
-    <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
+    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. The tool a session starts with comes from the project's available execution environments, not from the member. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
+    <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" data-project-only hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
   if (executionModel) {
     const execution = document.createElement("section"); execution.className = "settings-section";
@@ -29,25 +44,11 @@ export function createAgentsSurface({ document, storage, executionModel, project
       document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
     } });
   }
-  const toolSelect = element.querySelector('[aria-label="Tool for new member"]');
   const nameInput = element.querySelector('[aria-label="Name for new member"]');
-  const modelInput = element.querySelector('[aria-label="Model for new member"]');
-  const reasoningInput = element.querySelector('[aria-label="Reasoning for new member"]');
-  const registrationCatalogStatus = element.querySelector("[data-registration-catalog-status]");
-  const retryRegistrationCatalog = element.querySelector('[data-action="retry-registration-catalog"]');
   const registrationEligible = element.querySelector('[aria-label="PM eligible for new member"]');
   registrationEligible.checked = false;
   let nameTouched = false, registeredDraft = null;
   const registrationComposing = new Set();
-  let registrationTools = [], renderedTools = "";
-  let registrationTool = "";
-  function syncRegistrationTool() {
-    const next = toolSelect.value || "";
-    if (!next || next === registrationTool) return;
-    registrationTool = next;
-    modelInput.value = ""; reasoningInput.value = "";
-    registrationComposing.delete(modelInput); registrationComposing.delete(reasoningInput);
-  }
   const registrationError = element.querySelector("#roster-registration-error");
   const registrationMessage = document.createElement("span");
   const showConflict = document.createElement("button");
@@ -67,65 +68,33 @@ export function createAgentsSurface({ document, storage, executionModel, project
       && member.name === registeredDraft.name)) {
       if (!registrationComposing.has(nameInput) && name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
       if (registrationEligible.checked === registeredDraft.pm_eligible) registrationEligible.checked = false;
-      if (!registrationComposing.has(modelInput) && modelInput.value.trim() === registeredDraft.model) modelInput.value = "";
-      if (!registrationComposing.has(reasoningInput) && reasoningInput.value.trim() === registeredDraft.reasoning) reasoningInput.value = "";
       registeredDraft = null;
     }
     const draft = nameInput.value.trim();
     const conflict = registrationConflict();
     const error = !draft ? "Enter a display name." : conflict
-      ? `${conflict.name} (${conflict.agent_id || conflict.provider || "Unknown tool"}) is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
+      ? `${conflict.name} is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
     registrationMessage.textContent = nameTouched ? error : "";
     showConflict.hidden = !nameTouched || !conflict;
     registrationError.hidden = !nameTouched || !error;
     nameInput.setAttribute("aria-invalid", String(nameTouched && !!error));
     for (const button of element.querySelectorAll('[data-action="add"]')) {
-      button.disabled = !!error || registrationComposing.size > 0 || registrationTools.length === 0 || !rosterReady(roster);
-      button.title = registrationTools.length ? "Register this name with the selected tool." : "Loading supported and custom coding tools…";
+      button.disabled = !!error || registrationComposing.size > 0 || !rosterReady(roster);
+      button.title = "Register this name.";
     }
-    const choices = Array.isArray(roster.tuning_choices) ? roster.tuning_choices : roster.tuning_choices?.agents || [];
-    const entry = choices.find(agent => agent.id === toolSelect.value);
-    const selectedModel = entry?.models?.find(model => model.value === modelInput.value.trim());
-    for (const [input, suggestions] of [
-      [modelInput, [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]],
-      [reasoningInput, (selectedModel?.reasoning_options || entry?.reasoning_options || []).map(option => typeof option === "string" ? option : option.value)],
-    ]) {
-      const list = input.parentElement.querySelector("datalist"); list.replaceChildren();
-      for (const value of suggestions) {
-        const option = document.createElement("option"); option.value = value;
-        if (input === modelInput) option.label = entry?.models?.find(model => model.value === value)?.label || value;
-        list.append(option);
-      }
-      input.disabled = !rosterReady(roster);
-    }
-    registrationCatalogStatus.textContent = entry?.model_catalog_warning || "";
-    registrationCatalogStatus.hidden = !registrationCatalogStatus.textContent;
-    retryRegistrationCatalog.hidden = !registrationCatalogStatus.textContent || !onReloadProfile;
-  }
-  function syncTools() {
-    const builtins = supportedAgentsModel?.read().agents;
-    const custom = customAgentsModel?.read().catalog;
-    registrationTools = builtins && custom?.loaded ? [...builtins,
-      ...custom.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id }))] : [];
-    const key = JSON.stringify(registrationTools.map(tool => [tool.id, tool.name]));
-    if (key !== renderedTools) {
-      const selected = toolSelect.value || registrationTool; toolSelect.replaceChildren();
-      for (const tool of registrationTools) {
-        const option = document.createElement("option"); option.value = tool.id; option.textContent = tool.name || tool.id;
-        option.selected = tool.id === selected; toolSelect.append(option);
-      }
-      if (!registrationTools.some(tool => tool.id === selected) && toolSelect.firstElementChild) toolSelect.firstElementChild.selected = true;
-      renderedTools = key;
-    }
-    toolSelect.disabled = registrationTools.length === 0;
-    syncRegistrationTool();
-    syncRegistration();
   }
   const selectionKey = "gwt:ui:agents-selected-member";
   const savedSelection = storage?.get(selectionKey);
   let selectedId = typeof savedSelection === "string" && savedSelection ? savedSelection : null, tab = "team", previewElement = null, disposed = false;
   let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule, renderedSwitch;
   let renderedPlans = null;
+  // Issue #7649 (SPEC #7007 T-031, design item 25): one roster, two screens.
+  // "project" is the project's agents screen, which adds every member's
+  // history and the assignment plan. "ledger" is the machine-wide ledger,
+  // which shows no history, current work or planned assignment.
+  let view = "project";
+  const historyPlansStore = createUiStateStore({ members: [], pmMemberIds: [], rosterRevision: null, schedule: {} });
+  const historyPlans = mountIsland("agent-history-plans", element.querySelector(".agent-history-plans-host"), { store: historyPlansStore });
   let renderedDetail = null;
   const memberRows = new Map();
   const nameFields = new Map();
@@ -350,26 +319,14 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const current = liveWork(member), key = member ? JSON.stringify([member.member_id,
       current?.window_id, current?.session_id, current?.runtime_incarnation]) : null;
     if (renderedDetail?.key !== key) renderedDetail = null;
-    let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions, saved = renderedDetail?.saved;
+    let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions;
     // Refresh presentation around unchanged native controls without detaching
     // their keyboard targets. A different member/runtime retires those controls.
-    for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions && child !== saved) child.remove();
+    for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions) child.remove();
     if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
     if (plans.parentElement !== panel) panel.insertBefore(plans, actions || null);
     if (head.parentElement !== panel) panel.prepend(head);
-    panel.insertBefore(stats(member), saved || currentWork || plans);
-    if (!saved) {
-      saved = document.createElement("section"); saved.className = "roster-history roster-saved-settings";
-      saved.innerHTML = `<h4>Saved manual candidate</h4><p class="roster-description"></p><label class="settings-field roster-saved-revision">Saved manual candidate revision<input class="settings-input" type="text" readonly aria-label="Saved manual candidate revision"></label><p class="roster-description">Automatic launches use tier settings. Current work uses its own recorded launch settings.</p>`;
-      saved.querySelector("input").title = "Content identity of saved manual settings. Same settings have the same revision; this is not chronological order.";
-    }
-    const revision = saved.querySelector("input"), revisionValue = member.saved_manual_revision || "—";
-    if (revision.value !== revisionValue) revision.value = revisionValue;
-    const profile = member.saved_manual_profile;
-    saved.querySelector("p").textContent = profile
-      ? `Tool: ${profile.agent_id || "—"} · Model: ${profile.model || "—"} · Reasoning: ${profile.reasoning || "—"} · Runtime: ${profile.runtime_target || "—"}${profile.runtime_target === "Docker" && profile.docker_service ? ` (${profile.docker_service})` : ""} · Permissions: ${profile.skip_permissions === true ? "Skip prompts" : profile.skip_permissions === false ? "Ask" : "—"}`
-      : "Unavailable";
-    if (saved.parentElement !== panel) panel.insertBefore(saved, currentWork || plans);
+    panel.insertBefore(stats(member), currentWork || plans);
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
     const ol = history.querySelector("ol");
     if (current) {
@@ -408,7 +365,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     }
     actions.querySelector('[data-action="rest"]').disabled = !member.enabled || configuredPm(member) || rosterModel.read().members.filter(member => member.enabled).length <= 1;
     panel.insertBefore(history, actions);
-    renderedDetail = { key, currentWork, actions, saved };
+    renderedDetail = { key, currentWork, actions };
   }
   function memberNameField(member) {
     let field = nameFields.get(member.member_id);
@@ -438,12 +395,26 @@ export function createAgentsSurface({ document, storage, executionModel, project
       const selectPm = document.createElement("button"); selectPm.type = "button"; selectPm.dataset.action = "select-pm";
       selectPm.addEventListener("click", () => { const latest = rosterModel.read().members.find(item => item.member_id === member.member_id); if (latest?.pm_project_key && latest.pm_project_key !== rosterModel.read().project_key) onNavigateProject(latest.pm_project_key); else if (latest?.enabled && latest.pm_eligible && !holdsPmRole(latest)) onSelectPm(member.member_id); });
       const tuning = document.createElement("section"); tuning.dataset.memberTuning = "";
-      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, tuning); head.append(avatar(member), who);
+      const traits = document.createElement("section"); traits.className = "roster-traits"; traits.dataset.memberTraits = ""; traits.setAttribute("aria-label", "Traits");
+      traits.innerHTML = `<h4>Traits</h4><p class="settings-help">Fixed for this agent on every tool. A launch can override a value once; it never changes what is saved here.</p>${
+        Object.entries({ reasoning_level: "Reasoning level", speed: "Speed" }).map(([name, title]) => `<label class="settings-field roster-name-field">${title}<select aria-label="${title}" data-trait="${name}"><option value="">Tool default</option>${
+          TRAIT_CHOICES[name].map(([value, text]) => `<option value="${value}">${text}</option>`).join("")}</select></label>`).join("")
+      }<label class="settings-field roster-name-field">Personality<textarea aria-label="Personality" data-trait="personality" rows="4" maxlength="${PERSONALITY_MAX_CHARS}" placeholder="Instructions this agent reads when a session starts"></textarea></label><p class="settings-help">The tool takes the nearest reasoning and speed step it has at or below the chosen one.</p><button type="button" data-action="save-traits">Save traits</button>`;
+      field.traits = traits; field.traitsDraft = null;
+      const draft = () => Object.fromEntries([...traits.querySelectorAll("[data-trait]")].map(control => [control.dataset.trait, control.value || ""]));
+      for (const control of traits.querySelectorAll("[data-trait]")) for (const type of ["change", "input"]) control.addEventListener(type, () => { field.traitsDraft = draft(); sync(); });
+      traits.querySelector('[data-action="save-traits"]').addEventListener("click", () => {
+        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+        if (disposed || !latest || !field.traitsDraft || !rosterReady(roster) || roster.pending_roster) return;
+        const next = { ...field.traitsDraft, personality: field.traitsDraft.personality.trim() };
+        onSetTraits(latest.member_id, Object.fromEntries(Object.entries(next).filter(([, value]) => value)));
+      });
+      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, traits, tuning); head.append(avatar(member), who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
     field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
-    field.head.querySelector("p").textContent = `Registered tool: ${member.provider || "—"} · Member since ${date(member.created_at)} UTC`;
+    field.head.querySelector("p").textContent = `Member since ${date(member.created_at)} UTC`;
     let memberId = field.head.querySelector(".roster-member-id");
     if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
     memberId.textContent = `Member ID: ${member.member_id}`;
@@ -463,8 +434,26 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const foreign = member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key;
     selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";
     selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.enabled || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
+    const saved = savedTraits(member), same = draft => !!draft && Object.keys(saved).every(name => (name === "personality" ? draft[name].trim() : draft[name]) === saved[name]);
+    // A draft stays until the ledger holds the same values, so a refused save loses nothing.
+    if (same(field.traitsDraft)) field.traitsDraft = null;
+    const held = !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
+    for (const control of field.traits.querySelectorAll("[data-trait]")) {
+      const value = (field.traitsDraft || saved)[control.dataset.trait];
+      if ((control.value || "") !== value) {
+        // Selecting one option of a single select deselects the others.
+        if (control.tagName === "SELECT") [...control.options].find(option => option.value === value).selected = true;
+        else control.value = value;
+      }
+      control.disabled = !rosterReady(rosterModel.read());
+    }
+    field.traits.querySelector('[data-action="save-traits"]').disabled = held || !field.traitsDraft;
+    // Issue #7647 (SPEC #7007 item 27): a member has no tool of its own, so
+    // the ledger offers none, nor a model or reasoning for it. Only the
+    // Project Manager keeps those here, until it has its own list of
+    // execution environments (item 194).
     const role = configuredPm(member) ? "pm" : "implementation";
-    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
+    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { launchFields: role === "pm", target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
       onEdit: (patch, options) => tuningController?.editTuning(role, member.member_id, patch, options),
       onRetry: () => tuningController?.retryTuning(role, member.member_id) });
     return field.head;
@@ -486,11 +475,15 @@ export function createAgentsSurface({ document, storage, executionModel, project
     element.querySelector(".roster-past-empty").hidden = contributors.length > 0;
     element.querySelector(".roster-past-empty").textContent = complete === false ? "Previous contributor data is unavailable." : "No previous contributors are recorded.";
   }
+  function setView(next) {
+    if (next === view || !["ledger", "project"].includes(next)) return;
+    view = next; sync();
+  }
   function syncPreview() {
     if (!previewElement) return;
     const clone = element.cloneNode(true); clone.classList.add("agents-surface--preview"); clone.setAttribute("aria-label", "Agents read-only preview");
     for (const node of clone.querySelectorAll("[id]")) node.removeAttribute("id");
-    for (const control of clone.querySelectorAll("button, select, input")) { control.disabled = true; control.tabIndex = -1; }
+    for (const control of clone.querySelectorAll("button, select, input, textarea")) { control.disabled = true; control.tabIndex = -1; }
     for (const row of clone.querySelectorAll(".roster-row")) row.tabIndex = -1;
     previewElement.replaceChildren(clone);
   }
@@ -500,7 +493,52 @@ export function createAgentsSurface({ document, storage, executionModel, project
     if (!host || disposed) return;
     previewElement = document.createElement("div"); previewElement.className = "roster-preview-host"; host.append(previewElement); syncPreview();
   }
-  function memberRow(member) {
+  // Issue #7646 (A-26): one shared dialog confirms a deletion. What blocks it
+  // is read from the live roster each time, so reassigning the Project Manager
+  // lifts the guard without a reload.
+  const removal = document.createElement("div"); removal.className = "modal-backdrop"; removal.id = "roster-delete-modal"; removal.setAttribute("aria-hidden", "true");
+  const removalShell = document.createElement("div"); removalShell.className = "modal-shell"; removalShell.setAttribute("role", "dialog"); removalShell.setAttribute("aria-modal", "true");
+  removalShell.setAttribute("aria-labelledby", "roster-delete-title"); removalShell.tabIndex = -1; removal.append(removalShell); document.body.append(removal);
+  let removalId = null, releaseRemovalTrap = null, removalReturnFocus = null;
+  const removalBlocker = member => holdsPmRole(member)
+    ? `${member.name} is the Project Manager${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` for project ${member.pm_project_key}` : " for this project"}. Select another Project Manager first, then delete this member.`
+    : member.assignment || member.active_assignments?.length ? `${member.name} is assigned to work. Wait for that work to finish, then delete this member.` : null;
+  function closeRemoval() {
+    if (removalId === null) return;
+    removalId = null; removal.classList.remove("open"); removal.setAttribute("aria-hidden", "true");
+    releaseRemovalTrap?.(); releaseRemovalTrap = null; removalReturnFocus?.focus?.(); removalReturnFocus = null;
+  }
+  function renderRemoval() {
+    const member = rosterModel.read().members.find(member => member.member_id === removalId);
+    if (!member) { closeRemoval(); return; }
+    const blocker = removalBlocker(member);
+    const header = document.createElement("header"); header.className = "modal-header";
+    const title = document.createElement("h2"); title.id = "roster-delete-title"; title.textContent = blocker ? `${member.name} cannot be deleted` : `Delete ${member.name}?`; header.append(title);
+    const body = document.createElement("div"); body.className = "modal-body";
+    const copy = document.createElement("p"); copy.textContent = blocker || `${member.name} leaves the ledger on this machine for every project. Recorded history stays. This cannot be undone.`; body.append(copy);
+    const footer = document.createElement("footer"); footer.className = "modal-footer";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "text-button"; cancel.dataset.role = "roster-delete-cancel"; cancel.textContent = blocker ? "Close" : "Cancel";
+    cancel.addEventListener("click", closeRemoval); footer.append(cancel);
+    if (!blocker) {
+      const confirm = document.createElement("button"); confirm.type = "button"; confirm.className = "wizard-button destructive"; confirm.dataset.role = "roster-delete-confirm"; confirm.textContent = "Delete";
+      confirm.addEventListener("click", () => {
+        const roster = rosterModel.read(), latest = roster.members.find(member => member.member_id === removalId);
+        if (!latest || removalBlocker(latest) || !rosterReady(roster) || roster.pending_roster) { renderRemoval(); return; }
+        closeRemoval(); onRemoveMember(latest.member_id);
+      });
+      footer.append(confirm);
+    }
+    removalShell.replaceChildren(header, body, footer);
+    releaseRemovalTrap?.(); releaseRemovalTrap = createFocusTrap(removalShell, { document }); cancel.focus();
+  }
+  function openRemoval(memberId, opener) {
+    removalReturnFocus = opener; removalId = memberId;
+    removal.classList.add("open"); removal.removeAttribute("aria-hidden"); renderRemoval();
+  }
+  removal.addEventListener("click", event => { if (event.target === removal) closeRemoval(); });
+  const removalEscape = event => { if (removalId !== null && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeRemoval(); } };
+  document.addEventListener("keydown", removalEscape);
+  function memberRow(member, index, count) {
     const current = liveWork(member), key = current ? JSON.stringify([current.window_id, current.session_id, current.runtime_incarnation]) : "idle";
     let cached = memberRows.get(member.member_id);
     if (!cached || cached.key !== key) {
@@ -524,7 +562,22 @@ export function createAgentsSurface({ document, storage, executionModel, project
         const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
         if (!disposed && rosterReady(roster) && !roster.pending_roster && latest && !latest.enabled) onActivateMember(latest.member_id);
       });
-      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state);
+      // Issue #7646: the ledger order is the assignee priority.
+      const order = document.createElement("div"); order.className = "roster-order"; order.setAttribute("role", "group");
+      const position = document.createElement("span"); position.className = "roster-order-position"; order.append(position);
+      for (const [action, glyph] of [["move-up", "▲"], ["move-down", "▼"], ["remove", "Delete"]]) {
+        const button = document.createElement("button"); button.type = "button"; button.dataset.action = action; button.textContent = glyph;
+        button.addEventListener("click", () => {
+          const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+          if (disposed || !latest || !rosterReady(roster) || roster.pending_roster) return;
+          if (action === "remove") openRemoval(latest.member_id, button);
+          else onMoveMember(latest.member_id, action === "move-up" ? "up" : "down");
+        });
+        order.append(button);
+      }
+      // The controls sit at the row's trailing edge, so the body of the row stays the selection target.
+      const traits = document.createElement("span"); traits.className = "roster-row-traits";
+      who.append(name, purpose, traits, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state, order);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
@@ -536,8 +589,18 @@ export function createAgentsSurface({ document, storage, executionModel, project
     activate.disabled = member.enabled || !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     row.querySelector("h3").textContent = member.name;
+    const order = row.querySelector(".roster-order"), held = !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
+    order.setAttribute("aria-label", `Order and deletion for ${member.name}`);
+    order.querySelector(".roster-order-position").textContent = String(index + 1);
+    order.querySelector(".roster-order-position").title = "Assignment priority";
+    for (const [action, label, edge] of [["move-up", `Move ${member.name} up`, index === 0], ["move-down", `Move ${member.name} down`, index === count - 1], ["remove", `Delete ${member.name}`, false]]) {
+      const button = order.querySelector(`[data-action="${action}"]`);
+      button.setAttribute("aria-label", label); button.title = label; button.disabled = held || edge;
+    }
     const purpose = row.querySelector(".roster-purpose");
     purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : member.enabled ? "Waiting for the next issue" : "Not selected for new work"; purpose.title = purpose.textContent;
+    const traits = row.querySelector(".roster-row-traits");
+    traits.textContent = traitsSummary(member); traits.title = traits.textContent; traits.hidden = !traits.textContent;
     const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
     if (cached.summariesKey !== summariesKey) {
       const assignments = row.querySelector(".roster-assignments"); assignments.replaceChildren();
@@ -598,12 +661,21 @@ export function createAgentsSurface({ document, storage, executionModel, project
     for (const [id, { row }] of memberRows) if (!memberIds.has(id)) { row.remove(); memberRows.delete(id); }
     const focusedRow = document.activeElement?.closest(".roster-row");
     let anchor = null;
-    for (const member of [...members].reverse()) {
-      const row = memberRow(member);
+    for (const [index, member] of [...members.entries()].reverse()) {
+      const row = memberRow(member, index, members.length);
       if (row !== focusedRow && (row.parentElement !== list || row.nextElementSibling !== anchor)) list.insertBefore(row, anchor);
       anchor = row;
     }
+    if (removalId !== null) renderRemoval();
     renderDetail(selected); renderPast(roster.past_contributors || [], roster.past_complete);
+    const ledger = view === "ledger";
+    if (ledger) tab = "team";
+    element.dataset.view = view;
+    element.querySelector(".roster-heading h2").textContent = ledger ? "Agents" : "Agent history & plans";
+    for (const node of element.querySelectorAll(".roster-detail > .roster-plans, .roster-detail > .roster-history")) node.dataset.projectOnly = "";
+    for (const node of element.querySelectorAll("[data-project-only]")) node.hidden = ledger;
+    historyPlansStore.update(state => state.members === members && state.schedule === schedule && state.rosterRevision === roster.revision ? state
+      : { members, pmMemberIds: members.filter(holdsPmRole).map(member => member.member_id), rosterRevision: roster.revision, schedule });
     for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
     element.querySelector(".roster-team").hidden = tab !== "team"; element.querySelector(".roster-past").hidden = tab !== "past";
     element.dataset.catalogVersion = String(catalog.version);
@@ -612,18 +684,12 @@ export function createAgentsSurface({ document, storage, executionModel, project
   }
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => {
     nameTouched = true; syncRegistration();
-    if (button.disabled || !registrationTools.some(tool => tool.id === toolSelect.value)) return;
-    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked,
-      model: modelInput.value.trim(), reasoning: reasoningInput.value.trim(), ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
-    onAddMember(toolSelect.value, registeredDraft.name, registeredDraft.pm_eligible,
-      registeredDraft.model || registeredDraft.reasoning ? { model: registeredDraft.model || null, reasoning: registeredDraft.reasoning || null } : undefined);
+    if (button.disabled) return;
+    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked, ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
+    onAddMember(registeredDraft.name, registeredDraft.pm_eligible);
   });
   registrationEligible.addEventListener("change", syncPreview);
-  toolSelect.addEventListener("change", () => {
-    syncRegistrationTool(); syncRegistration(); syncPreview();
-  });
-  retryRegistrationCatalog.addEventListener("click", () => onReloadProfile?.());
-  for (const input of [nameInput, modelInput, reasoningInput]) {
+  for (const input of [nameInput]) {
     input.addEventListener("compositionstart", () => { registrationComposing.add(input); syncRegistration(); });
     input.addEventListener("compositionend", () => { registrationComposing.delete(input); syncRegistration(); syncPreview(); });
     input.addEventListener("input", event => {
@@ -638,17 +704,15 @@ export function createAgentsSurface({ document, storage, executionModel, project
     button.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); tab = event.key === "Home" ? "team" : event.key === "End" ? "past" : tab === "team" ? "past" : "team"; sync(); element.querySelector(`[data-tab="${tab}"]`).focus(); });
   }
   pmSettingsPanel?.mount(element.querySelector('[data-role="pm-project-operations"]'));
-  sync(); syncTools();
+  sync();
   const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
   const running = element.querySelector(".roster-active");
   running.textContent = "Running —";
   if (summaryModel) unsubscribers.push(summaryModel.subscribeFrame(state => state.running, count => {
     running.textContent = `Running ${number(count)}`;
   }));
-  if (supportedAgentsModel) unsubscribers.push(supportedAgentsModel.subscribeFrame(state => state.agents, syncTools));
-  if (customAgentsModel) unsubscribers.push(customAgentsModel.subscribeFrame(state => state.catalog, syncTools));
   if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
-  return { element, sync, syncPreview, selectMember, openPmSettings, setPreviewHost, dispose() { if (disposed) return; releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
+  return { element, sync, syncPreview, selectMember, openPmSettings, setPreviewHost, setView, get view() { return view; }, dispose() { if (disposed) return; historyPlans.unmount(); releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); closeRemoval(); document.removeEventListener("keydown", removalEscape); removal.remove(); disposed = true; } };
 }

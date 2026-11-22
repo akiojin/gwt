@@ -10,6 +10,11 @@ const repairLabels = {
   start_new_agent_session: "Start a new agent session",
 };
 
+const userHookTimings = [["session_start", "Session start"], ["stop", "Stop"]];
+const userHookStates = { ready: "Registered", missing: "Script missing", not_a_file: "Not a file", not_executable: "Not executable" };
+// What is typed into the registration form, kept across the panel's re-renders.
+const userHookDrafts = new WeakMap();
+
 export function hookRepairUnavailableReason(state = {}) {
   if (state.pending || state.error || !state.report) return "Read a successful hook audit before regenerating managed hooks.";
   if (state.report.configuration_audit?.configs?.some(config => config.state === "invalid_json" || config.state === "unreadable")) {
@@ -18,7 +23,7 @@ export function hookRepairUnavailableReason(state = {}) {
   return null;
 }
 
-export function renderHookCenterPanel(panel, { projectRoot, state = {}, available = Boolean(projectRoot), onRefresh, onRepair } = {}) {
+export function renderHookCenterPanel(panel, { projectRoot, state = {}, available = Boolean(projectRoot), onRefresh, onRepair, onChangeUserHook } = {}) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.hookAuditStatus = !available ? "unavailable" : state.pending
@@ -145,4 +150,64 @@ export function renderHookCenterPanel(panel, { projectRoot, state = {}, availabl
     list(repair, "Separate user actions", plan.user_actions, "None reported", actionLabel);
     list(repair, "New session actions", plan.new_session_actions, "None reported", actionLabel);
   }
+
+  const userHooks = report.user_hooks || {};
+  const own = section("Your hooks");
+  node(own, "p", "settings-help", "Register a script to run at a timing. Registered hooks are included in this audit. Registrations are saved on this computer, not in the repository.");
+  if (userHooks.error) node(own, "p", "settings-status", userHooks.error).setAttribute("role", "alert");
+  const registered = Array.isArray(userHooks.hooks) ? userHooks.hooks : [];
+  const timingLabel = timing => userHookTimings.find(([value]) => value === timing)?.[1] || timing;
+  if (!registered.length && !userHooks.error) node(own, "p", "settings-help", "No hooks are registered.");
+  for (const hook of registered) {
+    const row = node(own, "div", "settings-section", "");
+    row.dataset.role = "user-hook";
+    row.dataset.state = hook.state;
+    node(row, "h4", "settings-label", String(hook.script).split(/[\\/]/).pop());
+    node(row, "p", "settings-help", `Timing: ${timingLabel(hook.timing)} · Location: ${hook.script}`);
+    node(row, "p", "settings-help", `Audit: ${userHookStates[hook.state] || "Unknown"}`);
+    const remove = node(row, "button", "wizard-button", "Remove");
+    remove.type = "button";
+    remove.dataset.action = "remove-user-hook";
+    remove.setAttribute("aria-label", `Remove ${hook.script} at ${timingLabel(hook.timing)}`);
+    remove.addEventListener("click", () => onChangeUserHook?.({ action: "remove", timing: hook.timing, script: hook.script }));
+  }
+  const draft = userHookDrafts.get(panel) || { timing: userHookTimings[0][0], script: "", submitted: false };
+  userHookDrafts.set(panel, draft);
+  if (draft.submitted && !userHooks.change_error) draft.script = "";
+  draft.submitted = false;
+  node(own, "h4", "settings-label", "Register a hook");
+  if (userHooks.change_error) {
+    const refused = node(own, "p", "settings-status", userHooks.change_error);
+    refused.dataset.role = "user-hook-change-error";
+    refused.setAttribute("role", "alert");
+  }
+  const control = (caption, tag, role) => {
+    const label = node(own, "label", "settings-field", "");
+    node(label, "span", "", caption);
+    const element = document.createElement(tag);
+    element.className = tag === "select" ? "settings-select" : "settings-input";
+    element.dataset.role = role;
+    element.setAttribute("aria-label", caption);
+    label.appendChild(element);
+    return element;
+  };
+  const timing = control("Timing", "select", "user-hook-timing");
+  for (const [value, label] of userHookTimings) {
+    const option = node(timing, "option", "", label);
+    option.value = value;
+    option.selected = value === draft.timing;
+  }
+  timing.addEventListener("change", () => { draft.timing = timing.value; });
+  const script = control("Script location", "input", "user-hook-script");
+  script.type = "text";
+  script.placeholder = ".gwt/hooks/notify.sh";
+  script.value = draft.script;
+  script.addEventListener("input", () => { draft.script = script.value; });
+  const register = node(own, "button", "wizard-button", "Register");
+  register.type = "button";
+  register.dataset.action = "register-user-hook";
+  register.addEventListener("click", () => {
+    draft.submitted = true;
+    onChangeUserHook?.({ action: "register", timing: draft.timing, script: draft.script });
+  });
 }

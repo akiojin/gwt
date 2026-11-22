@@ -321,20 +321,11 @@ fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
                 probe.issuer.durable_authority(&grant),
                 crate::embedded_server::AgentDurableAuthority::PendingActivation
             );
-            let mut waiter = waiting_runtime.spawn(
+            let waiter = waiting_runtime.spawn(
                 gwt::agent_capability::durable_agent_execution_authority_with_lease_async(
                     grant.principal().clone(),
                 ),
             );
-            waiting_runtime.block_on(async {
-                // test-hygiene: allow-wall-clock-deadline the actual activation fence stays held throughout this observation
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(100), &mut waiter) // test-hygiene: allow-wall-clock-deadline hang guard while the actual activation fence is held at the pre-Work checkpoint
-                        .await
-                        .is_err(),
-                    "the first pane mutation must wait while activation is fenced"
-                );
-            });
             entered.send(waiter).unwrap();
             released.recv().expect("readiness observer release");
         },
@@ -365,6 +356,10 @@ fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
         Some(fixture.predecessor_binding.clone())
     );
     assert!(load_tracked_work_events(&fixture.repo).is_empty());
+    assert!(
+        !waiter.is_finished(),
+        "the same initial pane request must stay open until activation completes"
+    );
     release.send(()).unwrap();
     commit_owner_fresh_readiness(&fixture);
     assert_eq!(

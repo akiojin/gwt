@@ -223,19 +223,39 @@ pub fn run_maintenance(
     if result.success {
         if let Some(path) = installed_path {
             result.message.push_str(". ");
-            result
-                .message
-                .push_str(&shell_path_guidance(descriptor, &path, &environment.0));
+            match register_install_directory_on_shell_path(descriptor, &path, &environment.0) {
+                ShellPathRegistration::Registered { files } => result
+                    .message
+                    .push_str(&shell_path_registered_message(descriptor, &files, true)),
+                ShellPathRegistration::AlreadyRegistered { files } => result
+                    .message
+                    .push_str(&shell_path_registered_message(descriptor, &files, false)),
+                ShellPathRegistration::Skipped => {
+                    result
+                        .message
+                        .push_str(&shell_path_guidance(descriptor, &path, &environment.0))
+                }
+            }
         }
     }
     result
 }
 
-fn shell_path_guidance(
-    descriptor: &BuiltinAgentDescriptor,
+fn version_check_command(descriptor: &BuiltinAgentDescriptor) -> String {
+    std::iter::once(descriptor.command)
+        .chain(descriptor.version_prefix_args.iter().copied())
+        .chain([descriptor.version_flag])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The detected installation directory, or `None` when it cannot be shown or
+/// written safely because redaction would change it (it embeds a secret
+/// environment value or protected data).
+fn safe_install_directory(
     executable: &Path,
     environment: &HashMap<String, String>,
-) -> String {
+) -> Option<String> {
     let directory = executable.parent().unwrap_or(executable).to_string_lossy();
     // Only this detected filesystem location uses the audit classifier.
     // Installer/version output retains the stricter blanket env redaction.
@@ -247,16 +267,152 @@ fn shell_path_guidance(
     {
         safe_directory = safe_directory.replace(value, gwt_core::process_console::REDACTED);
     }
-    let check = std::iter::once(descriptor.command)
-        .chain(descriptor.version_prefix_args.iter().copied())
-        .chain([descriptor.version_flag])
-        .collect::<Vec<_>>()
-        .join(" ");
-    if safe_directory != directory {
+    (safe_directory == directory.as_ref()).then(|| directory.into_owned())
+}
+
+/// Outcome of trying to make a freshly installed CLI runnable by name from
+/// the user's own terminal (Issue #7496). Registration only ever appends to
+/// the shell startup files of the shell named by `SHELL`, only for
+/// home-local installs (e.g. `~/.local/bin`), and is idempotent; every other
+/// situation is `Skipped` and the caller falls back to printed guidance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellPathRegistration {
+    Registered { files: Vec<String> },
+    AlreadyRegistered { files: Vec<String> },
+    Skipped,
+}
+
+/// Shell startup files (relative to the home directory) that a new terminal
+/// of the given shell reads, paired with the line that puts `directory` on
+/// its PATH. Returns `None` for shells gwt does not register into.
+fn shell_startup_entries(shell_name: &str, directory: &str) -> Option<Vec<(String, String)>> {
+    let quoted = format!("'{}'", directory.replace('\'', "'\\''"));
+    match shell_name {
+        "zsh" => Some(vec![(
+            ".zshrc".into(),
+            format!("export PATH={quoted}:\"$PATH\""),
+        )]),
+        "bash" => Some(vec![
+            (".bashrc".into(), format!("export PATH={quoted}:\"$PATH\"")),
+            (
+                ".bash_profile".into(),
+                format!("export PATH={quoted}:\"$PATH\""),
+            ),
+        ]),
+        "fish" => Some(vec![(
+            ".config/fish/config.fish".into(),
+            format!("fish_add_path --path {quoted}"),
+        )]),
+        _ => None,
+    }
+}
+
+fn register_install_directory_on_shell_path(
+    descriptor: &BuiltinAgentDescriptor,
+    executable: &Path,
+    environment: &HashMap<String, String>,
+) -> ShellPathRegistration {
+    if cfg!(windows) {
+        return ShellPathRegistration::Skipped;
+    }
+    let Some(directory) = safe_install_directory(executable, environment) else {
+        return ShellPathRegistration::Skipped;
+    };
+    let Some(home) = environment
+        .get("HOME")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| std::env::var("HOME").ok())
+    else {
+        return ShellPathRegistration::Skipped;
+    };
+    let home_path = Path::new(&home);
+    let directory_path = Path::new(&directory);
+    // Only home-local installs (e.g. ~/.local/bin, ~/.cargo/bin) are missing
+    // from a terminal's PATH; system locations are already reachable and
+    // must not be written into personal startup files.
+    if directory_path == home_path || !directory_path.starts_with(home_path) {
+        return ShellPathRegistration::Skipped;
+    }
+    let Some(shell) = environment.get("SHELL").filter(|value| !value.is_empty()) else {
+        return ShellPathRegistration::Skipped;
+    };
+    let shell_name = Path::new(shell)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(entries) = shell_startup_entries(&shell_name, &directory) else {
+        return ShellPathRegistration::Skipped;
+    };
+    let marker = format!(
+        "# Added by gwt so `{}` runs by name in new terminals",
+        descriptor.command
+    );
+    let mut written = Vec::new();
+    let mut present = Vec::new();
+    for (relative, line) in entries {
+        let file = home_path.join(&relative);
+        let existing = std::fs::read_to_string(&file).unwrap_or_default();
+        if existing.contains(&directory) {
+            present.push(format!("~/{relative}"));
+            continue;
+        }
+        if let Some(parent) = file.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return ShellPathRegistration::Skipped;
+            }
+        }
+        let mut updated = existing;
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&marker);
+        updated.push('\n');
+        updated.push_str(&line);
+        updated.push('\n');
+        if std::fs::write(&file, updated).is_err() {
+            return ShellPathRegistration::Skipped;
+        }
+        written.push(format!("~/{relative}"));
+    }
+    if written.is_empty() {
+        ShellPathRegistration::AlreadyRegistered { files: present }
+    } else {
+        ShellPathRegistration::Registered { files: written }
+    }
+}
+
+fn shell_path_registered_message(
+    descriptor: &BuiltinAgentDescriptor,
+    files: &[String],
+    added: bool,
+) -> String {
+    let check = version_check_command(descriptor);
+    let files = files.join(" and ");
+    if added {
+        format!(
+            "Added the installation directory to {files} so new terminals can run `{}` by name. Open a new terminal and run `{check}` to verify.",
+            descriptor.command
+        )
+    } else {
+        format!(
+            "The installation directory is already on the PATH setup in {files}, so new terminals can run `{}` by name. Open a new terminal and run `{check}` to verify.",
+            descriptor.command
+        )
+    }
+}
+
+fn shell_path_guidance(
+    descriptor: &BuiltinAgentDescriptor,
+    executable: &Path,
+    environment: &HashMap<String, String>,
+) -> String {
+    let check = version_check_command(descriptor);
+    let Some(directory) = safe_install_directory(executable, environment) else {
         return format!(
             "gwt detection does not verify your terminal's PATH. The installation directory contains protected data and cannot be shown safely. Find the CLI's installation directory in your profile and add it to your terminal's PATH, then open a new terminal and run `{check}`."
         );
-    }
+    };
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
     let setup = if cfg!(windows) {
         format!("add `{directory}` to your user Path environment variable in Windows Settings")
@@ -705,6 +861,7 @@ INSTALLER"#,
         let mut settings = gwt_config::Settings::load_from_path(&fixture.config).unwrap();
         settings.profiles.profiles[0].env_vars.extend([
             ("HOME".into(), fixture.root.path().display().to_string()),
+            ("SHELL".into(), "/bin/zsh".into()),
             (
                 "PATH".into(),
                 format!(
@@ -723,14 +880,101 @@ INSTALLER"#,
         );
         assert!(result.success, "{}", result.message);
         assert_eq!(result.after_version.as_deref(), Some("2.1.0 (Claude Code)"));
-        assert!(result.message.contains("command not found"));
-        assert!(result
-            .message
-            .contains(fixture.root.path().join(".local/bin").to_str().unwrap()));
+        assert!(
+            result
+                .message
+                .contains("Added the installation directory to ~/.zshrc"),
+            "{}",
+            result.message
+        );
         assert!(result.message.contains("claude --version"));
         assert!(!result.message.contains("redacted"));
-        assert!(!fixture.root.path().join(".zshrc").exists());
+        let zshrc = std::fs::read_to_string(fixture.root.path().join(".zshrc")).unwrap();
+        assert!(
+            zshrc.contains(&format!(
+                "export PATH='{}':\"$PATH\"",
+                fixture.root.path().join(".local/bin").display()
+            )),
+            "{zshrc}"
+        );
         assert!(!fixture.root.path().join(".bashrc").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_path_registration_is_idempotent_and_shell_specific() {
+        let home = tempfile::tempdir().unwrap();
+        let executable = home.path().join(".local/bin").join("claude");
+        let descriptor = gwt_agent::builtin_agent_descriptor_for_command("claude").unwrap();
+        let environment = HashMap::from([
+            ("HOME".into(), home.path().display().to_string()),
+            ("SHELL".into(), "/bin/bash".into()),
+        ]);
+        let first = register_install_directory_on_shell_path(descriptor, &executable, &environment);
+        assert_eq!(
+            first,
+            ShellPathRegistration::Registered {
+                files: vec!["~/.bashrc".into(), "~/.bash_profile".into()]
+            }
+        );
+        let bashrc = std::fs::read_to_string(home.path().join(".bashrc")).unwrap();
+        assert!(bashrc.contains(".local/bin"));
+        let second =
+            register_install_directory_on_shell_path(descriptor, &executable, &environment);
+        assert_eq!(
+            second,
+            ShellPathRegistration::AlreadyRegistered {
+                files: vec!["~/.bashrc".into(), "~/.bash_profile".into()]
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".bashrc")).unwrap(),
+            bashrc
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_path_registration_skips_system_locations_unknown_shells_and_secrets() {
+        let home = tempfile::tempdir().unwrap();
+        let descriptor = gwt_agent::builtin_agent_descriptor_for_command("claude").unwrap();
+        let base = HashMap::from([
+            ("HOME".into(), home.path().display().to_string()),
+            ("SHELL".into(), "/bin/zsh".into()),
+        ]);
+        // Outside the home directory: a system location a terminal already sees.
+        assert_eq!(
+            register_install_directory_on_shell_path(
+                descriptor,
+                Path::new("/usr/local/bin/claude"),
+                &base
+            ),
+            ShellPathRegistration::Skipped
+        );
+        // Unknown shell: never guess a startup file.
+        let mut unknown = base.clone();
+        unknown.insert("SHELL".into(), "/bin/tcsh".into());
+        assert_eq!(
+            register_install_directory_on_shell_path(
+                descriptor,
+                &home.path().join(".local/bin/claude"),
+                &unknown
+            ),
+            ShellPathRegistration::Skipped
+        );
+        // A directory embedding a secret value must never be written out.
+        let secret = "private-installation-token";
+        let mut secret_env = base.clone();
+        secret_env.insert("SERVICE_TOKEN".into(), secret.into());
+        assert_eq!(
+            register_install_directory_on_shell_path(
+                descriptor,
+                &home.path().join(secret).join("claude"),
+                &secret_env
+            ),
+            ShellPathRegistration::Skipped
+        );
+        assert!(!home.path().join(".zshrc").exists());
     }
 
     #[cfg(unix)]

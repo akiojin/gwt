@@ -503,6 +503,9 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
     ) {
         return;
     }
+    if is_done_work_refusal(operation, error) {
+        return;
+    }
     let Some(kind) = classify_operation_refusal(operation, error) else {
         return;
     };
@@ -511,6 +514,20 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
         operation,
         render_operation_refusal_body(operation, error, kind),
     );
+}
+
+/// Issue #7339 (#6419): a typed `terminal_work` refusal for Done Work reports a
+/// completed record, not a blocker. Its "is terminal" wording must not turn a
+/// retried Done update or a follow-up `workspace.ensure` into a fresh-launch
+/// escalation; Discarded Work still escalates.
+fn is_done_work_refusal(operation: &str, error: &str) -> bool {
+    operation.starts_with("workspace.")
+        && serde_json::from_str::<crate::AgentWorkspaceUpdateError>(error).is_ok_and(|error| {
+            error.code == crate::AgentWorkspaceUpdateErrorCode::TerminalWork
+                && error.details.is_some_and(|details| {
+                    details.terminal_kind == gwt_core::workspace_projection::WorkEventKind::Done
+                })
+        })
 }
 
 /// File an escalation from operation-local refusal facts.

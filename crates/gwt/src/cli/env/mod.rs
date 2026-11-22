@@ -43,6 +43,12 @@ pub trait CliEnv {
     fn client(&self) -> &Self::Client;
     fn cache_root(&self) -> PathBuf;
     fn repo_path(&self) -> &std::path::Path;
+    /// Issue #7707: the Session writing the next GitHub body. Test envs leave
+    /// this empty unless a test injects a writer. Production reads the ambient
+    /// Session.
+    fn github_writer(&self) -> Option<crate::session_launch::GithubWriter> {
+        None
+    }
     fn deliver_feedback(
         &mut self,
         record: &gwt_core::feedback::PublicFeedback,

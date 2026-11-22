@@ -540,7 +540,9 @@ test.describe("Surface rail", () => {
     const settings = page.locator('.workspace-window[data-preset="settings"]');
     const railPopup = page.locator("#rail-control-explanation");
     const systemTab = settings.getByRole("tab", { name: "System", exact: true });
-    await page.locator('.op-rail__surface[data-surface="works"]').hover();
+    // The rail entry level with the Settings tabs: its explanation overlaps
+    // the System tab. (Issues, since Themes leads the rail — Issue #7643.)
+    await page.locator('.op-rail__surface[data-surface="issues"]').hover();
     await expect(railPopup).toBeVisible();
     const popupBounds = await railPopup.boundingBox(), tabBounds = await systemTab.boundingBox();
     expect(popupBounds && tabBounds).toBeTruthy();
@@ -743,8 +745,9 @@ test.describe("Surface rail", () => {
     const entry = (surface: string) => rail.locator(`[data-surface='${surface}']`);
 
     await expect(windowById(page, "board-window")).toBeVisible({ timeout: 10_000 });
-    await expect(surfaces.locator(".op-rail__surface-label")).toHaveText(["Issues", "Works", "Agents", "Board", "Settings"]);
-    // The PM leads the rail, cut off from the five surfaces by a rule.
+    await expect(surfaces.locator(".op-rail__surface-label")).toHaveText(["Themes", "Issues", "Works", "Agents", "Board", "Settings"]);
+    // The PM leads the rail, cut off from the surfaces by a rule. Themes
+    // comes first: it groups the Issues below it (Issue #7643).
     const railOrder = await rail.evaluate((element) =>
       Array.from(element.querySelectorAll("[data-surface], .op-rail__divider")).map((node) =>
         node.classList.contains("op-rail__divider")
@@ -752,11 +755,11 @@ test.describe("Surface rail", () => {
           : (node as HTMLElement).dataset.surface ?? "",
       ),
     );
-    expect(railOrder.slice(0, 7)).toEqual(["pm", "|", "issues", "works", "agents", "board", "settings"]);
+    expect(railOrder.slice(0, 8)).toEqual(["pm", "|", "themes", "issues", "works", "agents", "board", "settings"]);
     await expect(entry("pm")).toHaveText("PM");
     await expect(entry("works").locator(".op-rail__surface-icon")).toHaveText("▤");
     await expect(entry("works").locator(".op-rail__surface-icon")).toBeVisible();
-    for (const surface of ["issues", "agents", "board", "settings"]) {
+    for (const surface of ["themes", "issues", "agents", "board", "settings"]) {
       await expect(entry(surface).locator("svg")).toBeVisible();
     }
 

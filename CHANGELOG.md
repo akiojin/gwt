@@ -1,6 +1,67 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.172.0] - 2026-11-19
+
+### Bug Fixes
+
+- **test:** 背景 publication の待ち合わせを env lock 下で行い失敗内容を返す
+- Activation 中の owner lease 待ちを 10 秒 budget に合わせる
+- **ci:** InRelease の fd 待ち・TLS 切断と索引なし install をミラー障害として扱う
+- **gui:** 送信キューに Issues inbox を最新 1 件だけ残す
+
+### Features
+
+- **github:** Gwtd の Issue と PR 書き込みに担当者名を付ける
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7714 の作業状態を記録
+- **work:** Issue #7717 の作業状態を記録
+- **work:** Issue #5561 の作業状態を記録
+
+## [9.171.4] - 2026-11-19
+
+### Bug Fixes
+
+- **test:** Slow remote push テストの判定を実時間上限から順序に変更
+- **gui:** GUI 停止中の IME 確定が二重に送られないようにする
+- **pm:** Unconfirmed の PM wake が保持する PTY 入力予約を人の入力・turn 境界・期限で解放する
+- **pm:** 保持期限の判定に clock seam を入れ、テストの wall-clock 依存を除く
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7702 の作業イベントを記録する
+- **work:** Issue #7701 の作業記録を更新する
+
+### Testing
+
+- **gui:** Works の端末生成フィクスチャに IME 確定ゲートを渡す
+
+## [9.171.3] - 2026-11-19
+
+### Bug Fixes
+
+- **verify:** 明示済みの gwtd 復元ビルドを verify.run が重複追加しないようにする
+- **monitor:** 窓の無いレビュー予約を scan の時計で解放する
+- **pm:** Periodic wake の見送り理由を記録し issue.monitor.status に表示する
+- **restore:** 通常 Agent の自動復元も census の次回観測を待つ
+- **pm:** PM wake の停滞を最終配送からの経過で判定して issue.monitor.status に表示する
+- **verify:** Nextest の --config-file を libtest 区切り -- より前に挿入する
+- **verify:** Admission defer 後も実行中の gwtd.exe を復元する
+- **issue-monitor:** 独立レビューの PASS が記録されるまで auto-merge を保留する
+
+### Documentation
+
+- **monitor:** Private 関数への rustdoc リンクを外す
+- **issue-monitor:** Private 関数への rustdoc リンクを外す
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue #7688 PR handoff work events
+- **work:** Record Issue #7694 delivery work events
+- **work:** Record Issue #7697 work events
+
 ## [9.171.2] - 2026-11-18
 
 ### Bug Fixes

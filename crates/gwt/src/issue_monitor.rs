@@ -58,7 +58,9 @@ pub use tiers::{
     IssueMonitorTierProfileProjection, IssueMonitorTierRecord, IssueMonitorTierSelection,
     IssueMonitorTierSelectionProjection,
 };
+mod environments;
 mod quota;
+pub use environments::{normalize_project_execution_environments, ProjectExecutionEnvironment};
 pub(crate) use quota::provider_quota_reset_label;
 use quota::{PROVIDER_QUOTA_UNKNOWN_RESET_AT, PROVIDER_QUOTA_UNKNOWN_RESET_LABEL};
 
@@ -1103,6 +1105,11 @@ pub struct IssueMonitorPrefs {
     pub terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     #[serde(default)]
     pub terminal_queue_auto_refill_limit: usize,
+    /// Issue #7741: the execution environments this project may use, in
+    /// priority order. Empty means the list was never saved; launches then
+    /// choose exactly as they did before the list existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_environments: Vec<ProjectExecutionEnvironment>,
     /// One-shot, project-scoped migration marker. The serde default is
     /// intentionally the numeric default (0) for pre-migration JSON, while
     /// [`Default`] uses the current version for genuinely fresh projects.
@@ -1439,6 +1446,7 @@ impl Default for IssueMonitorPrefs {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            execution_environments: Vec::new(),
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
@@ -1563,6 +1571,7 @@ impl IssueMonitorPrefs {
             "launch_tiers": self.launch_tiers,
             "terminal_queue_auto_refill": self.terminal_queue_auto_refill,
             "terminal_queue_auto_refill_limit": self.terminal_queue_auto_refill_limit,
+            "execution_environments": self.execution_environments,
             "urgent_queue_limit": self.urgent_queue.limit,
             "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
                 "version": drain.version,
@@ -1589,8 +1598,10 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
-    /// Planned members and exact deliveries use their own registered tool;
-    /// an unplanned Issue uses the primary's tool.
+    /// Candidates for one Issue. Registered agents start with the project's
+    /// environment in priority order (Issue #7647); a project that never
+    /// saved a list keeps each agent on the tool it was registered with, the
+    /// planned agent's tool or else the primary's.
     pub fn registered_launch_profiles_for_issue(
         &self,
         issue_number: u64,
@@ -1600,7 +1611,7 @@ impl IssueMonitorPrefs {
             .first()
             .filter(|profile| profile.agent_member_id.is_some())
         else {
-            return pool;
+            return self.environment_candidates(pool);
         };
         let host = crate::process::current_hostname();
         let delivery_member = self
@@ -1615,9 +1626,17 @@ impl IssueMonitorPrefs {
             .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
         let scheduled =
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
+        if self.environment_tools().is_some() {
+            return self.agent_candidates_on_environment(self.registered_members(
+                &pool,
+                None,
+                scheduled,
+                issue_number,
+            ));
+        }
         // Issue #7027: every planned member launches with its own registered
         // tool, so an idle member of another pooled tool can take queued work.
-        let tool = normalize_issue_monitor_provider(
+        let planned_tool = normalize_issue_monitor_provider(
             &scheduled
                 .and_then(|id| {
                     pool.iter()
@@ -1626,9 +1645,21 @@ impl IssueMonitorPrefs {
                 .unwrap_or(primary)
                 .agent_id,
         );
+        self.registered_members(&pool, Some(&planned_tool), scheduled, issue_number)
+    }
+
+    /// Saved candidates of the agents that can take `issue_number` now,
+    /// limited to one registered tool when `tool` is given.
+    fn registered_members(
+        &self,
+        pool: &[IssueMonitorLaunchProfile],
+        tool: Option<&Option<String>>,
+        scheduled: Option<&str>,
+        issue_number: u64,
+    ) -> Vec<IssueMonitorLaunchProfile> {
         pool.iter()
             .filter(|profile| {
-                normalize_issue_monitor_provider(&profile.agent_id) == tool
+                tool.is_none_or(|tool| normalize_issue_monitor_provider(&profile.agent_id) == *tool)
                     && scheduled.is_none_or(|scheduled| {
                         profile.agent_member_id.as_deref() == Some(scheduled)
                     })
@@ -1645,11 +1676,13 @@ impl IssueMonitorPrefs {
                                                     == Some(key)
                                             })
                                     }))
-                                && member
-                                    .agent_id
-                                    .as_deref()
-                                    .and_then(normalize_issue_monitor_provider)
-                                    == tool
+                                && tool.is_none_or(|tool| {
+                                    member
+                                        .agent_id
+                                        .as_deref()
+                                        .and_then(normalize_issue_monitor_provider)
+                                        == *tool
+                                })
                                 && member.assignment.as_ref().is_none_or(|assignment| {
                                     assignment.issue_number == Some(issue_number)
                                         && assignment.project_key.as_deref().is_none_or(|key| {
@@ -2325,6 +2358,8 @@ struct IssueMonitorLaunchProfileRepr {
     #[serde(default)]
     codex_fast_mode: bool,
     #[serde(default)]
+    runtime_inherit: bool,
+    #[serde(default)]
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
     docker_service: Option<String>,
@@ -2355,6 +2390,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
             skip_permissions: repr.skip_permissions,
             fast_mode: repr.fast_mode || legacy_fast_mode,
             codex_speed: repr.codex_speed,
+            runtime_inherit: repr.runtime_inherit,
             runtime_target: repr.runtime_target,
             docker_service: repr.docker_service,
             docker_lifecycle_intent: repr.docker_lifecycle_intent,
@@ -2388,6 +2424,13 @@ pub struct IssueMonitorLaunchProfile {
     /// Explicit Codex speed; old boolean settings intentionally remain Off.
     #[serde(default)]
     pub codex_speed: gwt_agent::CodexSpeed,
+    /// Issue #7729 AC-4 (SPEC #7007 item 197 (4)): the candidate does not
+    /// name where it runs. A launch then runs where this project's last
+    /// launch ran, and the three fields below are only what the form last
+    /// showed. See [`Self::resolve_inherited_runtime`]. Always written, so a
+    /// sparse `profiles.set` can carry the saved choice over like any field.
+    #[serde(default)]
+    pub runtime_inherit: bool,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -2418,11 +2461,38 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             // decide a Claude profile's Fast Mode.
             fast_mode: config.fast_mode,
             codex_speed: config.codex_speed,
+            runtime_inherit: false,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
             windows_shell: config.windows_shell,
             prefer_for: Vec::new(),
+        }
+    }
+}
+
+impl IssueMonitorLaunchProfile {
+    /// Issue #7729 AC-4 (item 197 (3) and (4)): settle where an inheriting
+    /// candidate runs before it starts a session. `previous` is this
+    /// project's last launch; with none, the candidate runs on the host. A
+    /// candidate that names its place is left as it is. The launch still
+    /// falls back to the host when it asks for Docker in a project that has
+    /// no Docker setup (item 197 (2)).
+    pub fn resolve_inherited_runtime(&mut self, previous: Option<&LaunchWizardPreviousProfile>) {
+        if !self.runtime_inherit {
+            return;
+        }
+        match previous {
+            Some(previous) => {
+                self.runtime_target = previous.runtime_target;
+                self.docker_service = previous.docker_service.clone();
+                self.docker_lifecycle_intent = previous.docker_lifecycle_intent;
+            }
+            None => {
+                self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+                self.docker_service = None;
+                self.docker_lifecycle_intent = Default::default();
+            }
         }
     }
 }
@@ -2610,7 +2680,7 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 14] = [
     "agent_member_id",
     "model",
     "reasoning",
@@ -2619,6 +2689,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
     "skip_permissions",
     "fast_mode",
     "codex_speed",
+    "runtime_inherit",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -4612,6 +4683,13 @@ pub struct IssueMonitorAgentStatus {
     /// instead of the queue head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_occupancy: Option<IssueMonitorSlotOccupancy>,
+    /// Issue #7733 AC-2: how this host's terminal queue is measured against
+    /// the Auto-refill limit. `counted` and `uncounted` together are exactly
+    /// the membership `issue.monitor.queue.list` reports, so an empty `queue`
+    /// next to a populated terminal queue is explained member by member.
+    /// Absent from a publisher that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_queue_refill: Option<IssueMonitorTerminalQueueRefill>,
 }
 
 impl IssueMonitorAgentStatus {
@@ -4621,6 +4699,47 @@ impl IssueMonitorAgentStatus {
             view.needs_human_count = self.needs_human_count;
         }
     }
+}
+
+/// Issue #7733 AC-2: the terminal queue measured against the Auto-refill limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTerminalQueueRefill {
+    pub enabled: bool,
+    pub limit: usize,
+    /// Members that use Auto-refill capacity, in queue order.
+    pub counted: Vec<u64>,
+    /// Members that cannot launch and therefore use no capacity.
+    pub uncounted: Vec<IssueMonitorRefillUncounted>,
+    /// Why Auto-refill adds nothing now, or `null` while it has capacity.
+    pub hold: Option<IssueMonitorRefillHold>,
+}
+
+/// Issue #7733 AC-2: one terminal queue member outside the Auto-refill count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorRefillUncounted {
+    pub issue_number: u64,
+    pub reason: IssueMonitorRefillExemption,
+}
+
+/// Issue #7733: why a terminal queue member uses no Auto-refill capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorRefillExemption {
+    LabelExcluded,
+    /// Issue #7508: delivery is parked on an open PR.
+    OpenPrHold,
+    AwaitingMeasurement,
+    AwaitingVerification,
+    NeedsHuman,
+}
+
+/// Issue #7733 AC-2: the gate that keeps Auto-refill from adding an Issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorRefillHold {
+    Disabled,
+    /// `counted` already fills `limit`.
+    LimitReached,
 }
 
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
@@ -5546,6 +5665,8 @@ pub struct IssueMonitorState {
     #[serde(default)]
     terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     terminal_queue_auto_refill_limit: usize,
+    #[serde(default)]
+    execution_environments: Vec<ProjectExecutionEnvironment>,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
     /// [`IssueMonitorPrefs::launch_profile_pool`]).
     #[serde(default)]
@@ -6892,8 +7013,14 @@ pub const AUTO_MERGE_LABEL: &str = "auto-merge";
 
 /// Whether `issue` carries the [`AUTO_MERGE_LABEL`] (case-insensitive).
 pub fn issue_has_auto_merge_label(issue: &IssueMonitorIssue) -> bool {
-    issue
-        .labels
+    labels_opt_into_autonomy(&issue.labels)
+}
+
+/// The per-Issue half of the two-stage autonomy opt-in, read from a label
+/// list. The Monitor's gate and the Issue detail (Issue #7729 AC-1) both ask
+/// this one function, so the screen can never name a different mark.
+pub fn labels_opt_into_autonomy(labels: &[String]) -> bool {
+    labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case(AUTO_MERGE_LABEL))
 }
@@ -8922,6 +9049,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            execution_environments: Vec::new(),
             launch_profiles: Vec::new(),
             launch_auto: false,
             launch_tiers: Vec::new(),
@@ -9030,6 +9158,7 @@ impl IssueMonitorState {
         state.terminal_queue_auto_refill = prefs.terminal_queue_auto_refill;
         state.terminal_queue_exclusions = prefs.terminal_queue_exclusions;
         state.terminal_queue_auto_refill_limit = prefs.terminal_queue_auto_refill_limit;
+        state.execution_environments = prefs.execution_environments;
         state.last_scan_at = prefs.last_scan_at;
         state.last_scan_error = prefs.last_scan_error;
         state.agent_blackout_since = prefs.agent_blackout_since;
@@ -9226,6 +9355,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
             terminal_queue_exclusions: self.terminal_queue_exclusions.clone(),
             terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
+            execution_environments: self.execution_environments.clone(),
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profiles.first().cloned(),
@@ -12660,6 +12790,7 @@ impl IssueMonitorState {
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
         self.terminal_queue_auto_refill_limit = disk.terminal_queue_auto_refill_limit;
+        self.execution_environments = disk.execution_environments.clone();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.apply_terminal_queue_retirements();
         for entry in urgent_proposals {
@@ -16544,6 +16675,7 @@ impl IssueMonitorState {
                 Some(IssueMonitorStallReason::MaxActiveSaturated)
             )
             .then(|| self.slot_occupancy()),
+            terminal_queue_refill: Some(self.terminal_queue_refill()),
         }
     }
 
@@ -20368,6 +20500,88 @@ impl IssueMonitorState {
         adopted
     }
 
+    /// Issues whose launch, claim, or pane is live. Auto-refill never
+    /// displaces them, and a hold recorded beside one is not yet a wait.
+    fn refill_launch_protected(&self) -> BTreeSet<u64> {
+        self.active_issue_numbers()
+            .into_iter()
+            .chain(self.pending_claim_issue_numbers())
+            .chain(self.launched_windows.keys().copied())
+            .chain(self.process_held_issues.iter().copied())
+            .chain(
+                self.pending_launches
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .chain(
+                self.pending_launch_deliveries
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .collect()
+    }
+
+    /// Issue #7733: a member that cannot launch uses no Auto-refill capacity.
+    /// It keeps its membership, so its wait stays visible and an explicit
+    /// return to the queue needs no re-admission.
+    fn refill_exemption(
+        &self,
+        number: u64,
+        launch_protected: &BTreeSet<u64>,
+    ) -> Option<IssueMonitorRefillExemption> {
+        use IssueMonitorRefillExemption as Exemption;
+        if self.label_excluded_issues.contains(&number) {
+            return Some(Exemption::LabelExcluded);
+        }
+        if launch_protected.contains(&number) {
+            return None;
+        }
+        if self
+            .open_pr_observations
+            .get(&number)
+            .is_some_and(|observation| observation.hold.is_some())
+        {
+            return Some(Exemption::OpenPrHold);
+        }
+        match self.inbox_item(number)?.state {
+            MonitorInboxState::AwaitingMeasurement => Some(Exemption::AwaitingMeasurement),
+            MonitorInboxState::AwaitingVerification => Some(Exemption::AwaitingVerification),
+            MonitorInboxState::NeedsHuman => Some(Exemption::NeedsHuman),
+            _ => None,
+        }
+    }
+
+    /// Issue #7733 AC-2: the same measurement Auto-refill applies, for status.
+    fn terminal_queue_refill(&self) -> IssueMonitorTerminalQueueRefill {
+        let launch_protected = self.refill_launch_protected();
+        let mut counted = Vec::new();
+        let mut uncounted = Vec::new();
+        for issue_number in self.stored_local_terminal_queue_numbers() {
+            match self.refill_exemption(issue_number, &launch_protected) {
+                Some(reason) => uncounted.push(IssueMonitorRefillUncounted {
+                    issue_number,
+                    reason,
+                }),
+                None => counted.push(issue_number),
+            }
+        }
+        let enabled = self.terminal_queue_auto_refill && self.terminal_queue_auto_refill_limit > 0;
+        let hold = if !enabled {
+            Some(IssueMonitorRefillHold::Disabled)
+        } else if counted.len() >= self.terminal_queue_auto_refill_limit {
+            Some(IssueMonitorRefillHold::LimitReached)
+        } else {
+            None
+        };
+        IssueMonitorTerminalQueueRefill {
+            enabled,
+            limit: self.terminal_queue_auto_refill_limit,
+            counted,
+            uncounted,
+            hold,
+        }
+    }
+
     pub fn auto_refill_terminal_queue(&mut self, candidates: &[u64], now: &str) -> usize {
         if !self.terminal_queue_auto_refill || self.terminal_queue_auto_refill_limit == 0 {
             return 0;
@@ -20392,29 +20606,11 @@ impl IssueMonitorState {
         let host = crate::process::current_hostname();
         // Reordering may replace only an unstarted automatic selection. A
         // claim, pane, delivery, or urgent assignment retains its admission.
-        let mut protected = self
-            .active_issue_numbers()
-            .into_iter()
-            .chain(self.pending_claim_issue_numbers())
-            .chain(self.launched_windows.keys().copied())
-            .chain(self.process_held_issues.iter().copied())
-            .chain(
-                self.pending_launches
-                    .iter()
-                    .map(|launch| launch.issue_number),
-            )
-            .chain(
-                self.pending_launch_deliveries
-                    .iter()
-                    .map(|launch| launch.issue_number),
-            )
-            .collect::<BTreeSet<_>>();
-        let parked = self
-            .open_pr_observations
-            .iter()
-            .filter_map(|(&number, observation)| {
-                (observation.hold.is_some() && !protected.contains(&number)).then_some(number)
-            })
+        let mut protected = self.refill_launch_protected();
+        // Issue #7733: a member that cannot launch holds no refill capacity.
+        let exempt = self
+            .stored_local_terminal_queue_numbers()
+            .filter(|number| self.refill_exemption(*number, &protected).is_some())
             .collect::<BTreeSet<_>>();
         protected.extend(
             self.autonomous_records
@@ -20441,10 +20637,7 @@ impl IssueMonitorState {
         let mut eligible_len = queue
             .entries
             .iter()
-            .filter(|entry| {
-                !self.label_excluded_issues.contains(&entry.number)
-                    && !parked.contains(&entry.number)
-            })
+            .filter(|entry| !exempt.contains(&entry.number))
             .count();
         let mut displaced = Vec::new();
         for number in &candidates {
@@ -20461,8 +20654,7 @@ impl IssueMonitorState {
                     .filter(|(_, entry)| {
                         entry.queued_by == "auto-refill"
                             && !protected.contains(&entry.number)
-                            && !parked.contains(&entry.number)
-                            && !self.label_excluded_issues.contains(&entry.number)
+                            && !exempt.contains(&entry.number)
                             && rank(&entry.number) > rank(number)
                     })
                     .max_by_key(|(_, entry)| rank(&entry.number))
@@ -29813,6 +30005,13 @@ mod tests {
                 stall_reason: Some(IssueMonitorStallReason::GuiDisconnected),
                 gui_action: Some("Open the gwt window for this project".to_string()),
                 slot_occupancy: None,
+                terminal_queue_refill: Some(IssueMonitorTerminalQueueRefill {
+                    enabled: false,
+                    limit: 0,
+                    counted: vec![42],
+                    uncounted: Vec::new(),
+                    hold: Some(IssueMonitorRefillHold::Disabled),
+                }),
             }
         );
     }
@@ -30191,6 +30390,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -31745,6 +31945,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -32257,6 +32458,7 @@ mod tests {
                 skip_permissions: false,
                 fast_mode: false,
                 codex_speed: gwt_agent::CodexSpeed::Off,
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -32968,6 +33170,62 @@ mod tests {
             "routing tags describe a candidate, not the head slot, so a switch drops them"
         );
         assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
+    }
+
+    #[test]
+    fn issue_7729_candidate_runtime_inherit_persists_and_resolves_from_the_last_launch() {
+        // SPEC #7007 item 197 (4): a candidate names Host, Docker, or neither.
+        let explicit = test_launch_profile("codex");
+        assert_eq!(
+            serde_json::to_value(&explicit).unwrap()["runtime_inherit"],
+            false
+        );
+        let legacy: IssueMonitorLaunchProfile =
+            serde_json::from_value(serde_json::json!({"agent_id": "codex"})).unwrap();
+        assert!(
+            !legacy.runtime_inherit,
+            "a pool saved before this field names its place"
+        );
+        let mut inherit = test_launch_profile("codex");
+        inherit.runtime_inherit = true;
+        let saved = serde_json::to_value(&inherit).unwrap();
+        assert_eq!(saved["runtime_inherit"], true);
+        let restored: IssueMonitorLaunchProfile = serde_json::from_value(saved).unwrap();
+        assert!(restored.runtime_inherit);
+
+        // Item 197 (3): it runs where the project's last launch ran.
+        let mut docker = test_launch_profile("claude");
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        docker.docker_service = Some("app".to_string());
+        docker.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        let previous: LaunchWizardPreviousProfile = docker.into();
+        let mut resolved = restored.clone();
+        resolved.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(
+            resolved.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(resolved.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            resolved.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+
+        // No earlier launch: the host, whatever the form last showed.
+        let mut first = restored;
+        first.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        first.docker_service = Some("stale".to_string());
+        first.resolve_inherited_runtime(None);
+        assert_eq!(first.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+        assert_eq!(first.docker_service, None);
+
+        // A candidate that names its place ignores the last launch.
+        let mut host = explicit;
+        host.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(host.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+
+        // A reorder written without the field keeps the saved choice.
+        assert!(ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS.contains(&"runtime_inherit"));
     }
 
     #[test]
@@ -51785,6 +52043,64 @@ mod tests {
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2]);
         assert_eq!(monitor.auto_refill_terminal_queue(&[3], now), 0);
         assert!(monitor.open_pr_launch_held(1));
+    }
+
+    #[test]
+    fn issue_7733_external_waits_do_not_consume_auto_refill_capacity() {
+        let now = "2026-11-20T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        let waiting = |number| {
+            let mut candidate = issue(number);
+            candidate.body = Some(
+                "## Acceptance Criteria\n- [ ] AC-1: verify release [release-verification]\n"
+                    .into(),
+            );
+            candidate
+        };
+        let candidates = [waiting(1), waiting(2), waiting(3), issue(4), issue(5)];
+        monitor.terminal_queue_push(&[1, 2, 3], "launch_now", now);
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        for number in [1, 2, 3] {
+            monitor.record_merged_issue_settlement(
+                number,
+                number + 100,
+                Some("aaa".into()),
+                MergedIssueSettlementAction::AwaitVerification {
+                    unmet: vec!["AC-1".into()],
+                },
+                now,
+            );
+            assert_eq!(
+                monitor.inbox_item(number).unwrap().state,
+                MonitorInboxState::AwaitingVerification
+            );
+        }
+        let held = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(held.counted, Vec::<u64>::new());
+        assert_eq!(held.hold, None);
+
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(monitor.queue, VecDeque::from([4, 5]));
+        assert_eq!(monitor.claim_probe_plan(usize::MAX).1, vec![4, 5]);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.limit, 2);
+        assert_eq!(refill.counted, vec![4, 5]);
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::LimitReached));
+        assert_eq!(
+            refill
+                .uncounted
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [1, 2, 3].map(|number| (number, IssueMonitorRefillExemption::AwaitingVerification))
+        );
     }
 
     #[test]
