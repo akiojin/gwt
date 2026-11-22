@@ -282,7 +282,15 @@ impl IssueMonitorPrefs {
     }
 
     pub fn effective_launch_tiers(&self) -> Vec<Vec<IssueMonitorLaunchProfile>> {
-        self.launch_tiers_for_pool(&self.launch_profile_pool())
+        let pool = self.launch_profile_pool();
+        if pool
+            .first()
+            .is_some_and(|profile| profile.agent_member_id.is_some())
+        {
+            // Registered agents' tiers are those of the tool they start with.
+            return self.launch_tiers_for_pool(&self.agent_candidates_on_environment(pool));
+        }
+        self.launch_tiers_for_pool(&pool)
     }
 
     fn launch_tiers_for_pool(

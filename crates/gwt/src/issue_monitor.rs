@@ -1598,8 +1598,10 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
-    /// Planned members and exact deliveries use their own registered tool;
-    /// an unplanned Issue uses the primary's tool.
+    /// Candidates for one Issue. Registered agents start with the project's
+    /// environment in priority order (Issue #7647); a project that never
+    /// saved a list keeps each agent on the tool it was registered with, the
+    /// planned agent's tool or else the primary's.
     pub fn registered_launch_profiles_for_issue(
         &self,
         issue_number: u64,
@@ -1624,6 +1626,14 @@ impl IssueMonitorPrefs {
             .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
         let scheduled =
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
+        if self.environment_tools().is_some() {
+            return self.agent_candidates_on_environment(self.registered_members(
+                &pool,
+                None,
+                scheduled,
+                issue_number,
+            ));
+        }
         // Issue #7027: every planned member launches with its own registered
         // tool, so an idle member of another pooled tool can take queued work.
         let planned_tool = normalize_issue_monitor_provider(
@@ -1635,45 +1645,21 @@ impl IssueMonitorPrefs {
                 .unwrap_or(primary)
                 .agent_id,
         );
-        let members_for = |tool: &Option<String>| -> Vec<IssueMonitorLaunchProfile> {
-            self.registered_members_for_tool(&pool, tool, scheduled, issue_number)
-        };
-        // Issue #7741: a saved environment list decides which tools the
-        // project uses. A planned agent keeps its own tool; unplanned work
-        // takes the first environment some agent can run and that is not held.
-        let Some(tools) = self.environment_tools() else {
-            return members_for(&planned_tool);
-        };
-        if scheduled.is_some() {
-            return if planned_tool
-                .as_ref()
-                .is_some_and(|tool| tools.contains(tool))
-            {
-                members_for(&planned_tool)
-            } else {
-                Vec::new()
-            };
-        }
-        let tool = self.environment_tool_for_unplanned_issue(&tools, |tool| {
-            !members_for(&Some(tool.to_string())).is_empty()
-        });
-        if tool.is_none() {
-            return Vec::new();
-        }
-        members_for(&tool)
+        self.registered_members(&pool, Some(&planned_tool), scheduled, issue_number)
     }
 
-    fn registered_members_for_tool(
+    /// Saved candidates of the agents that can take `issue_number` now,
+    /// limited to one registered tool when `tool` is given.
+    fn registered_members(
         &self,
         pool: &[IssueMonitorLaunchProfile],
-        tool: &Option<String>,
+        tool: Option<&Option<String>>,
         scheduled: Option<&str>,
         issue_number: u64,
     ) -> Vec<IssueMonitorLaunchProfile> {
-        let tool = tool.clone();
         pool.iter()
             .filter(|profile| {
-                normalize_issue_monitor_provider(&profile.agent_id) == tool
+                tool.is_none_or(|tool| normalize_issue_monitor_provider(&profile.agent_id) == *tool)
                     && scheduled.is_none_or(|scheduled| {
                         profile.agent_member_id.as_deref() == Some(scheduled)
                     })
@@ -1690,11 +1676,13 @@ impl IssueMonitorPrefs {
                                                     == Some(key)
                                             })
                                     }))
-                                && member
-                                    .agent_id
-                                    .as_deref()
-                                    .and_then(normalize_issue_monitor_provider)
-                                    == tool
+                                && tool.is_none_or(|tool| {
+                                    member
+                                        .agent_id
+                                        .as_deref()
+                                        .and_then(normalize_issue_monitor_provider)
+                                        == *tool
+                                })
                                 && member.assignment.as_ref().is_none_or(|assignment| {
                                     assignment.issue_number == Some(issue_number)
                                         && assignment.project_key.as_deref().is_none_or(|key| {

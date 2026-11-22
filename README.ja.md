@@ -43,6 +43,8 @@ Agent workspace を materialize するために worktree を使いますが、�
   表示します。Settings → Issues execution settings の **Available execution
   environments** には、プロジェクトが使う実行環境を優先度順に並べます。セッションは
   使える最初の実行環境で始まり、制限で保留中のものや未サインインのものは飛ばします。
+  リストを保存したプロジェクトでは、登録済みのエージェントも、登録時のツールに
+  かかわらずこの順で決まった実行環境のツールで始まります。
 
 ## インストール
 

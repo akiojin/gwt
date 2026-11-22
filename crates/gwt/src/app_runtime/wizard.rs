@@ -9204,37 +9204,12 @@ fn with_inherited_runtime(
     profile
 }
 
-/// Issue #7741: start the candidate with the runtime options of the execution
-/// environment it runs on. Definitions that cannot be read change nothing, so
-/// a damaged file never stops a launch.
 fn with_environment_runtime(
     prefs: &gwt::IssueMonitorPrefs,
-    mut profile: gwt::IssueMonitorLaunchProfile,
+    profile: gwt::IssueMonitorLaunchProfile,
     model_chosen_by_tier: bool,
 ) -> gwt::IssueMonitorLaunchProfile {
-    // Issue #7647: the agent's fixed traits come first, so the environment's
-    // runtime options below win over them (item 189).
-    gwt::agent_names::apply_member_traits(prefs, &mut profile);
-    match gwt::execution_environments::load() {
-        Ok(store) => {
-            if let Some(environment) = gwt::execution_environments::environment_for_candidate(
-                &store,
-                &prefs.execution_environments,
-                &profile.agent_id,
-            ) {
-                gwt::execution_environments::apply_runtime(
-                    &mut profile,
-                    &environment.runtime,
-                    model_chosen_by_tier,
-                );
-            }
-        }
-        Err(error) => tracing::warn!(
-            error = %error,
-            "execution environments are unreadable; the launch candidate keeps its own options"
-        ),
-    }
-    profile
+    gwt::execution_environments::candidate_as_started(prefs, profile, model_chosen_by_tier)
 }
 
 /// Shared current-candidate selector. Preview callers use cached availability
