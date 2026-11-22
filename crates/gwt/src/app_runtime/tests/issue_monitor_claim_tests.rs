@@ -6127,6 +6127,10 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
     .expect("seed explicitly queued issues");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
 
     // Issue #5083: both writers must preserve the most recently accepted order,
     // including when the GUI was initialized before the CLI changed it.
@@ -6173,13 +6177,29 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
     );
     assert_saved_order(&mut env, &[3167, 3165, 3166]);
 
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::IssueMonitorQueueMove {
-            issue_number: 3166,
-            position: 0,
-        },
-    );
+    assert!(runtime
+        .handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::IssueMonitorQueueMove {
+                issue_number: 3166,
+                position: 0,
+            },
+        )
+        .is_empty());
+    // Issue #7782: the move commits on the blocking lane, so the saved order is
+    // readable only after that worker's completion reaches the runtime.
+    assert_saved_order(&mut env, &[3167, 3165, 3166]);
+    tasks.lock().unwrap().pop().expect("lane worker")();
+    let UserEvent::IssueMonitorLaneControlPrepared(prepared) =
+        recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("queue move completion expected");
+    };
+    let move_events = runtime.issue_monitor_lane_control_prepared_events(*prepared);
+    assert!(move_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorQueueResult { error: None, .. }
+    )));
     assert_saved_order(&mut env, &[3166, 3167, 3165]);
 
     assert_eq!(
