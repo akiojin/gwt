@@ -468,10 +468,11 @@ test("Command Rail retains navigation and direct surface entries without retired
   for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
     assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
   }
-  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Environment variables"]]) {
+  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Env vars"]]) {
     const entry = document.querySelector(`.op-rail__item[data-cmd="${command}"]`);
     assert.ok(entry, `${label} must remain directly reachable`);
     assert.equal(entry.textContent.trim().endsWith(label), true);
+    if (command === "open-profile") assert.equal(entry.getAttribute("aria-label"), "Environment variables");
   }
   assert.match(componentsStyle, /\.op-rail\s*\{[^}]*overflow-y:\s*auto/s);
 });
