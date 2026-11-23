@@ -309,16 +309,20 @@ pub(super) fn run_retained_owner_fixture() {
     .unwrap();
     assert_eq!(saved.status, gwt_agent::AgentStatus::Stopped);
     assert!(saved.restore_window_on_startup);
-    // Leave the retained Session's member idle while later fixture launches
-    // use other registered members at the front of the roster.
+    // Keep the retained Session's member available for exact restore while
+    // fresh launches prefer the other members and their saved profiles.
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&project),
         |prefs| {
+            let retained = saved.agent_member_id.as_deref();
             let roster = prefs.agent_roster.as_mut().unwrap();
-            roster.members.sort_by_key(|member| {
-                saved.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
-            });
+            roster
+                .members
+                .sort_by_key(|member| retained == Some(member.agent_member_id.as_str()));
             roster.revision += 1;
+            let mut profiles = prefs.launch_profile_pool();
+            profiles.sort_by_key(|profile| retained == profile.agent_member_id.as_deref());
+            prefs.set_launch_profile_pool(profiles);
         },
     )
     .unwrap();

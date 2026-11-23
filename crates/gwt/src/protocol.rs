@@ -6601,8 +6601,6 @@ mod tests {
         for action in [
             serde_json::json!({"kind":"read"}),
             serde_json::json!({"kind":"add"}),
-            serde_json::json!({"kind":"rest","member_id":"member-1"}),
-            serde_json::json!({"kind":"activate","member_id":"member-1"}),
             serde_json::json!({"kind":"rename","member_id":"member-1","name":"Maple"}),
             serde_json::json!({"kind":"move","member_id":"member-1","direction":"up"}),
             serde_json::json!({"kind":"move","member_id":"member-1","direction":"down"}),
@@ -6616,6 +6614,15 @@ mod tests {
                 "kind":"agent_roster", "action":action, "expected_revision":3
             }));
             assert!(parsed.is_ok(), "roster action was rejected: {parsed:?}");
+        }
+        for kind in ["rest", "activate"] {
+            let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind":"agent_roster", "action":{"kind":kind,"member_id":"member-1"}
+            }));
+            assert!(
+                parsed.is_err(),
+                "removed roster action was accepted: {parsed:?}"
+            );
         }
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind":"agent_roster", "action":{"kind":"read"}, "request_id":"name-write-1"
