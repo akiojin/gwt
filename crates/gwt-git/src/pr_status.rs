@@ -834,11 +834,9 @@ pub fn ready_to_promote_blocker(fields: &PrInventoryFields) -> Option<&'static s
         Some(0) => {}
         Some(_) => return Some("unresolved_review_threads"),
     }
-    match fields.coderabbit_review_complete {
-        None => return Some("coderabbit_review_unknown"),
-        Some(false) => return Some("coderabbit_review_pending"),
-        Some(true) => {}
-    }
+    // Issue #7810 AC-1b (owner ruling 2026-11-23): a CodeRabbit review is
+    // not a merge condition. Branch-protection checks and the independent
+    // review verdict decide; `coderabbit_review_complete` is informational.
     match agent_visual_check(&fields.body) {
         AgentVisualCheck::Fail => return Some("agent_visual_check_failed"),
         AgentVisualCheck::Absent => return Some("agent_visual_check_unknown"),
@@ -2211,9 +2209,7 @@ where
         // its review threads read.
         if !matches!(
             item.ready_to_promote_blocker.as_deref(),
-            Some("review_threads_unknown")
-                | Some("coderabbit_review_unknown")
-                | Some("agent_visual_check_unknown")
+            Some("review_threads_unknown") | Some("agent_visual_check_unknown")
         ) {
             continue;
         }
@@ -6991,6 +6987,26 @@ mod tests {
         );
     }
 
+    /// Issue #7810 AC-1b: a PR with no CodeRabbit review — unread, never
+    /// posted, or skipped by a rate limit — is promotable and completable on
+    /// its required checks alone.
+    #[test]
+    fn issue_7810_coderabbit_review_is_not_a_promotion_or_completion_condition() {
+        for coderabbit in [None, Some(false), Some(true)] {
+            let fields = PrInventoryFields {
+                coderabbit_review_complete: coderabbit,
+                ..promotable_fields()
+            };
+            assert_eq!(ready_to_promote_blocker(&fields), None, "{coderabbit:?}");
+            let row = inventory_item_from_fields(
+                fields,
+                UtcTimestamp::now(),
+                &PrInventoryOptions::default(),
+            );
+            assert_eq!(row.completion_blocker(), None, "{coderabbit:?}");
+        }
+    }
+
     #[test]
     fn completion_uses_non_strict_behind_policy_without_changing_promotion_taxonomy() {
         let mut fields = promotable_fields();
@@ -9754,20 +9770,6 @@ mod tests {
                 "unresolved_review_threads",
                 PrInventoryFields {
                     unresolved_review_threads: Some(2),
-                    ..promotable_fields()
-                },
-            ),
-            (
-                "coderabbit_review_unknown",
-                PrInventoryFields {
-                    coderabbit_review_complete: None,
-                    ..promotable_fields()
-                },
-            ),
-            (
-                "coderabbit_review_pending",
-                PrInventoryFields {
-                    coderabbit_review_complete: Some(false),
                     ..promotable_fields()
                 },
             ),

@@ -2239,7 +2239,7 @@ Draft that did not qualify, so a row never leaves you guessing why:
   never synchronize solely for BEHIND on a non-strict base. Hand an actual
   conflict back to the owner.
 - `unresolved_review_threads`: the owner answers review threads, not you.
-- `review_threads_unknown` / `coderabbit_review_unknown`: the probe is
+- `review_threads_unknown`: the probe is
   bounded to a few PRs per read, so the rest resolve next cycle. Wait.
 - `agent_visual_check_unknown`: the body was not hydrated, or the agent
   recorded no verdict. Never promote on an unknown UI state.
