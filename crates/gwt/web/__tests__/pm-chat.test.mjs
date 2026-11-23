@@ -2052,30 +2052,19 @@ test('Progress View task details switches to the Tasks view and requests the det
   view.dispose();
 });
 
-test('Log view renders fed notification groups and routes the drawer action', async () => {
+// Issue #7650 (SPEC #7007 T-032): the structured Logs window is the only log
+// surface. The PM view no longer re-renders the notification history as a
+// Log tab; PM execution output stays on the terminal (Execution log).
+test('PM view carries no Log tab that re-renders notification history', () => {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const viewed = [];
-  const view = createPmChat({ document, root, sessionId: 'session',
-    onLogVisibility: () => {}, onViewNotification: entry => viewed.push(entry) });
-  view.receiveLog([{ id: 7, key: 'window-command:agent-1:input', category: 'action',
-    title: 'Input failed', message: 'Your input was not delivered to the window.',
-    details: 'owner identity mismatch', count: 2, latestAt: new Date().toISOString(),
-    resolved: false, activatable: false }]);
-  view.showTaskLog();
-  const card = await waitForPm(() => root.querySelector('.task-log__card'), 'a Log group card');
-  assert.match(card.textContent, /Input failed/);
-  assert.match(card.textContent, /Action required/);
-  assert.match(card.textContent, /Repeated 2 times/);
-  const logButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
-    .find(button => button.textContent === 'Log');
-  assert.ok(logButton, 'the toolbar carries a Log view button distinct from Execution log');
-  assert.equal(logButton.getAttribute('aria-pressed'), 'true');
-  const viewButton = [...card.querySelectorAll('button')]
-    .find(node => node.textContent === 'View in Notifications');
-  viewButton.click();
-  assert.equal(viewed.length, 1);
-  assert.equal(viewed[0].key, 'window-command:agent-1:input');
+  const view = createPmChat({ document, root, sessionId: 'session', onLogVisibility: () => {} });
+  const labels = [...root.querySelectorAll('.pm-chat__toolbar button')].map(button => button.textContent);
+  assert.equal(labels.includes('Log'), false, 'no Log tab beside Execution log');
+  assert.ok(labels.includes('Execution log'), 'PM execution output stays on the terminal view');
+  assert.equal(root.querySelector('.task-log'), null);
+  assert.equal(typeof view.showTaskLog, 'undefined');
+  assert.equal(typeof view.receiveLog, 'undefined');
   view.dispose();
 });
 
