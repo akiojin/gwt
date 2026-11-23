@@ -798,6 +798,12 @@ impl AppRuntime {
         prepared: PreparedProjectOpen,
         source: ProjectNavigationSource,
     ) -> Vec<OutboundEvent> {
+        if let Err(error) = gwt::profile_dispatch::register_environment_project(
+            &gwt_core::paths::gwt_config_path(),
+            &prepared.target.project_root,
+        ) {
+            return self.project_open_error_events(&source, error.to_string());
+        }
         self.remember_prepared_recent_project(&prepared);
         let existing_tab_id =
             self.project_tab_incarnations

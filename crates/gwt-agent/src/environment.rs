@@ -361,14 +361,45 @@ impl LaunchEnvironment {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        Self::from_environment_profile_with_base(config_path, None, base_env)
+    }
+
+    pub fn for_project(
+        config_path: &Path,
+        project_root: &Path,
+        runtime_target: LaunchRuntimeTarget,
+    ) -> Result<Self, String> {
+        let key = gwt_core::paths::project_scope_hash(project_root).to_string();
+        let base_env = match runtime_target {
+            LaunchRuntimeTarget::Host => host_process_env(),
+            LaunchRuntimeTarget::Docker => HashMap::new(),
+        };
+        Self::from_environment_profile_with_base(config_path, Some(&key), base_env)
+    }
+
+    fn from_environment_profile_with_base<I>(
+        config_path: &Path,
+        project: Option<&str>,
+        base_env: I,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
         let mut settings = if config_path.exists() {
             gwt_config::Settings::load_from_path(config_path).map_err(|error| error.to_string())?
         } else {
             gwt_config::Settings::default()
         };
-        let active_name = settings.profiles.normalize_active_profile().name;
-        let Some(profile) = settings.profiles.get(&active_name) else {
-            return Err(format!("active profile not found: {active_name}"));
+        settings.profiles.normalize_active_profile();
+        let Some(profile) = settings.profiles.environment_profile(project) else {
+            if let Some(name) =
+                project.and_then(|key| settings.profiles.project_environments.as_ref()?.get(key))
+            {
+                if !name.is_empty() {
+                    return Err(format!("assigned environment set not found: {name}"));
+                }
+            }
+            return Ok(Self::from_base_env(base_env));
         };
 
         let inherited_remove_env = inherited_launch_scope_remove_env();
@@ -1263,6 +1294,36 @@ mod tests {
         );
         assert_eq!(env_vars.get("KEEP").map(String::as_str), Some("base"));
         assert_eq!(remove_env, expected_launch_remove_env(&["PATH", "SECRET"]));
+    }
+
+    #[test]
+    fn migrated_project_environment_suppresses_the_inherited_token() {
+        let mut profile = Profile::new("legacy");
+        profile.disabled_env.push("GITHUB_TOKEN".into());
+        let (_dir, config_path) = write_profile_config(profile);
+        gwt_config::Settings::update_at_path(&config_path, |settings| {
+            settings
+                .profiles
+                .migrate_environment_assignments(["existing"]);
+            settings.profiles.register_environment_project("new");
+            Ok(())
+        })
+        .unwrap();
+
+        for project in [Some("existing"), None, Some("unregistered"), Some("new")] {
+            let (env, removed) = LaunchEnvironment::from_environment_profile_with_base(
+                &config_path,
+                project,
+                [("GITHUB_TOKEN".into(), "synthetic".into())],
+            )
+            .unwrap()
+            .into_parts();
+            assert_eq!(env.contains_key("GITHUB_TOKEN"), project == Some("new"));
+            assert_eq!(
+                removed.iter().any(|name| name == "GITHUB_TOKEN"),
+                project != Some("new"),
+            );
+        }
     }
 
     #[test]

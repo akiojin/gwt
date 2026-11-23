@@ -468,7 +468,7 @@ test("Command Rail retains navigation and direct surface entries without retired
   for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
     assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
   }
-  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Profile"]]) {
+  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Environment variables"]]) {
     const entry = document.querySelector(`.op-rail__item[data-cmd="${command}"]`);
     assert.ok(entry, `${label} must remain directly reachable`);
     assert.equal(entry.textContent.trim().endsWith(label), true);
@@ -2766,7 +2766,7 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
     { source: launchWizardSource, selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
     { source: profileWindowSurfaceSource, selector: 'keyInput\\.setAttribute\\("aria-label", `Environment variable key, row ', desc: "env var key" },
     { source: profileWindowSurfaceSource, selector: 'modeSelect\\.setAttribute\\("aria-label", `Environment variable mode, row ', desc: "env var mode" },
-    { source: profileWindowSurfaceSource, selector: 'valueInput\\.setAttribute\\("aria-label", `Profile value, row ', desc: "profile env value" },
+    { source: profileWindowSurfaceSource, selector: 'valueInput\\.setAttribute\\("aria-label", `Set value, row ', desc: "profile env value" },
     { source: launchWizardSource, selector: 'select\\.setAttribute\\("aria-label", label\\)', desc: "launch-field select reuses label" },
   ];
   for (const { source, selector, desc } of expected) {

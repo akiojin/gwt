@@ -1028,8 +1028,9 @@ fn issue_monitor_codex_config_error(
         builder = builder.reasoning_level(reasoning);
     }
     let mut config = builder.build();
-    gwt_agent::LaunchEnvironment::from_active_profile(
+    gwt_agent::LaunchEnvironment::for_project(
         profile_config_path.as_ref().map_err(Clone::clone)?,
+        &request.project_root,
         gwt_agent::LaunchRuntimeTarget::Host,
     )?
     .with_project_root(&cwd)

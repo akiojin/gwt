@@ -5193,6 +5193,20 @@ impl AppRuntime {
             legacy_target.kind,
         )?;
         let persisted = load_session_state(&session_state_path)?;
+        gwt::profile_dispatch::migrate_environment_assignments(
+            &gwt_core::paths::gwt_config_path(),
+            persisted
+                .tabs
+                .iter()
+                .map(|tab| tab.project_root.as_path())
+                .chain(
+                    persisted
+                        .recent_projects
+                        .iter()
+                        .map(|project| project.path.as_path()),
+                ),
+        )
+        .map_err(std::io::Error::other)?;
         // Issue #4535 AC-2 / AC-5: one tab per ProjectKey, so every unique
         // project workspace is restored and no two tabs write back the same
         // `~/.gwt/projects/<key>/workspace.json`.
@@ -13428,6 +13442,12 @@ impl AppRuntime {
             }
             FrontendEvent::LoadThemes { request_id } => {
                 self.theme_events(client_id, context, request_id, None)
+            }
+            FrontendEvent::GetProjectEnvironmentSet => {
+                self.project_environment_set_events(&client_id, &context.project_root, None)
+            }
+            FrontendEvent::SetProjectEnvironmentSet { name } => {
+                self.project_environment_set_events(&client_id, &context.project_root, Some(name))
             }
             FrontendEvent::DeleteTheme { number, request_id } => {
                 self.theme_events(client_id, context, request_id, Some(number))

@@ -456,6 +456,14 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
+        Self::try_update_at_path(path, mutate)
+    }
+
+    pub fn try_update_at_path<F, T, E>(path: &Path, mutate: F) -> std::result::Result<T, E>
+    where
+        F: FnOnce(&mut Self) -> std::result::Result<T, E>,
+        E: From<ConfigError>,
+    {
         let guard = settings_write_guard(path)?;
         let path = &guard.target;
 

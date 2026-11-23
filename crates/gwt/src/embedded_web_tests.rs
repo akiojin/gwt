@@ -1486,7 +1486,15 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
         "expected a shared presetRoleLabel helper",
     );
     for label in [
-        "Shell", "Claude", "Codex", "Agent", "Branches", "Settings", "Profile", "Logs", "Issue",
+        "Shell",
+        "Claude",
+        "Codex",
+        "Agent",
+        "Branches",
+        "Settings",
+        "Environment variables",
+        "Logs",
+        "Issue",
         "Board",
     ] {
         assert!(

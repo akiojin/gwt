@@ -1057,7 +1057,7 @@ test("Profile disposal cancels pending saves and remounts without closed-window 
   assert.equal(remounted.querySelector('.profile-field input'), null);
   surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
   assert.equal(remounted.querySelector('.profile-field input').value, 'default');
-  assert.match(remounted.querySelector('.profile-status').textContent, /^Active /);
+  assert.match(remounted.querySelector('.profile-status').textContent, /^Device default:/);
   surface.disposeProfileWindow('profile');
 });
 

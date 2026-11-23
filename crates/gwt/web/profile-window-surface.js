@@ -332,11 +332,11 @@ export function createProfileWindowSurface({
           ? data.error
           : data.loading
             ? data.saving
-              ? "Saving profile..."
-              : "Loading profiles..."
+              ? "Saving environment variable set…"
+              : "Loading environment variable sets…"
             : data.saving
-              ? "Saving profile..."
-              : `Active ${activeProfile} · ${profileCount} profile${profileCount === 1 ? "" : "s"}`;
+              ? "Saving environment variable set…"
+              : `Device default: ${activeProfile} · ${profileCount} set${profileCount === 1 ? "" : "s"}`;
         status.className = "profile-status";
         if (data.error) {
           status.classList.add("error");
@@ -417,7 +417,7 @@ export function createProfileWindowSurface({
         } else {
           clearProfileSaveTimer(state);
         }
-        const name = window.prompt("Profile name", "review");
+        const name = window.prompt("Environment variable set name", "");
         if (!name) {
           return;
         }
@@ -447,7 +447,7 @@ export function createProfileWindowSurface({
         if (!state.selectedProfile) {
           return;
         }
-        if (!window.confirm(`Delete profile "${state.selectedProfile}"?`)) {
+        if (!window.confirm(`Delete the "${state.selectedProfile}" environment variable set? Projects that use it will have no set assigned.`)) {
           return;
         }
         clearProfileSaveTimer(state);
@@ -505,15 +505,15 @@ export function createProfileWindowSurface({
         list.innerHTML = "";
         if (!data.loading && profiles.length === 0) {
           const empty = createNode("div", "profile-empty workspace-empty-state");
-          empty.appendChild(createNode("div", "mock-label", "No profiles yet"));
+          empty.appendChild(createNode("div", "mock-label", "No environment variable sets yet"));
           empty.appendChild(
             createNode(
               "div",
               "profile-empty-copy",
-              "Create a profile to track env overrides and disabled OS variables.",
+              "Create a set to define overrides and disable inherited variables.",
             ),
           );
-          const button = createNode("button", "wizard-button primary", "New profile");
+          const button = createNode("button", "wizard-button primary", "New environment variable set");
           button.type = "button";
           button.addEventListener("click", () => createProfile(windowId));
           empty.appendChild(button);
@@ -534,10 +534,10 @@ export function createProfileWindowSurface({
           header.appendChild(createNode("div", "profile-row-title", profile.name));
           const chips = createNode("div", "profile-row-chips");
           if (profile.is_active) {
-            chips.appendChild(createNode("span", "profile-chip active", "Active"));
+            chips.appendChild(createNode("span", "profile-chip active", "Device default"));
           }
           if (profile.is_default) {
-            chips.appendChild(createNode("span", "profile-chip", "Default"));
+            chips.appendChild(createNode("span", "profile-chip", "Built-in"));
           }
           header.appendChild(chips);
           row.appendChild(header);
@@ -554,6 +554,9 @@ export function createProfileWindowSurface({
             `${profile.env_vars.length} env override${profile.env_vars.length === 1 ? "" : "s"} · ${profile.disabled_env.length} disabled variable${profile.disabled_env.length === 1 ? "" : "s"}`,
           );
           row.appendChild(meta);
+          const projectCount = profile.assigned_project_count || 0;
+          row.appendChild(createNode("div", "profile-row-meta",
+            `Assigned to ${projectCount} project${projectCount === 1 ? "" : "s"}`));
           list.appendChild(row);
         }
 
@@ -561,12 +564,12 @@ export function createProfileWindowSurface({
         const selected = selectedProfileEntry(state);
         if (!selected || !state.draft) {
           const empty = createNode("div", "profile-empty workspace-empty-state");
-          empty.appendChild(createNode("div", "mock-label", "Select a profile"));
+          empty.appendChild(createNode("div", "mock-label", "Select an environment variable set"));
           empty.appendChild(
             createNode(
               "div",
               "profile-empty-copy",
-              "Each profile keeps its own env overrides and disabled OS variables.",
+              "Select a set to edit its variables.",
             ),
           );
           editor.appendChild(empty);
@@ -575,7 +578,7 @@ export function createProfileWindowSurface({
         }
 
         const actions = createNode("div", "profile-inline-actions");
-        const activeButton = createNode("button", "wizard-button", "Set active");
+        const activeButton = createNode("button", "wizard-button", "Use as device default");
         activeButton.type = "button";
         activeButton.disabled = selected.is_active || data.loading;
         activeButton.addEventListener("click", () => setActiveProfile(windowId));
@@ -583,13 +586,15 @@ export function createProfileWindowSurface({
 
         const deleteButton = createNode("button", "wizard-button", "Delete");
         deleteButton.type = "button";
-        deleteButton.disabled = selected.is_default || data.loading;
+        deleteButton.disabled = selected.is_default || selected.is_active || data.loading;
+        if (selected.is_default) deleteButton.title = "The built-in set cannot be deleted.";
+        else if (selected.is_active) deleteButton.title = "Choose another device default before deleting this set.";
         deleteButton.addEventListener("click", () => deleteProfile(windowId));
         actions.appendChild(deleteButton);
         editor.appendChild(actions);
 
         const metadata = createNode("div", "profile-section");
-        metadata.appendChild(createNode("div", "mock-label", "Profile metadata"));
+        metadata.appendChild(createNode("div", "mock-label", "Set details"));
         const nameField = createNode("label", "profile-field");
         nameField.appendChild(createNode("span", "", "Name"));
         const nameInput = document.createElement("input");
@@ -618,10 +623,10 @@ export function createProfileWindowSurface({
         editor.appendChild(metadata);
 
         const envSection = createNode("div", "profile-section profile-env-section");
-        envSection.appendChild(createNode("div", "mock-label", "Environment Variables"));
+        envSection.appendChild(createNode("div", "mock-label", "Variables"));
         const envGrid = createNode("div", "profile-env-grid");
         const headerRow = createNode("div", "profile-env-grid-row profile-env-grid-head");
-        for (const label of ["Key", "OS", "Mode", "Profile", "Result"]) {
+        for (const label of ["Key", "OS", "Mode", "Set value", "Result"]) {
           headerRow.appendChild(createNode("div", "", label));
         }
         envGrid.appendChild(headerRow);
@@ -720,9 +725,9 @@ export function createProfileWindowSurface({
 
           const valueInput = document.createElement("input");
           valueInput.type = "text";
-          valueInput.placeholder = "Profile";
+          valueInput.placeholder = "Set value";
           valueInput.value = envRow.profileValue;
-          valueInput.setAttribute("aria-label", `Profile value, row ${index + 1}`);
+          valueInput.setAttribute("aria-label", `Set value, row ${index + 1}`);
           const resultCell = createNode("div", "profile-env-result", envRow.result);
           resultCell.title = envRow.result;
           valueInput.addEventListener("input", () => {
@@ -815,12 +820,12 @@ export function createProfileWindowSurface({
             <div class="profile-root">
               <div class="workspace-toolbar is-stacked">
                 <div class="workspace-toolbar-main">
-                  <div class="knowledge-heading">Profiles</div>
+                  <div class="knowledge-heading" role="heading" aria-level="2">Environment variables</div>
                   <div class="profile-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
-                  <button class="wizard-button" type="button" data-action="new-profile">New profile</button>
-                  <button class="icon-button" data-action="refresh-profile" aria-label="Refresh profiles">↻</button>
+                  <button class="wizard-button" type="button" data-action="new-profile">New environment variable set</button>
+                  <button class="icon-button" data-action="refresh-profile" aria-label="Refresh environment variable sets">↻</button>
                 </div>
               </div>
               <div class="profile-layout workspace-split">

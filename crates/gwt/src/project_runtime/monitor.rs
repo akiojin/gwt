@@ -191,8 +191,9 @@ pub(crate) fn reject_preflight_launch(
                 );
             }
         }
-        let (environment, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+        let (environment, _) = gwt_agent::LaunchEnvironment::for_project(
             &gwt_core::paths::gwt_config_path(),
+            root,
             gwt_agent::LaunchRuntimeTarget::Host,
         )?
         .into_parts();

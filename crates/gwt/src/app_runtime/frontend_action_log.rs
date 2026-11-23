@@ -893,6 +893,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::GetExecutionEnvironments
+        | FrontendEvent::GetProjectEnvironmentSet
+        | FrontendEvent::SetProjectEnvironmentSet { .. }
         | FrontendEvent::GetFirstRunSetup { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }

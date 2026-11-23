@@ -1271,6 +1271,10 @@ pub enum FrontendEvent {
     /// current project's priority list. Response is
     /// [`BackendEvent::ExecutionEnvironments`].
     GetExecutionEnvironments,
+    GetProjectEnvironmentSet,
+    SetProjectEnvironmentSet {
+        name: Option<String>,
+    },
     /// Register an account reached through a tool that reads its own settings.
     AddExecutionEnvironment {
         account_id: String,
@@ -1859,6 +1863,8 @@ pub struct ProfileEntryView {
     pub disabled_env: Vec<String>,
     pub is_default: bool,
     pub is_active: bool,
+    #[serde(default)]
+    pub assigned_project_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3232,6 +3238,12 @@ pub enum BackendEvent {
     ProfileSnapshot {
         id: String,
         snapshot: ProfileSnapshotView,
+    },
+    ProjectEnvironmentSet {
+        project_root: String,
+        names: Vec<String>,
+        assigned: Option<String>,
+        error: Option<String>,
     },
     LogEntries {
         id: String,
@@ -4626,6 +4638,7 @@ impl BackendEvent {
             BackendEvent::BoardEntries { .. } => "board_entries",
             BackendEvent::BoardHistoryPage { .. } => "board_history_page",
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
+            BackendEvent::ProjectEnvironmentSet { .. } => "project_environment_set",
             BackendEvent::LogEntries { .. } => "log_entries",
             BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
@@ -7499,6 +7512,7 @@ mod tests {
                     disabled_env: vec!["SECRET".to_string()],
                     is_default: true,
                     is_active: true,
+                    assigned_project_count: 0,
                 }],
                 os_env: vec![ProfileEnvEntryView {
                     key: "PATH".to_string(),

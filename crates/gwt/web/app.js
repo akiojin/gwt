@@ -1689,6 +1689,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // modal glue (open/close/render + state) moved to /project-shell-surface.js.
 
       function presetLabel(preset) {
+        if (preset === "profile") return "Environment variables";
         return preset
           .split("_")
           .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -1703,7 +1704,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           agent: "Agent",
           branches: "Branches",
           settings: "Settings",
-          profile: "Profile",
+          profile: "Environment variables",
           logs: "Logs",
           agent_kanban: "Agent Kanban",
           // SPEC-3671 FR-014: these three presets share the Knowledge surface but
@@ -1812,6 +1813,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const PM_ROLE_BADGE = "PM";
 
       function windowDisplayTitle(windowData) {
+        if (windowData?.preset === "profile") return presetRoleLabel("profile");
         const candidates = [
           windowData?.dynamic_title,
           windowData?.purpose_title,
@@ -3690,15 +3692,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                 ["Transport", "Local server"],
               ],
             };
-          case "profile":
-            return {
-              heading: "Active Profile",
-              rows: [
-                ["Profile", "default"],
-                ["Model", "Mixed"],
-                ["Shell", "Interactive"],
-              ],
-            };
           case "logs":
             return {
               heading: "Recent Events",
@@ -4801,6 +4794,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // case arms, the frontendUnits registry entries, and the delegated
       // document-level <select> guard listeners, wired through this
       // factory.
+      const projectEnvironmentSetsModel = createUiStateStore({});
       const {
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
@@ -4847,6 +4841,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
         renderProjectEnvironments: renderProjectExecutionEnvironments,
         renderPmEnvironments: renderPmExecutionEnvironments,
+        projectEnvironmentSetsModel,
       });
 
       function ensureWindow(windowData) {
@@ -5586,6 +5581,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           case "execution_environments":
             applyExecutionEnvironments(event.view);
             executionEnvironmentsModel.update(state => ({ ...state, view: event.view }));
+            break;
+          case "project_environment_set":
+            projectEnvironmentSetsModel.update(state => ({ ...state, [event.project_root]: event }));
             break;
           case "themes":
           case "theme_error":
