@@ -112,6 +112,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `SearchProjectIndex` | 対応 | `search` | プロジェクトインデックスを指定スコープで検索する。 |
 | `RequestWorkAdvisory` | 読み取り | — | Start Work で重複作業を調べるための候補を取得する。 |
 | `SelectKnowledgeBridgeEntry` | GUI 内部 | — | Knowledge ウィンドウ内の選択とプレビューを更新する。 |
+| `EditIssueSubtask` | 一部対応 | `issue.edit` | 課題本文の子課題を追加・削除し、選択中の課題詳細を更新する。エンベロープでは本文を編集できる。 |
 | `UpdateKnowledgeBridgePhase` | 一部対応 | `issue.label` | ラベルを操作できる。GUI は一覧の変更を既存フェーズラベルの置換として扱う。 |
 | `SetIssueAutonomousTarget` | 対応 | `issue.label` | 課題を自律駆動の対象に含める／外す。対象の印である `auto-merge` ラベルを付け外しする。 |
 | `RunBranchCleanup` | 一部対応 | `branch.prune_merged` | マージ済みブランチの削除に対応する。GUI は候補選択、作業ツリーの削除オプションと進捗も扱う。 |

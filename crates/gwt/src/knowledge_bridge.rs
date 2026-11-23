@@ -291,6 +291,8 @@ pub struct KnowledgeDetailView {
     pub launch_issue_number: Option<u64>,
     #[serde(default)]
     pub related_works: Vec<KnowledgeRelatedWorkView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtasks: Vec<IssueSubtask>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,6 +590,201 @@ pub fn load_knowledge_bridge_detail(
         .ok_or_else(|| format!("Issue #{number} not in local cache"))?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(work_item_detail_view(&entry, &linked_branches))
+}
+
+const SUBTASK_MARKER: &str = "<!-- gwt-subtask --> ";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueSubtask {
+    pub text: String,
+    pub done: bool,
+    pub remove_at: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueSubtaskChange {
+    Add { title: String },
+    Remove { start: usize, text: String },
+}
+
+struct IssueSubtaskSection {
+    exists: bool,
+    insert_at: usize,
+    items: Vec<IssueSubtask>,
+}
+
+fn issue_subtask_section(body: &str) -> IssueSubtaskSection {
+    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+    let mut heading = None;
+    let mut section = None;
+    let mut heading_text = String::new();
+    let mut open_items = Vec::new();
+    let mut result = IssueSubtaskSection {
+        exists: false,
+        insert_at: body.len(),
+        items: Vec::new(),
+    };
+    for (event, range) in Parser::new_ext(body, Options::ENABLE_TASKLISTS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                if section.is_some_and(|section_level: HeadingLevel| level <= section_level) {
+                    result.insert_at = range.start;
+                    break;
+                }
+                heading = Some(level);
+                heading_text.clear();
+            }
+            Event::Text(value) if heading.is_some() => heading_text.push_str(&value),
+            Event::End(TagEnd::Heading(_)) => {
+                let level = heading.take();
+                if section.is_none()
+                    && (heading_text == "子課題" || heading_text.eq_ignore_ascii_case("Subtasks"))
+                {
+                    section = level;
+                    result.exists = true;
+                }
+            }
+            Event::Start(Tag::Item) => open_items.push(range),
+            Event::End(TagEnd::Item) => {
+                open_items.pop();
+            }
+            Event::TaskListMarker(done) if result.exists => {
+                let text = body[range.end..].lines().next().unwrap_or("").trim();
+                let text = text.strip_prefix(SUBTASK_MARKER).unwrap_or(text);
+                let remove_at = open_items.last().and_then(|item| {
+                    let source = body[item.clone()].trim_end_matches(['\r', '\n']);
+                    (!source.contains('\n')).then_some(item.start)
+                });
+                if !text.is_empty() {
+                    result.items.push(IssueSubtask {
+                        text: text.into(),
+                        done,
+                        remove_at,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+pub fn edit_issue_subtask(
+    repo_path: &Path,
+    client: &dyn gwt_github::IssueClient,
+    number: u64,
+    change: &IssueSubtaskChange,
+) -> Result<(), String> {
+    let cache_root = issue_cache_root_for_repo_path(repo_path)
+        .ok_or("Knowledge Bridge is available only for Git projects.")?;
+    let cache = Cache::new(cache_root);
+    let number = gwt_github::IssueNumber(number);
+    // Multiple Issue windows can submit edits to the same GitHub body.
+    static SUBTASK_EDIT: Mutex<()> = Mutex::new(());
+    let _edit = SUBTASK_EDIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let gwt_github::FetchResult::Updated(snapshot) = client
+        .fetch(number, None)
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("Could not read the current issue description.".into());
+    };
+    if snapshot.state != IssueState::Open || has_gwt_spec_label(&snapshot.labels) {
+        return Err("Subtasks can be edited on open issues.".into());
+    }
+    let body = edit_subtask_markdown(&snapshot.body, change)?;
+    let updated = if body == snapshot.body {
+        snapshot
+    } else {
+        let mut updated = client
+            .patch_body(number, &body)
+            .map_err(|error| error.to_string())?;
+        updated.comments = snapshot.comments;
+        updated
+    };
+    cache
+        .write_snapshot(&updated)
+        .map_err(|error| error.to_string())
+}
+
+fn edit_subtask_markdown(body: &str, change: &IssueSubtaskChange) -> Result<String, String> {
+    let section = issue_subtask_section(body);
+    let title = match change {
+        IssueSubtaskChange::Add { title } => title.trim(),
+        IssueSubtaskChange::Remove { start, text } => {
+            if !section
+                .items
+                .iter()
+                .any(|item| item.remove_at == Some(*start) && item.text == *text)
+            {
+                return Err("The subtask changed. Reload the issue and try again.".into());
+            }
+            let end = body[*start..]
+                .find('\n')
+                .map_or(body.len(), |end| start + end + 1);
+            let mut updated = body.to_string();
+            updated.replace_range(*start..end, "");
+            return Ok(updated);
+        }
+    };
+    if title.is_empty() || title.chars().any(char::is_control) || title.chars().count() > 200 {
+        return Err("Enter a subtask title of 1–200 characters on one line.".into());
+    }
+    if section.items.iter().any(|item| item.text == title) {
+        return Ok(body.to_string());
+    }
+    let (before, after) = body.split_at(section.insert_at);
+    let mut result = before.trim_end_matches(['\r', '\n']).to_string();
+    if !result.is_empty() {
+        result.push_str("\n\n");
+    }
+    if !section.exists {
+        result.push_str("## 子課題\n\n");
+    }
+    result.push_str("- [ ] ");
+    // Keep titles such as "AC-1: ..." distinct from execution acceptance items.
+    result.push_str(SUBTASK_MARKER);
+    result.push_str(title);
+    result.push('\n');
+    if !after.is_empty() {
+        result.push('\n');
+        result.push_str(after);
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+#[test]
+fn issue_subtask_edits_use_the_same_markdown_items_as_progress() {
+    let original = "Subtasks\n--------\n\n```md\n- [ ] Second\n```\n\n- [x] First\n\n## Acceptance criteria\n\n- [ ] AC-1: Keep this\n";
+    let add = IssueSubtaskChange::Add {
+        title: "Second".into(),
+    };
+    let added = edit_subtask_markdown(original, &add).unwrap();
+    let progress = issue_subtask_section(&added);
+    assert_eq!(
+        progress
+            .items
+            .iter()
+            .map(|item| (item.text.as_str(), item.done))
+            .collect::<Vec<_>>(),
+        [("First", true), ("Second", false)]
+    );
+    assert_eq!(edit_subtask_markdown(&added, &add).unwrap(), added);
+    let remove = IssueSubtaskChange::Remove {
+        start: progress.items[1].remove_at.unwrap(),
+        text: "Second".into(),
+    };
+    let removed = edit_subtask_markdown(&added, &remove).unwrap();
+    assert_eq!(issue_subtask_section(&removed).items.len(), 1);
+    assert!(removed.contains("- [ ] AC-1: Keep this"));
+    assert!(edit_subtask_markdown(&removed, &remove).is_err());
+    assert!(edit_subtask_markdown("Existing description", &add)
+        .unwrap()
+        .contains("## 子課題\n\n- [ ] <!-- gwt-subtask --> Second"));
 }
 
 // Cache roots identify the shared project even when requests come from different worktrees.
@@ -1254,6 +1451,7 @@ fn issue_detail_view(
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
         related_works: Vec::new(),
+        subtasks: issue_subtask_section(&entry.snapshot.body).items,
     }
 }
 
@@ -1302,6 +1500,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
         related_works: Vec::new(),
+        subtasks: Vec::new(),
     }
 }
 
