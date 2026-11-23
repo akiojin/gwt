@@ -1,6 +1,49 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.173.1] - 2026-11-23
+
+### Bug Fixes
+
+- **pm:** 添付とモバイルの人の入力でも unconfirmed の PM wake の入力予約を解放する
+- **search:** Cold の query worker が試行の期限切れを越えて warm に到達する
+- **deps:** Url を 2.5.9 に更新して RUSTSEC-2026-0592 を解消する
+- **ci:** Coverage shard のテスト列挙に制限時間を付ける
+- **monitor:** 準備予算切れの launch delivery を再準備せず失敗として終わらせる
+- **web:** 終了時の後始末を unload から pagehide へ移す
+- **deps:** Filetime 0.2.30 の非推奨 set_file_mtime を std::fs::set_times に置き換える
+- **agents:** Remove persistent member resting state
+- **agents:** Apply saved settings to derived member candidates
+- **agents:** Grok の更新をインストール元に合った経路で行う
+- **issue-monitor:** Auto-refill の上限から稼働中の launch を除外する
+- **issue-monitor:** Reviewing gate が PR の base の branch protection を読み、閉じた理由を記録する
+- **pr-status:** CodeRabbit の check が head で成功していればレビュー完了として扱う
+- **pr-status:** CodeRabbit のレビュー記録を Ready 化・auto-merge・完了の条件から外す
+
+### Documentation
+
+- **test:** Node 26 で trace ZIP が閉じない原因を記録する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7701 の作業記録を更新する
+- **work:** Issue #7320 の Work イベントを記録する
+- **work:** Issue #7320 の後続 Work イベントを記録する
+- **work:** Record Issue 7494 work events
+- **work:** Issue #7493 の作業記録を更新する
+- **work:** Issue #7724 の作業記録を更新する
+- **work:** Issue #7726 の作業記録を更新する
+- **test:** Playwright を 1.65.1 へ更新し Node 26 を runner の対象に加える
+- **work:** Issue #7791 の作業記録を更新する
+
+### Testing
+
+- **agents:** Verify reassignment preserves saved launch profiles
+- **agents:** Align admission fixtures with registered roster
+- **issue-monitor:** Queued 列の Auto-refill hold 案内を headed E2E で固定する
+- **issue-monitor:** 回帰テストの不要な借用を外す
+- **issue-monitor:** Gate readback の順序変更に合わせて最初の失敗段を StatusCheckReadback にする
+
 ## [9.173.0] - 2026-11-22
 
 ### Bug Fixes
