@@ -3621,6 +3621,7 @@ mod tests {
             terminal_queue: Vec::new(),
             terminal_queue_auto_refill: false,
             terminal_queue_auto_refill_limit: 0,
+            terminal_queue_refill_hold: None,
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 0,

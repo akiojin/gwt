@@ -1024,6 +1024,12 @@ pub enum FrontendEvent {
         request_id: Option<u64>,
         number: u64,
     },
+    EditIssueSubtask {
+        id: String,
+        request_id: u64,
+        number: u64,
+        change: crate::knowledge_bridge::IssueSubtaskChange,
+    },
     /// SPEC-2017 US-8 — Kanban D&D writes a phase change back to the
     /// owning GitHub Issue. `target_phase=None` means Backlog (every
     /// `phase/*` label is removed); `Some("draft" | "planning" |

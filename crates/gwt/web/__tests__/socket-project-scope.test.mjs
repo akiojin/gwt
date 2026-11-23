@@ -425,8 +425,10 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
     getWorkspaceWindows: () => windows, scheduleFrame: run => { run(); return () => {}; },
   });
   t.after(() => { for (const id of ["knowledge", "offline", "closing", "foreign"]) knowledge.clearKnowledgeBridgeState(id); });
+  const themeConnections = [];
   Object.assign(context, {
     handleKnowledgeTransportChange: knowledge.handleKnowledgeTransportChange,
+    updateThemeConnection: connected => themeConnections.push(connected),
     knowledgeBridgeStateMap: knowledge.knowledgeBridgeStateMap,
     resyncKnowledge: knowledge.resyncKnowledge,
     clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
@@ -460,6 +462,7 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   assert.equal(context.pendingMessages.length, 2, "Refresh is coalesced into each existing unsent owner");
   context.reconnectCallbacks.at(-1)(); // reports offline for a second time
   sockets.at(-1).open();
+  assert.deepEqual(themeConnections.slice(-3), [false, false, true]);
   const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
   assert.equal(reads.filter(message => message.id === "knowledge").length, 1,
     "normal close/timer/open replaces the interrupted read");

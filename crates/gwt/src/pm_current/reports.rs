@@ -397,6 +397,7 @@ fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReport
         Err(error) => data.error = Some(format!("PM reports could not be loaded: {error}")),
     }
     data.decisions = load_decisions(repo);
+    crate::pm_report_board::publish_best_effort(repo);
     let inventory =
         crate::session_inventory::observe_sessions(repo, &gwt_core::paths::gwt_sessions_dir());
     data.processes = inventory

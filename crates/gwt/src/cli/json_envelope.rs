@@ -8406,6 +8406,14 @@ mod tests {
         assert_eq!(saved["report"]["kind"], "qa");
         assert_eq!(saved["report"]["question"], "Can we ship?");
         assert_eq!(saved["report"]["body"], "Checks passed.");
+        // Issue #7642: the saved report is recorded on the Board as it is saved.
+        let board_id = format!("pm-report-{}", saved["report"]["id"].as_str().unwrap());
+        assert!(gwt_core::coordination::load_snapshot(&repo)
+            .unwrap()
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == board_id));
         let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
         let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
         let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();

@@ -2180,6 +2180,10 @@ body {
   color: var(--color-text);
 }
 
+.issue-detail-subtask-item {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .issue-detail-ac-mark,
 .issue-detail-ac-id {
   font-family: var(--font-mono);

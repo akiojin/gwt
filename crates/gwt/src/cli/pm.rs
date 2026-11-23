@@ -648,6 +648,7 @@ pub(super) fn run<E: CliEnv>(
                 if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
                     tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
                 }
+                crate::pm_report_board::publish_best_effort(&repo_path);
             }
             out.push_str(
                 &serde_json::json!({"schema_version":2,"ok":true,"receipt":receipt}).to_string(),
@@ -777,6 +778,7 @@ pub(super) fn run<E: CliEnv>(
             if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
                 tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
             }
+            crate::pm_report_board::publish_best_effort(&repo_path);
             let mut response =
                 serde_json::json!({"schema_version": 1, "ok": true, "report": report});
             if let Some(saved) = saved_instruction {

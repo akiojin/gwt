@@ -290,6 +290,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             terminal_queue: Vec::new(),
             terminal_queue_auto_refill: false,
             terminal_queue_auto_refill_limit: 0,
+            terminal_queue_refill_hold: None,
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),

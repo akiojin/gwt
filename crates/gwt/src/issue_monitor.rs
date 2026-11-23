@@ -4217,6 +4217,10 @@ pub struct IssueMonitorStatusView {
     pub terminal_queue_auto_refill: bool,
     #[serde(default)]
     pub terminal_queue_auto_refill_limit: usize,
+    /// Issue #7813 AC-2: why Auto-refill adds nothing now, as in
+    /// `terminal_queue_refill.hold`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_queue_refill_hold: Option<IssueMonitorRefillHold>,
     #[serde(default)]
     pub unqueued_open_count: usize,
     #[serde(default)]
@@ -4698,6 +4702,8 @@ pub struct IssueMonitorRefillUncounted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueMonitorRefillExemption {
+    /// Issue #7813: launched or launching; it holds a slot, not a queue place.
+    Active,
     LabelExcluded,
     /// Issue #7508: delivery is parked on an open PR.
     OpenPrHold,
@@ -4713,6 +4719,9 @@ pub enum IssueMonitorRefillHold {
     Disabled,
     /// `counted` already fills `limit`.
     LimitReached,
+    /// Issue #7813: the last Issues scan left capacity but found no eligible
+    /// Backlog issue to add.
+    NoCandidates,
 }
 
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
@@ -5528,6 +5537,9 @@ pub struct AutonomousIssueSummary {
     /// its current head has no PASS verdict from the independent review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_hold: Option<String>,
+    /// Issue #7810 AC-2: the inputs keeping the reviewed PR's gate closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_hold: Option<AutonomousGateHold>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -5638,6 +5650,9 @@ pub struct IssueMonitorState {
     #[serde(default)]
     terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     terminal_queue_auto_refill_limit: usize,
+    /// Issue #7813: the last refill pass left capacity with nothing to add.
+    #[serde(skip)]
+    terminal_queue_refill_starved: bool,
     #[serde(default)]
     execution_environments: Vec<ProjectExecutionEnvironment>,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
@@ -6352,7 +6367,28 @@ pub struct AutonomousIssueRecord {
     /// off. A new head SHA starts the count over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_attempts: Option<AutonomousReviewAttempts>,
+    /// Issue #7810 AC-2: the gate inputs that kept a reviewed PR unmerged on
+    /// the last consecutive scans. Cleared when the gate opens or a new
+    /// review binds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_hold: Option<AutonomousGateHold>,
 }
+
+/// Issue #7810 AC-2: consecutive gate evaluations that kept a reviewed PR
+/// unmerged, and the inputs that closed the gate on the last one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousGateHold {
+    pub reason: String,
+    /// RFC3339 of the first evaluation in this closed run.
+    pub since: String,
+    /// Closed evaluations in a row, this one included.
+    pub scans: u32,
+}
+
+/// Issue #7810 AC-2: closed gate evaluations in a row before the Issue is
+/// parked for a human. A gate re-reads at most once a minute while CI runs,
+/// so this is at least two hours of a closed gate.
+pub const AUTONOMOUS_GATE_HOLD_MAX_SCANS: u32 = 120;
 
 /// Issue #4815: the review-dispatch half of the retry ladder, keyed by the
 /// reviewed SHA.
@@ -6975,6 +7011,7 @@ impl AutonomousIssueRecord {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         }
     }
@@ -9019,6 +9056,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            terminal_queue_refill_starved: false,
             execution_environments: Vec::new(),
             launch_profiles: Vec::new(),
             launch_auto: false,
@@ -11140,6 +11178,61 @@ impl IssueMonitorState {
         // the authentication diagnosis or admit an automatic retry.
         record.retry_hold_provider = None;
         true
+    }
+
+    /// Issue #7810 AC-2: count one gate evaluation that kept `issue_number`'s
+    /// reviewed PR unmerged, recording which inputs closed it (shown in
+    /// `issue.monitor.status`). A changed reason raises a notice; reaching
+    /// [`AUTONOMOUS_GATE_HOLD_MAX_SCANS`] parks the Issue for a human, since
+    /// the gate has shown it will not open by itself. Returns whether it did.
+    pub fn record_gate_closed(
+        &mut self,
+        issue_number: u64,
+        reason: impl Into<String>,
+        now: &str,
+    ) -> bool {
+        let reason = reason.into();
+        let record = self.autonomous_record_mut(issue_number);
+        let previous = record.gate_hold.take();
+        let changed = previous.as_ref().is_none_or(|hold| hold.reason != reason);
+        let hold = AutonomousGateHold {
+            reason: reason.clone(),
+            since: previous
+                .as_ref()
+                .map_or_else(|| now.to_string(), |hold| hold.since.clone()),
+            scans: previous.map_or(0, |hold| hold.scans).saturating_add(1),
+        };
+        let scans = hold.scans;
+        let since = hold.since.clone();
+        record.gate_hold = Some(hold);
+        let pr = record
+            .pr_number
+            .map_or_else(|| "the PR".to_string(), |pr| format!("PR #{pr}"));
+        if changed {
+            self.push_autonomous_notice(
+                "warn",
+                issue_number,
+                format!("Issue #{issue_number} gate closed for {pr}: {reason}"),
+            );
+        }
+        if scans < AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            return false;
+        }
+        self.escalate_to_needs_human(
+            issue_number,
+            NeedsHumanKind::UserChoiceRequired,
+            format!(
+                "the autonomous gate kept {pr} unmerged for {scans} scans since {since}: {reason}; fix the closed input or merge it by hand"
+            ),
+        );
+        true
+    }
+
+    /// Issue #7810 AC-2: the gate opened or routed elsewhere.
+    pub fn clear_gate_hold(&mut self, issue_number: u64) {
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.gate_hold = None;
+        }
     }
 
     /// Issue #3944 AC-2: ask the PM to steer `issue_number` — a live launch the
@@ -16033,6 +16126,7 @@ impl IssueMonitorState {
             terminal_queue: self.urgent_queue_projection(&host).entries,
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
             terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
+            terminal_queue_refill_hold: self.terminal_queue_refill().hold,
             unqueued_open_count,
             other_terminal_queue_count,
             active_count: self.active_count(),
@@ -16089,6 +16183,7 @@ impl IssueMonitorState {
                         steering: record.steering.clone(),
                         review_dispatch_hold: record.review_dispatch_hold.clone(),
                         merge_hold: record.merge_hold_reason(),
+                        gate_hold: record.gate_hold.clone(),
                         pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
                             handoff_id: handoff.handoff_id.clone(),
                             question: handoff.question.clone(),
@@ -18360,6 +18455,7 @@ impl IssueMonitorState {
         record.pr_number = Some(pr_number);
         record.reviewed_sha = Some(reviewed_sha.into());
         record.review_passed = None;
+        record.gate_hold = None;
     }
 
     /// SPEC #3200 FR-015: record the independent-review verdict for the in-flight
@@ -18368,6 +18464,10 @@ impl IssueMonitorState {
         let max = self.autonomous_tuning.max_attempts;
         let record = self.autonomous_record_mut(issue_number);
         record.review_passed = Some(passed);
+        // Issue #7810 AC-3: the previous attempt's failure is history once a
+        // fresh verdict arrives; the gate evaluates it anew.
+        record.last_failure_message = None;
+        record.gate_hold = None;
         let exhausted = if passed {
             // Issue #4815: a PASS ends the review ladder for this SHA.
             record.review_attempts = None;
@@ -20503,8 +20603,9 @@ impl IssueMonitorState {
         if self.label_excluded_issues.contains(&number) {
             return Some(Exemption::LabelExcluded);
         }
+        // Issue #7813: a launch holds a slot, not a place in the queue.
         if launch_protected.contains(&number) {
-            return None;
+            return Some(Exemption::Active);
         }
         if self
             .open_pr_observations
@@ -20540,6 +20641,8 @@ impl IssueMonitorState {
             Some(IssueMonitorRefillHold::Disabled)
         } else if counted.len() >= self.terminal_queue_auto_refill_limit {
             Some(IssueMonitorRefillHold::LimitReached)
+        } else if self.terminal_queue_refill_starved {
+            Some(IssueMonitorRefillHold::NoCandidates)
         } else {
             None
         };
@@ -28193,6 +28296,9 @@ pub fn scan_issue_monitor_candidates(
     monitor.admit_urgent_candidates(issues, now);
     monitor.auto_refill_terminal_queue(&refill, now);
     monitor.reconcile_terminal_queue();
+    // Issue #7813 AC-2: capacity left after this scan means no candidate.
+    monitor.terminal_queue_refill_starved = false;
+    monitor.terminal_queue_refill_starved = monitor.terminal_queue_refill().hold.is_none();
     let membership = monitor
         .local_terminal_queue_numbers()
         .into_iter()
@@ -31944,6 +32050,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let disk = IssueMonitorPrefs {
@@ -32071,6 +32178,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         save_issue_monitor_prefs(
@@ -32144,6 +32252,7 @@ mod tests {
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..IssueMonitorPrefs::default()
@@ -32217,6 +32326,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let older_disk = IssueMonitorPrefs {
@@ -32279,6 +32389,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let mut stale = test_monitor_with_prefs(
@@ -51596,7 +51707,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_queue_refill_retires_completed_work_but_counts_active_work() {
+    fn terminal_queue_refill_retires_completed_work_but_keeps_active_work() {
         let now = "2026-09-10T00:00:00Z";
         let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_terminal_queue_auto_refill(true, 2);
@@ -51613,8 +51724,11 @@ mod tests {
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![2, 3]);
         assert!(monitor.active_launches.contains(&2));
         assert!(monitor.prefs().terminal_queue_exclusions.is_empty());
-        // An active entry occupies capacity until a terminal fact retires it.
-        assert_eq!(monitor.auto_refill_terminal_queue(&[4], now), 0);
+        // Issue #7813: an active entry keeps its membership until a terminal
+        // fact retires it, but holds a slot rather than refill capacity.
+        assert_eq!(monitor.auto_refill_terminal_queue(&[4], now), 1);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![2, 3, 4]);
+        monitor.terminal_queue_remove(&[4], now);
         let mut concurrent =
             test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         concurrent.terminal_queue_push(&[1], "operator", "2026-09-10T00:01:00Z");
@@ -51986,10 +52100,11 @@ mod tests {
         monitor.observe_urgent_issue(&urgent, now);
         monitor.set_priority_order(vec![4]);
         scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2), urgent, issue(4)], now);
-        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 1, 2]);
+        // Nothing protected is displaced; Issue #7813: the active launch and
+        // the pending claim hold slots, so #4 takes the free queue place.
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 4, 1, 2]);
         assert_eq!(monitor.pending_claim_issue_numbers(), BTreeSet::from([2]));
         assert!(monitor.active_launches.contains(&1));
-        assert!(monitor.inbox_item(4).is_none());
     }
 
     #[test]
@@ -52070,6 +52185,79 @@ mod tests {
                 .map(|entry| (entry.issue_number, entry.reason))
                 .collect::<Vec<_>>(),
             [1, 2, 3].map(|number| (number, IssueMonitorRefillExemption::AwaitingVerification))
+        );
+    }
+
+    #[test]
+    fn issue_7813_auto_refill_limit_counts_queued_issues_not_active_launches() {
+        let now = "2026-11-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        monitor.terminal_queue_push(&[1, 2], "operator", now);
+        for number in [1, 2] {
+            monitor.record_candidate(issue(number));
+            monitor.complete_active_launch_at(number, format!("tab::agent-{number}"), now);
+        }
+        assert!(monitor.active_launches.contains(&1) && monitor.active_launches.contains(&2));
+
+        // AC-1: every slot is busy, yet the Queued column fills to the limit.
+        let candidates = [issue(1), issue(2), issue(3), issue(4), issue(5)];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4]);
+
+        // AC-2: only the waiting members use capacity; launches say why not.
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![3, 4]);
+        assert_eq!(
+            refill
+                .uncounted
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [1, 2].map(|number| (number, IssueMonitorRefillExemption::Active))
+        );
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::LimitReached));
+        assert_eq!(
+            monitor.status_view_at(now).terminal_queue_refill_hold,
+            Some(IssueMonitorRefillHold::LimitReached)
+        );
+    }
+
+    #[test]
+    fn issue_7813_auto_refill_reports_no_candidates_after_a_scan_adds_nothing() {
+        let now = "2026-11-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        assert_eq!(monitor.terminal_queue_refill().hold, None);
+        let mut closed = issue(1);
+        closed.state = IssueMonitorIssueState::Closed;
+        scan_issue_monitor_candidates(&mut monitor, &[closed], now);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, Vec::<u64>::new());
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::NoCandidates));
+        assert_eq!(
+            monitor.status_view_at(now).terminal_queue_refill_hold,
+            Some(IssueMonitorRefillHold::NoCandidates)
+        );
+
+        scan_issue_monitor_candidates(&mut monitor, &[issue(2)], now);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![2]);
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::NoCandidates));
+        scan_issue_monitor_candidates(&mut monitor, &[issue(2), issue(3)], now);
+        assert_eq!(
+            monitor
+                .agent_status_at(now)
+                .terminal_queue_refill
+                .unwrap()
+                .hold,
+            Some(IssueMonitorRefillHold::LimitReached)
         );
     }
 
@@ -53311,6 +53499,77 @@ mod tests {
             evaluate_autonomous_gate(&advanced),
             GateDecision::Fail(_)
         ));
+    }
+
+    /// Issue #7810 AC-3: a fresh verdict ends the story the previous
+    /// attempt's failure told; the stale message must not outlive it.
+    #[test]
+    fn issue_7810_a_new_verdict_clears_the_previous_failure_message() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.autonomous_record_mut(7).last_failure_message =
+            Some("HEAD advanced past the reviewed SHA — re-review".to_string());
+        monitor.record_review_verdict(7, true);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().last_failure_message,
+            None
+        );
+
+        monitor.begin_review(7, 99, "def456");
+        monitor.autonomous_record_mut(7).last_failure_message = Some("stale".to_string());
+        monitor.record_review_verdict(7, false);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().last_failure_message,
+            None
+        );
+    }
+
+    /// Issue #7810 AC-2: a gate that stays closed is counted per scan and
+    /// parked for a human once the count reaches its limit; an open gate (or
+    /// a new review) starts the count over.
+    #[test]
+    fn issue_7810_a_gate_closed_for_too_many_scans_needs_a_human() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_review_verdict(7, true);
+        for scan in 1..AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            assert!(!monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T09:00:00Z"));
+            let hold = monitor
+                .autonomous_record(7)
+                .unwrap()
+                .gate_hold
+                .clone()
+                .unwrap();
+            assert_eq!(
+                (hold.scans, hold.reason.as_str()),
+                (scan, "ci: Rust (pending)")
+            );
+            assert_eq!(hold.since, "2026-11-23T09:00:00Z");
+        }
+        monitor.clear_gate_hold(7);
+        assert_eq!(monitor.autonomous_record(7).unwrap().gate_hold, None);
+
+        for _ in 1..AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T10:00:00Z");
+        }
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().phase,
+            AutonomousPhase::Reviewing
+        );
+        assert!(monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T12:00:00Z"));
+        let record = monitor.autonomous_record(7).unwrap();
+        assert_eq!(record.phase, AutonomousPhase::NeedsHuman);
+        assert!(monitor
+            .failed_issues
+            .get(&7)
+            .is_some_and(|reason| reason.contains("ci: Rust (pending)")));
+
+        // A new review binding starts over.
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T09:00:00Z");
+        monitor.begin_review(7, 99, "def456");
+        assert_eq!(monitor.autonomous_record(7).unwrap().gate_hold, None);
     }
 
     #[test]

@@ -78,6 +78,7 @@ pub mod pm_current;
 pub mod pm_planning;
 pub mod pm_policy;
 pub mod pm_registry;
+pub mod pm_report_board;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
