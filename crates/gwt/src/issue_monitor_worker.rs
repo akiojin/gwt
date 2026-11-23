@@ -10741,7 +10741,9 @@ exit 0
                     "2026-07-28T00:10:03Z",
                 )
                 .expect_err("either completed verdict must resume live gate readback");
-                assert_eq!(failure.stage, IssueMonitorScanStage::BranchProtection);
+                // Issue #7810: the PR readback comes first; it names the base
+                // whose protection the gate then reads.
+                assert_eq!(failure.stage, IssueMonitorScanStage::StatusCheckReadback);
             }
         }
         // The review window fails to start.
