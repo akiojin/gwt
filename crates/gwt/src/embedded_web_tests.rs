@@ -2711,7 +2711,7 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
         "expected Profile surface to expose selection, CRUD, active-switch, and save events",
     );
     assert!(
-        html.contains("Environment Variables")
+        html.contains("role=\"heading\" aria-level=\"2\">Environment variables")
             && html.contains("Use OS")
             && html.contains("Override")
             && html.contains("Disabled")
