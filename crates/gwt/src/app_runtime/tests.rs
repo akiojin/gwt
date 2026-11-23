@@ -2835,6 +2835,7 @@ fn issue_monitor_autonomous_record(
         last_failure_message: None,
         delivering_since: None,
         review_attempts: None,
+        gate_hold: None,
         cancelled_claim_phase: None,
     }
 }

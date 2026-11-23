@@ -4954,6 +4954,8 @@ pub struct PrGateReadback {
     pub status_check_rollup: String,
     pub head_sha: Option<String>,
     pub merge: PrMergeReadback,
+    /// Issue #7810: the PR's base branch, whose protection the gate applies.
+    pub base_ref: Option<String>,
 }
 
 pub fn try_fetch_pr_gate_readback(repo_path: &Path, number: u64) -> Result<PrGateReadback> {
@@ -4976,7 +4978,7 @@ where
             "view",
             &number,
             "--json",
-            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus",
+            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName",
         ],
     )?;
     if !output.success {
@@ -4991,6 +4993,16 @@ where
         status_check_rollup: extract_status_check_rollup(&output.stdout),
         head_sha: parse_pr_head_sha(&output.stdout),
         merge,
+        base_ref: serde_json::from_str::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("baseRefName")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|base| !base.is_empty())
+                    .map(str::to_string)
+            }),
     })
 }
 
@@ -5013,12 +5025,12 @@ mod tests {
                     "view",
                     "7",
                     "--json",
-                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus"
+                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName"
                 ]
             );
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","baseRefName":"develop"}"#.to_string(),
                 stderr: String::new(),
             })
         })
@@ -5026,6 +5038,8 @@ mod tests {
         assert_eq!(calls, 1);
         assert!(readback.status_check_rollup.contains("\"build\""));
         assert_eq!(readback.head_sha.as_deref(), Some("abc"));
+        // Issue #7810: the gate reads the protection of the PR's own base.
+        assert_eq!(readback.base_ref.as_deref(), Some("develop"));
         assert_eq!(readback.merge.state, "OPEN");
         assert!(
             try_fetch_pr_gate_readback_with(Path::new("/repo"), 7, |_, _| Ok(GhCliOutput {

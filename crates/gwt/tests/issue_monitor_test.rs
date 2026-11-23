@@ -2912,6 +2912,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         last_failure_message: None,
         delivering_since: None,
         review_attempts: None,
+        gate_hold: None,
         cancelled_claim_phase: None,
     });
     let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
