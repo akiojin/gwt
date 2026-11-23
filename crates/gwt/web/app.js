@@ -163,7 +163,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
-      import { logGroupsFromHistoryRows } from "/task-log.js";
       import { windowCommandErrorPresentation } from "/window-command-error.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
@@ -4500,7 +4499,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         const view = pmChatViews.get(windowId);
         if (!view) return;
         view.unsubscribe();
-        view.unsubscribeLog?.();
         view.unsubscribeHumanAttention?.();
         view.controller.dispose();
         applyPmDecisions(windowId, null);
@@ -4582,9 +4580,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               activateTerminalOnReveal(windowData.id);
             });
           },
-          // SPEC #7007 T-013: a Log group opens the notification drawer at
-          // its original record (keyed rows focus their history row).
-          onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
           // SPEC #5016 HSK: unanswered decisions join the shared attention count.
           onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
           // SPEC #5016 HSV: unresolved reviews join the same shared count.
@@ -4595,12 +4590,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           pendingPmDecisions = false;
           view.controller.showDecisions();
         }
-        // SPEC #7007 T-013: the Log view mirrors this page's notification
-        // history (#5016 groups). The subscription fires immediately with
-        // the current rows, then on every history change.
-        view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
-          view.controller.receiveLog(logGroupsFromHistoryRows(rows));
-        });
         // SPEC #5016 HSF: Live facts shows the strip's needs_human value.
         view.unsubscribeHumanAttention = issueMonitorModel.subscribe(model => model.humanAttention.count,
           count => view.controller.receiveHumanAttention(count));
