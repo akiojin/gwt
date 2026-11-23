@@ -825,9 +825,9 @@ dependencies = [
 
 [[package]]
 name = "filetime"
-version = "0.2.29"
+version = "0.2.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+checksum = "e1255e7a9f1902190d4c10a75f2f7f495d3d3ce13e9ba26e6c48683a0f4dbed7"
 dependencies = [
  "cfg-if",
  "libc",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1383,10 +1383,9 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "dunce",
- "filetime",
  "fs2",
  "gwt-config",
  "gwt-core",
@@ -1411,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -1421,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "gwt-core",
  "thiserror 2.0.21",
@@ -1429,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "dirs 7.0.0",
  "fs2",
@@ -1446,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "base64 0.23.1",
  "core-foundation",
@@ -1488,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1502,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "dirs 7.0.0",
  "gwt-core",
@@ -1518,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "fs2",
  "gwt-core",
@@ -1536,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "base64 0.23.1",
  "dunce",
@@ -1557,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1573,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.173.0"
+version = "9.173.1"
 dependencies = [
  "thiserror 2.0.21",
 ]

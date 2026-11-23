@@ -808,19 +808,23 @@ mod tests {
         let before = super::reviewed_auto_merge_pr(&mut env, &input)
             .expect("a Ready same-repository PR can recover from workflow startup failure");
         assert_eq!(before["is_cross_repository"], false);
-        for blocker in [
-            "draft",
-            "head_changed",
-            "ci_failing",
-            "review_pending",
-            "visual_failed",
-        ] {
+        // Issue #7810 AC-1b: no CodeRabbit review (never posted, unread, or
+        // rate-limited) does not refuse the authorization.
+        for coderabbit in [None, Some(false)] {
+            let mut unreviewed = snapshot.clone();
+            unreviewed.inventory.coderabbit_review_complete = coderabbit;
+            env.completion_prs.insert(17, unreviewed);
+            assert!(
+                super::reviewed_auto_merge_pr(&mut env, &input).is_ok(),
+                "CodeRabbit {coderabbit:?} is not an auto-merge condition"
+            );
+        }
+        for blocker in ["draft", "head_changed", "ci_failing", "visual_failed"] {
             let mut invalid = snapshot.clone();
             match blocker {
                 "draft" => invalid.inventory.is_draft = true,
                 "head_changed" => invalid.head_sha = "b".repeat(40),
                 "ci_failing" => invalid.inventory.ci_status = "FAILURE".into(),
-                "review_pending" => invalid.inventory.coderabbit_review_complete = Some(false),
                 "visual_failed" => {
                     invalid.inventory.body = "Agent Visual Check: fail(error)".into()
                 }

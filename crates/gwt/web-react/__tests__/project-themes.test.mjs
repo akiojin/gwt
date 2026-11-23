@@ -49,6 +49,7 @@ function mount(state = {}) {
     openTheme: number => set({ selected: number }),
     closeTheme: () => set({ selected: null }),
     openIssue: number => calls.push(["openIssue", number]),
+    openConversation: source => calls.push(["openConversation", source]),
     askDelete: number => set({ dialog: { number } }),
     cancelDelete: () => set({ dialog: null }),
     confirmDelete: () => calls.push(["confirmDelete", store.read().dialog.number]),
@@ -107,6 +108,7 @@ test("AC-3: no themes shows what a theme is and how one appears", async () => {
   const page = mount({ themes: [], completedToday: 0 });
   const empty = page.document.querySelector("[data-themes-empty]");
   assert.match(empty.textContent, /No themes yet/);
+  assert.match(empty.textContent, /conversation on Home/);
   assert.match(empty.textContent, /GitHub Issue that has sub-issues/);
   assert.equal(page.document.querySelector("[data-themes-list]"), null);
   assert.equal(page.document.querySelector('[data-themes-stat="completed_today"]').textContent, "0");
@@ -159,4 +161,20 @@ test("a theme with one issue is worded in the singular", async () => {
   const page = mount({ selected: 20, dialog: { number: 20 } });
   assert.match(page.document.querySelector("[data-theme-delete-impact]").textContent, /The 1 issue under it stays as it is\./);
   page.unmount();
+});
+
+// Issue #7644 AC-2: a theme recorded from the conversation says so and opens
+// the message it came from.
+test("a recorded theme shows where it came from and opens that message", () => {
+  const source = { sessionId: "pm-session", messageId: "native-turn", recordedAt: "2026-11-23T10:00:00Z" };
+  const page = mount({ selected: 7, themes: rows.map(row => row.number === 7 ? { ...row, recordedFrom: source } : row) });
+  const origin = page.document.querySelector("[data-theme-origin]");
+  assert.match(origin.textContent, /Recorded automatically from the conversation on Home/);
+  page.click(page.document.querySelector("[data-theme-conversation]"));
+  assert.deepEqual(page.calls, [["openConversation", source]]);
+  page.unmount();
+  const other = mount({ selected: 20 });
+  assert.equal(other.document.querySelector("[data-theme-conversation]"), null);
+  assert.equal(other.document.querySelector("[data-theme-origin]"), null);
+  other.unmount();
 });

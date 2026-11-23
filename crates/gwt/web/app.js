@@ -163,7 +163,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
-      import { logGroupsFromHistoryRows } from "/task-log.js";
       import { windowCommandErrorPresentation } from "/window-command-error.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
@@ -337,6 +336,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
       const windowMap = new Map();
       let splitSurfaces = null;
+      let loadIssueThemes = () => {};
+      let updateThemeConnection = () => {};
       let worksSurface = null;
       let agentsSurface = null;
       let rosterHost = null;
@@ -976,7 +977,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
             (message.kind === "get_hook_doctor" && message.repair === true) || message.kind === "update_user_hooks") {
@@ -1241,6 +1242,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function setConnectionState(connected, recoverSnapshots = false) {
         if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); tuningController.disconnectTuning(); }
         connectionOverlay.setConnected(connected);
+        updateThemeConnection(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
@@ -2634,6 +2636,16 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         view?.controller.showDecisions();
       }
 
+      // Issue #7644: a theme recorded from the conversation opens the PM on
+      // the message it came from. A PM not mounted yet shows it once it is.
+      let pendingPmMessage = null;
+      function openPmMessage(messageId) {
+        const view = pmWindowId ? pmChatViews.get(pmWindowId) : null;
+        pendingPmMessage = view ? null : messageId;
+        openPmAgent();
+        view?.controller.showMessage(messageId);
+      }
+
       // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
       let projectAgentSummaryModel = null;
 
@@ -3875,6 +3887,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
+        parentThemeForIssue: number => projectThemes.parentTheme(number),
+        loadIssueThemes: () => loadIssueThemes(),
         currentProjectRoot: () => activeProjectTab()?.project_root,
         sendKnowledgeSemanticSearchNow,
         createNode,
@@ -4495,7 +4509,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         const view = pmChatViews.get(windowId);
         if (!view) return;
         view.unsubscribe();
-        view.unsubscribeLog?.();
         view.unsubscribeHumanAttention?.();
         view.controller.dispose();
         applyPmDecisions(windowId, null);
@@ -4577,9 +4590,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               activateTerminalOnReveal(windowData.id);
             });
           },
-          // SPEC #7007 T-013: a Log group opens the notification drawer at
-          // its original record (keyed rows focus their history row).
-          onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
           // SPEC #5016 HSK: unanswered decisions join the shared attention count.
           onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
           // SPEC #5016 HSV: unresolved reviews join the same shared count.
@@ -4590,12 +4600,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           pendingPmDecisions = false;
           view.controller.showDecisions();
         }
-        // SPEC #7007 T-013: the Log view mirrors this page's notification
-        // history (#5016 groups). The subscription fires immediately with
-        // the current rows, then on every history change.
-        view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
-          view.controller.receiveLog(logGroupsFromHistoryRows(rows));
-        });
+        if (pendingPmMessage != null) {
+          const messageId = pendingPmMessage;
+          pendingPmMessage = null;
+          view.controller.showMessage(messageId);
+        }
         // SPEC #5016 HSF: Live facts shows the strip's needs_human value.
         view.unsubscribeHumanAttention = issueMonitorModel.subscribe(model => model.humanAttention.count,
           count => view.controller.receiveHumanAttention(count));
@@ -6114,7 +6123,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function syncAppChromePm() {
         const pmWindow = (pmLauncherModel.read().workspace?.windows || []).find(windowData => windowData?.is_pm);
         const name = String(pmWindow?.agent_name || rosterModel.read().members.find(member => member.is_pm)?.name || "").trim();
-        appChrome.setPm({ name, decisions: issueMonitorModel.read().pmDecisionAttention.count });
+        // Issue #7635: names are unique in the ledger, so the PM's avatar is its member's.
+        const avatar = name ? rosterModel.read().members.find(member => member.name === name)?.avatar : null;
+        appChrome.setPm({ name, avatar, decisions: issueMonitorModel.read().pmDecisionAttention.count });
       }
       pmLauncherModel.subscribe(state => state.workspace, syncAppChromePm);
       rosterModel.subscribe(state => state.revision, syncAppChromePm);
@@ -6177,11 +6188,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
           requestAgentRoster({ kind: "add", name, pm_eligible: pmEligible });
         },
-        onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
         onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
         onSetTraits: (memberId, traits) => requestAgentRoster({ kind: "set_traits", member_id: memberId, traits }),
-        onActivateMember: memberId => requestAgentRoster({ kind: "activate", member_id: memberId }),
+        onSetAvatar: (memberId, avatar) => requestAgentRoster({ kind: "set_avatar", member_id: memberId, avatar }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
         onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),
@@ -6227,7 +6237,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         document, send, repliesModel: themeRepliesModel, // An issue under a theme opens in the Issues screen, like an Issue link
         // in a window header.
         onOpenIssue: number => runIssueWindowHeaderAction("open-issue", { linked_issue_number: number }),
+        onOpenConversation: ({ messageId }) => openPmMessage(messageId),
+        getProjectKey: activeProjectKey,
+        onHierarchyChange: renderAllKnowledgeBridgeWindows,
       });
+      loadIssueThemes = projectThemes.loadHierarchy;
+      updateThemeConnection = projectThemes.updateConnection;
       const themesElement = projectThemes.element;
       themesElement.hidden = true;
       document.querySelector(".surface-area").appendChild(themesElement);

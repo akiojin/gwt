@@ -3,9 +3,19 @@ import { renderMemberTuningControls } from "./settings-surface.js";
 import { createFocusTrap } from "./focus-trap.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { mountIsland } from "./react/islands.js";
+import { AVATAR_PRESETS, agentAvatar } from "./agent-avatar.js";
 
 const configuredPm = member => !!member?.pm_project_key;
 const holdsPmRole = member => !!member && (member.is_pm || !!member.pm_project_key || member.assignment?.role === "pm");
+// Draw `member`'s avatar (Issue #7635) into an existing node and return it.
+function renderAgentAvatar(node, member) {
+  const view = agentAvatar(member);
+  if (node.textContent !== view.glyph) node.textContent = view.glyph;
+  node.dataset.avatarKind = view.kind;
+  if (view.presetId) node.dataset.avatarPreset = view.presetId;
+  else delete node.dataset.avatarPreset;
+  return node;
+}
 const rosterReady = roster => roster.revision !== null && roster.revision !== undefined;
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
@@ -29,11 +39,11 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 
 export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onSetAvatar = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> registered members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Registered members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
     <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. The tool a session starts with comes from the project's available execution environments, not from the member. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" data-project-only hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
@@ -73,7 +83,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const draft = nameInput.value.trim();
     const conflict = registrationConflict();
     const error = !draft ? "Enter a display name." : conflict
-      ? `${conflict.name} is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
+      ? `${conflict.name} is already registered and uses this name. ` : "";
     registrationMessage.textContent = nameTouched ? error : "";
     showConflict.hidden = !nameTouched || !conflict;
     registrationError.hidden = !nameTouched || !error;
@@ -153,7 +163,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     return result;
   }
   function avatar(member) {
-    const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); result.textContent = Array.from(member.name || "?")[0]; return result;
+    const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); return renderAgentAvatar(result, member);
   }
   function setSelectedMember(memberId) {
     if (memberId === selectedId) return;
@@ -181,10 +191,6 @@ export function createAgentsSurface({ document, storage, executionModel, project
       return;
     }
     if (tab !== "team") { tab = "team"; sync(); }
-  }
-  function restSelected() {
-    const member = rosterModel.read().members.find(member => member.member_id === selectedId && member.enabled);
-    if (member && !configuredPm(member) && rosterModel.read().members.filter(member => member.enabled).length > 1) onRestMember(member.member_id);
   }
   function syncSwitchControls(section, member, current) {
     const switching = switchState(), intent = switching.intents.find(intent => intent.member_id === member.member_id);
@@ -243,7 +249,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const state = scheduleState(), snapshot = state.snapshot;
     const pending = state.pending || submittedSnapshot === snapshot && snapshot !== null;
     const current = liveWork(member);
-    const inputs = [member.member_id, member.enabled, rosterModel.read().revision, rosterModel.read().error, snapshot, state.error, pending, scheduleNotice, current?.window_id, current?.session_id, current?.runtime_incarnation, current?.issue_number];
+    const inputs = [member.member_id, rosterModel.read().revision, rosterModel.read().error, snapshot, state.error, pending, scheduleNotice, current?.window_id, current?.session_id, current?.runtime_incarnation, current?.issue_number];
     if (renderedPlans?.inputs.every((value, index) => value === inputs[index])) { syncSwitchControls(renderedPlans.section, member, current); return renderedPlans.section; }
     const section = document.createElement("section"); section.className = "roster-plans";
     renderedPlans = { inputs, section };
@@ -271,18 +277,18 @@ export function createAgentsSurface({ document, storage, executionModel, project
       const select = document.createElement("select"), reassign = document.createElement("button");
       select.setAttribute("aria-label", `Assign issue #${issue.issue_number} to member`);
       const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "Choose member"; select.append(placeholder);
-      for (const target of rosterModel.read().members.filter(target => target.enabled && !holdsPmRole(target) && target.member_id !== member.member_id)) {
+      for (const target of rosterModel.read().members.filter(target => !holdsPmRole(target) && target.member_id !== member.member_id)) {
         const option = document.createElement("option"); option.value = target.member_id; option.textContent = target.name; select.append(option);
       }
-      const blocked = pending || !!state.error || stale || !member.enabled;
+      const blocked = pending || !!state.error || stale;
       select.disabled = blocked || select.options.length <= 1;
       reassign.type = "button"; reassign.textContent = "Reassign"; reassign.setAttribute("aria-label", `Reassign issue #${issue.issue_number}`); reassign.disabled = true;
       select.addEventListener("change", () => { reassign.disabled = blocked || !select.value; });
       reassign.addEventListener("click", () => {
         const latest = scheduleState(), roster = rosterModel.read();
         if (latest.pending || submittedSnapshot || latest.error) return;
-        const source = roster.members.find(target => target.member_id === member.member_id && target.enabled);
-        const target = roster.members.find(target => target.member_id === select.value && target.enabled && !holdsPmRole(target) && target.member_id !== member.member_id);
+        const source = roster.members.find(target => target.member_id === member.member_id);
+        const target = roster.members.find(target => target.member_id === select.value && !holdsPmRole(target) && target.member_id !== member.member_id);
         if (latest.snapshot !== snapshot || roster.revision !== snapshot.roster_revision || !source || !target) {
           scheduleNotice = "Plans changed. Refresh plans before reassigning."; sync(); return;
         }
@@ -298,7 +304,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
         change.disabled = true;
         change.addEventListener("click", () => {
           const latest = scheduleState(), roster = rosterModel.read(), switching = switchState();
-          const source = roster.members.find(value => value.member_id === member.member_id && value.enabled && !value.is_pm), live = liveWork(source);
+          const source = roster.members.find(value => value.member_id === member.member_id && !value.is_pm), live = liveWork(source);
           if (switching.pending || switching.disconnected || switching.error || switching.intents.some(value => value.member_id === member.member_id && !["completed", "cancelled", "failed"].includes(value.stage))) return;
           if (latest.pending || submittedSnapshot || latest.error || roster.error || latest.snapshot !== snapshot || roster.revision !== snapshot.roster_revision ||
               !live || live.window_id !== current.window_id || live.session_id !== current.session_id || live.runtime_incarnation !== current.runtime_incarnation || live.issue_number !== current.issue_number) {
@@ -323,7 +329,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     // Refresh presentation around unchanged native controls without detaching
     // their keyboard targets. A different member/runtime retires those controls.
     for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions) child.remove();
-    if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
+    if (!member) { panel.textContent = "No registered members. Add a member to begin."; return; }
     if (plans.parentElement !== panel) panel.insertBefore(plans, actions || null);
     if (head.parentElement !== panel) panel.prepend(head);
     panel.insertBefore(stats(member), currentWork || plans);
@@ -358,13 +364,12 @@ export function createAgentsSurface({ document, storage, executionModel, project
     if (member.assignment?.session_id && activityModel.read().count === null) {
       const unavailable = document.createElement("p"); unavailable.className = "roster-description"; unavailable.textContent = "Activity unavailable"; panel.append(unavailable);
     }
-    if (!actions) {
+    if (current && !actions) {
       actions = document.createElement("div"); actions.className = "roster-actions";
       if (current) { const open = document.createElement("button"); open.type = "button"; open.className = "roster-open"; open.textContent = "Open terminal in Works"; open.addEventListener("click", () => openCurrent(member.member_id, current)); actions.append(open); }
-      const rest = document.createElement("button"); rest.type = "button"; rest.dataset.action = "rest"; rest.textContent = "Rest member"; rest.addEventListener("click", restSelected); actions.append(rest); panel.append(actions);
+      panel.append(actions);
     }
-    actions.querySelector('[data-action="rest"]').disabled = !member.enabled || configuredPm(member) || rosterModel.read().members.filter(member => member.enabled).length <= 1;
-    panel.insertBefore(history, actions);
+    panel.insertBefore(history, actions || null);
     renderedDetail = { key, currentWork, actions };
   }
   function memberNameField(member) {
@@ -393,7 +398,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
       const eligible = document.createElement("input"); eligible.type = "checkbox"; eligible.className = "settings-checkbox"; eligible.dataset.action = "pm-eligible";
       eligible.addEventListener("change", () => { if (!eligible.disabled) onSetPmEligibility(member.member_id, eligible.checked); }); eligibleLabel.append(eligible, document.createTextNode("PM eligible"));
       const selectPm = document.createElement("button"); selectPm.type = "button"; selectPm.dataset.action = "select-pm";
-      selectPm.addEventListener("click", () => { const latest = rosterModel.read().members.find(item => item.member_id === member.member_id); if (latest?.pm_project_key && latest.pm_project_key !== rosterModel.read().project_key) onNavigateProject(latest.pm_project_key); else if (latest?.enabled && latest.pm_eligible && !holdsPmRole(latest)) onSelectPm(member.member_id); });
+      selectPm.addEventListener("click", () => { const latest = rosterModel.read().members.find(item => item.member_id === member.member_id); if (latest?.pm_project_key && latest.pm_project_key !== rosterModel.read().project_key) onNavigateProject(latest.pm_project_key); else if (latest?.pm_eligible && !holdsPmRole(latest)) onSelectPm(member.member_id); });
       const tuning = document.createElement("section"); tuning.dataset.memberTuning = "";
       const traits = document.createElement("section"); traits.className = "roster-traits"; traits.dataset.memberTraits = ""; traits.setAttribute("aria-label", "Traits");
       traits.innerHTML = `<h4>Traits</h4><p class="settings-help">Fixed for this agent on every tool. A launch can override a value once; it never changes what is saved here.</p>${
@@ -409,11 +414,25 @@ export function createAgentsSurface({ document, storage, executionModel, project
         const next = { ...field.traitsDraft, personality: field.traitsDraft.personality.trim() };
         onSetTraits(latest.member_id, Object.fromEntries(Object.entries(next).filter(([, value]) => value)));
       });
-      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, traits, tuning); head.append(avatar(member), who);
+      // Issue #7635: the avatar is the agent's own; choosing one changes every display of it.
+      const avatarPicker = document.createElement("section"); avatarPicker.className = "roster-avatar-picker"; avatarPicker.dataset.memberAvatar = "";
+      const avatarTitle = document.createElement("h4"); avatarTitle.id = `roster-avatar-title-${member.member_id}`; avatarTitle.textContent = "Avatar";
+      const avatarChoices = document.createElement("div"); avatarChoices.className = "roster-avatar-choices"; avatarChoices.setAttribute("role", "radiogroup"); avatarChoices.setAttribute("aria-labelledby", avatarTitle.id);
+      for (const choice of [{ id: "default", label: "Initial" }, ...AVATAR_PRESETS]) {
+        const button = document.createElement("button"); button.type = "button"; button.className = "roster-avatar roster-avatar-choice";
+        button.dataset.avatarChoice = choice.id; button.setAttribute("role", "radio"); button.setAttribute("aria-label", choice.label); button.title = choice.label;
+        button.addEventListener("click", () => {
+          const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+          if (disposed || !latest || !rosterReady(roster) || roster.pending_roster || button.getAttribute("aria-checked") === "true") return;
+          onSetAvatar(latest.member_id, choice.id === "default" ? { kind: "default" } : { kind: "preset", preset_id: choice.id });
+        });
+        avatarChoices.append(button);
+      }
+      avatarPicker.append(avatarTitle, avatarChoices); field.avatarPicker = avatarPicker;
+      label.append(input); who.append(name, meta, label, status, retry, avatarPicker, eligibleLabel, selectPm, traits, tuning); field.avatar = avatar(member); head.append(field.avatar, who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
-    field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     field.head.querySelector("p").textContent = `Member since ${date(member.created_at)} UTC`;
     let memberId = field.head.querySelector(".roster-member-id");
     if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
@@ -433,7 +452,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const selectPm = field.head.querySelector('[data-action="select-pm"]');
     const foreign = member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key;
     selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";
-    selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.enabled || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
+    selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
     const saved = savedTraits(member), same = draft => !!draft && Object.keys(saved).every(name => (name === "personality" ? draft[name].trim() : draft[name]) === saved[name]);
     // A draft stays until the ledger holds the same values, so a refused save loses nothing.
     if (same(field.traitsDraft)) field.traitsDraft = null;
@@ -448,6 +467,14 @@ export function createAgentsSurface({ document, storage, executionModel, project
       control.disabled = !rosterReady(rosterModel.read());
     }
     field.traits.querySelector('[data-action="save-traits"]').disabled = held || !field.traitsDraft;
+    const shown = renderAgentAvatar(field.avatar, member).dataset;
+    for (const button of field.avatarPicker.querySelectorAll("[data-avatar-choice]")) {
+      const id = button.dataset.avatarChoice;
+      if (id === "default") renderAgentAvatar(button, { name: member.name });
+      else button.textContent = AVATAR_PRESETS.find(preset => preset.id === id).glyph;
+      button.setAttribute("aria-checked", String(id === (shown.avatarPreset || "default")));
+      button.disabled = held;
+    }
     // Issue #7647 (SPEC #7007 item 27): a member has no tool of its own, so
     // the ledger offers none, nor a model or reasoning for it. Only the
     // Project Manager keeps those here, until it has its own list of
@@ -556,12 +583,6 @@ export function createAgentsSurface({ document, storage, executionModel, project
       }
       const assignments = document.createElement("div"); assignments.className = "roster-assignments";
       assignments.setAttribute("role", "group"); assignments.setAttribute("aria-label", "Project assignments");
-      const activate = document.createElement("button"); activate.type = "button";
-      activate.dataset.action = "activate"; activate.textContent = "Reactivate";
-      activate.addEventListener("click", () => {
-        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
-        if (!disposed && rosterReady(roster) && !roster.pending_roster && latest && !latest.enabled) onActivateMember(latest.member_id);
-      });
       // Issue #7646: the ledger order is the assignee priority.
       const order = document.createElement("div"); order.className = "roster-order"; order.setAttribute("role", "group");
       const position = document.createElement("span"); position.className = "roster-order-position"; order.append(position);
@@ -577,17 +598,14 @@ export function createAgentsSurface({ document, storage, executionModel, project
       }
       // The controls sit at the row's trailing edge, so the body of the row stays the selection target.
       const traits = document.createElement("span"); traits.className = "roster-row-traits";
-      who.append(name, purpose, traits, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state, order);
+      who.append(name, purpose, traits, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state, order);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
     }
     const { row } = cached, unavailable = member.assignment?.session_id && activityModel.read().count === null;
     row.setAttribute("aria-selected", String(member.member_id === selectedId));
-    const activate = row.querySelector('[data-action="activate"]');
-    activate.hidden = member.enabled;
-    activate.disabled = member.enabled || !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
-    row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
+    renderAgentAvatar(row.querySelector(".roster-avatar"), member);
     row.querySelector("h3").textContent = member.name;
     const order = row.querySelector(".roster-order"), held = !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     order.setAttribute("aria-label", `Order and deletion for ${member.name}`);
@@ -598,7 +616,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
       button.setAttribute("aria-label", label); button.title = label; button.disabled = held || edge;
     }
     const purpose = row.querySelector(".roster-purpose");
-    purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : member.enabled ? "Waiting for the next issue" : "Not selected for new work"; purpose.title = purpose.textContent;
+    purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
     const traits = row.querySelector(".roster-row-traits");
     traits.textContent = traitsSummary(member); traits.title = traits.textContent; traits.hidden = !traits.textContent;
     const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
@@ -623,7 +641,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
       }
       assignments.hidden = !summaries.length; cached.summariesKey = summariesKey;
     }
-    row.querySelector(".roster-state").textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? `${member.enabled ? "" : "Resting · "}Activity unavailable` : member.enabled ? "Waiting" : "Resting";
+    row.querySelector(".roster-state").textContent = current ? `In Works${current.issue_number ? ` #${current.issue_number}` : ""}` : unavailable ? "Activity unavailable" : "Waiting";
     const values = [number(member.issue_count), number(member.landed_count), hours(member.active_seconds), number(member.tokens)];
     row.querySelectorAll(".roster-stat b").forEach((node, index) => { node.textContent = values[index]; });
     return row;
@@ -640,22 +658,20 @@ export function createAgentsSurface({ document, storage, executionModel, project
     identity.querySelector(".roster-pm-name").textContent = pm?.agent_name || (pm ? "Project Manager" : "");
     const schedule = scheduleState();
     if (submittedSnapshot && (schedule.error || schedule.snapshot !== submittedSnapshot)) submittedSnapshot = null;
-    const enabledMembers = (roster.members || []).filter(member => member.enabled);
     const members = roster.members || [];
-    const enabledCount = enabledMembers.length;
+    const memberCount = members.length;
     if (rosterReady(roster) && !members.some(member => member.member_id === selectedId)) {
       setSelectedMember(members[0]?.member_id || null);
     }
     const selected = members.find(member => member.member_id === selectedId);
-    element.querySelector(".roster-count").textContent = String(enabledCount);
+    element.querySelector(".roster-count").textContent = String(memberCount);
     element.querySelector(".roster-capacity-value").textContent = number(roster.capacity);
-    const scale = Math.max(enabledCount, roster.recommended_capacity || 0, roster.capacity || 0, 1) * 1.25;
-    const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(enabledCount));
-    element.querySelector(".roster-capacity-fill").style.width = `${enabledCount / scale * 100}%`;
+    const scale = Math.max(memberCount, roster.recommended_capacity || 0, roster.capacity || 0, 1) * 1.25;
+    const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(memberCount));
+    element.querySelector(".roster-capacity-fill").style.width = `${memberCount / scale * 100}%`;
     const limit = element.querySelector(".roster-capacity-limit"); limit.hidden = !finite(roster.recommended_capacity); limit.style.left = `${(roster.recommended_capacity || 0) / scale * 100}%`;
     const reviewCount = renderReviews();
-    element.querySelector(".roster-capacity-note").textContent = `Registered ${number(rosterReady(roster) ? members.length : null)} · Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length + reviewCount)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
-    element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || configuredPm(selected) || enabledCount <= 1;
+    element.querySelector(".roster-capacity-note").textContent = `Registered ${number(rosterReady(roster) ? members.length : null)} · Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length + reviewCount)} / Team ${memberCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && memberCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
     const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
     const list = element.querySelector(".roster-list"), memberIds = new Set(members.map(member => member.member_id));
     for (const [id, { row }] of memberRows) if (!memberIds.has(id)) { row.remove(); memberRows.delete(id); }
@@ -698,7 +714,6 @@ export function createAgentsSurface({ document, storage, executionModel, project
       syncRegistration(); syncPreview();
     });
   }
-  element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
   for (const button of element.querySelectorAll("[data-tab]")) {
     button.addEventListener("click", () => { tab = button.dataset.tab; sync(); });
     button.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); tab = event.key === "Home" ? "team" : event.key === "End" ? "past" : tab === "team" ? "past" : "team"; sync(); element.querySelector(`[data-tab="${tab}"]`).focus(); });

@@ -11733,6 +11733,7 @@ impl AppRuntime {
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
             | FrontendEvent::SelectKnowledgeBridgeEntry { id, .. }
+            | FrontendEvent::EditIssueSubtask { id, .. }
             | FrontendEvent::UpdateKnowledgeBridgePhase { id, .. }
             | FrontendEvent::SetIssueAutonomousTarget { id, .. }
             | FrontendEvent::RunBranchCleanup { id, .. }
@@ -12174,6 +12175,7 @@ impl AppRuntime {
             | FrontendEvent::SearchProjectIndex { id, .. }
             | FrontendEvent::RequestWorkAdvisory { id, .. }
             | FrontendEvent::SelectKnowledgeBridgeEntry { id, .. }
+            | FrontendEvent::EditIssueSubtask { id, .. }
             | FrontendEvent::UpdateKnowledgeBridgePhase { id, .. }
             | FrontendEvent::SetIssueAutonomousTarget { id, .. }
             | FrontendEvent::RunBranchCleanup { id, .. }
@@ -12887,6 +12889,12 @@ impl AppRuntime {
                 issue_number,
                 target_phase.as_deref(),
             ),
+            FrontendEvent::EditIssueSubtask {
+                id,
+                request_id,
+                number,
+                change,
+            } => self.issue_subtask_events(&client_id, &id, request_id, number, change),
             FrontendEvent::SetIssueAutonomousTarget {
                 id,
                 request_id,

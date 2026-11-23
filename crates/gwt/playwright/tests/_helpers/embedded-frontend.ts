@@ -31,7 +31,6 @@ const ROOT_MODULES = new Set([
   // SPEC #7007 — task-centered Progress island host imported by pm-chat.js.
   "task-progress.js",
   // SPEC #7007 — task-centered Log island host imported by pm-chat.js and app.js.
-  "task-log.js",
   // Issue #7648 — Execution environments island host imported by app.js.
   "execution-environments.js",
   // Issue #7740 — shared header and footer imported by app.js, hub-app.js and frontend-route.js.
@@ -80,6 +79,7 @@ const ROOT_MODULES = new Set([
   "surface-rail.js",
   "split-surfaces.js",
   "agents-surface.js",
+  "agent-avatar.js",
   "works-surface.js",
   "terminal-text-preview.js",
   "focus-trap.js",

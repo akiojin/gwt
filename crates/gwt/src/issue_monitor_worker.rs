@@ -3985,16 +3985,20 @@ fn advance_one_autonomous_issue(
             if ci_wait_hold_active(repo_path, pr, Instant::now()) {
                 return Ok(());
             }
-            let protection =
-                run_budgeted_readback_stage(IssueMonitorScanStage::BranchProtection, || {
-                    fetch_branch_protection_for_monitor(repo_path, repo_slug, base_branch)
-                })?;
             // Issue #4726 AC-1: an auto-merge armed on a conflicting / behind
             // PR never merges, so the gate reads mergeability too. Issue #6877
             // AC-2: rollup, head and mergeability come from one `gh` call.
             let gate_readback =
                 run_budgeted_readback_stage(IssueMonitorScanStage::StatusCheckReadback, || {
                     gwt_git::pr_status::try_fetch_pr_gate_readback(repo_path, pr)
+                })?;
+            // Issue #7810 AC-1: GitHub merges the PR under its own base's
+            // protection. The repository default branch (`origin/HEAD`) can
+            // require checks a PR into another base never runs.
+            let base_branch = gate_readback.base_ref.as_deref().unwrap_or(base_branch);
+            let protection =
+                run_budgeted_readback_stage(IssueMonitorScanStage::BranchProtection, || {
+                    fetch_branch_protection_for_monitor(repo_path, repo_slug, base_branch)
                 })?;
             let rollup = gate_readback.status_check_rollup;
             let head = gate_readback.head_sha.unwrap_or_default();
@@ -4075,6 +4079,37 @@ fn advance_one_autonomous_issue(
                     issue_number,
                 ) {
                     routed = crate::issue_monitor_gate::GateAction::Hold(reason);
+                }
+            }
+            // Issue #7810 AC-2: a gate that stays closed says which inputs
+            // closed it, and is parked for a human once it plainly will not
+            // open by itself.
+            match &routed {
+                crate::issue_monitor_gate::GateAction::WaitForCi
+                | crate::issue_monitor_gate::GateAction::Hold(_) => {
+                    let mut closed = crate::issue_monitor_gate::closed_gate_inputs(
+                        &inputs,
+                        &rollup,
+                        base_branch,
+                    );
+                    if let crate::issue_monitor_gate::GateAction::Hold(reason) = &routed {
+                        closed.push(format!("hold: {reason}"));
+                    }
+                    let reason = closed.join("; ");
+                    tracing::info!(
+                        issue = issue_number,
+                        pr,
+                        base = base_branch,
+                        reason = %reason,
+                        "Issues: autonomous gate closed"
+                    );
+                    if monitor.record_gate_closed(issue_number, reason, now) {
+                        return Ok(());
+                    }
+                }
+                crate::issue_monitor_gate::GateAction::Deliver
+                | crate::issue_monitor_gate::GateAction::Remediate(_) => {
+                    monitor.clear_gate_hold(issue_number);
                 }
             }
             match routed {
@@ -10706,7 +10741,9 @@ exit 0
                     "2026-07-28T00:10:03Z",
                 )
                 .expect_err("either completed verdict must resume live gate readback");
-                assert_eq!(failure.stage, IssueMonitorScanStage::BranchProtection);
+                // Issue #7810: the PR readback comes first; it names the base
+                // whose protection the gate then reads.
+                assert_eq!(failure.stage, IssueMonitorScanStage::StatusCheckReadback);
             }
         }
         // The review window fails to start.
@@ -10884,7 +10921,7 @@ exit 0
 case "$*" in
   *repos/owner/repo/branches/develop/protection)
     printf '%s\n' '{"required_status_checks":{"contexts":["Rust"]},"allow_force_pushes":{"enabled":false}}' ;;
-  'pr view 7 --json statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus')
+  'pr view 7 --json statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName')
     printf '%s\n' '{"statusCheckRollup":[{"name":"Rust","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/90/job/10"}],"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   'api /repos/owner/repo/actions/runs/90')
     cat "$GWT_TEST_CI_RERUN_FIXTURES/run.json" ;;
@@ -10955,9 +10992,24 @@ esac
             .expect("reviewing scan");
         };
 
+        // Issue #7810 AC-2: waiting on the retry keeps the gate closed, and
+        // the record names why; everything else is left as it was.
+        let without_gate_hold = |monitor: &IssueMonitorState| {
+            monitor.autonomous_record(42).cloned().map(|mut record| {
+                record.gate_hold = None;
+                record
+            })
+        };
         workflow(1, "completed");
         scan(&mut monitor);
-        assert_eq!(monitor.autonomous_record(42), reviewing.as_ref());
+        assert_eq!(without_gate_hold(&monitor), reviewing);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.gate_hold.clone())
+                .map(|hold| hold.reason),
+            Some("ci: required checks of develop not passed: Rust (failed)".to_string())
+        );
         assert_eq!(monitor.pending_effects().len(), 1);
         let effect = monitor.pending_effects()[0].clone();
         assert_eq!(effect.effect_id, "ci-rerun:7:abc123:90");
@@ -10975,8 +11027,8 @@ esac
         workflow(2, "in_progress");
         scan(&mut monitor);
         assert_eq!(
-            monitor.autonomous_record(42),
-            reviewing.as_ref(),
+            without_gate_hold(&monitor),
+            reviewing,
             "a pending retry retains the reviewed generation and attempt count"
         );
         assert!(monitor.pending_effects().is_empty());
@@ -10992,6 +11044,165 @@ esac
             Some("CI failed or independent review rejected — remediate")
         );
         assert!(monitor.pending_effects().is_empty());
+    }
+
+    /// Issue #7810 AC-1/AC-2: the Reviewing gate reads the branch protection
+    /// of the PR's own base, not the repository default branch. A PR into
+    /// `develop` never runs a check only `main` requires, so reading `main`'s
+    /// protection left the gate waiting on CI forever, without a word.
+    #[cfg(unix)]
+    #[test]
+    fn issue_7810_reviewing_gate_reads_the_protection_of_the_pr_base() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        for args in [
+            vec!["init", "--bare"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("initialize repository");
+            assert!(output.status.success(), "git fixture: {output:?}");
+        }
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("create bin");
+        let fake_gh = bin.join("gh");
+        std::fs::write(
+            &fake_gh,
+            r#"#!/bin/sh
+case "$*" in
+  *repos/owner/repo/branches/main/protection)
+    printf '%s\n' '{"required_status_checks":{"contexts":["Rust","check-source-branch"]},"allow_force_pushes":{"enabled":false}}' ;;
+  *repos/owner/repo/branches/develop/protection)
+    printf '%s\n' '{"required_status_checks":{"contexts":["Rust"]},"allow_force_pushes":{"enabled":false}}' ;;
+  'pr view 7 --json statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName')
+    cat "$GWT_TEST_GATE_FIXTURES/pr.json" ;;
+  *) printf '%s\n' "unexpected gh call: $*" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .expect("write fake gh");
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake gh");
+        let mut paths = vec![bin];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let _fixtures =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GATE_FIXTURES", temp.path());
+        let pr_base = |base: &str| {
+            std::fs::write(
+                temp.path().join("pr.json"),
+                serde_json::json!({
+                    "statusCheckRollup": [
+                        {"name": "Rust", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                    ],
+                    "headRefOid": "abc123", "state": "OPEN",
+                    "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+                    "baseRefName": base
+                })
+                .to_string(),
+            )
+            .expect("write PR readback");
+        };
+        let body = "## Acceptance Criteria\n- [ ] AC-1: returns 200\n";
+        let issues = [IssueMonitorIssue {
+            labels: vec!["auto-merge".into()],
+            body: Some(body.into()),
+            ..issue(42)
+        }];
+        let mut reviewed = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        reviewed.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(body).snapshot(),
+        );
+        reviewed.begin_review(42, 7, "abc123");
+        reviewed.record_review_verdict(42, true);
+        let scan = |monitor: &mut IssueMonitorState| {
+            advance_one_autonomous_issue(
+                monitor,
+                &issues,
+                "owner/repo",
+                temp.path(),
+                // The repository default branch (`origin/HEAD`) is `main`.
+                "main",
+                None,
+                b"secret",
+                42,
+                "2026-11-23T09:00:00Z",
+            )
+            .expect("reviewing scan");
+        };
+
+        // A PR into develop: develop's required checks passed, so it arms.
+        pr_base("develop");
+        let mut monitor = reviewed.clone();
+        scan(&mut monitor);
+        assert!(
+            monitor.pending_effects().iter().any(|effect| matches!(
+                &effect.payload,
+                crate::IssueMonitorEffectPayload::ArmAutoMerge {
+                    issue_number: 42,
+                    pr_number: 7,
+                    reviewed_sha,
+                } if reviewed_sha == "abc123"
+            )),
+            "a reviewed, green PR into develop is armed: {:?}",
+            monitor.pending_effects()
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|r| r.gate_hold.clone()),
+            None
+        );
+
+        // A PR into main still waits on main's own required check — and
+        // now says so, on the record that `issue.monitor.status` shows.
+        pr_base("main");
+        let mut monitor = reviewed.clone();
+        scan(&mut monitor);
+        assert!(monitor.pending_effects().is_empty());
+        let hold = monitor
+            .autonomous_record(42)
+            .and_then(|record| record.gate_hold.clone())
+            .expect("a closed gate records why");
+        assert_eq!(hold.scans, 1);
+        assert!(
+            hold.reason.contains("check-source-branch") && hold.reason.contains("main"),
+            "reason names the closed input: {}",
+            hold.reason
+        );
+        let summary = monitor
+            .status_view()
+            .autonomous_issues
+            .into_iter()
+            .find(|summary| summary.issue_number == 42)
+            .expect("status row");
+        assert_eq!(summary.gate_hold, Some(hold));
     }
 }
 

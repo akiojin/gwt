@@ -22,24 +22,27 @@ const settle = async () => {
   await new Promise(resolve => setImmediate(resolve));
 };
 
-function fixture({ sendResult = "sent" } = {}) {
+function fixture({ sendResult = "sent", getProjectKey } = {}) {
   const { document, window } = parseHTML("<!doctype html><html><body></body></html>");
   globalThis.document = document;
   globalThis.window = window;
   const sent = [];
   const opened = [];
+  const conversations = [];
   const repliesModel = createUiStateStore({ reply: null });
   const themes = createProjectThemes({
     document, repliesModel,
     send: message => { sent.push(message); return sendResult; },
     onOpenIssue: number => opened.push(number),
+    onOpenConversation: source => conversations.push(source),
+    getProjectKey,
     scheduleFrame: callback => { callback(); return () => {}; },
   });
   document.body.appendChild(themes.element);
   const reply = async event => { repliesModel.update(() => ({ reply: event })); await settle(); };
   const click = async selector => { document.querySelector(selector).click(); await settle(); };
   const text = () => themes.element.textContent;
-  return { document, themes, sent, opened, reply, click, text };
+  return { document, themes, sent, opened, conversations, reply, click, text };
 }
 
 test("opening the screen asks for the themes and shows the answer", async () => {
@@ -75,6 +78,31 @@ test("an answer to an older request does not replace the newer one", async () =>
   assert.doesNotMatch(page.text(), /Theme 7/, "the first request was superseded");
   await page.reply({ kind: "themes", request_id: 2, view: view([theme(20)]) });
   assert.match(page.text(), /Theme 20/);
+  page.themes.dispose();
+});
+
+test("Issues shares the Themes hierarchy only for the active project", async () => {
+  let project = "first";
+  const page = fixture({ getProjectKey: () => project });
+  page.themes.loadHierarchy();
+  page.themes.loadHierarchy();
+  assert.equal(page.sent.length, 1);
+  await page.reply({ kind: "themes", request_id: 1, view: view([theme(7)]) });
+  assert.equal(page.themes.parentTheme(8).number, 7);
+  project = "second";
+  assert.equal(page.themes.parentTheme(8), undefined);
+  page.themes.loadHierarchy();
+  await page.reply({ kind: "themes", request_id: 2, view: view([theme(20)]) });
+  assert.equal(page.themes.parentTheme(8), undefined);
+  assert.equal(page.themes.parentTheme(21).number, 20);
+  page.themes.reload();
+  page.themes.updateConnection(false);
+  page.themes.updateConnection(true);
+  assert.equal(page.sent.at(-1).request_id, 4);
+  await page.reply({ kind: "themes", request_id: 3, view: view([theme(7)]) });
+  assert.equal(page.themes.parentTheme(8), undefined);
+  await page.reply({ kind: "themes", request_id: 4, view: view([theme(7)]) });
+  assert.equal(page.themes.parentTheme(8).number, 7);
   page.themes.dispose();
 });
 
@@ -139,4 +167,25 @@ test("the Themes styles use Operator tokens only", () => {
   for (const rule of rules) {
     assert.doesNotMatch(rule, /#[0-9a-fA-F]{3,8}\b|rgba?\(/, rule);
   }
+});
+
+// Issue #7644: a theme the PM recorded leads back to its conversation turn.
+test("a recorded theme opens the conversation it came from", async () => {
+  const page = fixture();
+  page.themes.reload();
+  const recorded = { ...theme(7, 0, 0), issues: [],
+    recorded_from: { session_id: "pm-session", message_id: "native-turn", recorded_at: "2026-11-23T10:00:00Z" } };
+  await page.reply({ kind: "themes", request_id: 1, view: view([recorded, theme(20)]) });
+  assert.match(page.document.querySelector('[data-theme-number="7"]').textContent, /0 issues under it/);
+
+  await page.click('[data-theme-number="7"]');
+  assert.match(page.text(), /Recorded automatically from the conversation on Home/);
+  await page.click("[data-theme-conversation]");
+  assert.deepEqual(page.conversations, [{ sessionId: "pm-session", messageId: "native-turn" }]);
+
+  await page.click("[data-themes-back]");
+  await page.click('[data-theme-number="20"]');
+  assert.equal(page.document.querySelector("[data-theme-conversation]"), null,
+    "a theme made on GitHub has no conversation to open");
+  page.themes.dispose();
 });

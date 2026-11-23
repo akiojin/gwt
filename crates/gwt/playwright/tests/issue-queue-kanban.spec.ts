@@ -30,6 +30,7 @@ test.beforeEach(async ({ page }, info) => {
     inboxFirst: info.title.startsWith("Issue #5287"),
     includeAgent: info.title.startsWith("AC-M1/M2:") || info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
+    includeTheme: info.title.startsWith("Issue #7645"),
   });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
@@ -1687,6 +1688,33 @@ test("card selection keeps issue body, acceptance and provenance beside switchab
   await expect(page.locator(".issue-queue-board")).toBeVisible();
 });
 
+test("Issue #7645 shows delayed theme progress and edits issue subtasks", async ({ page }) => {
+  const detail = page.locator(".knowledge-detail-pane");
+  await row(page, 3).locator(".knowledge-row-select").click();
+  const parent = detail.getByRole("link", { name: "Project theme (#70)" });
+  await expect(parent).toHaveCount(0);
+  const title = detail.getByLabel("Subtask title");
+  await title.fill("Verify the change");
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__queueShowTheme)).toBe("function");
+  await page.evaluate(() => (window as any).__queueShowTheme());
+  await expect(row(page, 3)).toContainText("In theme Project theme");
+  await expect(parent).toHaveAttribute("href", "https://github.com/example/repo/issues/70");
+  const theme = detail.getByRole("progressbar", { name: "Theme progress done" });
+  await expect(theme).toHaveAttribute("aria-valuenow", "1");
+  await expect(theme).toHaveAttribute("aria-valuemax", "4");
+  await expect(title).toHaveValue("Verify the change");
+  await expect(title).toBeFocused();
+  await detail.getByRole("button", { name: "Add subtask" }).click();
+  await expect(detail.getByText("Verify the change", { exact: true })).toBeVisible();
+  const progress = detail.getByRole("progressbar", { name: "Subtasks done" });
+  await expect(progress).toHaveAttribute("aria-valuemax", "2");
+  await expect(progress).toHaveAttribute("aria-valuenow", "1");
+  await expect(title).toHaveValue("");
+  await detail.getByRole("button", { name: "Remove subtask Verify the change" }).click();
+  await expect(detail.getByText("Verify the change", { exact: true })).toHaveCount(0);
+  await expect(progress).toHaveAttribute("aria-valuemax", "1");
+});
+
 test("T-F2: tier raise is per-Issue, server-confirmed and retained beside body and Output", async ({page}) => {
   const facts = { issue_number: 3, tier_count: 3, next_minimum_tier: 0,
     next_launch: { tier: 1, agent_id: "claude", model: "sonnet", reasoning: "medium" } };
@@ -1980,9 +2008,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false } = {}) {
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false, includeTheme = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -2118,13 +2146,32 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
           if (message.kind==="load_knowledge_bridge") fixture.__queueBaseLoad=fixture.__queueLoad;
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
-        else if(message.kind==="select_knowledge_bridge_entry") {
+        else if(message.kind==="load_themes") {
+          const reply = {kind:"themes",request_id:message.request_id,view:{themes:includeTheme ? [{
+            number:70,title:"Project theme",url:"https://github.com/example/repo/issues/70",
+            issues_total:4,issues_completed:1,issues:[{number:3,in_repository:true}],
+          }] : []}};
+          if (includeTheme) fixture.__queueShowTheme = () => this.emit(reply);
+          else this.emit(reply);
+        }
+        else if(message.kind==="select_knowledge_bridge_entry" || message.kind==="edit_issue_subtask") {
           fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
+          if (includeTheme && message.number === 3) {
+            const detail = fixture.__queueLastDetail.detail;
+            fixture.__queueSubtasks ??= [{ text: "Confirm the issue", done: true, remove_at: 25 }];
+            if (message.change?.kind === "add") {
+              fixture.__queueSubtasks.push({ text: message.change.title, done: false, remove_at: 50 });
+            } else if (message.change?.kind === "remove") {
+              fixture.__queueSubtasks = fixture.__queueSubtasks.filter(item =>
+                item.remove_at !== message.change.start || item.text !== message.change.text);
+            }
+            detail.subtasks = fixture.__queueSubtasks;
+          }
           this.emit(fixture.__queueLastDetail);
         }
       }
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings});
+  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme});
 }

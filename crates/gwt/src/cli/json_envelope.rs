@@ -2346,6 +2346,46 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 })
             }
         }
+        "pm.theme.record" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "original", "decision", "title", "summary", "number", "note", "reason",
+                ],
+                "pm.theme.record",
+            )?;
+            let text = |key: &'static str| required_nonempty_workspace_reopen_string(params, key);
+            let decision = match text("decision")?.as_str() {
+                "create" => crate::themes::ThemeDecision::Create {
+                    title: text("title")?,
+                    summary: text("summary")?,
+                },
+                "update" => crate::themes::ThemeDecision::Update {
+                    number: required_u64(params, "number")?,
+                    note: text("note")?,
+                },
+                "none" => crate::themes::ThemeDecision::None {
+                    reason: text("reason")?,
+                },
+                "declined" => crate::themes::ThemeDecision::Declined {
+                    reason: text("reason")?,
+                },
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "decision",
+                        reason: "expected one of: create, update, none, declined",
+                    })
+                }
+            };
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeRecord {
+                original: required_string(params, "original")?,
+                decision,
+            })
+        }
+        "pm.theme.list" => {
+            reject_unknown_params(params, &[], "pm.theme.list")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeList)
+        }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
             project_root: optional_string(params, "project_root")?,
         }),
@@ -8366,6 +8406,14 @@ mod tests {
         assert_eq!(saved["report"]["kind"], "qa");
         assert_eq!(saved["report"]["question"], "Can we ship?");
         assert_eq!(saved["report"]["body"], "Checks passed.");
+        // Issue #7642: the saved report is recorded on the Board as it is saved.
+        let board_id = format!("pm-report-{}", saved["report"]["id"].as_str().unwrap());
+        assert!(gwt_core::coordination::load_snapshot(&repo)
+            .unwrap()
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == board_id));
         let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
         let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
         let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();
@@ -9379,7 +9427,7 @@ mod tests {
         let member: agent_names::AgentMember = serde_json::from_str(&output).unwrap();
         assert_eq!(member.name, "Additional teammate");
         assert_eq!(member.agent_id.as_deref(), Some("codex"));
-        assert!(member.enabled && member.implementation_eligible());
+        assert!(member.implementation_eligible());
         assert!(member.assignment.is_none());
         let key = gwt_core::paths::project_scope_hash(&repo);
         let persisted = crate::agent_registry::SessionMemberSnapshot::load()

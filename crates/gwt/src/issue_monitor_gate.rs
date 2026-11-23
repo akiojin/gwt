@@ -464,6 +464,69 @@ pub fn evaluate_autonomous_gate(inputs: &AutonomousGateInputs) -> GateDecision {
     GateDecision::Pass
 }
 
+/// Issue #7810 AC-2: every gate input that keeps the gate closed, named so
+/// the log and `issue.monitor.status` say why nothing was merged. Empty when
+/// the gate passes. `base_branch` is the branch whose protection was applied.
+pub fn closed_gate_inputs(
+    inputs: &AutonomousGateInputs,
+    rollup_json: &str,
+    base_branch: &str,
+) -> Vec<String> {
+    use crate::issue_monitor_review::ReviewGateOutcome;
+
+    let mut closed = Vec::new();
+    match &inputs.branch_protection {
+        gwt_git::branch_protection::BranchProtectionStatus::Verified { required_checks }
+            if !required_checks.is_empty() =>
+        {
+            let items: Vec<serde_json::Value> = match serde_json::from_str(rollup_json) {
+                Ok(serde_json::Value::Array(items)) => items,
+                _ => Vec::new(),
+            };
+            let unpassed: Vec<String> = required_checks
+                .iter()
+                .filter_map(|required| {
+                    let state = items
+                        .iter()
+                        .find(|item| ci_item_name(item) == Some(required.as_str()))
+                        .map(ci_item_state);
+                    match state {
+                        Some(CiItemState::Success) => None,
+                        Some(CiItemState::Failed) => Some(format!("{required} (failed)")),
+                        Some(CiItemState::Pending) => Some(format!("{required} (pending)")),
+                        None => Some(format!("{required} (not reported)")),
+                    }
+                })
+                .collect();
+            if !unpassed.is_empty() {
+                closed.push(format!(
+                    "ci: required checks of {base_branch} not passed: {}",
+                    unpassed.join(", ")
+                ));
+            }
+        }
+        _ => closed.push(format!(
+            "branch protection: {base_branch} has no verified required checks"
+        )),
+    }
+    if inputs.review != ReviewGateOutcome::Pass {
+        closed.push("review: the independent review did not pass".to_string());
+    }
+    if !inputs.acceptance_unchanged {
+        closed.push("acceptance: criteria changed after launch".to_string());
+    }
+    if inputs.reviewed_sha.is_empty() || inputs.reviewed_sha != inputs.head_sha {
+        closed.push(format!(
+            "sha: reviewed {:?} is not the head {:?}",
+            inputs.reviewed_sha, inputs.head_sha
+        ));
+    }
+    if let Some(reason) = unmergeable_reason(inputs.mergeability) {
+        closed.push(format!("mergeability: {reason}"));
+    }
+    closed
+}
+
 /// Issue #4726: why GitHub will not merge a PR in this state, if it will not.
 /// `Unknown` is not a refusal: GitHub is still computing, and the Delivering
 /// merge-watch re-reads it every scan.

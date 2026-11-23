@@ -162,9 +162,7 @@ impl IssueMonitorPrefs {
         let members = roster
             .members
             .iter()
-            .filter(|member| {
-                member.implementation_eligible() && (member.enabled || member.assignment.is_some())
-            })
+            .filter(|member| member.implementation_eligible())
             .map(|member| {
                 let issues: Vec<_> = self
                     .agent_issue_schedule
@@ -195,17 +193,14 @@ impl IssueMonitorPrefs {
     }
 }
 
-/// Issue #7027: why an enabled member cannot take automatic work, or `None`
+/// Issue #7027: why a registered member cannot take automatic work, or `None`
 /// when a pooled profile is bound to it with its own tool. Whether that tool
 /// starts stays with the launch path, which resolves the exact command.
 fn automatic_member_ineligibility(
     pool: &[IssueMonitorLaunchProfile],
     member: &AgentMember,
 ) -> Option<String> {
-    let Some(profile) = pool
-        .iter()
-        .find(|profile| profile.agent_member_id.as_deref() == Some(&member.agent_member_id))
-    else {
+    let Some(profile) = IssueMonitorPrefs::legacy_member_profile(pool, member) else {
         return Some("not_in_launch_profiles".into());
     };
     if member
@@ -250,14 +245,14 @@ fn reconcile_with_health(
         })
         .unwrap_or_default();
     let pool = prefs.launch_profile_pool();
-    let bound = pool
-        .first()
-        .is_some_and(|profile| profile.agent_member_id.is_some());
+    let bound = prefs.environment_tools().is_none()
+        && pool
+            .first()
+            .is_some_and(|profile| profile.agent_member_id.is_some());
     let mut ineligible = BTreeMap::new();
     let mut members = Vec::new();
     for member in roster.members.iter().filter(|member| {
-        member.enabled
-            && member.implementation_eligible()
+        member.implementation_eligible()
             && member.assignment.as_ref().is_none_or(|assignment| {
                 assignment.host_id.is_empty() || assignment.host_id == host
             })
@@ -531,32 +526,31 @@ fn member_runner_health(
 ) -> BTreeMap<String, String> {
     let mut failures = BTreeMap::new();
     let mut probes = BTreeMap::new();
+    let Some(roster) = prefs.agent_roster.as_ref() else {
+        return failures;
+    };
     let pool = prefs.launch_profile_pool();
-    for profile in &pool {
-        let Some(id) = profile.agent_member_id.as_ref() else {
-            continue;
-        };
-        let eligible = prefs.agent_roster.as_ref().is_some_and(|roster| {
-            roster.members.iter().any(|member| {
-                member.agent_member_id == *id
-                    && member.enabled
-                    && member.assignment.is_none()
-                    && automatic_member_ineligibility(&pool, member).is_none()
-            })
-        });
+    let environment = prefs.environment_tool_for_agents();
+    for member in &roster.members {
         // An existing assignment (including one on another host) retains its
         // delivery authority; only future local automatic work is inspected.
-        if !eligible {
+        if !member.implementation_eligible() || member.assignment.is_some() {
             continue;
         }
+        let id = &member.agent_member_id;
+        let profile = if let Some(tool) = environment.as_deref() {
+            Some(prefs.member_candidate_on_environment(&pool, id, tool))
+        } else {
+            prefs.legacy_member_candidate(&pool, member)
+        };
+        let Some(profile) = profile else {
+            continue;
+        };
         // Members of the same tool/runtime share this installed runner. Retry
         // a failed probe next snapshot, rather than once per member this pass.
         // Issue #7647: the runner inspected is the one the member starts with.
-        let profile = &prefs
-            .agent_candidates_on_environment(vec![profile.clone()])
-            .remove(0);
         let key = format!("{}:{:?}", profile.agent_id, profile.runtime_target);
-        if let Err(error) = probes.entry(key).or_insert_with(|| probe(profile)) {
+        if let Err(error) = probes.entry(key).or_insert_with(|| probe(&profile)) {
             failures.insert(id.clone(), format!("runner_health_check_failed: {error}"));
         }
     }
@@ -592,10 +586,10 @@ fn mutate_project_agent_schedule_with_probe(
             }
             if prefs.scheduled_issue_in_flight(*issue_number) || prefs.scheduled_issue_has_pending_claim(*issue_number) {return Err(io::Error::other("Issue already claiming, launching or running; read issue.monitor.schedule.read and retry"));}
             let target = prefs.agent_roster.as_ref().and_then(|roster| roster.members.iter().find(|member| member.agent_member_id == *target_member_id)).ok_or_else(|| io::Error::other("Target Agent member is absent; read issue.monitor.schedule.read and retry"))?;
-            if !target.enabled || !target.implementation_eligible() || target.assignment.as_ref().is_some_and(|assignment| !assignment.host_id.is_empty() && assignment.host_id != host) {
-                return Err(io::Error::other("Target Agent must be enabled and belong to this host; read issue.monitor.schedule.read and choose a local member"));
+            if !target.implementation_eligible() || target.assignment.as_ref().is_some_and(|assignment| !assignment.host_id.is_empty() && assignment.host_id != host) {
+                return Err(io::Error::other("Target Agent must be eligible for implementation and belong to this host; read issue.monitor.schedule.read and choose a local member"));
             }
-            let tool_exclusion = if source_member_id != target_member_id {
+            let tool_exclusion = if source_member_id != target_member_id && prefs.environment_tools().is_none() {
                 selected_member_tool_exclusion(&prefs.launch_profile_pool(), Some(target), target_member_id)
             } else {
                 None
@@ -640,10 +634,7 @@ fn selected_member_tool_exclusion(
     let Some(member) = member else {
         return Some(format!("selected member {member_id} is absent"));
     };
-    let Some(selected) = profiles
-        .iter()
-        .find(|profile| profile.agent_member_id.as_deref() == Some(member_id))
-    else {
+    let Some(selected) = IssueMonitorPrefs::legacy_member_profile(profiles, member) else {
         return Some(format!("missing selected profile for member {member_id}"));
     };
     let expected = normalize_issue_monitor_provider(&selected.agent_id);
@@ -752,7 +743,7 @@ impl IssueMonitorState {
             .as_ref()
             .is_some_and(|roster| roster.implementation_enabled_count() == 0)
         {
-            return Some("No implementation members are available: enabled Agents are configured or reserved as PM; add or enable an implementation Agent in Agents".into());
+            return Some("No implementation members are available: registered Agents are configured or reserved as PM; add an implementation Agent in Agents".into());
         }
         let host = crate::process::current_hostname();
         if let Some(foreign) = self
@@ -793,29 +784,33 @@ impl IssueMonitorState {
                 .iter()
                 .find(|member| member.agent_member_id == id)
         });
-        let selected = self
-            .launch_profiles
-            .first()
-            .filter(|profile| profile.agent_member_id.is_some());
-        let tool_matches = selected.is_none_or(|_| {
-            self.prefs()
+        let uses_environment =
+            !normalize_project_execution_environments(self.execution_environments.clone())
+                .is_empty();
+        let tool_matches = (!uses_environment
+            && self
+                .launch_profiles
+                .first()
+                .is_none_or(|profile| profile.agent_member_id.is_none()))
+            || self
+                .prefs()
                 .registered_launch_profiles_for_issue(number)
                 .iter()
-                .any(|profile| profile.agent_member_id.as_deref() == Some(id))
-        });
+                .any(|profile| profile.agent_member_id.as_deref() == Some(id));
         // Issue #7027 AC-3: name why the scheduled member itself cannot launch.
         let own = member
             .filter(|_| !tool_matches)
-            .and_then(|member| {
-                automatic_member_ineligibility(&self.prefs().launch_profile_pool(), member)
-            })
+            .and_then(|member| automatic_member_ineligibility(&self.launch_profiles, member))
             .map(|reason| format!("; scheduled member {id} not eligible: {reason}"))
             .unwrap_or_default();
-        if let Some(reason) = selected_member_tool_exclusion(&self.launch_profiles, member, id) {
-            return Some(format!("scheduled_member_unavailable: {reason}{own}; read issue.monitor.schedule.read and reassign to a matching selected member"));
+        if !uses_environment {
+            if let Some(reason) = selected_member_tool_exclusion(&self.launch_profiles, member, id)
+            {
+                return Some(format!("scheduled_member_unavailable: {reason}{own}; read issue.monitor.schedule.read and reassign to a matching selected member"));
+            }
         }
         let available = tool_matches && member.is_some_and(|member| member.implementation_eligible() && match &member.assignment {
-            None => member.enabled,
+            None => true,
             Some(assignment) => assignment.issue_number == Some(number)
                 && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))
                 && (assignment.host_id.is_empty() || assignment.host_id == host)
@@ -826,8 +821,7 @@ impl IssueMonitorState {
         let current = member
             .map(|member| {
                 format!(
-                    "enabled={}, assignment={:?}",
-                    member.enabled,
+                    "assignment={:?}",
                     member
                         .assignment
                         .as_ref()
@@ -850,7 +844,7 @@ impl IssueMonitorState {
                 excluded.join(", ")
             )
         };
-        (!available).then(|| format!("scheduled_member_unavailable: expected enabled local idle member {id}; current {current} (including pending claims/deliveries){excluded}; move it with issue.monitor.schedule.reassign (read issue.monitor.schedule.read for revisions) or wait for that member"))
+        (!available).then(|| format!("scheduled_member_unavailable: expected local idle member {id}; current {current} (including pending claims/deliveries){excluded}; move it with issue.monitor.schedule.reassign (read issue.monitor.schedule.read for revisions) or wait for that member"))
     }
 }
 
@@ -1171,15 +1165,6 @@ mod tests {
         );
         assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
         assert!(monitor.agent_schedule_launch_exclusion(43).is_some());
-        crate::agent_names::mutate_project_roster(
-            &root,
-            &sessions,
-            crate::agent_names::AgentRosterAction::Rest {
-                member_id: member.clone(),
-            },
-            None,
-        )
-        .unwrap();
         mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
         assert_eq!(
             load_issue_monitor_prefs(&path)
@@ -1191,7 +1176,7 @@ mod tests {
                 .unwrap()
                 .agent_member_id,
             *member,
-            "reconciliation must retain the selected target's member even while resting"
+            "reconciliation must retain the pinned target's member"
         );
     }
 
@@ -1537,7 +1522,7 @@ mod tests {
             .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
             .unwrap();
         let member = &monitor.agent_roster.as_ref().unwrap().members[1];
-        assert!(member.enabled && member.assignment.is_none());
+        assert!(member.assignment.is_none());
         assert_eq!(monitor.agent_schedule_launch_exclusion(41), None);
         let profiles = monitor.prefs().registered_launch_profiles_for_issue(41);
         assert_eq!(profiles.len(), 1);
@@ -1772,18 +1757,28 @@ mod tests {
                 && reason.contains("claude"),
             "save={rejected:?}; legacy exclusion={reason}"
         );
-        let error = mutate_project_agent_schedule(
+        let saved_profiles = load_issue_monitor_prefs(&path)
+            .unwrap()
+            .launch_profile_pool();
+        let reassigned = mutate_project_agent_schedule(
             &root,
             &sessions,
             move_action(&recovered, 41, source, unselected),
         )
-        .unwrap_err();
-        assert!(error.contains("selected profile"), "{error}");
-        assert_eq!(fs::read(&path).unwrap(), before);
+        .unwrap();
+        assert!(reassigned.members[1]
+            .issues
+            .iter()
+            .any(|entry| entry.issue_number == 41));
+        let prefs = load_issue_monitor_prefs(&path).unwrap();
+        let candidates = prefs.registered_launch_profiles_for_issue(41);
+        assert_eq!(candidates.len(), 1);
         assert_eq!(
-            fs::read(crate::agent_registry::path()).unwrap(),
-            registry_before
+            candidates[0].agent_member_id.as_deref(),
+            Some(unselected.as_str())
         );
+        assert_eq!(candidates[0].agent_id, "codex");
+        assert_eq!(prefs.launch_profile_pool(), saved_profiles);
     }
 
     #[test]
@@ -1887,7 +1882,13 @@ mod tests {
         let (_temp, _home, root, sessions, roster) = fixture();
         let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
         let host = crate::process::current_hostname();
-        let mut prefs = load_issue_monitor_prefs(&path).unwrap();
+        let mut stored = serde_json::to_value(load_issue_monitor_prefs(&path).unwrap()).unwrap();
+        stored["max_active_agents"] = 1.into();
+        stored["agent_roster"]["members"][1]["enabled"] = false.into();
+        let mut prefs =
+            finish_issue_monitor_prefs_load(&path, serde_json::from_value(stored).unwrap())
+                .unwrap();
+        assert_eq!(prefs.max_active_agents, roster.members.len());
         prefs.agent_roster.as_mut().unwrap().members[1].last_spec_number = Some(41);
         reconcile(
             &mut prefs,
@@ -1982,7 +1983,6 @@ mod tests {
             .unwrap()
             .entries
             .retain(|entry| entry.number == 42);
-        prefs.agent_roster.as_mut().unwrap().members[1].enabled = false;
         reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let snapshot = prefs.agent_schedule_snapshot(&host).unwrap();
         assert_eq!(snapshot.members[0].issues.len(), 1);
@@ -2128,15 +2128,6 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        crate::agent_names::mutate_project_roster(
-            &root,
-            &sessions,
-            crate::agent_names::AgentRosterAction::Rest {
-                member_id: roster.members[0].agent_member_id.clone(),
-            },
-            None,
-        )
-        .unwrap();
         mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
         let prefs = load_issue_monitor_prefs(&path).unwrap();
         assert_eq!(
@@ -2147,29 +2138,13 @@ mod tests {
         assert_eq!(
             monitor.scheduled_agent_member_id(41),
             Some(roster.members[0].agent_member_id.as_str()),
-            "rest must not retarget an in-flight claim to another member"
+            "reconciliation must not retarget an attempting claim"
         );
-        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
-
-        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-            prefs.pending_effects.clear();
-            Ok(())
-        })
-        .unwrap();
-        mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
-        let monitor = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            load_issue_monitor_prefs(&path).unwrap(),
-        );
-        assert_eq!(
-            monitor.scheduled_agent_member_id(41),
-            Some(roster.members[1].agent_member_id.as_str()),
-            "a settled claim permits normal replanning away from a resting member"
-        );
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_none());
     }
 
     #[test]
-    fn agent_schedule_rest_keeps_exact_materialized_delivery_replay() {
+    fn agent_schedule_keeps_exact_materialized_delivery_replay() {
         let (_temp, _home, root, sessions, roster) = fixture();
         mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
         crate::agent_names::reserve_project_member(
@@ -2180,15 +2155,6 @@ mod tests {
             None,
             Some("delivery-41"),
             Some(&roster.members[0].agent_member_id),
-        )
-        .unwrap();
-        crate::agent_names::mutate_project_roster(
-            &root,
-            &sessions,
-            crate::agent_names::AgentRosterAction::Rest {
-                member_id: roster.members[0].agent_member_id.clone(),
-            },
-            None,
         )
         .unwrap();
         let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
@@ -2203,7 +2169,7 @@ mod tests {
         monitor.set_source_repository(Some(("fixture", "queue")));
         assert!(
             monitor.can_materialize_delivery(&delivery, Some("tab::pane")),
-            "rest only changes future admission; exact installed delivery still acknowledges"
+            "the exact installed delivery can be acknowledged"
         );
         assert!(
             monitor.agent_schedule_launch_exclusion(41).is_none(),
@@ -2211,7 +2177,7 @@ mod tests {
         );
         assert!(
             monitor.agent_schedule_launch_exclusion(43).is_some(),
-            "resting member cannot take a different Issue"
+            "the assigned member cannot take a different Issue"
         );
     }
 
@@ -2343,6 +2309,52 @@ mod tests {
             assert_eq!(profiles.len(), 1);
             assert_eq!(profiles[0].agent_id, "codex");
         }
+    }
+
+    #[test]
+    fn configured_environment_schedules_idle_members_without_saved_profiles() {
+        let (_temp, _home, root, _sessions, roster) = fixture();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let host = crate::process::current_hostname();
+        let mut prefs = load_issue_monitor_prefs(&path).unwrap();
+        let mut saved = IssueMonitorLaunchProfile::for_tool("codex");
+        saved.agent_member_id = Some(roster.members[0].agent_member_id.clone());
+        prefs.set_launch_profile_pool(vec![saved]);
+        prefs.execution_environments = vec![ProjectExecutionEnvironment {
+            environment_id: "claude".into(),
+            tool: "claude".into(),
+        }];
+
+        let omitted = &roster.members[1].agent_member_id;
+        let health = member_runner_health(&prefs, |profile| {
+            assert_eq!(profile.agent_id, "claude");
+            Err("runner check failed".into())
+        });
+        assert!(health.contains_key(omitted));
+        reconcile_with_health(
+            &mut prefs,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &host,
+            &health,
+        )
+        .unwrap();
+        assert!(prefs.agent_issue_schedule.reservations.is_empty());
+
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            monitor.scheduled_agent_member_id(42),
+            Some(omitted.as_str())
+        );
+        assert_eq!(monitor.agent_schedule_launch_exclusion(42), None);
+        let candidates = monitor.prefs().registered_launch_profiles_for_issue(42);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].agent_id, "claude");
+        assert_eq!(
+            candidates[0].agent_member_id.as_deref(),
+            Some(omitted.as_str())
+        );
     }
 
     #[test]
@@ -2496,9 +2508,6 @@ mod tests {
         let healthy = member_runner_health(&prefs, |_| Ok(()));
         assert!(healthy.is_empty());
         prefs.agent_issue_schedule.reservations.clear();
-        for member in &mut prefs.agent_roster.as_mut().unwrap().members[2..] {
-            member.enabled = false;
-        }
         reconcile_with_health(
             &mut prefs,
             &BTreeMap::new(),

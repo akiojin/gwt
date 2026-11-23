@@ -16574,6 +16574,7 @@ exit 0
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -16690,6 +16691,7 @@ exit 0
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -22665,6 +22667,7 @@ exit 0
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
@@ -23197,6 +23200,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
@@ -27742,6 +27746,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -27813,6 +27818,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -27936,6 +27942,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    gate_hold: None,
                     cancelled_claim_phase: None,
                 },
                 crate::AutonomousIssueRecord {
@@ -27960,6 +27967,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    gate_hold: None,
                     cancelled_claim_phase: None,
                 },
             ],
@@ -28034,6 +28042,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -28931,6 +28940,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -29085,6 +29095,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -29227,6 +29238,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
@@ -29653,6 +29665,7 @@ exit 1
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
@@ -29899,6 +29912,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
@@ -30967,6 +30981,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
@@ -31269,6 +31284,7 @@ exit 1
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         crate::save_issue_monitor_prefs(

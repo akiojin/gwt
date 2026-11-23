@@ -53,7 +53,7 @@ impl AgentProfileCore {
         }
     }
 
-    fn apply(&self, profile: &mut IssueMonitorLaunchProfile) {
+    pub(crate) fn apply(&self, profile: &mut IssueMonitorLaunchProfile) {
         profile.agent_id.clone_from(&self.agent_id);
         profile.model.clone_from(&self.model);
         profile.reasoning.clone_from(&self.reasoning);
@@ -371,12 +371,8 @@ fn store_project_roster(
     let mut assignments = BTreeMap::new();
     let mut selected = None;
     for member in &mut roster.members {
-        if (!member.enabled || !member.pm_eligible)
-            && member_has_pm_duty(registry, &member.agent_member_id)
-        {
-            return Err(invalid(
-                "Choose another PM before resting this member or removing PM eligibility",
-            ));
+        if !member.pm_eligible && member_has_pm_duty(registry, &member.agent_member_id) {
+            return Err(invalid("Choose another PM before removing PM eligibility"));
         }
         if let Some(assignment) = member.assignment.take() {
             if assignment.project_key.as_deref() != Some(key) {
@@ -1381,11 +1377,12 @@ fn validate_decoding(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<Pr
         }
         for project in registry.pm_projects.values() {
             if project.member_id.as_ref().is_some_and(|id| {
-                !roster.members.iter().any(|member| {
-                    &member.agent_member_id == id && member.enabled && member.pm_eligible
-                })
+                !roster
+                    .members
+                    .iter()
+                    .any(|member| &member.agent_member_id == id && member.pm_eligible)
             }) {
-                return Err(invalid("Configured PM must remain enabled and PM-eligible"));
+                return Err(invalid("Configured PM must remain PM-eligible"));
             }
         }
         for members in names.values().filter(|members| members.len() > 1) {
@@ -1567,8 +1564,8 @@ pub(crate) fn mutate_pm_selection(
                 return Err(invalid("Choose another PM before removing PM eligibility"));
             }
             AgentRosterAction::SelectPm { .. } => {
-                if !member.enabled || !member.pm_eligible {
-                    return Err(invalid("Choose an enabled, PM-eligible Agent"));
+                if !member.pm_eligible {
+                    return Err(invalid("Choose a PM-eligible Agent"));
                 }
                 if member
                     .pm_project_key
@@ -2239,12 +2236,13 @@ fn reserve_new_pm_member_inner(
             });
             // Issue #7731: the agent designated in the first-run setup
             // serves as PM here. A designation nobody can fill — unreadable,
-            // or naming a member who left or is resting — changes nothing.
+            // or naming a member who left — changes nothing.
             let designation = crate::first_run_setup::load_designation().ok().flatten();
             let designated = designation.as_ref().and_then(|designation| {
-                roster.members.iter().position(|member| {
-                    member.enabled && designation.names(&member.agent_member_id, &member.name)
-                })
+                roster
+                    .members
+                    .iter()
+                    .position(|member| designation.names(&member.agent_member_id, &member.name))
             });
             let index = match designated {
                 Some(index) => index,
@@ -2253,7 +2251,7 @@ fn reserve_new_pm_member_inner(
                         .as_ref()
                         .filter(|designation| designation.member_id.is_none())
                         .map(|designation| designation.name.as_str())
-                        // A resting member already holds this name.
+                        // Another member already holds this name.
                         .filter(|name| {
                             !roster.members.iter().any(|member| {
                                 member.name.trim().to_lowercase() == name.trim().to_lowercase()
@@ -2286,9 +2284,9 @@ fn reserve_new_pm_member_inner(
         }
         registry.pm_projects.entry(key.to_string()).or_default();
         let mut member = selected_pm_member(&registry, key.as_str()).expect("configured member");
-        if !member.enabled || !member.pm_eligible {
+        if !member.pm_eligible {
             return Err(invalid(
-                "Configured PM must be enabled and PM-eligible; choose another PM in Agents",
+                "Configured PM must be PM-eligible; choose another PM in Agents",
             ));
         }
         if let Some(assignment) = &member.assignment {
@@ -2865,7 +2863,6 @@ pub(crate) fn bind_prepared_pm_member_session(
             let profile = prefs.settings.launch_profile_or_default();
             if expected.session_id.is_some()
                 || prefs.registration.is_some()
-                || !member.enabled
                 || !member.pm_eligible
                 || member.pm_project_key.as_deref() != Some(key.as_str())
                 || expected.pm_profile_revision.as_deref()
@@ -3178,7 +3175,6 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                         agent_member_id: id.clone(),
                         agent_id: Some(session.agent_id.command().into()),
                         name,
-                        enabled: true,
                         pm_eligible: true,
                         pm_project_key: None,
                         created_at: session.created_at.to_rfc3339(),
@@ -3188,6 +3184,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                         last_owner_project_key: None,
                         assignment: None,
                         traits: Default::default(),
+                        avatar: Default::default(),
                     });
                 if !configured {
                     registry
@@ -3546,9 +3543,9 @@ impl SessionMemberSnapshot {
         Ok(Self { registry: load()? })
     }
 
-    /// Issue #7731: `(member id, name)` of every enabled member on this
+    /// Issue #7731: `(member id, name)` of every registered member on this
     /// machine, in ledger order. Empty while the registry is not active.
-    pub fn enabled_members(&self) -> Vec<(String, String)> {
+    pub fn registered_members(&self) -> Vec<(String, String)> {
         self.registry
             .as_ref()
             .filter(|registry| registry.phase == RegistryPhase::Active)
@@ -3557,7 +3554,6 @@ impl SessionMemberSnapshot {
                 roster
                     .members
                     .iter()
-                    .filter(|member| member.enabled)
                     .map(|member| (member.agent_member_id.clone(), member.name.clone()))
                     .collect()
             })
@@ -3761,13 +3757,7 @@ fn bind_project_profiles(registry: &Registry, key: &str, prefs: &mut IssueMonito
                         .any(|id| id == &member.agent_member_id)
                 })
             });
-            if let Some(member) = local.or_else(|| {
-                roster.members.iter().find(|member| {
-                    member.enabled
-                        && member.implementation_eligible()
-                        && member.agent_id.as_ref() == Some(&profile.agent_id)
-                })
-            }) {
+            if let Some(member) = local.or_else(|| roster.members.iter().find(matching)) {
                 profile.agent_member_id = Some(member.agent_member_id.clone());
             }
         }
@@ -4515,12 +4505,11 @@ fn add_source(
             (&left.created_at, &left.origin_session_id)
                 .cmp(&(&right.created_at, &right.origin_session_id))
         });
-        for (index, member) in seeds.iter_mut().enumerate() {
+        for member in &mut seeds {
             member.agent_member_id = aliases
                 .entry(member.agent_member_id.clone())
                 .or_insert_with(|| uuid::Uuid::new_v4().to_string())
                 .clone();
-            member.enabled = index < prefs.max_active_agents.max(1);
             member.last_owner_project_key = Some(key.into());
             if let Some(assignment) = &mut member.assignment {
                 assignment.project_key = Some(key.into());
@@ -6186,6 +6175,57 @@ mod tests {
     }
 
     #[test]
+    fn legacy_resting_member_can_reserve_work_after_registry_import() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, prefs_path, raw) = source();
+        let mut legacy: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let mut primary = IssueMonitorLaunchProfile::for_tool("codex");
+        primary.agent_member_id = Some("a4263a32-14e9-4bb0-ab78-ec3d4816e811".into());
+        legacy["launch_profile"] = serde_json::to_value(primary).unwrap();
+        legacy["agent_roster"]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "agent_member_id": "b4263a32-14e9-4bb0-ab78-ec3d4816e811",
+                "agent_id": "codex",
+                "name": "Aspen",
+                "enabled": false,
+                "created_at": "2026-10-01T00:00:00Z"
+            }));
+        let raw = serde_json::to_vec(&legacy).unwrap();
+        fs::write(&prefs_path, &raw).unwrap();
+        fs::write(prefs_path.with_extension("committed.json"), &raw).unwrap();
+
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        assert_eq!(roster.members.len(), 2);
+        let aspen = &roster.members[1];
+        assert_eq!(aspen.name, "Aspen");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(prefs.launch_profile_pool().len(), 1);
+        assert!(prefs
+            .registered_launch_profiles_for_issue(42)
+            .iter()
+            .any(|profile| profile.agent_member_id.as_deref() == Some(&aspen.agent_member_id)));
+        let member = crate::agent_names::reserve_project_member_for_agent(
+            &root,
+            &sessions,
+            "legacy-resting-member",
+            Some(42),
+            None,
+            None,
+            None,
+            "codex",
+            Some(&aspen.agent_member_id),
+        )
+        .unwrap();
+        assert_eq!(member.agent_member_id, aspen.agent_member_id);
+        let core: serde_json::Value = serde_json::from_slice(&fs::read(path()).unwrap()).unwrap();
+        assert!(core["roster"]["members"][1].get("enabled").is_none());
+    }
+
+    #[test]
     fn legacy_single_assignment_migrates_without_changing_its_project_or_aliases() {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
@@ -7059,6 +7099,126 @@ mod tests {
             of(&read()),
             expected,
             "reordering, tuning and a launch leave the saved traits alone"
+        );
+    }
+
+    // Issue #7635 AC-1..AC-4: the avatar is the agent's own attribute. An
+    // unset member stays as stored before avatars existed, a preset survives a
+    // reload and a tool change, and an unknown preset is refused.
+    #[test]
+    fn ledger_avatar_is_saved_on_the_member_and_kept_across_tool_changes() {
+        use crate::agent_names::{AgentAvatar, AgentAvatarKind};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, _, _) = source();
+        ensure_active_for_project(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let read = || {
+            crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                AgentRosterAction::Read,
+                None,
+            )
+            .unwrap()
+        };
+        let added = ledger_add(&root, "Birch", false);
+        let birch = added.members[1].agent_member_id.clone();
+        assert!(
+            added.members.iter().all(|member| member.avatar.is_unset()),
+            "a member starts on the default avatar"
+        );
+        assert!(
+            !serde_json::to_string(&added).unwrap().contains("avatar"),
+            "an unset member is stored as it was before avatars existed"
+        );
+        let fox = AgentAvatar {
+            kind: AgentAvatarKind::Preset,
+            preset_id: Some("fox".into()),
+        };
+        let saved = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SetAvatar {
+                member_id: birch.clone(),
+                avatar: fox.clone(),
+            },
+            Some(added.revision),
+        )
+        .unwrap();
+        assert!(saved.revision > added.revision);
+        let of = |roster: &AgentRoster| {
+            roster
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == birch)
+                .unwrap()
+                .avatar
+                .clone()
+        };
+        assert_eq!(of(&saved), fox);
+        assert_eq!(of(&read()), fox, "the avatar survives a reload");
+
+        for refused in [
+            AgentAvatar {
+                kind: AgentAvatarKind::Preset,
+                preset_id: Some("unicorn".into()),
+            },
+            AgentAvatar {
+                kind: AgentAvatarKind::Preset,
+                preset_id: None,
+            },
+            AgentAvatar {
+                kind: AgentAvatarKind::Upload,
+                preset_id: None,
+            },
+        ] {
+            let error = crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                AgentRosterAction::SetAvatar {
+                    member_id: birch.clone(),
+                    avatar: refused,
+                },
+                Some(saved.revision),
+            )
+            .unwrap_err();
+            assert!(error.contains("avatar"), "{error}");
+        }
+        assert_eq!(of(&read()), fox, "a refused write changes nothing");
+
+        let core = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&birch)
+            .unwrap();
+        let tuned = set_member_tuning(&crate::agent_names::MemberTuning {
+            member_id: birch.clone(),
+            model: None,
+            reasoning: None,
+            expected_core_revision: core.1,
+            agent_id: Some("claude".into()),
+            runtime_target: None,
+            skip_permissions: None,
+        });
+        assert_eq!(tuned.error, None);
+        assert_eq!(of(&read()), fox, "a tool change leaves the avatar alone");
+
+        let cleared = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SetAvatar {
+                member_id: birch.clone(),
+                avatar: AgentAvatar::default(),
+            },
+            Some(read().revision),
+        )
+        .unwrap();
+        assert!(
+            of(&cleared).is_unset(),
+            "the default avatar can be restored"
         );
     }
 
@@ -8116,7 +8276,7 @@ mod tests {
     }
 
     /// Issue #7731: a designation that names nobody usable — the member left
-    /// the ledger or is resting — leaves the earlier behaviour in place.
+    /// the ledger — leaves the earlier behaviour in place.
     #[test]
     fn first_pm_reservation_ignores_a_designation_nobody_can_fill() {
         let home = tempfile::tempdir().unwrap();

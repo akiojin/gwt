@@ -199,10 +199,6 @@ root_js_modules! {
     // pm-chat.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.
     "task-progress.js" => "createTaskProgress",
-    // SPEC #7007 — task-centered Log island host for the PM chat surface.
-    // pm-chat.js and app.js import this at module top level, so the asset
-    // MUST be registered or the ES module load 404s and the splash hangs.
-    "task-log.js" => "createTaskLog",
     // Issue #7648 (SPEC #7007 T-030) — Execution environments island host.
     // app.js and provider-usage-surface.js import this at module top level,
     // so the asset MUST be registered or the ES module load 404s and the
@@ -260,6 +256,10 @@ root_js_modules! {
     // top level, so a missing entry would hang the splash.
     "surface-rail.js" => "installSurfaceRail",
     "split-surfaces.js" => "createSplitSurfaces",
+    // Issue #7635 — the avatar part every Agent display shares. app-chrome.js
+    // and agents-surface.js import it at module top level, so the asset MUST
+    // be registered or the ES module load 404s and the splash hangs.
+    "agent-avatar.js" => "agentAvatar",
     "agents-surface.js" => "createAgentsSurface",
     "works-surface.js" => "createWorksSurface",
     "terminal-text-preview.js" => "createTerminalTextPreview",

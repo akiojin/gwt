@@ -131,7 +131,7 @@ async function launch(page: Page, branch: string): Promise<{ id: string; session
   };
   let roster = await rosterRequest({ kind: "read" });
   const available = () => roster.members.some((member: any) =>
-    member.agent_id === AGENT && member.enabled && !member.assignment);
+    member.agent_id === AGENT && !member.assignment);
   if (!available()) roster = await rosterRequest({ kind: "add", agent_id: AGENT }, roster.revision);
   expect(available(), "normally allocated command-tool member").toBe(true);
   const request = async (detail: unknown, requireOpen = false) => {

@@ -1024,6 +1024,12 @@ pub enum FrontendEvent {
         request_id: Option<u64>,
         number: u64,
     },
+    EditIssueSubtask {
+        id: String,
+        request_id: u64,
+        number: u64,
+        change: crate::knowledge_bridge::IssueSubtaskChange,
+    },
     /// SPEC-2017 US-8 — Kanban D&D writes a phase change back to the
     /// owning GitHub Issue. `target_phase=None` means Backlog (every
     /// `phase/*` label is removed); `Some("draft" | "planning" |
@@ -6601,8 +6607,6 @@ mod tests {
         for action in [
             serde_json::json!({"kind":"read"}),
             serde_json::json!({"kind":"add"}),
-            serde_json::json!({"kind":"rest","member_id":"member-1"}),
-            serde_json::json!({"kind":"activate","member_id":"member-1"}),
             serde_json::json!({"kind":"rename","member_id":"member-1","name":"Maple"}),
             serde_json::json!({"kind":"move","member_id":"member-1","direction":"up"}),
             serde_json::json!({"kind":"move","member_id":"member-1","direction":"down"}),
@@ -6611,11 +6615,24 @@ mod tests {
             serde_json::json!({"kind":"set_traits","member_id":"member-1","traits":{
                 "reasoning_level":"max","speed":"fastest","personality":"Verify before changing."
             }}),
+            serde_json::json!({"kind":"set_avatar","member_id":"member-1","avatar":{"kind":"default"}}),
+            serde_json::json!({"kind":"set_avatar","member_id":"member-1","avatar":{
+                "kind":"preset","preset_id":"fox"
+            }}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
                 "kind":"agent_roster", "action":action, "expected_revision":3
             }));
             assert!(parsed.is_ok(), "roster action was rejected: {parsed:?}");
+        }
+        for kind in ["rest", "activate"] {
+            let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind":"agent_roster", "action":{"kind":kind,"member_id":"member-1"}
+            }));
+            assert!(
+                parsed.is_err(),
+                "removed roster action was accepted: {parsed:?}"
+            );
         }
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind":"agent_roster", "action":{"kind":"read"}, "request_id":"name-write-1"

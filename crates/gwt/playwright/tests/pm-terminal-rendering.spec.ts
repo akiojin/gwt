@@ -55,6 +55,32 @@ test("Issue #7492 PM execution log starts when its delayed layout becomes availa
   expect(errors, "console and page errors").toEqual([]);
 });
 
+// Issue #7650 (SPEC #7007 T-032): the structured Logs window is the only log
+// surface, so the PM view carries no Log tab re-rendering notifications.
+test("Issue #7650 PM view has no Log tab and keeps its execution log terminal", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  const toolbar = pm.getByRole("group", { name: "PM view" });
+  await expect(toolbar.getByRole("button", { name: "Execution log", exact: true })).toBeVisible();
+  await expect(toolbar.getByRole("button", { name: "Log", exact: true })).toHaveCount(0);
+  await expect(pm.locator(".task-log")).toHaveCount(0);
+  await toolbar.getByRole("button", { name: "Execution log", exact: true }).click();
+  await expect(toolbar.getByRole("button", { name: "Execution log", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(pm.locator(".pm-conversation-log")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`no-log-tab-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 // Returning to the page replaces the transport, which clears agent activity.
 // A PM terminal that Works showed earlier must stay in the PM window.
 test("Issue #7558 PM execution log stays in its window when the transport is replaced after a Works visit", async ({ page }, info) => {
@@ -470,7 +496,7 @@ test.describe("PM touch targets", () => {
     await page.locator("#op-pm-entry").click();
     const pm = page.locator(`.workspace-window[data-id="${PM}"] .pm-chat`);
     const views = pm.locator(".pm-chat__toolbar[role='group'] button");
-    await expect(views).toHaveCount(8);
+    await expect(views).toHaveCount(7);
     const names = await views.allTextContents();
     const view = (name: string) => views.filter({ hasText: new RegExp(`^${name}$`) });
     const controls = () => pm.evaluate(root => [...root.querySelectorAll("button, select, summary")]

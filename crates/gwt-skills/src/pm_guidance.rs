@@ -715,6 +715,30 @@ Use this wire through the existing operation; do not attach legacy `body`,
   diagnostic as missing evidence, not an empty instruction list. Existing
   `memory.add` work-note lessons remain separate from these records.
 
+## Themes from the conversation
+
+- Every human turn of the conversation on Home ends with one theme decision,
+  recorded with `pm.theme.record` in the same turn, with no extra step by the
+  user. Pass the user's message unchanged as `original`; it must match the
+  latest human message, and the theme links back to that message.
+- `decision:"create"` with `title` and `summary` records a new theme as a
+  GitHub Issue labelled `gwt-theme`, when the user asked for something or
+  decided something that no current theme covers. Write the title and summary
+  in the user's language; the summary is the theme's description. Never copy
+  secrets into them.
+- `decision:"update"` with `number` and `note` adds a later request or
+  decision to an existing theme as a comment. Read `pm.theme.list` first and
+  prefer updating the theme that already covers the subject over creating a
+  duplicate.
+- `decision:"declined"` with `reason` keeps the user's explicit "do not make
+  this a theme" as the decision; nothing is written to GitHub.
+- `decision:"none"` with `reason` is for a turn that asked or decided nothing,
+  such as a status question or small talk.
+- A wrongly recorded theme is corrected only by deleting it on the Themes
+  screen. Themes are never merged, and issues are never moved between themes.
+- The Stop gate reminds you once per turn when the decision is missing.
+  Automatic prompts are not human turns and are never recorded as themes.
+
 ## Request task reconciliation
 
 - Follow the existing `pm.status` worktree freshness contract first; stale or
@@ -2239,7 +2263,7 @@ Draft that did not qualify, so a row never leaves you guessing why:
   never synchronize solely for BEHIND on a non-strict base. Hand an actual
   conflict back to the owner.
 - `unresolved_review_threads`: the owner answers review threads, not you.
-- `review_threads_unknown` / `coderabbit_review_unknown`: the probe is
+- `review_threads_unknown`: the probe is
   bounded to a few PRs per read, so the rest resolve next cycle. Wait.
 - `agent_visual_check_unknown`: the body was not hydrated, or the agent
   recorded no verdict. Never promote on an unknown UI state.
@@ -3144,6 +3168,13 @@ mod tests {
     /// Canonical phrases the PM contract must always carry (FR anchors).
     fn required_phrases() -> &'static [&'static str] {
         &[
+            // Issue #7644: every human turn ends with a theme decision.
+            "## Themes from the conversation",
+            "Every human turn of the conversation on Home ends with one theme decision",
+            "`pm.theme.record`",
+            "`decision:\"declined\"`",
+            "Read `pm.theme.list` first",
+            "corrected only by deleting it on the Themes",
             // FR-004: sole window + full autonomy without mid-confirmations.
             "single conversational window",
             "No intermediate confirmation questions",

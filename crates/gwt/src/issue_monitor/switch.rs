@@ -351,11 +351,7 @@ impl IssueMonitorPrefs {
         let member = roster
             .members
             .iter()
-            .find(|member| {
-                member.agent_member_id == member_id
-                    && member.enabled
-                    && member.implementation_eligible()
-            })
+            .find(|member| member.agent_member_id == member_id && member.implementation_eligible())
             .ok_or_else(unavailable)?;
         let assignment = member.assignment.as_ref().ok_or_else(unavailable)?;
         let session = assignment
@@ -502,7 +498,7 @@ impl IssueMonitorPrefs {
     pub fn agent_switch_target_available(&self, intent: &AgentSwitchIntent, host: &str) -> bool {
         let target = intent.request.target_issue_number;
         target > 0 && intent.source.assignment.issue_number != Some(target)
-            && self.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| member.agent_member_id == intent.request.member_id && member.enabled && member.assignment.as_ref().is_some_and(|assignment| assignment.host_id == host && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key)))))
+            && self.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| member.agent_member_id == intent.request.member_id && member.implementation_eligible() && member.assignment.as_ref().is_some_and(|assignment| assignment.host_id == host && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key)))))
             && self.agent_issue_schedule.validate().is_ok()
             && self.agent_issue_schedule.reservations.iter().any(|reservation| reservation.host_id == host && reservation.agent_member_id == intent.request.member_id && reservation.issue_number == target)
             && self.terminal_queues.get(host).is_some_and(|queue| queue.entries.iter().filter(|entry| entry.number == target).count() == 1)
@@ -787,7 +783,6 @@ mod tests {
                 agent_id: None,
                 agent_member_id: "member".into(),
                 name: "Member".into(),
-                enabled: true,
                 created_at: "2026-10-25T00:00:00Z".into(),
                 origin_session_id: None,
                 last_issue_number: Some(41),
@@ -795,6 +790,7 @@ mod tests {
                 last_owner_project_key: None,
                 assignment: Some(intent.source.assignment.clone()),
                 traits: Default::default(),
+                avatar: Default::default(),
             }],
         });
         prefs.launched_issues.push(IssueMonitorLaunchedIssue {
@@ -1142,9 +1138,8 @@ mod tests {
             .clone()
             .request_agent_switch(request.clone(), "host")
             .is_ok());
-        let changes: [fn(&mut IssueMonitorPrefs); 7] = [
+        let changes: [fn(&mut IssueMonitorPrefs); 6] = [
             |p| p.agent_roster.as_mut().unwrap().revision += 1,
-            |p| p.agent_roster.as_mut().unwrap().members[0].enabled = false,
             |p| {
                 p.agent_roster.as_mut().unwrap().members[0]
                     .assignment
