@@ -514,7 +514,6 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
                 == Some(session_id.as_str())
         })
         .expect("observed Session binds a roster member");
-    assert!(member.member.enabled);
     assert_eq!(
         candidate.agent_member_id.as_deref(),
         Some(member.member.agent_member_id.as_str())
@@ -4858,7 +4857,7 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
                 .unwrap()
                 .members
                 .iter()
-                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .filter(|member| member.agent_id.as_deref() == Some("codex"))
                 .take(2)
                 .map(|member| {
                     let mut profile = base.clone();

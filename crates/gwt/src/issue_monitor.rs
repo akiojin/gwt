@@ -1607,12 +1607,6 @@ impl IssueMonitorPrefs {
         issue_number: u64,
     ) -> Vec<IssueMonitorLaunchProfile> {
         let pool = self.launch_profile_pool();
-        let Some(primary) = pool
-            .first()
-            .filter(|profile| profile.agent_member_id.is_some())
-        else {
-            return self.environment_candidates(pool);
-        };
         let host = crate::process::current_hostname();
         let delivery_member = self
             .pending_launch_deliveries
@@ -1626,74 +1620,53 @@ impl IssueMonitorPrefs {
             .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
         let scheduled =
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
-        if self.environment_tools().is_some() {
-            return self.agent_candidates_on_environment(self.registered_members(
-                &pool,
-                None,
-                scheduled,
-                issue_number,
-            ));
+        if let (Some(roster), Some(tool)) = (&self.agent_roster, self.environment_tool_for_agents())
+        {
+            return roster
+                .members
+                .iter()
+                .filter(|member| self.registered_member_can_take(member, scheduled, issue_number))
+                .map(|member| {
+                    Self::member_candidate_on_environment(&pool, &member.agent_member_id, &tool)
+                })
+                .collect();
         }
+        let Some(primary) = pool
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some())
+        else {
+            return self.environment_candidates(pool);
+        };
         // Issue #7027: every planned member launches with its own registered
         // tool, so an idle member of another pooled tool can take queued work.
-        let planned_tool = normalize_issue_monitor_provider(
-            &scheduled
-                .and_then(|id| {
-                    pool.iter()
-                        .find(|profile| profile.agent_member_id.as_deref() == Some(id))
-                })
-                .unwrap_or(primary)
-                .agent_id,
-        );
-        self.registered_members(&pool, Some(&planned_tool), scheduled, issue_number)
+        let primary_tool = normalize_issue_monitor_provider(&primary.agent_id);
+        self.agent_roster
+            .iter()
+            .flat_map(|roster| &roster.members)
+            .filter(|member| self.registered_member_can_take(member, scheduled, issue_number))
+            .filter_map(|member| Self::legacy_member_candidate(&pool, member))
+            .filter(|profile| {
+                scheduled.is_some()
+                    || normalize_issue_monitor_provider(&profile.agent_id) == primary_tool
+            })
+            .collect()
     }
 
-    /// Saved candidates of the agents that can take `issue_number` now,
-    /// limited to one registered tool when `tool` is given.
-    fn registered_members(
+    fn registered_member_can_take(
         &self,
-        pool: &[IssueMonitorLaunchProfile],
-        tool: Option<&Option<String>>,
+        member: &crate::agent_names::AgentMember,
         scheduled: Option<&str>,
         issue_number: u64,
-    ) -> Vec<IssueMonitorLaunchProfile> {
-        pool.iter()
-            .filter(|profile| {
-                tool.is_none_or(|tool| normalize_issue_monitor_provider(&profile.agent_id) == *tool)
-                    && scheduled.is_none_or(|scheduled| {
-                        profile.agent_member_id.as_deref() == Some(scheduled)
-                    })
-                    && self.agent_roster.as_ref().is_some_and(|roster| {
-                        roster.members.iter().any(|member| {
-                            profile.agent_member_id.as_deref()
-                                == Some(member.agent_member_id.as_str())
-                                && member.implementation_eligible()
-                                && (member.enabled
-                                    || member.assignment.as_ref().is_some_and(|assignment| {
-                                        assignment.issue_number == Some(issue_number)
-                                            && assignment.project_key.as_deref().is_none_or(|key| {
-                                                self.agent_registry_project_key.as_deref()
-                                                    == Some(key)
-                                            })
-                                    }))
-                                && tool.is_none_or(|tool| {
-                                    member
-                                        .agent_id
-                                        .as_deref()
-                                        .and_then(normalize_issue_monitor_provider)
-                                        == *tool
-                                })
-                                && member.assignment.as_ref().is_none_or(|assignment| {
-                                    assignment.issue_number == Some(issue_number)
-                                        && assignment.project_key.as_deref().is_none_or(|key| {
-                                            self.agent_registry_project_key.as_deref() == Some(key)
-                                        })
-                                })
-                        })
-                    })
+    ) -> bool {
+        scheduled.is_none_or(|id| id == member.agent_member_id)
+            && member.implementation_eligible()
+            && member.assignment.as_ref().is_none_or(|assignment| {
+                assignment.issue_number == Some(issue_number)
+                    && assignment
+                        .project_key
+                        .as_deref()
+                        .is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))
             })
-            .cloned()
-            .collect()
     }
 
     /// SPEC #3914 FR-001: replace the pool and keep `launch_profile` in sync
@@ -7283,12 +7256,9 @@ fn finish_issue_monitor_prefs_load(
         roster
             .validate()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if roster.enabled_count() != prefs.max_active_agents {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Agent roster and project capacity disagree",
-            ));
-        }
+        // The old limit counted only enabled members. All registered members
+        // now contribute to capacity, including those saved as resting.
+        prefs.max_active_agents = roster.enabled_count();
     }
     if machine_managed_monitor_prefs(path) {
         // Cache only project bytes. The machine policy may change without any

@@ -309,24 +309,16 @@ pub(super) fn run_retained_owner_fixture() {
     .unwrap();
     assert_eq!(saved.status, gwt_agent::AgentStatus::Stopped);
     assert!(saved.restore_window_on_startup);
-    let bootstrap_saved = gwt_agent::Session::load(
-        &gwt_core::paths::gwt_sessions_dir()
-            .join(format!("{}.toml", bootstrap.session.as_ref().unwrap().id)),
-    )
-    .unwrap();
-    let retained_members = [
-        bootstrap_saved.agent_member_id.as_deref(),
-        saved.agent_member_id.as_deref(),
-    ];
+    // Leave the retained Session's member idle while later fixture launches
+    // use other registered members at the front of the roster.
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&project),
         |prefs| {
-            for member in &mut prefs.agent_roster.as_mut().unwrap().members {
-                if retained_members.contains(&Some(member.agent_member_id.as_str())) {
-                    member.enabled = false;
-                }
-            }
-            prefs.max_active_agents = prefs.agent_roster.as_ref().unwrap().enabled_count();
+            let roster = prefs.agent_roster.as_mut().unwrap();
+            roster.members.sort_by_key(|member| {
+                saved.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
+            });
+            roster.revision += 1;
         },
     )
     .unwrap();

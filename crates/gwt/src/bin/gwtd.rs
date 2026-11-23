@@ -910,7 +910,7 @@ fn format_pm_help() -> String {
         "               kind, text, reply_to (required for reply), timeout_seconds (1..86400; default 900).",
         "               Unavailable peers return status=unavailable; Reports retain the attempt.",
         "               Unread messages reach the peer's next prompt; a successful reply acknowledges.",
-        "  pm.agent.add Register one enabled member in the shared Agent roster.",
+        "  pm.agent.add Register one member in the shared Agent roster.",
         "               Required: name (unique display name), agent_id (coding tool).",
         "               The current project's registered PM receives the new member and its ID.",
         "               Use issue.monitor.profiles.set to select the member for Issues launches.",

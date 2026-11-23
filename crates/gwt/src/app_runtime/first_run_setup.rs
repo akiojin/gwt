@@ -47,7 +47,7 @@ impl AppRuntime {
             .collect();
         let members: Vec<SetupMemberView> = gwt::agent_registry::SessionMemberSnapshot::load()
             .map_err(|error| format!("Could not read the agent ledger: {error}"))?
-            .enabled_members()
+            .registered_members()
             .into_iter()
             .map(|(member_id, name)| SetupMemberView { member_id, name })
             .collect();

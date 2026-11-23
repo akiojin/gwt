@@ -8335,7 +8335,6 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             agent_member_id: format!("member-{name}"),
             agent_id: None,
             name: name.into(),
-            enabled: true,
             created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin_session_id: None,
             last_issue_number: None,

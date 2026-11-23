@@ -2718,7 +2718,7 @@ mod tests {
         // Importing a project's first roster gives its members new ids.
         let members = crate::agent_registry::SessionMemberSnapshot::load()
             .unwrap()
-            .enabled_members();
+            .registered_members();
         let id = |name: &str| {
             let (id, _) = members.iter().find(|(_, member)| member == name).unwrap();
             id.clone()

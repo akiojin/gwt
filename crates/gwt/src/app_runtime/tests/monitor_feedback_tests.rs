@@ -1004,7 +1004,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
                 .unwrap()
                 .members
                 .iter()
-                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .filter(|member| member.agent_id.as_deref() == Some("codex"))
                 .take(3)
                 .map(|member| {
                     let mut profile = base.clone();
@@ -1735,18 +1735,21 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         Some(&roster),
         "read-only preparation must not consume a member"
     );
-    // Keep the existing pane and proposed window ID unchanged. Resting the
-    // first member changes canonical admission without exhausting capacity.
-    let current = gwt::agent_names::mutate_project_roster(
+    // Mark the selected member busy without changing the existing pane or
+    // exhausting machine capacity.
+    let first = &roster.members[0];
+    gwt::agent_names::reserve_project_member_for_agent(
         &fixture.project_root,
         &fixture.runtime.sessions_dir,
-        gwt::agent_names::AgentRosterAction::Rest {
-            member_id: roster.members[0].agent_member_id.clone(),
-        },
-        Some(roster.revision),
+        "new-assignment-after-preparation",
+        Some(3166),
+        None,
+        None,
+        None,
+        first.agent_id.as_deref().unwrap(),
+        Some(&first.agent_member_id),
     )
-    .expect("rest the first member after preparation");
-    assert!(current.revision > roster.revision);
+    .expect("reserve the first member for other work after preparation");
     assert_eq!(fs::read(&history_path).unwrap(), member_names);
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(fixture
@@ -1826,20 +1829,25 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         .find(|window| window.linked_issue_number == Some(3165))
         .and_then(|window| window.agent_name.as_ref())
         .expect("revalidated pane has a persistent member name");
-    assert_eq!(launched_name, &current.members[1].name);
+    assert_eq!(launched_name, &roster.members[1].name);
     assert_eq!(windows.len(), 2);
     let assigned = gwt::load_issue_monitor_prefs(&prefs_path)
         .unwrap()
         .agent_roster
         .unwrap();
-    assert!(!assigned.members[0].enabled);
-    assert!(assigned.members[0].assignment.is_none());
-    assert!(assigned.members[1].enabled);
+    assert_eq!(
+        assigned.members[0]
+            .assignment
+            .as_ref()
+            .unwrap()
+            .issue_number,
+        Some(3166)
+    );
     assert_eq!(
         assigned.members[1]
             .assignment
             .as_ref()
-            .expect("the enabled canonical member was reserved")
+            .expect("the next idle member was reserved")
             .issue_number,
         Some(3165)
     );
@@ -1891,7 +1899,7 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
                 .unwrap()
                 .members
                 .iter()
-                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .filter(|member| member.agent_id.as_deref() == Some("codex"))
                 .take(2)
                 .map(|member| {
                     let mut profile = base.clone();
@@ -1954,7 +1962,6 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
                     .iter()
                     .any(|member| {
                         Some(&member.agent_member_id) == profile.agent_member_id.as_ref()
-                            && member.enabled
                             && member.assignment.is_none()
                     })
         })
@@ -2371,7 +2378,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
                 .unwrap()
                 .members
                 .iter()
-                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .filter(|member| member.agent_id.as_deref() == Some("codex"))
                 .take(2)
                 .map(|member| {
                     let mut profile = base.clone();
@@ -2787,8 +2794,7 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             .members
             .iter()
             .position(|member| {
-                member.enabled
-                    && member.assignment.is_none()
+                member.assignment.is_none()
                     && source.agent_member_id.as_deref() != Some(member.agent_member_id.as_str())
             })
             .expect("an unassigned spare distinct from the exact asking member");
