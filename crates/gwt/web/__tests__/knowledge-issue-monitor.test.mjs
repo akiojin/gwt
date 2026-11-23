@@ -378,7 +378,7 @@ test("Monitor Queue and slots read one immutable model projection in both views"
     assert.equal(body.querySelector('[data-metric="capacity"]').textContent, `${active} of ${maxActive}`);
     assert.match(body.querySelector('[data-metric="active"]').getAttribute("aria-description"),
       new RegExp(`Issues agent capacity: ${active}/${maxActive}`));
-    assert.equal(strip.textContent, `Run Q${queue} A${active}/${maxActive}`);
+    assert.equal(strip.textContent, `Running · ${queue} queued · ${active} of ${maxActive} active`);
   };
   surface.applyIssueMonitorStatus({ enabled: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
     counts: { queue: 99, active: 99, maxActive: 99 } });
@@ -955,7 +955,7 @@ test("Issue #3620: the Operator strip preserves a zero effective worker cap", as
   const { document } = parseHTML('<div id="op-strip-issue-monitor"><span id="op-strip-issue-monitor-value"></span></div>');
   renderIssueMonitorStatus(document, { status: { enabled: true, state: "idle" },
     counts: { queue: 2, active: 0, maxActive: 0 } });
-  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle Q2 A0/0");
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle · 2 queued · 0 of 0 active");
 });
 
 test("Issues band preserves higher-priority states around quota-hold metadata", async (t) => {

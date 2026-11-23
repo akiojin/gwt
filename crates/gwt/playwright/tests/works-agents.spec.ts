@@ -96,7 +96,7 @@ test.describe("Works and Agents approved baseline", () => {
       fixture.monitorActive(3, 2);
       fixture.usage("measured", 0, [50, 999]);
     });
-    await expect(page).toHaveTitle(/RUN 2/);
+    await expect(page).toHaveTitle(/ 2 running /);
     await expect(page.locator("#op-strip-running")).toHaveText("2");
     await expect(works(page).locator('[data-count="running"]')).toHaveText("2");
     await expect(works(page).locator(".work-row")).toHaveCount(3);
@@ -117,7 +117,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-active")).toHaveText("Running 2");
     await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-one", "starting"));
     await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
-    await expect(page).toHaveTitle(/RUN 3/);
+    await expect(page).toHaveTitle(/ 3 running /);
     await expect(page.locator("#op-strip-running")).toHaveText("3");
   });
 
@@ -380,7 +380,7 @@ test.describe("Works and Agents approved baseline", () => {
     });
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 0 / Team 3");
     await expect(page.locator("#op-strip-running")).toHaveText("3");
-    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q0 A1/3");
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Running · 0 queued · 1 of 3 active");
     await openRail(page, "works");
     await expect(works(page).locator(".work-row")).toHaveCount(0);
     await expect(works(page).locator(".works-empty")).toBeVisible();

@@ -47,7 +47,7 @@ test("Issue #6992: Wedged status exposes a cancelable confirmation and sends one
     await expect(health).toContainText("Unavailable");
     await expect(restart).toBeHidden();
     await injectHealth("wedged");
-    await expect(health).toContainText("Wedged");
+    await expect(health).toContainText("Not responding");
     await restart.click();
     const dialog = modal.getByRole("dialog");
     await expect(dialog).toBeVisible();

@@ -58,6 +58,53 @@ fn embedded_web_status_strip_has_no_runtime_completion_indicator() {
     assert!(static_asset_text("/styles/tokens.css").contains("--color-state-done"));
 }
 
+/// Issue #7633 (SPEC #7007 T-015, AC-6/AC-7): the shared status bar and the
+/// tab title read the one shared summary in plain English words. The old
+/// abbreviations and the encoded `Q9 A3/6` monitor value must not come back.
+#[test]
+fn embedded_web_status_strip_and_tab_title_use_plain_words() {
+    let html = index_html();
+    let strip_start = html
+        .find("id=\"op-status-strip\"")
+        .expect("status strip markup");
+    let strip_end = strip_start + html[strip_start..].find("</footer>").expect("strip end");
+    let strip = &html[strip_start..strip_end];
+    assert!(strip.contains("data-role=\"connection-label\">Connected</span>"));
+    for label in [
+        "Project", "Running", "Idle", "Blocked", "Errors", "Work", "Auto-run", "Load",
+    ] {
+        assert!(
+            strip.contains(&format!(
+                "<span class=\"op-status-strip__label\">{label}</span>"
+            )),
+            "status strip must label `{label}` in plain words"
+        );
+    }
+    for abbreviation in [
+        ">ONLINE<",
+        ">PROJECT<",
+        ">RUNNING<",
+        ">IDLE<",
+        ">BLOCK<",
+        ">ERROR<",
+        ">WORK<",
+        ">ISSUES<",
+        ">PERF<",
+    ] {
+        assert!(
+            !strip.contains(abbreviation),
+            "status strip must not show the abbreviation {abbreviation}"
+        );
+    }
+    let metadata = root_js_module_source("/project-page-metadata.js");
+    assert!(metadata.contains("${running} running · ${blocked} blocked"));
+    assert!(!metadata.contains("RUN ${running}"));
+    let shell = root_js_module_source("/operator-shell.js");
+    assert!(!shell.contains("Q${queue} A${active}"));
+    assert!(shell.contains("${queue} queued · ${active} of ${maxActive} active"));
+    assert!(!app_js().contains("\"ONLINE\" : \"OFFLINE\""));
+}
+
 /// SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
 /// app.js.
 fn project_index_search_surface_js() -> &'static str {

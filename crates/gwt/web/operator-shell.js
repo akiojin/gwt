@@ -195,7 +195,7 @@ export function applyTelemetryCounts(doc, counts = {}) {
   const runningInline = Number(counts.running_inline ?? 0);
   const inlineSlot = doc.getElementById("op-strip-running-inline");
   if (inlineSlot) {
-    inlineSlot.textContent = `${runningInline} inline`;
+    inlineSlot.textContent = `${runningInline} in Issues`;
     inlineSlot.hidden = !(runningInline > 0);
   }
   const runningCell = doc.querySelector(".op-status-strip__cell--running");
@@ -307,18 +307,18 @@ function issueMonitorStatusStripView(status, counts) {
       state,
       value: "Off",
       needsHuman,
-      title: "Issues: Off",
+      title: "Auto-run: Off",
       alert: false,
     };
   }
 
   let label = "Idle";
   if (state === "error") label = "Error";
-  else if (state === "auth_required") label = "Auth";
-  else if (state === "launching" || state === "active") label = "Run";
-  else if (state === "quota_hold") label = "Hold";
+  else if (state === "auth_required") label = "Sign-in needed";
+  else if (state === "launching" || state === "active") label = "Running";
+  else if (state === "quota_hold") label = "On hold";
 
-  const value = `${label} Q${queue} A${active}/${maxActive}`;
+  const value = `${label} · ${queue} queued · ${active} of ${maxActive} active`;
   const lastError = typeof status.last_error === "string" ? status.last_error.trim() : "";
   const quotaHoldDetail = state === "quota_hold"
     ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}`
@@ -328,7 +328,7 @@ function issueMonitorStatusStripView(status, counts) {
     state,
     value,
     needsHuman,
-    title: detail ? `Issues: ${value} | ${detail}` : `Issues: ${value}`,
+    title: detail ? `Auto-run: ${value} | ${detail}` : `Auto-run: ${value}`,
     alert: state === "error" || state === "auth_required",
   };
 }
@@ -385,11 +385,11 @@ function runtimeHealthState(state) {
 function runtimeHealthStateLabel(state) {
   switch (runtimeHealthState(state)) {
     case "hot":
-      return "HOT";
+      return "High";
     case "warn":
-      return "WARN";
+      return "Elevated";
     case "warming":
-      return "WARM";
+      return "Warming";
     default:
       return "OK";
   }
@@ -421,11 +421,11 @@ function signedDelta(value) {
 function runtimeHealthTitle(snapshot, queue) {
   return [
     RUNTIME_HEALTH_CPU_UNITS,
-    `state: ${runtimeHealthState(snapshot.state)}`,
-    `processes: ${Number(snapshot.process_count) || 0}`,
-    `runners: ${Number(snapshot.runner_count) || 0}`,
-    `queued: ${Number(queue.queued_entries) || 0}`,
-    `dropped: ${signedDelta(queue.dropped_lossy_delta)}`,
+    `State: ${runtimeHealthStateLabel(snapshot.state)}`,
+    `Processes: ${Number(snapshot.process_count) || 0}`,
+    `Runners: ${Number(snapshot.runner_count) || 0}`,
+    `Queued events: ${Number(queue.queued_entries) || 0}`,
+    `Dropped events: ${signedDelta(queue.dropped_lossy_delta)}`,
   ].join(" | ");
 }
 
@@ -508,13 +508,13 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
 
   const summary = doc.createElement("div");
   summary.className = "op-runtime-health-detail__summary";
-  appendRuntimeHealthChip(doc, summary, "STATE", runtimeHealthStateLabel(snapshot.state));
+  appendRuntimeHealthChip(doc, summary, "State", runtimeHealthStateLabel(snapshot.state));
   appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeAggregateCpu(snapshot.cpu_percent));
-  appendRuntimeHealthChip(doc, summary, "MEM", formatRuntimeMemory(snapshot.memory_bytes));
+  appendRuntimeHealthChip(doc, summary, "Memory", formatRuntimeMemory(snapshot.memory_bytes));
   appendRuntimeHealthChip(
     doc,
     summary,
-    "PROC",
+    "Processes",
     `${Number(snapshot.process_count) || 0}/${Number(snapshot.runner_count) || 0}`,
   );
   detail.appendChild(summary);
@@ -1341,5 +1341,5 @@ function applyProjectOwnerHealth(doc, health = {}) {
   cell.hidden = false;
   cell.title = health.detail || "";
   const value = cell.querySelector("[data-project-owner-health-value]");
-  if (value) value.textContent = state === "healthy" ? "Ready" : state === "wedged" ? "Wedged" : state === "degraded" ? "Unavailable" : "Connecting";
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "wedged" ? "Not responding" : state === "degraded" ? "Unavailable" : "Connecting";
 }

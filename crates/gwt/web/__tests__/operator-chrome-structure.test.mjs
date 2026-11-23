@@ -1328,7 +1328,7 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
 test("Status Strip exposes a compact PERF cell for runtime health", () => {
   const cell = document.getElementById("op-strip-runtime-health");
   assert.ok(cell, "expected runtime health PERF cell");
-  assert.match(cell.textContent ?? "", /PERF/);
+  assert.match(cell.textContent ?? "", /Load/);
   assert.match(cell.getAttribute("aria-label") ?? "", /Runtime performance/);
   assert.match(cell.getAttribute("aria-label") ?? "", runtimeCpuUnitsPattern);
   assert.match(cell.getAttribute("title") ?? "", runtimeCpuUnitsPattern);
@@ -1392,13 +1392,13 @@ test("Status Strip omits the retired server URL cell", () => {
   assert.doesNotMatch(appSource, /kind:\s*"open_server_url"/);
 });
 
-test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () => {
+test("Status Strip labels the WebSocket connection state as Connected/Disconnected", () => {
   const strip = document.getElementById("op-status-strip");
   const connectionLabel = strip?.querySelector("[data-role='connection-label']");
   assert.ok(connectionLabel, "expected a connection label in the status strip");
-  assert.equal(connectionLabel.textContent?.trim(), "ONLINE");
+  assert.equal(connectionLabel.textContent?.trim(), "Connected");
   assert.doesNotMatch(html, />\s*LIVE\s*</);
-  assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"ONLINE"\s*:\s*"OFFLINE"/);
+  assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"Connected"\s*:\s*"Disconnected"/);
 });
 
 test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1.2)", () => {
@@ -1588,8 +1588,8 @@ test("Status Strip spells out WORK and drops the cryptic T clock label (SPEC-303
   assert.ok(branchesCell, "expected the Work cell");
   assert.equal(
     branchesCell.querySelector(".op-status-strip__label")?.textContent?.trim(),
-    "WORK",
-    "the WK label must spell out WORK",
+    "Work",
+    "the WK label must spell out Work",
   );
   const clockCell = document.getElementById("op-strip-clock")?.parentElement;
   assert.ok(clockCell, "expected the clock cell");
@@ -3108,8 +3108,8 @@ test("Status Strip RUNNING / IDLE / WAITING / ERROR cells all tint with their st
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--error/);
   assert.doesNotMatch(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
   assert.doesNotMatch(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--blocked/);
-  assert.match(indexHtml, /<span class="op-status-strip__label">RUNNING<\/span>/);
-  assert.match(indexHtml, /<span class="op-status-strip__label">ERROR<\/span>/);
+  assert.match(indexHtml, /<span class="op-status-strip__label">Running<\/span>/);
+  assert.match(indexHtml, /<span class="op-status-strip__label">Errors<\/span>/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--runtime-health/);
   assert.match(css, /\.op-status-strip__cell--runtime-health\[data-state="warn"\]/);
 });

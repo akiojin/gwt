@@ -249,10 +249,12 @@ the tray menu:
   Continue work. A daemon shared with another connected GUI or started
   independently remains running.
 
-Project browser tabs show agent RUN / BLOCK counts in their titles and a
-status favicon. BLOCK includes waiting, stopped, and error states; shell
-windows are excluded. The status strip and the Works heading show the same
-RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
+Project browser tabs show agent counts in plain words in their titles (for
+example `gwt — 3 running · 1 blocked — gwt`) and a status favicon. Blocked
+includes waiting, stopped, and error states; shell windows are excluded. The
+status strip (Running / Idle / Blocked / Errors) and the Works heading show the
+same counts as the tab title. The strip's Auto-run cell reads like
+`Running · 9 queued · 3 of 6 active`. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
 The root URL `http://127.0.0.1:<port>/` is the **Hub**. It opens on **Home**,

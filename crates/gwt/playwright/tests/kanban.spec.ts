@@ -124,7 +124,7 @@ test("Issue #3165: Open Issues is pointer and keyboard navigation only", async (
   await expect(issues).toHaveCount(1);
   const monitor = page.locator("#op-strip-issue-monitor");
   await expect(monitor).toHaveAccessibleName("Open Issues: Off");
-  await expect(monitor).toHaveAttribute("title", "Open Issues | Issues: Off");
+  await expect(monitor).toHaveAttribute("title", "Open Issues | Auto-run: Off");
   const messageCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
   for (const activation of ["click", "Enter", "Space"]) {
     await page.locator('.op-rail__surface[data-surface="settings"]').click();
@@ -151,7 +151,7 @@ test("Issue #3165: Open Issues is pointer and keyboard navigation only", async (
     enabled: true, state: "error", queue_len: 3, active_count: 0, max_active_agents: 2,
     last_error: "Issues navigation fixture error",
   } }));
-  await expect(monitor).toHaveAccessibleName("Open Issues: Error Q3 A0/2");
+  await expect(monitor).toHaveAccessibleName("Open Issues: Error · 3 queued · 0 of 2 active");
   await expect(monitor).toHaveAttribute("title", /Open Issues.*Issues navigation fixture error/);
   await expect(monitor).toHaveClass(/op-status-strip__cell--alert/);
   await page.screenshot({ path: info.outputPath(`monitor-navigation-${theme}.png`) });
