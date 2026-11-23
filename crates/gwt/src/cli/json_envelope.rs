@@ -8374,7 +8374,7 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.id == board_id));
-        let broker =gwt_core::index::broker::RefreshBroker::open_default().unwrap();
+        let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
         let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
         let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();
         let target = gwt_core::index::broker::RefreshTarget::base(hash.as_str(), [scope]);
