@@ -1687,6 +1687,22 @@ test("card selection keeps issue body, acceptance and provenance beside switchab
   await expect(page.locator(".issue-queue-board")).toBeVisible();
 });
 
+test("Issue #7645 shows theme progress and adds a subtask to the issue body", async ({ page }) => {
+  const detail = page.locator(".knowledge-detail-pane");
+  await row(page, 3).locator(".knowledge-row-select").click();
+  await expect(detail.getByRole("link", { name: "Project theme (#70)" })).toHaveAttribute(
+    "href", "https://github.com/example/repo/issues/70",
+  );
+  const theme = detail.getByRole("progressbar", { name: "Theme progress done" });
+  await expect(theme).toHaveAttribute("aria-valuenow", "1");
+  await expect(theme).toHaveAttribute("aria-valuemax", "4");
+  await detail.getByLabel("Subtask title").fill("Verify the change");
+  await detail.getByRole("button", { name: "Add subtask" }).click();
+  await expect(detail.getByText("Verify the change", { exact: true })).toBeVisible();
+  await expect(detail.getByRole("progressbar", { name: "Subtasks done" })).toHaveAttribute("aria-valuemax", "2");
+  await expect(detail.getByRole("progressbar", { name: "Subtasks done" })).toHaveAttribute("aria-valuenow", "1");
+});
+
 test("T-F2: tier raise is per-Issue, server-confirmed and retained beside body and Output", async ({page}) => {
   const facts = { issue_number: 3, tier_count: 3, next_minimum_tier: 0,
     next_launch: { tier: 1, agent_id: "claude", model: "sonnet", reasoning: "medium" } };
@@ -2103,8 +2119,14 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
           if (message.kind==="load_knowledge_bridge") fixture.__queueBaseLoad=fixture.__queueLoad;
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
-        else if(message.kind==="select_knowledge_bridge_entry") {
+        else if(message.kind==="select_knowledge_bridge_entry" || message.kind==="add_issue_subtask") {
           fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
+          if (message.number === 3) {
+            const detail = fixture.__queueLastDetail.detail;
+            detail.parent_theme = { number: 70, title: "Project theme", url: "https://github.com/example/repo/issues/70", total: 4, completed: 1 };
+            detail.sections[0].body += "\n\n## 子課題\n\n- [x] Confirm the issue";
+            if (message.kind === "add_issue_subtask") detail.sections[0].body += `\n- [ ] ${message.title}`;
+          }
           this.emit(fixture.__queueLastDetail);
         }
       }

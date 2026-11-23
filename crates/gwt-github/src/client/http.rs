@@ -3382,6 +3382,17 @@ query($owner:String!,$repo:String!,$after:String){
 }
 "#;
 
+const PARENT_THEME_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$number:Int!){
+  rateLimit{cost remaining resetAt nodeCount}
+  repository(owner:$owner, name:$repo){
+    issue(number:$number){
+      parent{ number title url subIssuesSummary{ total completed } }
+    }
+  }
+}
+"#;
+
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
@@ -3865,6 +3876,17 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         }
         listing.truncated = true;
         Ok(listing)
+    }
+
+    fn parent_theme(&self, number: IssueNumber) -> Result<Option<ThemeIssue>, ApiError> {
+        let value = self.graphql(
+            PARENT_THEME_QUERY,
+            json!({"owner": self.owner, "repo": self.repo, "number": number.0}),
+        )?;
+        Ok(parse_theme_issue(
+            &value["data"]["repository"]["issue"]["parent"],
+            &format!("{}/{}", self.owner, self.repo),
+        ))
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {

@@ -356,6 +356,10 @@ pub trait IssueClient: Send + Sync {
     fn list_themes(&self) -> Result<ThemeListing, ApiError> {
         Err(ApiError::Unexpected("list themes unsupported".into()))
     }
+
+    fn parent_theme(&self, _number: IssueNumber) -> Result<Option<ThemeIssue>, ApiError> {
+        Ok(None)
+    }
 }
 
 /// One theme: an open Issue that has sub-issues (Issue #7643).

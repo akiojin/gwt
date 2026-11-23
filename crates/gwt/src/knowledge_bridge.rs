@@ -291,6 +291,17 @@ pub struct KnowledgeDetailView {
     pub launch_issue_number: Option<u64>,
     #[serde(default)]
     pub related_works: Vec<KnowledgeRelatedWorkView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_theme: Option<KnowledgeParentTheme>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeParentTheme {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub total: u64,
+    pub completed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,6 +599,121 @@ pub fn load_knowledge_bridge_detail(
         .ok_or_else(|| format!("Issue #{number} not in local cache"))?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(work_item_detail_view(&entry, &linked_branches))
+}
+
+pub fn append_issue_subtask(
+    repo_path: &Path,
+    client: &dyn gwt_github::IssueClient,
+    number: u64,
+    title: &str,
+) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().any(char::is_control) || title.chars().count() > 200 {
+        return Err("Enter a subtask title of 1–200 characters on one line.".into());
+    }
+    let cache_root = issue_cache_root_for_repo_path(repo_path)
+        .ok_or("Knowledge Bridge is available only for Git projects.")?;
+    let cache = Cache::new(cache_root);
+    let number = gwt_github::IssueNumber(number);
+    // Multiple Issue windows can submit edits to the same GitHub body.
+    static SUBTASK_EDIT: Mutex<()> = Mutex::new(());
+    let _edit = SUBTASK_EDIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let gwt_github::FetchResult::Updated(snapshot) = client
+        .fetch(number, None)
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("Could not read the current issue description.".into());
+    };
+    if snapshot.state != IssueState::Open || has_gwt_spec_label(&snapshot.labels) {
+        return Err("Subtasks can be added to open issues.".into());
+    }
+    let body = append_subtask_markdown(&snapshot.body, title);
+    if body == snapshot.body {
+        return cache
+            .write_snapshot(&snapshot)
+            .map_err(|error| error.to_string());
+    }
+    let mut updated = client
+        .patch_body(number, &body)
+        .map_err(|error| error.to_string())?;
+    updated.comments = snapshot.comments;
+    cache
+        .write_snapshot(&updated)
+        .map_err(|error| error.to_string())
+}
+
+fn append_subtask_markdown(body: &str, title: &str) -> String {
+    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+
+    let mut heading = None;
+    let mut section = None;
+    let mut section_start = 0;
+    let mut insert_at = body.len();
+    let mut text = String::new();
+    for (event, range) in Parser::new(body).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                if section.is_some_and(|section_level: HeadingLevel| level <= section_level) {
+                    insert_at = range.start;
+                    break;
+                }
+                heading = Some(level);
+                text.clear();
+            }
+            Event::Text(value) if heading.is_some() => text.push_str(&value),
+            Event::End(TagEnd::Heading(_)) => {
+                let level = heading.take();
+                if section.is_none() && (text == "子課題" || text.eq_ignore_ascii_case("Subtasks"))
+                {
+                    section = level;
+                    section_start = range.end;
+                }
+            }
+            _ => {}
+        }
+    }
+    if section.is_some()
+        && body[section_start..insert_at].lines().any(|line| {
+            ["- [ ] ", "- [x] ", "- [X] "]
+                .iter()
+                .any(|prefix| line.strip_prefix(prefix) == Some(title))
+        })
+    {
+        return body.to_string();
+    }
+    let (before, after) = body.split_at(insert_at);
+    let mut result = before.trim_end_matches(['\r', '\n']).to_string();
+    if !result.is_empty() {
+        result.push_str("\n\n");
+    }
+    if section.is_none() {
+        result.push_str("## 子課題\n\n");
+    }
+    result.push_str("- [ ] ");
+    result.push_str(title);
+    result.push('\n');
+    if !after.is_empty() {
+        result.push('\n');
+        result.push_str(after);
+    }
+    result
+}
+
+#[cfg(test)]
+#[test]
+fn issue_subtask_is_inserted_before_the_next_body_section() {
+    let body = "## Description\n\nKeep this.\n\n## 子課題\n\n- [x] First\n\n## Acceptance criteria\n\n- [ ] AC-1: Keep this too\n";
+    assert_eq!(
+        append_subtask_markdown(body, "Second"),
+        "## Description\n\nKeep this.\n\n## 子課題\n\n- [x] First\n\n- [ ] Second\n\n## Acceptance criteria\n\n- [ ] AC-1: Keep this too\n",
+    );
+    assert_eq!(
+        append_subtask_markdown("Existing description", "First"),
+        "Existing description\n\n## 子課題\n\n- [ ] First\n",
+    );
+    assert_eq!(append_subtask_markdown(body, "First"), body);
 }
 
 // Cache roots identify the shared project even when requests come from different worktrees.
@@ -1254,6 +1380,7 @@ fn issue_detail_view(
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
         related_works: Vec::new(),
+        parent_theme: None,
     }
 }
 
@@ -1302,6 +1429,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
         related_works: Vec::new(),
+        parent_theme: None,
     }
 }
 

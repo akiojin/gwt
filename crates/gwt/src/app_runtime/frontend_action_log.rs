@@ -404,6 +404,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .window(id)
             .mode(format!("{knowledge_kind:?}"))
             .target(number.to_string()),
+        FrontendEvent::AddIssueSubtask { id, number, .. } => {
+            FrontendUserActionLog::new("add_issue_subtask", "knowledge")
+                .window(id)
+                .target(number.to_string())
+        }
         FrontendEvent::UpdateKnowledgeBridgePhase {
             id,
             issue_number,

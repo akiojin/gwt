@@ -614,6 +614,31 @@ export function issueAcceptanceProgress(markdown) {
   return { items, done: items.filter((item) => item.done).length, total: items.length };
 }
 
+export function issueChildProgress(sections) {
+  const body = sections?.find(section => section.title === "Description")?.body || "";
+  const items = [];
+  let headingLevel = 0;
+  let fence = null;
+  for (const line of body.split(/\r?\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1].startsWith(fence) && !marker[2].trim()) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    const heading = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (heading) {
+      if (headingLevel && heading[1].length <= headingLevel) break;
+      if (/^(子課題|Subtasks)$/i.test(heading[2])) headingLevel = heading[1].length;
+      continue;
+    }
+    const item = headingLevel && /^ {0,3}[-*+]\s+\[([ xX])\]\s+(\S.*)$/.exec(line);
+    if (item) items.push({ done: item[1] !== " ", text: item[2].trim() });
+  }
+  return { items, done: items.filter(item => item.done).length, total: items.length };
+}
+
 // SPEC #3885 Phase 5 (T-035 / FR-023): one action band per state, at most three
 // visible actions plus ⋯. queue = Launch now / Move to top, running = Open
 // window / Move to top (⋯ keeps Requeue and Stop), done = Open PR. Every other
@@ -2928,7 +2953,7 @@ export function createKnowledgeKanbanSurface({
         windowId,
         knowledgeKind,
         number,
-        { explicit = false } = {},
+        { explicit = false, subtaskTitle = null } = {},
       ) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         const previousNumber = state.selectedNumber;
@@ -2975,13 +3000,26 @@ export function createKnowledgeKanbanSurface({
         } else {
           renderKnowledgeDetailOnly(windowId, state);
         }
-        send({
+        const message = subtaskTitle == null ? {
           kind: "select_knowledge_bridge_entry",
           id: windowId,
           knowledge_kind: effectiveKind,
           request_id: requestId,
           number,
-        });
+        } : {
+          kind: "add_issue_subtask",
+          id: windowId,
+          request_id: requestId,
+          number,
+          title: subtaskTitle,
+        };
+        if (send(message) === "unavailable" && subtaskTitle != null) {
+          state.detailLoading = false;
+          state.error = "Could not add the subtask. Reconnect and try again.";
+          renderKnowledgeStatusOnly(windowId, state);
+          renderKnowledgeDetailOnly(windowId, state);
+          return false;
+        }
         return true;
       }
 
@@ -4350,19 +4388,22 @@ export function createKnowledgeKanbanSurface({
 
       function renderIssueDetailAcceptance(detail) {
         const text = (detail.sections || []).map((section) => section?.body || "").join("\n");
-        const progress = issueAcceptanceProgress(text);
+        return renderIssueDetailProgress("Acceptance criteria", issueAcceptanceProgress(text));
+      }
+
+      function renderIssueDetailProgress(label, progress) {
         if (progress.total === 0) return null;
         const block = createNode("section", "issue-detail-ac");
-        block.setAttribute("aria-label", "Acceptance criteria");
+        block.setAttribute("aria-label", label);
         const head = createNode("div", "issue-detail-ac-head");
-        head.appendChild(createNode("span", "issue-detail-ac-title", "Acceptance criteria"));
+        head.appendChild(createNode("span", "issue-detail-ac-title", label));
         head.appendChild(
           createNode("span", "issue-detail-ac-count", `${progress.done} / ${progress.total}`),
         );
         block.appendChild(head);
         const gauge = createNode("div", "issue-detail-ac-gauge");
         gauge.setAttribute("role", "progressbar");
-        gauge.setAttribute("aria-label", "Acceptance criteria done");
+        gauge.setAttribute("aria-label", `${label} done`);
         gauge.setAttribute("aria-valuemin", "0");
         gauge.setAttribute("aria-valuemax", String(progress.total));
         gauge.setAttribute("aria-valuenow", String(progress.done));
@@ -4370,12 +4411,13 @@ export function createKnowledgeKanbanSurface({
         fill.style.width = `${Math.round((progress.done / progress.total) * 100)}%`;
         gauge.appendChild(fill);
         block.appendChild(gauge);
+        if (progress.items.length === 0) return block;
         const list = createNode("ul", "issue-detail-ac-list");
         for (const item of progress.items) {
           const row = createNode("li", "issue-detail-ac-item");
           row.dataset.done = item.done ? "true" : "false";
           row.appendChild(createNode("span", "issue-detail-ac-mark", item.done ? "✓" : "○"));
-          row.appendChild(createNode("span", "issue-detail-ac-id", item.id));
+          if (item.id) row.appendChild(createNode("span", "issue-detail-ac-id", item.id));
           row.appendChild(createNode("span", "issue-detail-ac-text", item.text));
           list.appendChild(row);
         }
@@ -4770,6 +4812,42 @@ export function createKnowledgeKanbanSurface({
         const scroll = createNode("div", "knowledge-detail-scroll workspace-scroll modal-body issue-detail-body");
         if (state.detailLoading) {
           scroll.appendChild(createNode("div", "knowledge-detail-empty", "Loading detail"));
+        }
+        if (detail.parent_theme) {
+          const parent = detail.parent_theme;
+          const progress = renderIssueDetailProgress("Theme progress", {
+            items: [],
+            done: Math.min(parent.completed, parent.total),
+            total: parent.total,
+          });
+          if (progress) {
+            const link = createNode("a", null, `${parent.title} (#${parent.number})`);
+            link.href = parent.url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            progress.prepend(link);
+            scroll.appendChild(progress);
+          }
+        }
+        const children = renderIssueDetailProgress("Subtasks", issueChildProgress(detail.sections));
+        if (children) scroll.appendChild(children);
+        if (!entry.is_spec && detail.state?.toLowerCase() !== "closed" && !state.detailLoading) {
+          const form = createNode("form", "knowledge-section");
+          const label = createNode("label", null, "Subtask title");
+          const input = createNode("input");
+          input.type = "text";
+          input.required = true;
+          input.maxLength = 200;
+          label.appendChild(input);
+          const button = createNode("button", null, "Add subtask");
+          button.type = "submit";
+          form.append(label, button);
+          form.addEventListener("submit", event => {
+            event.preventDefault();
+            const title = input.value.trim();
+            if (title) dispatchKnowledgeDetailRequest(windowId, "issue", number, { subtaskTitle: title });
+          });
+          scroll.appendChild(form);
         }
         (detail.sections || []).forEach((section, index) => {
           const card = createNode("details", "knowledge-section");
