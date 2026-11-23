@@ -539,11 +539,9 @@ fn member_runner_health(
         }
         let id = &member.agent_member_id;
         let profile = if let Some(tool) = environment.as_deref() {
-            Some(IssueMonitorPrefs::member_candidate_on_environment(
-                &pool, id, tool,
-            ))
+            Some(prefs.member_candidate_on_environment(&pool, id, tool))
         } else {
-            IssueMonitorPrefs::legacy_member_candidate(&pool, member)
+            prefs.legacy_member_candidate(&pool, member)
         };
         let Some(profile) = profile else {
             continue;

@@ -1627,7 +1627,7 @@ impl IssueMonitorPrefs {
                 .iter()
                 .filter(|member| self.registered_member_can_take(member, scheduled, issue_number))
                 .map(|member| {
-                    Self::member_candidate_on_environment(&pool, &member.agent_member_id, &tool)
+                    self.member_candidate_on_environment(&pool, &member.agent_member_id, &tool)
                 })
                 .collect();
         }
@@ -1644,7 +1644,7 @@ impl IssueMonitorPrefs {
             .iter()
             .flat_map(|roster| &roster.members)
             .filter(|member| self.registered_member_can_take(member, scheduled, issue_number))
-            .filter_map(|member| Self::legacy_member_candidate(&pool, member))
+            .filter_map(|member| self.legacy_member_candidate(&pool, member))
             .filter(|profile| {
                 scheduled.is_some()
                     || normalize_issue_monitor_provider(&profile.agent_id) == primary_tool

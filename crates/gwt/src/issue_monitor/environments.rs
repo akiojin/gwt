@@ -175,11 +175,9 @@ impl IssueMonitorPrefs {
             .iter()
             .find(|member| member.agent_member_id == member_id)?;
         if let Some(tool) = self.environment_tool_for_agents() {
-            return Some(Self::member_candidate_on_environment(
-                &pool, member_id, &tool,
-            ));
+            return Some(self.member_candidate_on_environment(&pool, member_id, &tool));
         }
-        Self::legacy_member_candidate(&pool, member)
+        self.legacy_member_candidate(&pool, member)
     }
 
     pub(super) fn legacy_member_profile<'pool>(
@@ -199,6 +197,7 @@ impl IssueMonitorPrefs {
     }
 
     pub(super) fn legacy_member_candidate(
+        &self,
         pool: &[IssueMonitorLaunchProfile],
         member: &crate::agent_names::AgentMember,
     ) -> Option<IssueMonitorLaunchProfile> {
@@ -217,7 +216,7 @@ impl IssueMonitorPrefs {
         {
             // Another member's general profile authorizes the tool. Its
             // per-member launch settings stay with that member.
-            environment_candidate(&profile.agent_id)
+            self.default_member_candidate(&member.agent_member_id, &profile.agent_id)
         } else {
             profile.clone()
         };
@@ -226,6 +225,7 @@ impl IssueMonitorPrefs {
     }
 
     pub(super) fn member_candidate_on_environment(
+        &self,
         pool: &[IssueMonitorLaunchProfile],
         member_id: &str,
         tool: &str,
@@ -235,11 +235,19 @@ impl IssueMonitorPrefs {
             .find(|profile| profile.agent_member_id.as_deref() == Some(member_id))
             .cloned()
             .map_or_else(
-                || environment_candidate(tool),
+                || self.default_member_candidate(member_id, tool),
                 |profile| profile.on_tool(tool),
             );
         candidate.agent_member_id = Some(member_id.to_string());
         candidate
+    }
+
+    fn default_member_candidate(&self, member_id: &str, tool: &str) -> IssueMonitorLaunchProfile {
+        let mut candidate = environment_candidate(tool);
+        if let Some(core) = self.agent_registry_profiles.get(member_id) {
+            core.apply(&mut candidate);
+        }
+        candidate.on_tool(tool)
     }
 
     /// Whether `tool` is one of the project's saved environments, which any

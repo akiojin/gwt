@@ -53,7 +53,7 @@ impl AgentProfileCore {
         }
     }
 
-    fn apply(&self, profile: &mut IssueMonitorLaunchProfile) {
+    pub(crate) fn apply(&self, profile: &mut IssueMonitorLaunchProfile) {
         profile.agent_id.clone_from(&self.agent_id);
         profile.model.clone_from(&self.model);
         profile.reasoning.clone_from(&self.reasoning);
