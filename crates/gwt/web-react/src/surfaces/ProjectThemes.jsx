@@ -14,7 +14,7 @@ const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 // Every string this surface shows.
 const COPY = {
   title: "Themes",
-  lead: "A theme groups several issues. Each theme is a GitHub Issue with sub-issues, and its progress comes from GitHub.",
+  lead: "A theme groups several issues. The PM records a theme from what you ask for or decide in the conversation on Home. Each theme is a GitHub Issue, and its progress comes from GitHub.",
   stats: { in_progress: "Themes in progress", almost_done: "Themes almost done", completedToday: "Issues completed today" },
   status: { in_progress: "In progress", almost_done: "Almost done" },
   loading: "Loading themes…",
@@ -23,17 +23,21 @@ const COPY = {
   truncated: "This repository has more open issues than one read covers. Only themes among the most recently updated issues are listed.",
   deleted: number => `Theme #${number} was deleted.`,
   emptyTitle: "No themes yet",
-  emptyBody: "A theme is a GitHub Issue that has sub-issues. Add sub-issues to an Issue on GitHub and it appears here.",
+  emptyBody: "The PM records a theme when you ask for something or decide something in the conversation on Home. A GitHub Issue that has sub-issues also appears here.",
   progress: (total, completed) => `${plural(total, "issue")} under it · ${completed} completed`,
   back: "Back to themes",
   kind: total => `Theme · ${plural(total, "issue")} under it`,
   github: number => `This theme is a GitHub Issue: #${number}`,
   openGithub: "Open on GitHub",
   about: "About this theme",
+  origin: "Source of this theme",
+  recorded: at => `Recorded automatically from the conversation on Home${at ? ` on ${formatDate(at)}` : ""}. What was asked or decided later is added to the GitHub Issue.`,
+  openConversation: "Show in conversation",
   noSummary: "This theme has no description.",
   progressTitle: "Progress",
   issues: "Issues under this theme",
   issuesPartial: (shown, total) => `Showing the first ${shown} of ${total} issues. Open the theme on GitHub to see the rest.`,
+  noIssues: "No issues sit under this theme yet. The PM adds them as the work is planned.",
   issueOpen: "Open",
   issueCompleted: "Completed",
   otherRepository: "In another repository — opens on GitHub",
@@ -48,6 +52,13 @@ const COPY = {
   deleting: "Deleting…",
   cancel: "Cancel",
 };
+
+// The day a theme was recorded, in the viewer's locale; an unreadable time
+// shows as it was given.
+function formatDate(value) {
+  const at = new Date(value);
+  return Number.isNaN(at.getTime()) ? value : at.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
 
 function Progress({ theme }) {
   return (
@@ -144,6 +155,19 @@ function ThemeDetail({ view, theme, actions, headingRef, deleteRef }) {
           <Badge status={theme.status} />
         </div>
       </section>
+      {theme.recordedFrom ? (
+        <section className="project-themes__group" data-theme-origin>
+          <h2>{COPY.origin}</h2>
+          <div className="project-themes__progress">
+            <div className="project-themes__row-text">
+              <span className="project-themes__meta">{COPY.recorded(theme.recordedFrom.recordedAt)}</span>
+            </div>
+            <button type="button" data-theme-conversation onClick={() => actions.openConversation(theme.recordedFrom)}>
+              {COPY.openConversation}
+            </button>
+          </div>
+        </section>
+      ) : null}
       <section className="project-themes__group">
         <h2>{COPY.issues}</h2>
         <ul className="project-themes__list" data-theme-issues>
@@ -171,6 +195,7 @@ function ThemeDetail({ view, theme, actions, headingRef, deleteRef }) {
             );
           })}
         </ul>
+        {theme.issues.length ? null : <p className="project-themes__hint" data-theme-no-issues>{COPY.noIssues}</p>}
         {theme.total > theme.issues.length ? <p className="project-themes__hint">{COPY.issuesPartial(theme.issues.length, theme.total)}</p> : null}
       </section>
       <section className="project-themes__group">

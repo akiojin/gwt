@@ -3141,3 +3141,33 @@ fn list_themes_stops_at_the_page_limit_and_says_so() {
     assert!(listing.truncated);
     assert_eq!(client.transport().recorded().len(), 10);
 }
+
+// Issue #7644: a theme the PM recorded from the conversation carries the
+// `gwt-theme` label and is a theme before any issue sits under it.
+#[test]
+fn list_themes_includes_recorded_themes_without_sub_issues() {
+    let transport = FakeTransport::new();
+    transport.enqueue(theme_page(
+        serde_json::json!([
+            { "number": 5, "title": "Plain", "body": "", "url": "https://github.com/o/r/issues/5",
+              "labels": { "nodes": [ { "name": "bug" } ] },
+              "subIssuesSummary": { "total": 0, "completed": 0 }, "subIssues": { "nodes": [] } },
+            { "number": 6, "title": "Recorded", "body": "From the conversation.",
+              "url": "https://github.com/o/r/issues/6",
+              "labels": { "nodes": [ { "name": "gwt-theme" } ] },
+              "subIssuesSummary": { "total": 0, "completed": 0 }, "subIssues": { "nodes": [] } }
+        ]),
+        None,
+    ));
+    let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+
+    let listing = client.list_themes().expect("themes");
+
+    let numbers: Vec<u64> = listing.themes.iter().map(|theme| theme.number.0).collect();
+    assert_eq!(numbers, vec![6]);
+    assert_eq!(listing.themes[0].sub_issues_total, 0);
+    let request: serde_json::Value =
+        serde_json::from_str(client.transport().recorded()[0].body.as_deref().unwrap()).unwrap();
+    assert!(request["query"].as_str().unwrap().contains("labels("));
+    assert_eq!(gwt_github::client::THEME_LABEL, "gwt-theme");
+}
