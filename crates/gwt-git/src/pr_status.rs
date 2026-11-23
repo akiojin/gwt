@@ -2585,7 +2585,13 @@ query($owner: String!, $repo: String!, $number: Int!) {
     pullRequest(number: $number) {
       reviewThreads(first: 100) { nodes { isResolved } }
       latestReviews(first: 20) { nodes { submittedAt author { login } } }
-      commits(last: 1) { nodes { commit { committedDate } } }
+      commits(last: 1) { nodes { commit {
+        committedDate
+        statusCheckRollup { contexts(first: 100) { nodes {
+          ... on CheckRun { name status conclusion }
+          ... on StatusContext { context state }
+        } } }
+      } } }
     }
   }
 }
@@ -2611,12 +2617,32 @@ pub fn parse_review_state(json: &str) -> Option<PrReviewState> {
                 })
                 .count() as u32
         })?;
-    let head_committed_at = pr
+    let head_commit = pr
         .get("commits")
         .and_then(|commits| commits.get("nodes"))
         .and_then(serde_json::Value::as_array)
         .and_then(|nodes| nodes.first())
-        .and_then(|node| node.get("commit"))
+        .and_then(|node| node.get("commit"));
+    // Issue #7810: with nothing to say, CodeRabbit passes its check on the
+    // head and posts no review. A skipped (rate-limited) or neutral check
+    // reviewed nothing, so only SUCCESS counts.
+    let coderabbit_check_passed = head_commit
+        .and_then(|commit| commit.get("statusCheckRollup"))
+        .and_then(|rollup| rollup.get("contexts"))
+        .and_then(|contexts| contexts.get("nodes"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|nodes| {
+            nodes.iter().any(|node| {
+                let field = |key: &str| node.get(key).and_then(serde_json::Value::as_str);
+                field("name")
+                    .or_else(|| field("context"))
+                    .is_some_and(|name| name.to_ascii_lowercase().contains("coderabbit"))
+                    && field("conclusion")
+                        .or_else(|| field("state"))
+                        .is_some_and(|verdict| verdict.eq_ignore_ascii_case("SUCCESS"))
+            })
+        });
+    let head_committed_at = head_commit
         .and_then(|commit| commit.get("committedDate"))
         .and_then(serde_json::Value::as_str)
         .and_then(|value| parse_github_timestamp(Some(value)));
@@ -2646,7 +2672,8 @@ pub fn parse_review_state(json: &str) -> Option<PrReviewState> {
                     _ => false,
                 }
             })
-        });
+        })
+        || coderabbit_check_passed;
     Some(PrReviewState {
         unresolved_threads,
         coderabbit_review_complete,
@@ -2679,7 +2706,13 @@ query($owner: String!, $repo: String!, $number: Int!) {
     pullRequest(number: $number) {
       reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
       latestReviews(first: 20) { nodes { submittedAt author { login } } }
-      commits(last: 1) { nodes { commit { committedDate } } }
+      commits(last: 1) { nodes { commit {
+        committedDate
+        statusCheckRollup { contexts(first: 100) { nodes {
+          ... on CheckRun { name status conclusion }
+          ... on StatusContext { context state }
+        } } }
+      } } }
     }
   }
 }
@@ -9869,6 +9902,55 @@ mod tests {
         );
 
         assert!(parse_review_state("not json").is_none());
+    }
+
+    /// Issue #7810: CodeRabbit passes its check on the head without posting a
+    /// review when it has nothing to say. That pass is a finished review; a
+    /// skipped (rate-limited), neutral or running check is not.
+    #[test]
+    fn issue_7810_a_passing_coderabbit_check_on_the_head_completes_the_review() {
+        let payload = |check: &str| {
+            format!(
+                r#"{{"data":{{"repository":{{"pullRequest":{{
+                  "reviewThreads":{{"nodes":[]}},
+                  "latestReviews":{{"nodes":[]}},
+                  "commits":{{"nodes":[{{"commit":{{"committedDate":"2026-09-10T00:00:00Z",
+                    "statusCheckRollup":{{"contexts":{{"nodes":[
+                      {{"name":"Build","status":"COMPLETED","conclusion":"SUCCESS"}},
+                      {check}
+                    ]}}}}}}}}]}}
+                }}}}}}}}"#
+            )
+        };
+        for (check, complete) in [
+            (
+                r#"{"name":"CodeRabbit","status":"COMPLETED","conclusion":"SUCCESS"}"#,
+                true,
+            ),
+            (r#"{"context":"CodeRabbit","state":"SUCCESS"}"#, true),
+            (
+                r#"{"name":"CodeRabbit","status":"COMPLETED","conclusion":"SKIPPED"}"#,
+                false,
+            ),
+            (
+                r#"{"name":"CodeRabbit","status":"COMPLETED","conclusion":"NEUTRAL"}"#,
+                false,
+            ),
+            (
+                r#"{"name":"CodeRabbit","status":"IN_PROGRESS","conclusion":null}"#,
+                false,
+            ),
+            (r#"{"context":"CodeRabbit","state":"PENDING"}"#, false),
+            (
+                r#"{"name":"Lint","status":"COMPLETED","conclusion":"SUCCESS"}"#,
+                false,
+            ),
+        ] {
+            let state = parse_review_state(&payload(check)).expect("review state");
+            assert_eq!(state.coderabbit_review_complete, complete, "{check}");
+        }
+        assert!(REVIEW_STATE_QUERY.contains("statusCheckRollup"));
+        assert!(COMPLETION_REVIEW_STATE_QUERY.contains("statusCheckRollup"));
     }
 
     /// The probe reuses the URL every row already carries instead of spending
