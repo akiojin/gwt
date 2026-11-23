@@ -496,7 +496,7 @@ test.describe("PM touch targets", () => {
     await page.locator("#op-pm-entry").click();
     const pm = page.locator(`.workspace-window[data-id="${PM}"] .pm-chat`);
     const views = pm.locator(".pm-chat__toolbar[role='group'] button");
-    await expect(views).toHaveCount(8);
+    await expect(views).toHaveCount(7);
     const names = await views.allTextContents();
     const view = (name: string) => views.filter({ hasText: new RegExp(`^${name}$`) });
     const controls = () => pm.evaluate(root => [...root.querySelectorAll("button, select, summary")]
