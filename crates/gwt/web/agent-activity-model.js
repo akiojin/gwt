@@ -140,7 +140,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     const name = value.trim();
     if (!name) return "Enter a display name.";
     if (state.members.some(member => member.member_id !== memberId && member.name.trim().toLowerCase() === name.toLowerCase())) {
-      return "This name is already registered, including resting members.";
+      return "This name is already registered.";
     }
     return "";
   }
@@ -207,7 +207,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     if (request.action?.kind === "read") {
       latestRead = { request_id: request.request_id, error: model.read().error }; return true;
     }
-    if (!["add", "rest", "activate", "resize", "set_pm_eligibility", "select_pm", "move", "remove", "set_traits"].includes(request.action?.kind)) return false;
+    if (!["add", "resize", "set_pm_eligibility", "select_pm", "move", "remove", "set_traits"].includes(request.action?.kind)) return false;
     latestRead = null;
     if (latestSnapshot) latestSnapshot = { ...latestSnapshot, error: null };
     model.update(state => ({ ...state, error: null, pending_roster: { request_id: request.request_id, action: request.action } }));

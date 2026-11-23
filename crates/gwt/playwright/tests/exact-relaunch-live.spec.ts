@@ -17,7 +17,7 @@ import { readLatestOwnActivity, readProcessState, startExactRelaunchFixture, wri
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
-type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
+type RosterMember = { agent_member_id: string; agent_id: string; name: string;
   assignment: { session_id: string | null; issue_number: number | null } | null;
   active_assignments?: { project_key: string; project_name: string | null; session_id: string | null; issue_number: number | null; state: string }[];
   saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
@@ -580,7 +580,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     const firstIssue = 43, secondIssue = 44;
     const fixture = await startExactRelaunchFixture(info, {
       page, freshNativeIds: true,
-      monitorPreferences: { max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2 },
+      monitorPreferences: { max_active_agents: 1 },
       async prepare({ home, project, env }) {
         const origin = join(home, "project-a.git");
         execFileSync("git", ["init", "--bare", "-q", origin], { cwd: project, env, encoding: "utf8" });
@@ -609,20 +609,16 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         await mkdir(secondPreferences, { recursive: true });
         await writeFile(join(secondPreferences, "pm.json"), JSON.stringify({ settings: { auto_start: false } }));
         await writeFile(join(secondPreferences, "issue-monitor.json"), JSON.stringify({ enabled: false,
-          max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2, priority_order: [] }));
+          max_active_agents: 1, priority_order: [] }));
         await writeFile(join(home, ".gwt/session.json"), JSON.stringify({ tabs: [
           { id: "shared-a", title: "Project A", project_root: project, kind: "git" },
           { id: "shared-b", title: "Project B", project_root: second, kind: "git" },
         ], active_tab_id: "shared-a", recent_projects: [] }));
-        // Reading the fixture's initial status already creates the shared Auto
-        // policy. A project JSON seed cannot change that machine authority.
-        const configured = JSON.parse(execFileSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
-          cwd: project, env, encoding: "utf8", timeout: 30_000,
-          input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.config.set", params: { max_active: 2 } }),
-        }));
-        expect(configured.ok).toBe(true);
-        expect(JSON.parse(await readFile(join(home, ".gwt/machine-state/agent-settings.json"), "utf8")))
-          .toMatchObject({ mode: "manual", manual_limit: 2 });
+        // The two live processes share one member across distinct projects.
+        // Set the independent machine allowance without adding a second identity.
+        const machinePath = join(home, ".gwt/machine-state/agent-settings.json");
+        const machine = JSON.parse(await readFile(machinePath, "utf8"));
+        await writeFile(machinePath, JSON.stringify({ ...machine, mode: "manual", manual_limit: 2 }));
       },
     });
     const secondPage = await page.context().newPage().catch(async error => {
@@ -643,14 +639,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       }
       await gotoLiveGwt(page, liveGwtProjectUrl(fixture.url, firstKey), { enableTestBridge: true });
       await openAgents(page);
-      let before = await readRoster(page);
-      const resizeSequence = await cursor(page);
-      await sendLiveGwtEvent(page, { kind: "agent_roster", expected_revision: before.revision,
-        action: { kind: "resize", size: 1 } });
-      before = await rosterAfter(page, resizeSequence, before.revision);
+      const before = await readRoster(page);
       expect(before.error).toBeNull();
-      expect(before.members.filter(member => member.enabled)).toHaveLength(1);
-      const memberId = before.members.find(member => member.agent_id === "codex" && member.enabled)!.agent_member_id;
+      expect(before.members).toHaveLength(1);
+      const memberId = before.members.find(member => member.agent_id === "codex")!.agent_member_id;
       await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondKey), { enableTestBridge: true });
       await openAgents(secondPage);
       expect((await readRoster(secondPage)).members.some(member => member.agent_member_id === memberId)).toBe(true);
@@ -729,8 +721,14 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     expect(secondErrors).toEqual([]);
   });
 
-  test("named registration and inline rename persist their UUID through rejection, reload and native restart", async ({ page }, info) => {
-    const fixture = await startExactRelaunchFixture(info, { page });
+  test("Issue #7775 legacy member waits for work and named registrations preserve identity", async ({ page }, info) => {
+    const legacyName = "Previously resting member";
+    const fixture = await startExactRelaunchFixture(info, { page, monitorPreferences: {
+      agent_roster: { schema_version: 1, revision: 7, members: [
+        { agent_member_id: "4a796866-efb0-43af-a5db-0d0f44a34cb5", agent_id: "codex", name: "First member", enabled: true, created_at: "2026-10-01T00:00:00Z" },
+        { agent_member_id: "4e501291-cfe9-4ac0-aca2-2b328a3cd1e9", agent_id: "codex", name: legacyName, enabled: false, created_at: "2026-10-02T00:00:00Z" },
+      ] },
+    } });
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
     await page.addInitScript(theme => {
@@ -744,6 +742,14 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       const before = await readRoster(page);
+      expect(before.capacity).toBe(2);
+      const legacyMember = before.members.find(member => member.name === legacyName)!;
+      expect(legacyMember).toBeDefined();
+      expect(legacyMember).not.toHaveProperty("enabled");
+      const legacyRow = surface.locator(`[data-member-id="${legacyMember.agent_member_id}"]`);
+      await expect(legacyRow.locator(".roster-state")).toHaveText("Waiting");
+      await expect(legacyRow.locator(".roster-purpose")).toHaveText("Waiting for the next issue");
+      await expect(surface.getByRole("button", { name: /Rest member|Reactivate/ })).toHaveCount(0);
       await expect(register).toBeDisabled();
       await name.fill(" ");
       await expect(surface.locator("#roster-registration-error > span")).toHaveText("Enter a display name.");
@@ -786,13 +792,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const retryMember = retried.members.find(member => member.name === "Retry contributor")!;
       expect(retryMember.agent_member_id).toBeTruthy();
       await surface.locator(`.roster-row[data-member-id="${retryMember.agent_member_id}"]`).click();
-      const restSequence = await cursor(page);
-      await surface.locator('.roster-detail [data-action="rest"]').click();
-      const rested = await rosterAfter(page, restSequence, retried.revision);
-      expect(rested.members.find(value => value.agent_member_id === retryMember.agent_member_id)?.enabled).toBe(false);
+      await expect(surface.locator(`[data-member-id="${retryMember.agent_member_id}"] .roster-state`)).toHaveText("Waiting");
+      await expect(surface.getByRole("button", { name: /Rest member|Reactivate/ })).toHaveCount(0);
       await name.fill("  RETRY CONTRIBUTOR  ");
       await expect(name).toHaveAttribute("aria-invalid", "true");
-      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor is resting and uses this name. ");
+      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor is already registered and uses this name. ");
       await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(register).toBeDisabled();
       await name.fill("");
@@ -800,7 +804,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const displayName = surface.getByRole("textbox", { name: "Display name", exact: true });
       const renameSequence = await cursor(page);
       await displayName.fill("Maple ");
-      const firstWord = await rosterAfter(page, renameSequence, rested.revision);
+      const firstWord = await rosterAfter(page, renameSequence, retried.revision);
       expect(firstWord.members.find(value => value.agent_member_id === member.agent_member_id)?.name).toBe("Maple");
       await expect(surface.locator(".roster-name-status")).toHaveText("Saved");
       await displayName.screenshot({ path: info.outputPath(`name-word-boundary-${theme}.png`) });
@@ -840,6 +844,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       const restored = await readRoster(page);
+      expect(restored.members.find(value => value.name === legacyName)).toEqual(legacyMember);
+      await expect(legacyRow.locator(".roster-state")).toHaveText("Waiting");
       expect(restored.members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
       expect(restored.members.find(value => value.name === "Retry contributor")?.agent_member_id)
         .toBe(retried.members.find(value => value.name === "Retry contributor")?.agent_member_id);
@@ -1028,7 +1034,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         const source = sourceSnapshot.members.find(value => value.agent_member_id === memberId)!;
         const shared = sharedSnapshot.members.find(value => value.agent_member_id === memberId)!;
         expect(shared).toMatchObject({ agent_member_id: memberId, agent_id: source.agent_id, name: source.name,
-          enabled: source.enabled, assignment: null });
+          assignment: null });
         // Sequential reads can observe different live Session states; the
         // project-qualified assignment identity must remain the same.
         const identities = (member: RosterMember) => member.active_assignments?.map(assignment => ({
@@ -1377,7 +1383,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       const pmRoster = await pmMutation("add", () => surface.locator('.roster-capacity [data-action="add"]').click());
       expect(pmRoster.members).toHaveLength(beforePmAdd.members.length + 1);
       const pmMember = pmRoster.members.find(member => member.name === "Project A PM member")!;
-      expect(pmMember).toMatchObject({ agent_id: "codex", enabled: true, pm_eligible: true, assignment: null });
+      expect(pmMember).toMatchObject({ agent_id: "codex", pm_eligible: true, assignment: null });
       const pmMemberId = pmMember.agent_member_id;
       expect(pmMemberId).not.toBe(memberId);
       expect(pmMemberId).not.toBe(spare.agent_member_id);
@@ -2207,7 +2213,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
           expect(roster.members.map(member => member.agent_member_id).sort()).toEqual(expectedMemberIds);
           for (const expected of expectedMembers) {
             const member = roster.members.find(member => member.agent_member_id === expected.memberId)!;
-            expect(member).toMatchObject({ agent_id: expected.isPm ? "claude" : "codex", enabled: true });
+            expect(member).toMatchObject({ agent_id: expected.isPm ? "claude" : "codex" });
             if (expected.isPm) {
               expect(member).toMatchObject({ pm_eligible: true, pm_project_key: roster.project_key });
               await expect(main.locator(`.roster-list .roster-row[data-member-id="${expected.memberId}"] .roster-purpose`)).toHaveText("Project Manager");
@@ -2358,11 +2364,11 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       expect(saved.kind, saved.message).toBe("issue_monitor_profiles");
       expect(saved.profiles).toContainEqual(expect.objectContaining(savedCandidate));
       const identities = (roster: AgentRoster) => roster.members.map(member => ({
-        agent_member_id: member.agent_member_id, agent_id: member.agent_id, name: member.name, enabled: member.enabled,
+        agent_member_id: member.agent_member_id, agent_id: member.agent_id, name: member.name,
       })).sort((left, right) => left.agent_member_id.localeCompare(right.agent_member_id));
       const assertCapacity = async (roster: AgentRoster) => {
         expect(roster.error).toBeFalsy();
-        expect(roster.capacity).toBe(roster.members.filter(member => member.enabled).length);
+        expect(roster.capacity).toBe(roster.members.length);
         const preferences = join(fixture.home, ".gwt", "projects", roster.project_key, "project-state", "issue-monitor.json");
         await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")).max_active_agents,
           { timeout: 30_000, message: "persisted max_active equals the latest roster capacity" }).toBe(roster.capacity);
@@ -2376,7 +2382,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
         const roster = await readRoster(target);
         await assertCapacity(roster);
         const member = roster.members.find(member => member.agent_member_id === memberId)!;
-        expect(member).toMatchObject({ name: memberName, agent_id: "codex", enabled: true });
+        expect(member).toMatchObject({ name: memberName, agent_id: "codex" });
         expect(currentWindow.agent_id).toBe("codex");
         const nativeHost = target.locator(`.works-full .works-terminal[data-window-id="${currentWindow.id}"]`);
         await expect(nativeHost).toBeVisible();
@@ -2410,25 +2416,19 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       await attachScreenshot(page, testInfo, `launched-${theme}`);
       const initialRoster = await checkMemberLinks(page, firstWindow, first.gwt_session_id!, "initial");
       await page.locator(".op-rail").getByRole("button", { name: "Agents", exact: true }).click();
-      const enabledBefore = new Set(initialRoster.members.filter(member => member.enabled).map(member => member.agent_member_id));
+      const registeredBefore = new Set(initialRoster.members.map(member => member.agent_member_id));
       await page.getByLabel("Name for new member", { exact: true }).fill("Relaunch helper");
       const beforeAdd = await cursor(page);
       await page.locator('.roster-capacity [data-action="add"]').click();
       const added = await rosterAfter(page, beforeAdd, initialRoster.revision);
       expect(added.capacity).toBe(initialRoster.capacity + 1); await assertCapacity(added);
       await expect(page.locator(".roster-count")).toHaveText(String(added.capacity));
-      const addedMember = added.members.find(member => member.enabled && !enabledBefore.has(member.agent_member_id))!;
+      const addedMember = added.members.find(member => !registeredBefore.has(member.agent_member_id))!;
       expect(addedMember?.name.trim()).toBeTruthy();
       expect(addedMember.agent_id).toBe("codex");
       await page.locator(`.roster-row[data-member-id="${addedMember.agent_member_id}"]`).click();
-      const beforeRest = await cursor(page);
-      await page.locator('.roster-detail [data-action="rest"]').click();
-      const rested = await rosterAfter(page, beforeRest, added.revision);
-      expect(rested.capacity).toBe(initialRoster.capacity); await assertCapacity(rested);
-      await expect(page.locator(".roster-count")).toHaveText(String(rested.capacity));
-      expect(rested.members.find(member => member.agent_member_id === addedMember.agent_member_id))
-        .toMatchObject({ name: addedMember.name, agent_id: "codex", enabled: false });
-      const savedRosterIdentities = identities(rested);
+      await expect(page.locator(`[data-member-id="${addedMember.agent_member_id}"] .roster-state`)).toHaveText("Waiting");
+      const savedRosterIdentities = identities(added);
       await page.getByRole("button", { name: "Works", exact: true }).click();
       if (!await page.locator(".works-full:not([hidden])").isVisible()) await row.locator(".work-open").click();
 
@@ -2514,10 +2514,10 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       const restoredRoster = await checkMemberLinks(restored, thirdWindow, third.gwt_session_id!, "app-restored");
       expect(identities(restoredRoster)).toEqual(savedRosterIdentities);
       expect(restoredRoster.members.find(member => member.agent_member_id === addedMember.agent_member_id))
-        .toMatchObject({ name: addedMember.name, agent_id: "codex", enabled: false });
+        .toMatchObject({ name: addedMember.name, agent_id: "codex" });
       await testInfo.attach("agent-member-continuity", { body: JSON.stringify({ member_id: memberId, name: memberName,
         sessions: [first.gwt_session_id, second.gwt_session_id, third.gwt_session_id], capacity: restoredRoster.capacity,
-        retained_resting_member: addedMember.agent_member_id }), contentType: "application/json" });
+        retained_member: addedMember.agent_member_id }), contentType: "application/json" });
       await attachScreenshot(restored, testInfo, `app-restarted-${theme}`);
       expect(errors, "console/page errors after app restart").toEqual([]);
     } finally {

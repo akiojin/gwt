@@ -24,7 +24,7 @@ async function readCanonicalRoster(page: Page): Promise<any> {
   return reply.roster;
 }
 function durableRoster(roster: any) {
-  const fields = ["agent_member_id", "agent_id", "name", "enabled", "pm_eligible", "pm_project_key", "created_at",
+  const fields = ["agent_member_id", "agent_id", "name", "pm_eligible", "pm_project_key", "created_at",
     "origin_session_id", "last_issue_number", "last_spec_number", "last_owner_project_key", "assignment"];
   return { revision: roster.revision, members: roster.members.map((member: any) =>
     Object.fromEntries(fields.map(field => [field, member[field]]))) };
@@ -174,13 +174,11 @@ test.describe("Issue queue real backend launch", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       operation("issue.monitor.config.set", { max_active: 10 });
       operation("issue.monitor.schedule.read");
-      await expect.poll(async () => (await readCanonicalRoster(page)).members.filter((member: any) => member.enabled).length).toBe(10);
+      await expect.poll(async () => (await readCanonicalRoster(page)).members.length).toBe(10);
       const canonical = await readCanonicalRoster(page);
       expect(canonical.members).toHaveLength(10);
-      expect(canonical.total_enabled).toBe(10);
       const originalMembers = durableRoster(canonical).members;
-      // The seed ConfigSet changes the shared roster as well as machine policy.
-      // Restore its ten existing members through the normal roster writer.
+      // Lower the machine policy while preserving the ten registered members.
       const seed = join(fixture.home, "machine-policy-seed");
       await mkdir(seed);
       operation("issue.monitor.config.set", { max_active: 4 }, seed);
@@ -198,10 +196,8 @@ test.describe("Issue queue real backend launch", () => {
       expect(resizedReply.kind, resizedReply.message).toBe("agent_roster");
       expect(resizedReply.roster.project_key).toBe(reduced.project_key);
       expect(resizedReply.roster.error).toBeFalsy();
-      expect(resizedReply.roster.revision).toBeGreaterThan(reduced.revision);
+      expect(resizedReply.roster.revision).toBe(reduced.revision);
       expect(resizedReply.roster.members).toHaveLength(10);
-      expect(resizedReply.roster.members.filter((member: any) => member.enabled)).toHaveLength(10);
-      expect(resizedReply.roster.total_enabled).toBe(10);
       expect(durableRoster(resizedReply.roster).members).toEqual(originalMembers);
       expect(await machine()).toEqual(olderMachine);
       const roster = durableRoster(await readCanonicalRoster(page));
@@ -611,7 +607,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(n1.current_hook_event.correlation_id).not.toBe(initialNormal.current_hook_event.correlation_id);
       await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.targetIssueNumber] }, "issue_monitor_queue_result");
       const roster = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
-      expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(1);
+      expect(roster.members).toHaveLength(1);
       const member = roster.members.find((member: any) => member.assignment?.session_id === source.gwt_session_id);
       expect(member).toBeTruthy();
       const before = await session(source.gwt_session_id!);
@@ -2067,14 +2063,14 @@ request.catch(() => {});
       const roster = (await request({ kind: "agent_roster", action: { kind: "add" },
         expected_revision: initial.revision }, "agent_roster")).roster;
       expect(roster.error).toBeFalsy();
-      expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(2);
+      expect(roster.members).toHaveLength(2);
       // Registration and launch eligibility are separate: explicitly select
       // both fixed-tool people while retaining the legacy profile's tuning.
       const preferences = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
       const baseProfile = preferences.launch_profiles[0];
       expect(baseProfile.agent_id).toBe("codex");
       expect(baseProfile.agent_member_id).toBe(initial.members[0].agent_member_id);
-      const selectedProfiles = roster.members.filter((member: any) => member.enabled).map((member: any) => {
+      const selectedProfiles = roster.members.map((member: any) => {
         expect(member.agent_id).toBe("codex");
         return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id,
           skip_permissions: true, prefer_for: ["kind:issue"] };
@@ -2095,8 +2091,7 @@ request.catch(() => {});
       let observed = schedule();
       const source = owner(observed);
       expect(source).toBeTruthy();
-      const target = roster.members.find((member: any) => member.enabled
-        && member.agent_member_id !== source.agent_member_id);
+      const target = roster.members.find((member: any) => member.agent_member_id !== source.agent_member_id);
       expect(target).toBeTruthy();
       // A separate project changes only this person's common saved core. The
       // primary Monitor still owns its candidate order, permissions and routing.
@@ -2572,13 +2567,13 @@ request.catch(() => {});
       const roster = (await request({ kind: "agent_roster", action: { kind: "add" },
         expected_revision: initial.revision }, "agent_roster")).roster;
       expect(roster.error).toBeFalsy();
-      expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(2);
+      expect(roster.members).toHaveLength(2);
       await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 2 });
       await expect.poll(async () => JSON.parse(await readFile(
         join(fixture.home, ".gwt/machine-state/agent-settings.json"), "utf8")))
         .toMatchObject({ mode: "manual", manual_limit: 2 });
       const baseProfile = (await preferences()).launch_profiles[0];
-      const profiles = roster.members.filter((member: any) => member.enabled).map((member: any) => {
+      const profiles = roster.members.map((member: any) => {
         expect(member.agent_id).toBe("codex");
         return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id };
       });
@@ -2610,7 +2605,7 @@ request.catch(() => {});
       const automatic = schedule.members.find((member: any) => member.issues.some((issue: any) => issue.issue_number === 45));
       expect(automatic).toBeTruthy();
       const selected = (await readCanonicalRoster(page)).members.find((member: any) =>
-        member.enabled && member.assignment && member.agent_member_id !== automatic.agent_member_id);
+        member.assignment && member.agent_member_id !== automatic.agent_member_id);
       expect(selected).toBeTruthy();
       const selectedLaunch = launches.find(launch => launch.gwt_session_id === selected.assignment.session_id)!;
       const otherLaunch = launches.find(launch => launch.gwt_session_id !== selected.assignment.session_id)!;

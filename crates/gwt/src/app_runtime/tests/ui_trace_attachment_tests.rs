@@ -1768,8 +1768,7 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
                     .unwrap()
                     .agent_roster
                     .unwrap();
-                assert!(roster.members.iter().any(|member| member.enabled
-                    && member.assignment.is_none() && member.agent_id.as_deref() == Some("fixture")),
+                assert!(roster.members.iter().any(|member| member.assignment.is_none() && member.agent_id.as_deref() == Some("fixture")),
                     "a real idle fixture-tool member must be available before testing the Prepared refusal");
                 let choice = gwt::project_runtime::launch_payload::ManualSuccessorChoice {
                     operation_id: format!("second-monitor-{index}"),

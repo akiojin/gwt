@@ -780,6 +780,7 @@ test.describe("Works and Agents approved baseline", () => {
     await page.evaluate(() => {
       const fixture = (window as any).__worksAgentsFixture;
       const member = fixture.members.find((value: any) => value.agent_member_id === "m-added");
+      member.enabled = false; // Legacy roster data must never hide a registered member.
       member.saved_manual_profile = { agent_id: "codex", agent_member_id: "m-added", model: "retained-model", reasoning: "high", runtime_target: "Host", skip_permissions: false };
       member.saved_implementation_core = { agent_id: "codex", model: "retained-model", reasoning: "high", version: null, fast_mode: false };
       member.saved_implementation_core_revision = "core-added-1";
@@ -789,32 +790,27 @@ test.describe("Works and Agents approved baseline", () => {
       ];
       fixture.reorderMembers(["m-one", "m-two", "m-idle", "m-added"]);
     });
-    const beforeRest = await page.evaluate(() => structuredClone((window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added")));
-    expect(beforeRest.saved_implementation_core.model).toBe("retained-model");
-    expect(beforeRest.history).toHaveLength(2);
+    const registeredRecord = await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      return structuredClone(fixture.members.find(member => member.agent_member_id === "m-added"));
+    });
+    expect(registeredRecord.saved_implementation_core.model).toBe("retained-model");
+    expect(registeredRecord.history).toHaveLength(2);
     await roster(page).locator('.roster-row[data-member-id="m-added"]').click();
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
     ]);
-    await roster(page).locator('.roster-detail [data-action="rest"]').click();
-    await expect(roster(page).locator(".roster-count")).toHaveText("3");
-    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
-    const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", name: "Dahlia", pm_eligible: false }, 3], [{ kind: "rest", member_id: "m-added" }, 5]]);
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
-    const resting = roster(page).locator('.roster-row[data-member-id="m-added"]');
-    const restingRecord = { ...beforeRest, enabled: false };
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
-    expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
-      expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
-    ]);
-    await expect(resting).toBeVisible();
-    await expect(resting.locator(".roster-state")).toHaveText("Resting");
+    const added = roster(page).locator('.roster-row[data-member-id="m-added"]');
+    await expect(added.locator(".roster-state")).toHaveText("Waiting");
+    await expect(added.locator(".roster-purpose")).toHaveText("Waiting for the next issue");
+    await expect(roster(page).getByRole("button", { name: /Rest member|Reactivate/ })).toHaveCount(0);
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
+    const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", name: "Dahlia", pm_eligible: false }, 3]]);
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(null));
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy —");
-    await expect(resting).toBeVisible();
+    await expect(added).toBeVisible();
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(["agent-one", "agent-two", "pm-window"]));
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 2");
 
@@ -827,7 +823,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-now, .roster-row[data-member-id='m-one'] .roster-current")).toHaveCount(0);
     await page.evaluate(() => (window as any).__worksAgentsFixture.error("Roster readback unavailable"));
     await expect(roster(page).locator(":scope > .roster-error")).toHaveText("Roster readback unavailable");
-    await expect(roster(page).locator(".roster-count")).toHaveText("3");
+    await expect(roster(page).locator(".roster-count")).toHaveText("4");
 
     await page.setViewportSize({ width: 400, height: 1000 });
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
@@ -849,69 +845,47 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator(".works-source-note")).toHaveCount(0);
     await openRail(page, "agents");
     await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
-    await resting.click();
-    await expect(resting).toHaveAttribute("aria-selected", "true");
+    await added.click();
+    await expect(added).toHaveAttribute("aria-selected", "true");
     await page.reload();
     await openRail(page, "agents");
-    await expect(resting).toBeVisible();
-    await expect(resting.locator(".roster-state")).toHaveText("Resting");
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
-    await expect(resting).toHaveAttribute("aria-selected", "true");
+    await expect(added).toBeVisible();
+    await expect(added.locator(".roster-state")).toHaveText("Waiting");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(registeredRecord);
+    await expect(added).toHaveAttribute("aria-selected", "true");
     await expect(roster(page).locator(".roster-detail h3")).toHaveText("Dahlia");
     const beforeReconnect = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
     const readyBeforeReconnect = (await sent(page)).filter(message => message.kind === "frontend_ready").length;
     await page.evaluate(() => (window as any).__worksAgentsFixture.reconnectCatalogs());
     await expect.poll(() => page.evaluate(() => (window as any).__worksAgentsFixture.sent.filter(message => message.kind === "frontend_ready").length)).toBeGreaterThan(readyBeforeReconnect);
-    await expect(resting).toHaveAttribute("aria-selected", "true");
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
+    await expect(added).toHaveAttribute("aria-selected", "true");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(registeredRecord);
     expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual(beforeReconnect);
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),
     ]);
-    await expect(roster(page).locator(".roster-count")).toHaveText("3");
-    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
+    await expect(roster(page).locator(".roster-count")).toHaveText("4");
+    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("4");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
     expect(await roster(page).locator(".roster-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.memberId)))
       .toEqual(["m-one", "m-two", "m-idle", "m-added"]);
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
-    await resting.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: info.outputPath("agents-resting-reload-400.png") });
-    // The collision route reveals the canonical resting identity without a write.
-    const beforeActivation = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
+    await added.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("agents-registered-reload-400.png") });
+    // The collision route reveals the registered identity without a write.
+    const beforeCollision = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
     await roster(page).getByLabel("Name for new member", { exact: true }).fill(" DAHLIA ");
     const conflict = roster(page).locator("#roster-registration-error");
-    await expect(conflict).toContainText("Dahlia is resting");
+    await expect(conflict).toContainText("Dahlia is already registered");
     await expect(roster(page).locator('.roster-capacity [data-action="add"]')).toBeDisabled();
     await conflict.getByRole("button", { name: "Show member", exact: true }).click();
-    await expect(resting).toBeFocused();
-    expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual(beforeActivation);
-    await resting.getByRole("button", { name: "Reactivate", exact: true }).click();
-    await expect(resting.locator(".roster-state")).toHaveText("Waiting");
-    const activation = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "activate");
-    expect(activation).toHaveLength(1);
-    expect(activation[0].action).toEqual({ kind: "activate", member_id: "m-added" });
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(beforeRest);
-    await expect(roster(page).locator(".roster-count")).toHaveText("4");
-    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
-    await page.screenshot({ path: info.outputPath("agents-reactivated-400.png") });
-    await page.reload();
-    await openRail(page, "agents");
-    await expect(resting.locator(".roster-state")).toHaveText("Waiting");
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(beforeRest);
-
-    // Rest changes future eligibility; the census still owns the live Work.
+    await expect(added).toBeFocused();
+    expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual(beforeCollision);
     const busy = roster(page).locator('.roster-row[data-member-id="m-one"]');
     await busy.click();
-    const busyRecord = await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-one"));
-    const beforeBusyRest = await sent(page);
-    await roster(page).locator('.roster-detail [data-action="rest"]').click();
-    await expect(busy.locator(".roster-state")).toHaveText("Resting · Finishing in Works #4777");
-    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-one")))
-      .toEqual({ ...busyRecord, enabled: false });
-    await expect(roster(page).locator(".roster-count")).toHaveText("3");
-    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
-    await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
-    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4 · Busy 2 / Team 3");
+    const beforeWorkEnded = await sent(page);
+    await expect(busy.locator(".roster-state")).toHaveText("In Works #4777");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4 · Busy 2 / Team 4");
     await roster(page).locator(".roster-now button").click();
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
     await full(page).getByRole("button", { name: "Back to Works" }).click();
@@ -920,25 +894,21 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(workRow(page, "agent-one")).toHaveCount(0);
     await openRail(page, "agents");
     await expect(busy).toHaveAttribute("aria-selected", "true");
-    await expect(busy.locator(".roster-state")).toHaveText("Resting");
+    await expect(busy.locator(".roster-state")).toHaveText("Waiting");
     await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
-    await expect(roster(page).locator(".roster-count")).toHaveText("3");
-    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
-    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4 · Busy 1 / Team 3");
+    await expect(roster(page).locator(".roster-count")).toHaveText("4");
+    await expect(roster(page).locator(".roster-capacity-value")).toHaveText("4");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4 · Busy 1 / Team 4");
     await expect(roster(page).locator(".roster-history")).toContainText("Later slice");
     await expect(roster(page).locator(".roster-now, .roster-detail .roster-open")).toHaveCount(0);
-    const afterBusyRest = (await sent(page)).slice(beforeBusyRest.length);
-    expect(afterBusyRest.filter(message => message.kind === "agent_roster" && message.action.kind !== "read")
-      .map(message => message.action)).toEqual([{ kind: "rest", member_id: "m-one" }]);
-    expect(afterBusyRest.filter(message => ["agent_schedule", "create_window", "close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind)
-      && message.action?.kind !== "read")).toEqual([]);
+    expect((await sent(page)).slice(beforeWorkEnded.length).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual([]);
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
-    await page.screenshot({ path: info.outputPath("agents-resting-after-work-400.png") });
+    await page.screenshot({ path: info.outputPath("agents-registered-after-work-400.png") });
 
   });
 
   // SPEC #6476 T-005g (AC-1): on a phone the Agents controls kept their
-  // desktop size (Team/Past 28px, settings, rest, register, name and tool
+  // desktop size (Team/Past 28px, settings, register, name and tool
   // 31-32px), below a 44px tap target. Below 601px every control on Team and
   // Past is at least 44px; wider layouts keep their sizes.
   test("Agents controls are 44px tap targets on a phone and keep their desktop size", async ({ page }, info) => {
@@ -1316,7 +1286,6 @@ test.describe("Works and Agents approved baseline", () => {
     await detail.locator('[data-action="select-pm"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
     await expect(roster(page).locator('.roster-row[data-member-id="m-idle"]')).toContainText("Project Manager");
-    await expect(detail.locator('[data-action="rest"]')).toBeDisabled();
     await detail.locator('[aria-label="Display name"]').fill("Cedar PM");
     await expect(detail.locator('.roster-name-status')).toHaveText("Saved");
     await detail.locator('[data-member-tuning-field="model"]').fill("opusplan");
@@ -1358,13 +1327,13 @@ async function installWorksAgentsBackend(page: Page) {
     const assignment = (session_id: string, issue_number: number) => ({ reservation_id: `r-${session_id}`, session_id, issue_number, spec_number: null, delivery_id: null, host_id: "fixture-host", host_pid: 12345, host_started_at: 1 });
     const savedRoster = JSON.parse(sessionStorage.getItem("fixture:works-roster") || "null");
     const members: any[] = savedRoster?.members ?? [
-      { agent_member_id: "m-one", agent_id: "codex", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", saved_manual_profile: { agent_id: "codex", agent_member_id: "m-one", model: "saved-manual-model", reasoning: "high", runtime_target: "Host", skip_permissions: false }, issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
+      { agent_member_id: "m-one", agent_id: "codex", name: "Aster", created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", saved_manual_profile: { agent_id: "codex", agent_member_id: "m-one", model: "saved-manual-model", reasoning: "high", runtime_target: "Host", skip_permissions: false }, issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
         { session_id: "s-one", name: "Launch author", provider: "codex", model: "launch-model", issue_number: 4777, title: "Current issue", result: "Running", started_at: "2026-10-23T00:00:00Z", ended_at: null },
         { session_id: "s-earlier", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
         { session_id: "s-later", issue_number: 4600, title: "Later slice", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
       ] },
-      { agent_member_id: "m-two", agent_id: "claude", name: "Birch", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
-      { agent_member_id: "m-idle", agent_id: "codex", name: "Cedar", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
+      { agent_member_id: "m-two", agent_id: "claude", name: "Birch", created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
+      { agent_member_id: "m-idle", agent_id: "codex", name: "Cedar", created_at: "2026-10-20T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
     ];
     for (const member of members) {
       member.saved_implementation_core ||= { agent_id: member.agent_id, model: member.saved_manual_profile?.model || null, reasoning: null, version: null, fast_mode: false };
@@ -1399,7 +1368,7 @@ async function installWorksAgentsBackend(page: Page) {
     let socket: FixtureWebSocket, online = true, echoInput = false, resyncText: string | null = null;
     const sockets: FixtureWebSocket[] = [];
     const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright", active_tab_id: "tab-works", recent_projects: [], tabs: [{ id: "tab-works", title: "Works Agents Fixture", project_root: "/fixture", project_key: projectKey, kind: "git", workspace: { windows, viewport: { x: 0, y: 0, zoom: 1 } } }] } });
-    const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, revision_decimal: String(revision), members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
+    const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, revision_decimal: String(revision), members, capacity: members.length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
     const applyRename = (message: any) => {
       const member = members.find(member => member.agent_member_id === message.action.member_id);
       const name = message.action.name.trim();
@@ -1412,7 +1381,7 @@ async function installWorksAgentsBackend(page: Page) {
       if (!firstRenameReceipt) firstRenameReceipt = JSON.parse(JSON.stringify(receipt));
       socket.emit(receipt);
     };
-    const scheduleSnapshot = () => ({ kind: "agent_schedule", schedule: { project_key: projectKey, roster_revision: revision, queue_revision: queueRevision, schedule_revision: scheduleRevision, members: members.filter(member => member.enabled).map(member => ({ agent_member_id: member.agent_member_id, issues: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues || [], empty_reason: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues.length ? null : "No queued issue" })) } });
+    const scheduleSnapshot = () => ({ kind: "agent_schedule", schedule: { project_key: projectKey, roster_revision: revision, queue_revision: queueRevision, schedule_revision: scheduleRevision, members: members.map(member => ({ agent_member_id: member.agent_member_id, issues: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues || [], empty_reason: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues.length ? null : "No queued issue" })) } });
     const applySchedule = (action: any) => {
       if (action.expected_roster_revision !== revision || action.expected_queue_revision !== queueRevision || action.expected_schedule_revision !== scheduleRevision) {
         rejectedScheduleRevisions.push(action);
@@ -1494,13 +1463,11 @@ async function installWorksAgentsBackend(page: Page) {
           }
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
           if (message.action.kind === "set_pm_eligibility") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.pm_eligible = message.action.eligible; revision++; } }
-          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && member.enabled && !member.assignment) { for (const other of members) if (other.agent_member_id === pmMemberId) { other.is_pm = false; other.pm_project_key = null; } pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
-          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id || "codex", name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
-          if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
+          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && !member.assignment) { for (const other of members) if (other.agent_member_id === pmMemberId) { other.is_pm = false; other.pm_project_key = null; } pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
+          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id || "codex", name: message.action.name, pm_eligible: message.action.pm_eligible === true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "move") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id), target = index + (message.action.direction === "up" ? -1 : 1); if (index >= 0 && target >= 0 && target < members.length) { [members[index], members[target]] = [members[target], members[index]]; revision++; } }
           if (message.action.kind === "set_traits") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.traits = message.action.traits; revision++; } }
           if (message.action.kind === "remove") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id); if (index >= 0 && members[index].agent_member_id !== pmMemberId && !members[index].assignment) { members.splice(index, 1); revision++; } }
-          if (message.action.kind === "activate") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member && !member.enabled) { member.enabled = true; revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
           if (message.action.kind === "set_pm_eligibility" && deferredEligibility) {
             pendingEligibilityReceipt = JSON.stringify({ ...rosterSnapshot(), request_id: message.request_id }); return;
@@ -1603,7 +1570,12 @@ async function installWorksAgentsBackend(page: Page) {
         };
         socket.emit(workspace());
       },
-      reorderMembers(ids: string[]) { members.splice(0, members.length, ...ids.map(id => members.find(member => member.agent_member_id === id))); revision++; socket.emit(rosterSnapshot()); },
+      reorderMembers(ids: string[]) {
+        members.splice(0, members.length, ...ids.map(id => members.find(member => member.agent_member_id === id)));
+        revision++;
+        sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
+        socket.emit(rosterSnapshot());
+      },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
