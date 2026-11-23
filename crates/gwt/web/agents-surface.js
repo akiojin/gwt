@@ -3,9 +3,19 @@ import { renderMemberTuningControls } from "./settings-surface.js";
 import { createFocusTrap } from "./focus-trap.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { mountIsland } from "./react/islands.js";
+import { AVATAR_PRESETS, agentAvatar } from "./agent-avatar.js";
 
 const configuredPm = member => !!member?.pm_project_key;
 const holdsPmRole = member => !!member && (member.is_pm || !!member.pm_project_key || member.assignment?.role === "pm");
+// Draw `member`'s avatar (Issue #7635) into an existing node and return it.
+function renderAgentAvatar(node, member) {
+  const view = agentAvatar(member);
+  if (node.textContent !== view.glyph) node.textContent = view.glyph;
+  node.dataset.avatarKind = view.kind;
+  if (view.presetId) node.dataset.avatarPreset = view.presetId;
+  else delete node.dataset.avatarPreset;
+  return node;
+}
 const rosterReady = roster => roster.revision !== null && roster.revision !== undefined;
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
@@ -29,7 +39,7 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 
 export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onSetAvatar = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
@@ -153,7 +163,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     return result;
   }
   function avatar(member) {
-    const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); result.textContent = Array.from(member.name || "?")[0]; return result;
+    const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); return renderAgentAvatar(result, member);
   }
   function setSelectedMember(memberId) {
     if (memberId === selectedId) return;
@@ -404,11 +414,25 @@ export function createAgentsSurface({ document, storage, executionModel, project
         const next = { ...field.traitsDraft, personality: field.traitsDraft.personality.trim() };
         onSetTraits(latest.member_id, Object.fromEntries(Object.entries(next).filter(([, value]) => value)));
       });
-      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, traits, tuning); head.append(avatar(member), who);
+      // Issue #7635: the avatar is the agent's own; choosing one changes every display of it.
+      const avatarPicker = document.createElement("section"); avatarPicker.className = "roster-avatar-picker"; avatarPicker.dataset.memberAvatar = "";
+      const avatarTitle = document.createElement("h4"); avatarTitle.id = `roster-avatar-title-${member.member_id}`; avatarTitle.textContent = "Avatar";
+      const avatarChoices = document.createElement("div"); avatarChoices.className = "roster-avatar-choices"; avatarChoices.setAttribute("role", "radiogroup"); avatarChoices.setAttribute("aria-labelledby", avatarTitle.id);
+      for (const choice of [{ id: "default", label: "Initial" }, ...AVATAR_PRESETS]) {
+        const button = document.createElement("button"); button.type = "button"; button.className = "roster-avatar roster-avatar-choice";
+        button.dataset.avatarChoice = choice.id; button.setAttribute("role", "radio"); button.setAttribute("aria-label", choice.label); button.title = choice.label;
+        button.addEventListener("click", () => {
+          const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+          if (disposed || !latest || !rosterReady(roster) || roster.pending_roster || button.getAttribute("aria-checked") === "true") return;
+          onSetAvatar(latest.member_id, choice.id === "default" ? { kind: "default" } : { kind: "preset", preset_id: choice.id });
+        });
+        avatarChoices.append(button);
+      }
+      avatarPicker.append(avatarTitle, avatarChoices); field.avatarPicker = avatarPicker;
+      label.append(input); who.append(name, meta, label, status, retry, avatarPicker, eligibleLabel, selectPm, traits, tuning); field.avatar = avatar(member); head.append(field.avatar, who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
-    field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     field.head.querySelector("p").textContent = `Member since ${date(member.created_at)} UTC`;
     let memberId = field.head.querySelector(".roster-member-id");
     if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
@@ -443,6 +467,14 @@ export function createAgentsSurface({ document, storage, executionModel, project
       control.disabled = !rosterReady(rosterModel.read());
     }
     field.traits.querySelector('[data-action="save-traits"]').disabled = held || !field.traitsDraft;
+    const shown = renderAgentAvatar(field.avatar, member).dataset;
+    for (const button of field.avatarPicker.querySelectorAll("[data-avatar-choice]")) {
+      const id = button.dataset.avatarChoice;
+      if (id === "default") renderAgentAvatar(button, { name: member.name });
+      else button.textContent = AVATAR_PRESETS.find(preset => preset.id === id).glyph;
+      button.setAttribute("aria-checked", String(id === (shown.avatarPreset || "default")));
+      button.disabled = held;
+    }
     // Issue #7647 (SPEC #7007 item 27): a member has no tool of its own, so
     // the ledger offers none, nor a model or reasoning for it. Only the
     // Project Manager keeps those here, until it has its own list of
@@ -573,7 +605,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     }
     const { row } = cached, unavailable = member.assignment?.session_id && activityModel.read().count === null;
     row.setAttribute("aria-selected", String(member.member_id === selectedId));
-    row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
+    renderAgentAvatar(row.querySelector(".roster-avatar"), member);
     row.querySelector("h3").textContent = member.name;
     const order = row.querySelector(".roster-order"), held = !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     order.setAttribute("aria-label", `Order and deletion for ${member.name}`);

@@ -790,6 +790,7 @@ mod tests {
                 last_owner_project_key: None,
                 assignment: Some(intent.source.assignment.clone()),
                 traits: Default::default(),
+                avatar: Default::default(),
             }],
         });
         prefs.launched_issues.push(IssueMonitorLaunchedIssue {

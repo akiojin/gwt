@@ -40,6 +40,52 @@ pub struct AgentMember {
     /// Fixed traits of this agent (SPEC #7007 items 26, 43 and 48).
     #[serde(default, skip_serializing_if = "AgentTraits::is_unset")]
     pub traits: AgentTraits,
+    /// The agent's avatar (SPEC #7007 items 17, 18 and 20). It belongs to the
+    /// agent, so a tool change never touches it.
+    #[serde(default, skip_serializing_if = "AgentAvatar::is_unset")]
+    pub avatar: AgentAvatar,
+}
+
+/// Preset avatars an agent can choose (SPEC #7007 item 96). The GUI draws
+/// each id; an id outside this list is refused when saved.
+pub const AVATAR_PRESET_IDS: &[&str] = &["cat", "owl", "bear", "fox", "penguin", "robot"];
+
+/// Where an agent's avatar comes from. `Upload` is reserved for an image the
+/// user provides (T-018) and cannot be saved yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAvatarKind {
+    #[default]
+    Default,
+    Preset,
+    Upload,
+}
+
+/// An agent's avatar. The default draws the agent's initial.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAvatar {
+    #[serde(default)]
+    pub kind: AgentAvatarKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+}
+
+impl AgentAvatar {
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Refuse an avatar the GUI cannot draw.
+    fn validated(self) -> Result<Self, String> {
+        match self.kind {
+            AgentAvatarKind::Default => Ok(Self::default()),
+            AgentAvatarKind::Preset => match self.preset_id.as_deref() {
+                Some(id) if AVATAR_PRESET_IDS.contains(&id) => Ok(self),
+                _ => Err("Choose one of the preset avatars".into()),
+            },
+            AgentAvatarKind::Upload => Err("Uploading an avatar image is not available yet".into()),
+        }
+    }
 }
 
 /// Longest personality text an agent may carry. Item 180 fixes that a cap
@@ -208,6 +254,11 @@ pub enum AgentRosterAction {
         member_id: String,
         traits: AgentTraits,
     },
+    /// Replace the member's avatar. A tool change never writes it.
+    SetAvatar {
+        member_id: String,
+        avatar: AgentAvatar,
+    },
     SetTuning(MemberTuning),
 }
 
@@ -342,6 +393,7 @@ impl AgentRoster {
             last_owner_project_key: None,
             assignment: None,
             traits: Default::default(),
+            avatar: Default::default(),
         });
         Ok(())
     }
@@ -845,6 +897,7 @@ pub(crate) fn observed_project_member_seeds(
                     ),
                 }),
                 traits: Default::default(),
+                avatar: Default::default(),
             });
     }
     Ok(members)
@@ -900,6 +953,7 @@ pub fn mutate_project_roster_snapshot(
             | AgentRosterAction::Move { .. }
             | AgentRosterAction::Remove { .. }
             | AgentRosterAction::SetTraits { .. }
+            | AgentRosterAction::SetAvatar { .. }
     ) {
         return crate::agent_registry::mutate_pm_selection(
             &gwt_core::paths::project_scope_hash(root),
@@ -1039,6 +1093,15 @@ pub(crate) fn apply_roster_action(
                 .find(|member| member.agent_member_id == member_id)
                 .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
                 .traits = traits;
+        }
+        AgentRosterAction::SetAvatar { member_id, avatar } => {
+            let avatar = avatar.validated().map_err(std::io::Error::other)?;
+            roster
+                .members
+                .iter_mut()
+                .find(|member| member.agent_member_id == member_id)
+                .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
+                .avatar = avatar;
         }
         AgentRosterAction::SetPmEligibility { .. }
         | AgentRosterAction::SelectPm { .. }
@@ -1780,6 +1843,7 @@ pub fn adopt_project_member_session(
                 host_started_at: crate::process::host_process_start_time(observed.host_pid),
             }),
         traits: Default::default(),
+        avatar: Default::default(),
     };
     let mut seed = initial_project_members(root, &path, sessions_dir)?;
     if !seed

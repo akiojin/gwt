@@ -1,5 +1,6 @@
 import { createUiStateStore } from "./ui-state-store.js";
 import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
+import { agentAvatar } from "./agent-avatar.js";
 
 // Issue #7740 (SPEC #7007 slice F-1): the header and footer every page shares.
 // Rendered by the React surfaces in `AppChrome.jsx` (crates/gwt/web-react);
@@ -88,7 +89,7 @@ function chromeView(state, handlers) {
     if (destination.kind === "pm") {
       const waiting = countOf(state.decisions);
       view.label = pmName || view.label;
-      view.avatar = Array.from(view.label)[0];
+      view.avatar = agentAvatar({ name: view.label, avatar: state.pmAvatar }).glyph;
       view.count = waiting;
       if (!view.reason) {
         view.title = `${COPY.pm.title}${pmName ? ` ${pmName}` : ""}: ${waiting ? COPY.pm.waiting(waiting) : COPY.pm.none}`;
@@ -124,7 +125,7 @@ function chromeView(state, handlers) {
 // A page without a project passes none, which disables every such entry.
 export function createAppChrome({ document, handlers = {} }) {
   let state = {
-    pmName: "", decisions: 0, unread: 0, unreadHasError: false, notificationsOpen: false, surface: null, version: "",
+    pmName: "", pmAvatar: null, decisions: 0, unread: 0, unreadHasError: false, notificationsOpen: false, surface: null, version: "",
   };
   const model = createUiStateStore(chromeView(state, handlers));
   const set = patch => {
@@ -145,7 +146,7 @@ export function createAppChrome({ document, handlers = {} }) {
       header: mount("app-header", createDetachedIslandContainer(document)),
       footer: mount("app-footer", createDetachedIslandContainer(document)),
     }),
-    setPm: ({ name = "", decisions = 0 } = {}) => set({ pmName: name, decisions }),
+    setPm: ({ name = "", decisions = 0, avatar = null } = {}) => set({ pmName: name, decisions, pmAvatar: avatar }),
     setNotifications: ({ count = 0, hasError = false, open = false } = {}) =>
       set({ unread: count, unreadHasError: hasError, notificationsOpen: open }),
     setActiveSurface: surface => set({ surface }),

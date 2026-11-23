@@ -6119,7 +6119,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function syncAppChromePm() {
         const pmWindow = (pmLauncherModel.read().workspace?.windows || []).find(windowData => windowData?.is_pm);
         const name = String(pmWindow?.agent_name || rosterModel.read().members.find(member => member.is_pm)?.name || "").trim();
-        appChrome.setPm({ name, decisions: issueMonitorModel.read().pmDecisionAttention.count });
+        // Issue #7635: names are unique in the ledger, so the PM's avatar is its member's.
+        const avatar = name ? rosterModel.read().members.find(member => member.name === name)?.avatar : null;
+        appChrome.setPm({ name, avatar, decisions: issueMonitorModel.read().pmDecisionAttention.count });
       }
       pmLauncherModel.subscribe(state => state.workspace, syncAppChromePm);
       rosterModel.subscribe(state => state.revision, syncAppChromePm);
@@ -6185,6 +6187,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
         onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
         onSetTraits: (memberId, traits) => requestAgentRoster({ kind: "set_traits", member_id: memberId, traits }),
+        onSetAvatar: (memberId, avatar) => requestAgentRoster({ kind: "set_avatar", member_id: memberId, avatar }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
         onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),
