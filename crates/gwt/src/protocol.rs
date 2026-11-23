@@ -6632,6 +6632,9 @@ mod tests {
             serde_json::json!({"kind":"set_avatar","member_id":"member-1","avatar":{
                 "kind":"preset","preset_id":"fox"
             }}),
+            serde_json::json!({"kind":"set_avatar","member_id":"member-1","avatar":{
+                "kind":"upload","image":"data:image/png;base64,iVBORw0KGgo="
+            }}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
                 "kind":"agent_roster", "action":action, "expected_revision":3

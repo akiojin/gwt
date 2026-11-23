@@ -1276,7 +1276,7 @@ test.describe("Works and Agents approved baseline", () => {
     const picker = roster(page).locator(".roster-detail [data-member-avatar]");
     const heading = roster(page).locator(".roster-detail .roster-detail-heading > .roster-avatar");
     await expect(picker.getByRole("radiogroup", { name: "Avatar" })).toBeVisible();
-    await expect(picker.getByRole("radio")).toHaveCount(7);
+    await expect(picker.getByRole("radio")).toHaveCount(8);
     await expect(picker.getByRole("radio", { name: "Initial" })).toHaveAttribute("aria-checked", "true");
 
     await picker.getByRole("radio", { name: "Fox" }).click();
@@ -1290,6 +1290,58 @@ test.describe("Works and Agents approved baseline", () => {
     await picker.getByRole("radio", { name: "Initial" }).click();
     await expect(row.locator(".roster-avatar")).toHaveText("C");
     expect((await saved())[1]).toEqual({ kind: "set_avatar", member_id: "m-idle", avatar: { kind: "default" } });
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
+
+    await page.setViewportSize({ width: 400, height: 900 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+  });
+
+  test("Issue #7636 the ledger uploads an avatar image, refuses a bad file and returns to a preset", async ({ page }, info) => {
+    await page.locator('.project-bar [data-destination="agents"]').click();
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    const row = roster(page).locator('.roster-row[data-member-id="m-idle"]');
+    const saved = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_avatar").map(message => message.action);
+    await row.click();
+    const picker = roster(page).locator(".roster-detail [data-member-avatar]");
+    const heading = roster(page).locator(".roster-detail .roster-detail-heading > .roster-avatar");
+    const file = picker.locator("input[type=file][data-avatar-file]");
+    const error = picker.locator(".roster-avatar-error");
+
+    // A file that is not an image is refused in place and saves nothing.
+    await file.setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("not an image") });
+    await expect(error).toBeVisible();
+    await expect(error).toContainText("PNG, JPEG, WebP or GIF");
+    expect(await saved()).toEqual([]);
+    await expect(row.locator(".roster-avatar")).toHaveText("C");
+
+    // A wide image is cropped to a small square PNG and drawn everywhere.
+    const wide = await page.evaluate(() => {
+      const canvas = document.createElement("canvas"); canvas.width = 300; canvas.height = 200;
+      const context = canvas.getContext("2d")!; context.fillStyle = "#c0392b"; context.fillRect(0, 0, 300, 200);
+      context.fillStyle = "#2980b9"; context.fillRect(100, 50, 100, 100);
+      return canvas.toDataURL("image/png").split(",")[1];
+    });
+    await file.setInputFiles({ name: "me.png", mimeType: "image/png", buffer: Buffer.from(wide, "base64") });
+    await expect.poll(async () => (await saved()).length).toBe(1);
+    const upload = (await saved())[0];
+    expect(upload.member_id).toBe("m-idle");
+    expect(upload.avatar.kind).toBe("upload");
+    expect(upload.avatar.image).toMatch(/^data:image\/png;base64,/);
+    const size = await page.evaluate(src => new Promise<number[]>(resolve => { const img = new Image(); img.onload = () => resolve([img.naturalWidth, img.naturalHeight]); img.src = src; }), upload.avatar.image);
+    expect(size).toEqual([128, 128]);
+    await expect(error).toBeHidden();
+    for (const node of [row.locator(".roster-avatar img"), heading.locator("img"), picker.getByRole("radio", { name: "Upload image" }).locator("img")]) {
+      await expect(node).toHaveAttribute("src", upload.avatar.image);
+    }
+    await expect(picker.getByRole("radio", { name: "Upload image" })).toHaveAttribute("aria-checked", "true");
+    await expect(row.locator(".roster-avatar img")).toHaveJSProperty("complete", true);
+    await page.screenshot({ path: info.outputPath("agent-ledger-avatar-upload.png") });
+
+    // A preset can be chosen again at any time.
+    await picker.getByRole("radio", { name: "Owl" }).click();
+    await expect(row.locator(".roster-avatar")).toHaveText("🦉");
+    await expect(row.locator(".roster-avatar img")).toHaveCount(0);
+    expect((await saved())[1]).toEqual({ kind: "set_avatar", member_id: "m-idle", avatar: { kind: "preset", preset_id: "owl" } });
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
 
     await page.setViewportSize({ width: 400, height: 900 });

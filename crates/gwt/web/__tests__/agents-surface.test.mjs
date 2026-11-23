@@ -1115,7 +1115,7 @@ test("the ledger draws each member's avatar and saves a chosen preset", async ()
   assert.equal(rowAvatar("m1").textContent, "O", "an unset member shows its initial");
   assert.equal(rowAvatar("m2").textContent, "T");
   assert.deepEqual([...picker().querySelectorAll("[data-avatar-choice]")].map(button => button.dataset.avatarChoice),
-    ["default", "cat", "owl", "bear", "fox", "penguin", "robot"]);
+    ["default", "cat", "owl", "bear", "fox", "penguin", "robot", "upload"]);
   assert.equal(choice("default").getAttribute("aria-checked"), "true");
 
   choice("fox").click();
@@ -1135,5 +1135,48 @@ test("the ledger draws each member's avatar and saves a chosen preset", async ()
   choice("default").click();
   assert.deepEqual(f.avatarsSaved[1], ["m1", { kind: "default" }]);
   assert.equal(rowAvatar("m2").textContent, "T", "each member keeps its own avatar");
+  f.surface.dispose();
+});
+
+// Issue #7636 AC-1 / AC-2 / AC-3: an uploaded image is drawn in the row and
+// the detail, a refused file says why without saving, and a preset or the
+// initial can be chosen again at any time.
+test("the ledger draws an uploaded avatar, refuses a bad file and returns to a preset", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const image = "data:image/png;base64,iVBORw0KGgo=";
+  const picker = () => root.querySelector(".roster-detail [data-member-avatar]");
+  const choice = id => picker().querySelector(`[data-avatar-choice="${id}"]`);
+  const error = () => picker().querySelector(".roster-avatar-error");
+  assert.equal(choice("upload").getAttribute("aria-label"), "Upload image");
+  assert.equal(error().hidden, true);
+
+  const file = picker().querySelector("input[type=file][data-avatar-file]");
+  assert.match(file.accept, /image\/png/);
+  let opened = 0; file.click = () => { opened++; };
+  choice("upload").click();
+  assert.equal(opened, 1, "the upload choice opens the file picker");
+  Object.defineProperty(file, "files", { configurable: true, value: [{ type: "image/svg+xml", size: 10 }] });
+  file.dispatchEvent(new f.window.Event("change"));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(error().hidden, false, "an unsupported file says why");
+  assert.match(error().textContent, /PNG, JPEG, WebP or GIF/);
+  assert.equal(f.avatarsSaved.length, 0, "a refused file saves nothing");
+
+  f.rosterModel.update(state => ({ ...state, revision: "4", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "upload", image } } : member) })); f.flush();
+  for (const node of [root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar'), root.querySelector(".roster-detail .roster-detail-heading .roster-avatar"), choice("upload")]) {
+    assert.equal(node.querySelector("img.agent-avatar-image")?.getAttribute("src"), image);
+  }
+  assert.equal(choice("upload").getAttribute("aria-checked"), "true");
+  assert.equal(choice("default").getAttribute("aria-checked"), "false");
+
+  choice("owl").click();
+  assert.equal(error().hidden, true, "a new choice clears the message");
+  assert.deepEqual(f.avatarsSaved, [["m1", { kind: "preset", preset_id: "owl" }]]);
+  f.rosterModel.update(state => ({ ...state, revision: "5", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "preset", preset_id: "owl" } } : member) })); f.flush();
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar').textContent, "🦉");
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar img'), null);
+  assert.equal(choice("upload").textContent, "＋");
   f.surface.dispose();
 });

@@ -202,3 +202,14 @@ test("the PM entry draws the PM's avatar and follows a preset change", () => {
   chrome.setPm({ name: "Hikari", decisions: 0 });
   assert.equal(avatar().textContent, "H");
 });
+
+// Issue #7636 AC-1: an uploaded avatar is drawn as an image on the PM entry.
+test("the PM entry draws an uploaded avatar image", () => {
+  const { chrome, item } = projectPage();
+  const image = "data:image/png;base64,iVBORw0KGgo=";
+  chrome.setPm({ name: "Hikari", decisions: 0, avatar: { kind: "upload", image } });
+  assert.equal(item("pm").querySelector(".app-head__avatar img.agent-avatar-image")?.getAttribute("src"), image);
+  chrome.setPm({ name: "Hikari", decisions: 0, avatar: { kind: "preset", preset_id: "fox" } });
+  assert.equal(item("pm").querySelector(".app-head__avatar img"), null);
+  assert.equal(item("pm").querySelector(".app-head__avatar").textContent, "🦊");
+});
