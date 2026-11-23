@@ -1757,6 +1757,9 @@ mod tests {
                 && reason.contains("claude"),
             "save={rejected:?}; legacy exclusion={reason}"
         );
+        let saved_profiles = load_issue_monitor_prefs(&path)
+            .unwrap()
+            .launch_profile_pool();
         let reassigned = mutate_project_agent_schedule(
             &root,
             &sessions,
@@ -1775,10 +1778,7 @@ mod tests {
             Some(unselected.as_str())
         );
         assert_eq!(candidates[0].agent_id, "codex");
-        assert_eq!(
-            fs::read(crate::agent_registry::path()).unwrap(),
-            registry_before
-        );
+        assert_eq!(prefs.launch_profile_pool(), saved_profiles);
     }
 
     #[test]
