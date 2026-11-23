@@ -3744,10 +3744,17 @@ export function createKnowledgeKanbanSurface({
               empty = createNode("div", "knowledge-empty");
               column.appendChild(empty);
             }
-            const refill = issueMonitorModel.read().status.terminal_queue_auto_refill;
-            const stopped = !issueMonitorModel.read().status.enabled;
+            const monitorStatus = issueMonitorModel.read().status;
+            const refill = monitorStatus.terminal_queue_auto_refill;
+            const stopped = !monitorStatus.enabled;
+            // Issue #7813 AC-2: name the gate instead of promising a scan.
+            const hold = monitorStatus.terminal_queue_refill_hold;
             empty.textContent = phase === "queued"
               ? (refill && stopped ? "Start the Issues to begin Auto-refill."
+                : refill && hold === "limit_reached"
+                  ? `Auto-refill is at its refill limit (${monitorStatus.terminal_queue_auto_refill_limit ?? 0}). Raise the limit in Issues settings to queue more.`
+                : refill && hold === "no_candidates"
+                  ? "The last Issues scan found no eligible Backlog issue to add. Auto-refill skips held, label-excluded, and removed issues."
                 : refill ? "Auto-refill adds eligible Backlog issues on the next Issues scan."
                   : "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above.")
               : `No ${phase} items`;

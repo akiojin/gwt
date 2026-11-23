@@ -1919,6 +1919,21 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect(issues.getByLabel("Refill limit",{exact:true})).toHaveValue("5");
 });
 
+test("Issue #7813: empty Queued column names the Auto-refill hold", async ({ page }) => {
+  const queued = column(page,"queued");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4});
+  await expect(queued.locator(".knowledge-row")).toHaveCount(0);
+  await expect(queued).toContainText("Auto-refill adds eligible Backlog issues on the next Issues scan.");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,
+    terminal_queue_refill_hold:"limit_reached"});
+  await expect(queued).toContainText("Auto-refill is at its refill limit (4).");
+  await expect(queued).not.toContainText("next Issues scan");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,
+    terminal_queue_refill_hold:"no_candidates"});
+  await expect(queued).toContainText("The last Issues scan found no eligible Backlog issue to add.");
+  await expect(queued).not.toContainText("next Issues scan");
+});
+
 test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
   await confirm(page, [99, 3, 4]);
   await page.evaluate(() => (window as any).__queueActivity([{window_id:"tab-queue::agent-3",session_id:"session-3",
