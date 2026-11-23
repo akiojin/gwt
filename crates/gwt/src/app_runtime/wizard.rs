@@ -5063,6 +5063,20 @@ impl AppRuntime {
         if let Some(rejection) = rejection {
             return self.queue_monitor_preflight_rejection(context, rejection);
         }
+        // Issue #7726: an exhausted budget is terminal even when no durable
+        // delivery is left to reject (the Issue was closed or stopped). Its
+        // result carries no prefs stamp, so the freshness check below would
+        // read it as changed prefs and prepare the same delivery forever.
+        if delivery.result.as_ref().is_err_and(|error| {
+            error == gwt::project_runtime::events::MONITOR_PREPARATION_EXHAUSTED
+        }) {
+            return self.schedule_issue_monitor_launch_failure(
+                context,
+                request,
+                gwt::project_runtime::events::MONITOR_PREPARATION_EXHAUSTED.to_string(),
+                None,
+            );
+        }
         record_issue_monitor_gui_phase(
             "monitor_gui_context",
             &mut phase_started,

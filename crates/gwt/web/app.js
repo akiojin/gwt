@@ -5883,7 +5883,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       installBrowserFileDropBridge();
       installNativeFileDropBridge();
 
-      window.addEventListener("unload", () => {
+      // Chromium no longer allows unload handlers (Permissions Policy), and
+      // registering one logs a console error. pagehide also fires when the
+      // page enters the back/forward cache; it may be restored from there, so
+      // only a page that is really going away is disposed.
+      window.addEventListener("pagehide", (event) => {
+        if (event.persisted) return;
         disposeAttachmentProgress();
         disposeProjectShellSurface();
 
@@ -5895,7 +5900,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         agentActivityModel.dispose();
         switchModel.dispose();
         launchWizardVisibilityModel.dispose();
-      }, { once: true });
+      });
 
       window.addEventListener(
         "keydown",
