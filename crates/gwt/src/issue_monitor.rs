@@ -4244,6 +4244,10 @@ pub struct IssueMonitorStatusView {
     pub terminal_queue_auto_refill: bool,
     #[serde(default)]
     pub terminal_queue_auto_refill_limit: usize,
+    /// Issue #7813 AC-2: why Auto-refill adds nothing now, as in
+    /// `terminal_queue_refill.hold`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_queue_refill_hold: Option<IssueMonitorRefillHold>,
     #[serde(default)]
     pub unqueued_open_count: usize,
     #[serde(default)]
@@ -4725,6 +4729,8 @@ pub struct IssueMonitorRefillUncounted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueMonitorRefillExemption {
+    /// Issue #7813: launched or launching; it holds a slot, not a queue place.
+    Active,
     LabelExcluded,
     /// Issue #7508: delivery is parked on an open PR.
     OpenPrHold,
@@ -4740,6 +4746,9 @@ pub enum IssueMonitorRefillHold {
     Disabled,
     /// `counted` already fills `limit`.
     LimitReached,
+    /// Issue #7813: the last Issues scan left capacity but found no eligible
+    /// Backlog issue to add.
+    NoCandidates,
 }
 
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
@@ -5665,6 +5674,9 @@ pub struct IssueMonitorState {
     #[serde(default)]
     terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     terminal_queue_auto_refill_limit: usize,
+    /// Issue #7813: the last refill pass left capacity with nothing to add.
+    #[serde(skip)]
+    terminal_queue_refill_starved: bool,
     #[serde(default)]
     execution_environments: Vec<ProjectExecutionEnvironment>,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
@@ -9049,6 +9061,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            terminal_queue_refill_starved: false,
             execution_environments: Vec::new(),
             launch_profiles: Vec::new(),
             launch_auto: false,
@@ -16063,6 +16076,7 @@ impl IssueMonitorState {
             terminal_queue: self.urgent_queue_projection(&host).entries,
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
             terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
+            terminal_queue_refill_hold: self.terminal_queue_refill().hold,
             unqueued_open_count,
             other_terminal_queue_count,
             active_count: self.active_count(),
@@ -20533,8 +20547,9 @@ impl IssueMonitorState {
         if self.label_excluded_issues.contains(&number) {
             return Some(Exemption::LabelExcluded);
         }
+        // Issue #7813: a launch holds a slot, not a place in the queue.
         if launch_protected.contains(&number) {
-            return None;
+            return Some(Exemption::Active);
         }
         if self
             .open_pr_observations
@@ -20570,6 +20585,8 @@ impl IssueMonitorState {
             Some(IssueMonitorRefillHold::Disabled)
         } else if counted.len() >= self.terminal_queue_auto_refill_limit {
             Some(IssueMonitorRefillHold::LimitReached)
+        } else if self.terminal_queue_refill_starved {
+            Some(IssueMonitorRefillHold::NoCandidates)
         } else {
             None
         };
@@ -28223,6 +28240,9 @@ pub fn scan_issue_monitor_candidates(
     monitor.admit_urgent_candidates(issues, now);
     monitor.auto_refill_terminal_queue(&refill, now);
     monitor.reconcile_terminal_queue();
+    // Issue #7813 AC-2: capacity left after this scan means no candidate.
+    monitor.terminal_queue_refill_starved = false;
+    monitor.terminal_queue_refill_starved = monitor.terminal_queue_refill().hold.is_none();
     let membership = monitor
         .local_terminal_queue_numbers()
         .into_iter()
@@ -51626,7 +51646,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_queue_refill_retires_completed_work_but_counts_active_work() {
+    fn terminal_queue_refill_retires_completed_work_but_keeps_active_work() {
         let now = "2026-09-10T00:00:00Z";
         let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_terminal_queue_auto_refill(true, 2);
@@ -51643,8 +51663,11 @@ mod tests {
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![2, 3]);
         assert!(monitor.active_launches.contains(&2));
         assert!(monitor.prefs().terminal_queue_exclusions.is_empty());
-        // An active entry occupies capacity until a terminal fact retires it.
-        assert_eq!(monitor.auto_refill_terminal_queue(&[4], now), 0);
+        // Issue #7813: an active entry keeps its membership until a terminal
+        // fact retires it, but holds a slot rather than refill capacity.
+        assert_eq!(monitor.auto_refill_terminal_queue(&[4], now), 1);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![2, 3, 4]);
+        monitor.terminal_queue_remove(&[4], now);
         let mut concurrent =
             test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         concurrent.terminal_queue_push(&[1], "operator", "2026-09-10T00:01:00Z");
@@ -52016,10 +52039,11 @@ mod tests {
         monitor.observe_urgent_issue(&urgent, now);
         monitor.set_priority_order(vec![4]);
         scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2), urgent, issue(4)], now);
-        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 1, 2]);
+        // Nothing protected is displaced; Issue #7813: the active launch and
+        // the pending claim hold slots, so #4 takes the free queue place.
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 4, 1, 2]);
         assert_eq!(monitor.pending_claim_issue_numbers(), BTreeSet::from([2]));
         assert!(monitor.active_launches.contains(&1));
-        assert!(monitor.inbox_item(4).is_none());
     }
 
     #[test]
@@ -52100,6 +52124,79 @@ mod tests {
                 .map(|entry| (entry.issue_number, entry.reason))
                 .collect::<Vec<_>>(),
             [1, 2, 3].map(|number| (number, IssueMonitorRefillExemption::AwaitingVerification))
+        );
+    }
+
+    #[test]
+    fn issue_7813_auto_refill_limit_counts_queued_issues_not_active_launches() {
+        let now = "2026-11-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        monitor.terminal_queue_push(&[1, 2], "operator", now);
+        for number in [1, 2] {
+            monitor.record_candidate(issue(number));
+            monitor.complete_active_launch_at(number, &format!("tab::agent-{number}"), now);
+        }
+        assert!(monitor.active_launches.contains(&1) && monitor.active_launches.contains(&2));
+
+        // AC-1: every slot is busy, yet the Queued column fills to the limit.
+        let candidates = [issue(1), issue(2), issue(3), issue(4), issue(5)];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4]);
+
+        // AC-2: only the waiting members use capacity; launches say why not.
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![3, 4]);
+        assert_eq!(
+            refill
+                .uncounted
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [1, 2].map(|number| (number, IssueMonitorRefillExemption::Active))
+        );
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::LimitReached));
+        assert_eq!(
+            monitor.status_view_at(now).terminal_queue_refill_hold,
+            Some(IssueMonitorRefillHold::LimitReached)
+        );
+    }
+
+    #[test]
+    fn issue_7813_auto_refill_reports_no_candidates_after_a_scan_adds_nothing() {
+        let now = "2026-11-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        assert_eq!(monitor.terminal_queue_refill().hold, None);
+        let mut closed = issue(1);
+        closed.state = IssueMonitorIssueState::Closed;
+        scan_issue_monitor_candidates(&mut monitor, &[closed], now);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, Vec::<u64>::new());
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::NoCandidates));
+        assert_eq!(
+            monitor.status_view_at(now).terminal_queue_refill_hold,
+            Some(IssueMonitorRefillHold::NoCandidates)
+        );
+
+        scan_issue_monitor_candidates(&mut monitor, &[issue(2)], now);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![2]);
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::NoCandidates));
+        scan_issue_monitor_candidates(&mut monitor, &[issue(2), issue(3)], now);
+        assert_eq!(
+            monitor
+                .agent_status_at(now)
+                .terminal_queue_refill
+                .unwrap()
+                .hold,
+            Some(IssueMonitorRefillHold::LimitReached)
         );
     }
 
