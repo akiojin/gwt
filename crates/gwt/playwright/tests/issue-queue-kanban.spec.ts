@@ -965,7 +965,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0 · 0 issues · PM 0");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle Q1 A0/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle · 1 queued · 0 of 2 active");
   await expect(row(page, 42).locator(".knowledge-row-badge")).toHaveText("Needs human");
   await expect(row(page, 42).locator('[data-key="reason"]')).toHaveText(reason);
   await row(page, 42).locator(".knowledge-row-select").click();
@@ -988,7 +988,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(column(page, "active").locator('[data-issue-number="44"]')).toBeVisible();
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Running · 1 queued · 1 of 2 active");
 });
 
 test("Issue #6141 closed issues follow live sessions and explain cleanup, counts and errors", async ({ page }) => {

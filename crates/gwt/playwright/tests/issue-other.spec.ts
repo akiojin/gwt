@@ -190,7 +190,7 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
     }), enabled);
     await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText(enabled ? "Stop" : "Start");
     await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", String(enabled));
-    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle Q0 A0/2" : "Off");
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle · 0 queued · 0 of 2 active" : "Off");
     await expect(search).toBeFocused();
     await expect(other).toHaveAttribute("open");
     expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
@@ -200,7 +200,7 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
   } }));
   await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
   await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Running · 3 queued · 1 of 2 active");
   await expect(page.locator('[data-metric="queue"]')).toHaveText("Queue 3");
   await expect(page.locator('[data-metric="capacity"]')).toHaveText("1 of 2");
   for (const [status, queue] of [
@@ -208,7 +208,7 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
     [{ queue_len: 4 }, 4],
   ] as const) {
     await page.evaluate(status => (window as any).__otherEmit({ kind: "issue_monitor_status", status }), status);
-    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(`Run Q${queue} A0/0`);
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(`Running · ${queue} queued · 0 of 0 active`);
     await expect(page.locator('[data-metric="queue"]')).toHaveText(`Queue ${queue}`);
     await expect(page.locator('[data-metric="capacity"]')).toHaveText("0 of 0");
     await expect(page.locator('[data-metric="active"]')).toHaveAttribute("aria-description", /Issues agent capacity: 0\/0/);

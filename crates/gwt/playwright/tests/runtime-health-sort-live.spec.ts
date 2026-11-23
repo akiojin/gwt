@@ -85,7 +85,7 @@ test.describe("Runtime health sort controls", () => {
     const perfValue = page.locator("#op-strip-runtime-health-value");
     const detail = page.locator("#op-runtime-health-detail");
 
-    await expect(perfValue).toHaveText("HOT 100% 5.0G");
+    await expect(perfValue).toHaveText("High 100% 5.0G");
     await expect(perfCell).toHaveAttribute("title", CPU_UNITS);
     await expect(perfCell).toHaveAttribute("aria-label", CPU_UNITS);
 
@@ -105,7 +105,7 @@ test.describe("Runtime health sort controls", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await perfCell.focus();
     await expect(detail).toBeVisible();
-    await expect(perfValue).toHaveText("HOT 100% 5.0G");
+    await expect(perfValue).toHaveText("High 100% 5.0G");
 
     await detail.getByRole("button", { name: "CPU" }).click();
     await page.waitForTimeout(200);
@@ -152,7 +152,7 @@ test.describe("Runtime health sort controls", () => {
         return { before, immediate, renders, latest: value.textContent };
       } finally { observer.disconnect(); }
     });
-    expect(burst).toEqual({ before: "OK 5% 1.0G", immediate: "OK 5% 1.0G", renders: 1, latest: "HOT 50% 1.0G" });
+    expect(burst).toEqual({ before: "OK 5% 1.0G", immediate: "OK 5% 1.0G", renders: 1, latest: "High 50% 1.0G" });
     await expect(detail).toContainText("burst-50");
     await expect(detail).not.toContainText("latest-snapshot");
     await expect(detail.locator(".op-runtime-health-detail__process-more")).toContainText("sorted by Mem");

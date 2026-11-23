@@ -235,9 +235,11 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
   停止します。背景で継続中の作業も対象です。他の GUI が接続中の daemon や、独立起動した
   daemon は動作を維持します。
 
-プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
-表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
-ステータスバーと Works 見出しは、タブタイトルと同じ RUNNING / BLOCK / IDLE / ERROR 件数を表示します。
+プロジェクトのブラウザタブには、エージェントの件数を言葉で表したタイトル（例：
+`gwt — 3 running · 1 blocked — gwt`）と状態別 favicon を表示します。Blocked は
+待機・停止・エラーを含み、シェルは集計しません。ステータスバー（Running / Idle /
+Blocked / Errors）と Works 見出しは、タブタイトルと同じ件数を表示します。
+ステータスバーの Auto-run 欄は `Running · 9 queued · 3 of 6 active` のように表示します。
 未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
 Hub のタイトルと favicon は固定です。
 

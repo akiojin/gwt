@@ -1258,7 +1258,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           "[data-role='connection-label']",
         );
         if (connectionStatusLabel) {
-          connectionStatusLabel.textContent = connected ? "ONLINE" : "OFFLINE";
+          connectionStatusLabel.textContent = connected ? "Connected" : "Disconnected";
         }
         if (strip) {
           strip.classList.toggle("op-status-strip--offline", !connected);

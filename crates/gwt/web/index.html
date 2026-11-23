@@ -266,14 +266,14 @@
         >
           <div class="op-status-strip__cell">
             <span class="op-status-strip__live-dot" aria-hidden="true"></span>
-            <span class="op-status-strip__label" data-role="connection-label">ONLINE</span>
+            <span class="op-status-strip__label" data-role="connection-label">Connected</span>
           </div>
           <div class="op-status-strip__cell project-owner-health" data-project-owner-health hidden>
-            <span class="op-status-strip__label">PROJECT</span>
+            <span class="op-status-strip__label">Project</span>
             <span class="op-status-strip__value" data-project-owner-health-value>Connecting</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--running">
-            <span class="op-status-strip__label">RUNNING</span>
+            <span class="op-status-strip__label">Running</span>
             <span class="op-status-strip__value" id="op-strip-running" aria-label="Running agents">0</span>
             <!-- Issue #3884 AC-3: how many of the running agents live as inline
                  terminals in the Issue window instead of on the canvas. -->
@@ -282,22 +282,22 @@
               id="op-strip-running-inline"
               aria-label="Running agents shown as inline terminals in the Issue window"
               hidden
-            >0 inline</span>
+            >0 in Issues</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--idle">
-            <span class="op-status-strip__label">IDLE</span>
+            <span class="op-status-strip__label">Idle</span>
             <span class="op-status-strip__value" id="op-strip-idle" aria-label="Idle agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--waiting">
-            <span class="op-status-strip__label">BLOCK</span>
+            <span class="op-status-strip__label">Blocked</span>
             <span class="op-status-strip__value" id="op-strip-waiting" aria-label="Agents that need you, including stopped and errored agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--error">
-            <span class="op-status-strip__label">ERROR</span>
+            <span class="op-status-strip__label">Errors</span>
             <span class="op-status-strip__value" id="op-strip-error" aria-label="Agents with runtime errors">0</span>
           </div>
           <div class="op-status-strip__cell">
-            <span class="op-status-strip__label">WORK</span>
+            <span class="op-status-strip__label">Work</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
           </div>
           <button
@@ -306,13 +306,13 @@
             id="op-strip-issue-monitor"
             data-state="disabled"
             aria-label="Open Issues: Off"
-            title="Open Issues | Issues: Off"
+            title="Open Issues | Auto-run: Off"
           >
-            <span class="op-status-strip__label">ISSUES</span>
+            <span class="op-status-strip__label">Auto-run</span>
             <span
               class="op-status-strip__value"
               id="op-strip-issue-monitor-value"
-              aria-label="Issues status"
+              aria-label="Auto-run status"
             >Off</span>
             <span class="op-status-strip__sub" id="op-strip-needs-human" hidden></span>
           </button>
@@ -324,12 +324,12 @@
             aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             title="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
           >
-            <span class="op-status-strip__label">PERF</span>
+            <span class="op-status-strip__label">Load</span>
             <span
               class="op-status-strip__value"
               id="op-strip-runtime-health-value"
               aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
-            >CPU -- MEM --</span>
+            >Warming -- --</span>
           </div>
           <div class="op-status-strip__cell" aria-hidden="true">
             <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>

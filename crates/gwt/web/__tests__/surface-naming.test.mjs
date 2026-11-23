@@ -24,7 +24,7 @@ const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 test("the status strip uses the Issues label and navigation name", () => {
   const html = readFileSync(resolve(here, "../index.html"), "utf8");
   assert.match(html, /aria-label="Open Issues: Off"/);
-  assert.match(html, /op-status-strip__label">ISSUES<\/span>/);
+  assert.match(html, /op-status-strip__label">Auto-run<\/span>/);
 });
 
 function presetRoleLabels() {
