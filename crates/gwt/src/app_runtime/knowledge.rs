@@ -1994,7 +1994,7 @@ impl AppRuntime {
         id: &str,
         request_id: u64,
         number: u64,
-        title: String,
+        change: gwt::knowledge_bridge::IssueSubtaskChange,
     ) -> Vec<OutboundEvent> {
         self.knowledge_detail_events(
             client_id,
@@ -2002,7 +2002,7 @@ impl AppRuntime {
             KnowledgeKind::Issue,
             Some(request_id),
             number,
-            Some(title),
+            Some(change),
         )
     }
 
@@ -2013,7 +2013,7 @@ impl AppRuntime {
         kind: KnowledgeKind,
         request_id: Option<u64>,
         number: u64,
-        subtask_title: Option<String>,
+        subtask_change: Option<gwt::knowledge_bridge::IssueSubtaskChange>,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -2054,17 +2054,17 @@ impl AppRuntime {
         let client_factory = Arc::clone(&self.issue_client_factory);
         self.blocking_tasks.spawn(move || {
             let detail = (|| {
-                if let Some(title) = subtask_title {
+                if let Some(change) = subtask_change {
                     let (owner, repo) =
                         gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
                             .map_err(|error| error.to_string())?;
                     let client =
                         client_factory(&owner, &repo).map_err(|error| error.to_string())?;
-                    gwt::knowledge_bridge::append_issue_subtask(
+                    gwt::knowledge_bridge::edit_issue_subtask(
                         &project_root,
                         client.as_ref(),
                         number,
-                        &title,
+                        &change,
                     )?;
                 }
                 gwt::load_knowledge_bridge_detail(&project_root, kind, number)

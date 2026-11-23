@@ -51,6 +51,7 @@ export function createProjectThemes({
   let pending = null;
   let hierarchyProject = null;
   let parents = new Map();
+  let interruptedProject = null;
 
   function request(message, waiting) {
     const requestId = nextRequestId++;
@@ -130,5 +131,14 @@ export function createProjectThemes({
   function parentTheme(number) {
     return hierarchyProject === getProjectKey() ? parents.get(number) : undefined;
   }
-  return { element: container, reload, loadHierarchy, parentTheme, dispose };
+  function updateConnection(connected) {
+    if (!connected && pending?.kind === "load_themes") {
+      interruptedProject = pending.project;
+      pending = null;
+    } else if (connected && interruptedProject === getProjectKey() && interruptedProject !== null) {
+      interruptedProject = null;
+      if (!pending) reload();
+    }
+  }
+  return { element: container, reload, loadHierarchy, parentTheme, updateConnection, dispose };
 }

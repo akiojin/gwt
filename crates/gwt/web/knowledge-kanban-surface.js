@@ -614,32 +614,6 @@ export function issueAcceptanceProgress(markdown) {
   return { items, done: items.filter((item) => item.done).length, total: items.length };
 }
 
-export function issueChildProgress(sections) {
-  const body = sections?.find(section => section.title === "Description")?.body || "";
-  const items = [];
-  let headingLevel = 0;
-  let fence = null;
-  for (const line of body.split(/\r?\n/)) {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (marker) {
-      if (!fence) fence = marker[1];
-      else if (marker[1].startsWith(fence) && !marker[2].trim()) fence = null;
-      continue;
-    }
-    if (fence) continue;
-    const heading = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
-    if (heading) {
-      if (headingLevel && heading[1].length <= headingLevel) break;
-      // The escaped heading matches Japanese source Markdown, not UI copy.
-      if (/^(\u5b50\u8ab2\u984c|Subtasks)$/i.test(heading[2])) headingLevel = heading[1].length;
-      continue;
-    }
-    const item = headingLevel && /^ {0,3}[-*+]\s+\[([ xX])\]\s+(\S.*)$/.exec(line);
-    if (item) items.push({ done: item[1] !== " ", text: item[2].replace(/^<!-- gwt-subtask -->\s*/, "").trim() });
-  }
-  return { items, done: items.filter(item => item.done).length, total: items.length };
-}
-
 // SPEC #3885 Phase 5 (T-035 / FR-023): one action band per state, at most three
 // visible actions plus ⋯. queue = Launch now / Move to top, running = Open
 // window / Move to top (⋯ keeps Requeue and Stop), done = Open PR. Every other
@@ -2956,7 +2930,7 @@ export function createKnowledgeKanbanSurface({
         windowId,
         knowledgeKind,
         number,
-        { explicit = false, subtaskTitle = null } = {},
+        { explicit = false, subtaskChange = null } = {},
       ) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         const previousNumber = state.selectedNumber;
@@ -3003,22 +2977,23 @@ export function createKnowledgeKanbanSurface({
         } else {
           renderKnowledgeDetailOnly(windowId, state);
         }
-        const message = subtaskTitle == null ? {
+        const message = subtaskChange == null ? {
           kind: "select_knowledge_bridge_entry",
           id: windowId,
           knowledge_kind: effectiveKind,
           request_id: requestId,
           number,
         } : {
-          kind: "add_issue_subtask",
+          kind: "edit_issue_subtask",
           id: windowId,
           request_id: requestId,
           number,
-          title: subtaskTitle,
+          change: subtaskChange,
         };
-        if (send(message) === "unavailable" && subtaskTitle != null) {
+        if (subtaskChange?.kind === "add") state.subtaskDraftRequest = requestId;
+        if (send(message) === "unavailable" && subtaskChange != null) {
           state.detailLoading = false;
-          state.error = "Could not add the subtask. Reconnect and try again.";
+          state.error = "Could not edit the subtask. Reconnect and try again.";
           renderKnowledgeStatusOnly(windowId, state);
           renderKnowledgeDetailOnly(windowId, state);
           return false;
@@ -3711,7 +3686,7 @@ export function createKnowledgeKanbanSurface({
               return JSON.stringify([(entry.labels || []).map(name => repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)), { ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
-                agentActivityModel?.read().byIssue[entry.number],
+                agentActivityModel?.read().byIssue[entry.number], parentThemeForIssue(entry.number)?.title,
                 phase === "active" ? issueCurrentAgentWindows(issueProjectWindows(windowId), entry) : null]);
             },
             update: (row, entry) => {
@@ -4394,7 +4369,7 @@ export function createKnowledgeKanbanSurface({
         return renderIssueDetailProgress("Acceptance criteria", issueAcceptanceProgress(text));
       }
 
-      function renderIssueDetailProgress(label, progress) {
+      function renderIssueDetailProgress(label, progress, onRemove) {
         if (progress.total === 0) return null;
         const block = createNode("section", "issue-detail-ac");
         block.setAttribute("aria-label", label);
@@ -4418,10 +4393,18 @@ export function createKnowledgeKanbanSurface({
         const list = createNode("ul", "issue-detail-ac-list");
         for (const item of progress.items) {
           const row = createNode("li", "issue-detail-ac-item");
+          if (!item.id) row.classList.add("issue-detail-subtask-item");
           row.dataset.done = item.done ? "true" : "false";
           row.appendChild(createNode("span", "issue-detail-ac-mark", item.done ? "✓" : "○"));
           if (item.id) row.appendChild(createNode("span", "issue-detail-ac-id", item.id));
           row.appendChild(createNode("span", "issue-detail-ac-text", item.text));
+          if (onRemove && item.remove_at != null) {
+            const remove = createNode("button", null, "Remove");
+            remove.type = "button";
+            remove.setAttribute("aria-label", `Remove subtask ${item.text}`);
+            remove.addEventListener("click", () => onRemove(item));
+            row.appendChild(remove);
+          }
           list.appendChild(row);
         }
         block.appendChild(list);
@@ -4603,6 +4586,7 @@ export function createKnowledgeKanbanSurface({
         const attention = work ? workAttentionFor?.(work) || null : null;
         const faces = entry ? issueRowFaces(windowId, entry, work) : {};
         const queue = canonicalQueuedKnowledgeEntries(state);
+        const parent = parentThemeForIssue(Number(number));
         const relatedWorks = state.detail?.related_works || [];
         const liveSessions = buildKnowledgeRelatedLiveSessionWindowsByConversation(relatedWorks);
         const relatedActions = relatedWorks.flatMap(relatedWork =>
@@ -4614,7 +4598,8 @@ export function createKnowledgeKanbanSurface({
         const key = JSON.stringify([
           state.detail, state.detailLoading, state.selectedNumber, state.previewHidden,
           state.issueDetailView, agentPreview, state.error, entry, work, attention,
-          relatedActions, state.pendingAutonomousTargets?.has(Number(number)) === true,
+          relatedActions, parent && [parent.number, parent.title, parent.url, parent.total, parent.completed],
+          state.pendingAutonomousTargets?.has(Number(number)) === true,
           issueMonitorModel.read().status.autonomous_mode,
           agentPreview && state.issueDetailView === "output" && Boolean(isAgentsSurfaceMounted()),
           queue.findIndex(item => item.number === entry?.number), queue.length,
@@ -4645,7 +4630,14 @@ export function createKnowledgeKanbanSurface({
           }
           return;
         }
+        const activeInput = document.activeElement;
+        const restoreSubtaskFocus = activeInput?.dataset.subtaskTitle === String(number) && detailPane.contains(activeInput);
         renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview });
+        if (restoreSubtaskFocus) {
+          const input = detailPane.querySelector("[data-subtask-title]");
+          input?.focus();
+          input?.setSelectionRange(activeInput.selectionStart, activeInput.selectionEnd);
+        }
         issueDetailRenderKeys.set(detailPane, key);
         issueDetailTierRenderKeys.set(detailPane, tierKey);
       }
@@ -4832,15 +4824,26 @@ export function createKnowledgeKanbanSurface({
             scroll.appendChild(progress);
           }
         }
-        const children = renderIssueDetailProgress("Subtasks", issueChildProgress(detail.sections));
+        const items = detail.subtasks || [];
+        const editable = !entry.is_spec && detail.state?.toLowerCase() !== "closed" && !state.detailLoading && !state.error;
+        const changeSubtask = change => dispatchKnowledgeDetailRequest(windowId, "issue", number, { subtaskChange: change });
+        const children = renderIssueDetailProgress("Subtasks", {
+          items, total: items.length, done: items.filter(item => item.done).length,
+        }, editable ? item => changeSubtask({ kind: "remove", start: item.remove_at, text: item.text }) : null);
         if (children) scroll.appendChild(children);
-        if (!entry.is_spec && detail.state?.toLowerCase() !== "closed" && !state.detailLoading && !state.error) {
+        if (editable) {
           const form = createNode("form", "knowledge-section");
           const label = createNode("label", null, "Subtask title");
           const input = createNode("input");
           input.type = "text";
           input.required = true;
           input.maxLength = 200;
+          input.dataset.subtaskTitle = String(number);
+          input.value = state.subtaskDrafts?.get(number) || "";
+          input.addEventListener("input", () => {
+            state.subtaskDrafts ??= new Map();
+            state.subtaskDrafts.set(number, input.value);
+          });
           label.appendChild(input);
           const button = createNode("button", null, "Add subtask");
           button.type = "submit";
@@ -4848,7 +4851,7 @@ export function createKnowledgeKanbanSurface({
           form.addEventListener("submit", event => {
             event.preventDefault();
             const title = input.value.trim();
-            if (title) dispatchKnowledgeDetailRequest(windowId, "issue", number, { subtaskTitle: title });
+            if (title) changeSubtask({ kind: "add", title });
           });
           scroll.appendChild(form);
         }
@@ -6346,6 +6349,10 @@ export function createKnowledgeKanbanSurface({
           previousNumber = state.selectedNumber;
           const matchesLoadRequest =
             !event.request_id || event.request_id === state.loadRequestId;
+          if (state.subtaskDraftRequest === event.request_id) {
+            state.subtaskDrafts?.delete(event.detail?.number);
+            state.subtaskDraftRequest = null;
+          }
           state.detail = event.detail ? { ...event.detail,
             sections: (event.detail.sections || []).map(section => ({ ...section,
               content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;

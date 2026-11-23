@@ -338,6 +338,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const windowMap = new Map();
       let splitSurfaces = null;
       let loadIssueThemes = () => {};
+      let updateThemeConnection = () => {};
       let worksSurface = null;
       let agentsSurface = null;
       let rosterHost = null;
@@ -977,7 +978,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "add_issue_subtask"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
             (message.kind === "get_hook_doctor" && message.repair === true) || message.kind === "update_user_hooks") {
@@ -1242,6 +1243,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function setConnectionState(connected, recoverSnapshots = false) {
         if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); tuningController.disconnectTuning(); }
         connectionOverlay.setConnected(connected);
+        updateThemeConnection(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
@@ -6232,6 +6234,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onHierarchyChange: renderAllKnowledgeBridgeWindows,
       });
       loadIssueThemes = projectThemes.loadHierarchy;
+      updateThemeConnection = projectThemes.updateConnection;
       const themesElement = projectThemes.element;
       themesElement.hidden = true;
       document.querySelector(".surface-area").appendChild(themesElement);

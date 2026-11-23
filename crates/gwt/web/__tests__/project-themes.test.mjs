@@ -93,6 +93,14 @@ test("Issues shares the Themes hierarchy only for the active project", async () 
   await page.reply({ kind: "themes", request_id: 2, view: view([theme(20)]) });
   assert.equal(page.themes.parentTheme(8), undefined);
   assert.equal(page.themes.parentTheme(21).number, 20);
+  page.themes.reload();
+  page.themes.updateConnection(false);
+  page.themes.updateConnection(true);
+  assert.equal(page.sent.at(-1).request_id, 4);
+  await page.reply({ kind: "themes", request_id: 3, view: view([theme(7)]) });
+  assert.equal(page.themes.parentTheme(8), undefined);
+  await page.reply({ kind: "themes", request_id: 4, view: view([theme(7)]) });
+  assert.equal(page.themes.parentTheme(8).number, 7);
   page.themes.dispose();
 });
 
