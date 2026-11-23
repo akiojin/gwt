@@ -516,6 +516,8 @@ fn board_snapshot_events(
         Ok(scope) => scope,
         Err(error) => return vec![board_read_error(client_id, id, error)],
     };
+    // Issue #7642: every saved PM report is on the Board before it is shown.
+    gwt::pm_report_board::publish_best_effort(project_root);
     let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
         gwt::board_provider::load_snapshot(project_root)
     } else {

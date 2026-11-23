@@ -2639,6 +2639,16 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         view?.controller.showDecisions();
       }
 
+      // Issue #7644: a theme recorded from the conversation opens the PM on
+      // the message it came from. A PM not mounted yet shows it once it is.
+      let pendingPmMessage = null;
+      function openPmMessage(messageId) {
+        const view = pmWindowId ? pmChatViews.get(pmWindowId) : null;
+        pendingPmMessage = view ? null : messageId;
+        openPmAgent();
+        view?.controller.showMessage(messageId);
+      }
+
       // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
       let projectAgentSummaryModel = null;
 
@@ -4588,6 +4598,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           pendingPmDecisions = false;
           view.controller.showDecisions();
         }
+        if (pendingPmMessage != null) {
+          const messageId = pendingPmMessage;
+          pendingPmMessage = null;
+          view.controller.showMessage(messageId);
+        }
         // SPEC #7007 T-013: the Log view mirrors this page's notification
         // history (#5016 groups). The subscription fires immediately with
         // the current rows, then on every history change.
@@ -6228,6 +6243,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         document, send, repliesModel: themeRepliesModel, // An issue under a theme opens in the Issues screen, like an Issue link
         // in a window header.
         onOpenIssue: number => runIssueWindowHeaderAction("open-issue", { linked_issue_number: number }),
+        onOpenConversation: ({ messageId }) => openPmMessage(messageId),
         getProjectKey: activeProjectKey,
         onHierarchyChange: renderAllKnowledgeBridgeWindows,
       });

@@ -714,10 +714,15 @@ fn handle_stop(
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
     // wins and the remaining checks must NOT run.
-    let stop_checks: [(&str, StopCheck<'_>); 10] = [
+    let stop_checks: [(&str, StopCheck<'_>); 11] = [
         (
             "pm-reporting-stop-check",
             Box::new(|| super::pm_reporting::handle_stop(worktree_root, current_session)),
+        ),
+        // Issue #7644: each human PM turn ends with a theme decision.
+        (
+            "pm-theme-stop-check",
+            Box::new(|| super::pm_reporting::handle_theme_stop(worktree_root, current_session)),
         ),
         (
             "board-read-stop-check",

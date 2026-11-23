@@ -351,14 +351,20 @@ pub trait IssueClient: Send + Sync {
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError>;
 
-    /// List the themes of the repository: open Issues that have sub-issues,
-    /// with GitHub's own sub-issue totals (Issue #7643).
+    /// List the themes of the repository: open Issues that have sub-issues or
+    /// carry [`THEME_LABEL`], with GitHub's own sub-issue totals (Issue #7643,
+    /// Issue #7644).
     fn list_themes(&self) -> Result<ThemeListing, ApiError> {
         Err(ApiError::Unexpected("list themes unsupported".into()))
     }
 }
 
-/// One theme: an open Issue that has sub-issues (Issue #7643).
+/// The label of a theme the PM recorded from the conversation (Issue #7644).
+/// Such an Issue is a theme before any issue sits under it.
+pub const THEME_LABEL: &str = "gwt-theme";
+
+/// One theme: an open Issue that has sub-issues or carries [`THEME_LABEL`]
+/// (Issue #7643, Issue #7644).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeIssue {
     pub number: IssueNumber,

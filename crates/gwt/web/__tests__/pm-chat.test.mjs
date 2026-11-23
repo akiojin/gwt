@@ -2078,3 +2078,38 @@ test('Log view renders fed notification groups and routes the drawer action', as
   assert.equal(viewed[0].key, 'window-command:agent-1:input');
   view.dispose();
 });
+
+// Issue #7644: a theme recorded from the conversation opens the message it
+// came from, also when the conversation arrives after the request.
+test('Chat opens the message a theme came from, or says it is gone', () => {
+  const { root, model, view } = fixture();
+  view.showMessage('original');
+  assert.equal(view.isChatVisible(), true);
+  const navigation = [];
+  const bubble = () => root.querySelector('[data-message-id="original"]');
+  // linkedom has no scrollIntoView; a browser element does.
+  const proto = Object.getPrototypeOf(Object.getPrototypeOf(root));
+  const hadScroll = Object.hasOwn(proto, 'scrollIntoView');
+  proto.scrollIntoView = function () { navigation.push(`arrived:${this.dataset.messageId}`); };
+  try {
+    model.applyPmWindowReceiveEvent(conversation([
+      { id: 'original', role: 'user', text: 'Add search to the log screen', source_key: 'source' },
+    ]));
+  } finally {
+    if (!hadScroll) delete proto.scrollIntoView;
+  }
+  assert.ok(bubble(), 'the conversation rendered the target');
+  assert.deepEqual(navigation.splice(0), ['arrived:original']);
+  view.showReports();
+  bubble().scrollIntoView = () => navigation.push('scroll');
+  bubble().focus = () => navigation.push('focus');
+  view.showMessage('original');
+  assert.deepEqual(navigation, ['scroll', 'focus']);
+  const notice = root.querySelector('[data-pm-message-target-notice]');
+  assert.equal(notice.hidden, true);
+
+  view.showMessage('gone');
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /no longer in the conversation/);
+  view.dispose();
+});
