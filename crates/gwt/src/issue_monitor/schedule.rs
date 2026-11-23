@@ -511,8 +511,9 @@ fn check_member_runner(root: &Path, profile: &IssueMonitorLaunchProfile) -> Resu
         .working_dir(root)
         .runtime_target(profile.runtime_target)
         .build();
-    gwt_agent::LaunchEnvironment::from_active_profile(
+    gwt_agent::LaunchEnvironment::for_project(
         &gwt_core::paths::gwt_config_path(),
+        root,
         config.runtime_target,
     )?
     .with_project_root(root)

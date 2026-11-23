@@ -173,8 +173,9 @@ pub(super) fn check_launch_permission(
     }
     let custom = configured_custom_agent_for_launch(config, &gwt_core::paths::gwt_config_path())?;
     let mut materialized = config.clone();
-    gwt_agent::LaunchEnvironment::from_active_profile(
+    gwt_agent::LaunchEnvironment::for_project(
         &gwt_core::paths::gwt_config_path(),
+        project_root,
         config.runtime_target,
     )?
     .with_project_root(&worktree)
@@ -326,12 +327,21 @@ pub fn prepare_agent_launch(
         }
         let initial_prompt_file =
             crate::launch_runtime::prepare_initial_prompt(&mut config, &worktree_path)?;
-        gwt_agent::LaunchEnvironment::from_active_profile(
-            &profile_config_path,
-            config.runtime_target,
-        )?
-        .with_project_root(&worktree_path)
-        .apply_to_config(&mut config);
+        let environment = if pm_launch {
+            gwt_agent::LaunchEnvironment::from_active_profile(
+                &profile_config_path,
+                config.runtime_target,
+            )
+        } else {
+            gwt_agent::LaunchEnvironment::for_project(
+                &profile_config_path,
+                Path::new(&project_root),
+                config.runtime_target,
+            )
+        }?;
+        environment
+            .with_project_root(&worktree_path)
+            .apply_to_config(&mut config);
         if let Some(managed_worktree) = managed_codex_worktree.as_ref() {
             let report = register_codex_managed_project_trust_for_resolved_launch(
                 &profile_config_path,

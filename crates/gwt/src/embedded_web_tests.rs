@@ -1486,7 +1486,15 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
         "expected a shared presetRoleLabel helper",
     );
     for label in [
-        "Shell", "Claude", "Codex", "Agent", "Branches", "Settings", "Profile", "Logs", "Issue",
+        "Shell",
+        "Claude",
+        "Codex",
+        "Agent",
+        "Branches",
+        "Settings",
+        "Environment variables",
+        "Logs",
+        "Issue",
         "Board",
     ] {
         assert!(
@@ -2703,7 +2711,7 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
         "expected Profile surface to expose selection, CRUD, active-switch, and save events",
     );
     assert!(
-        html.contains("Environment Variables")
+        html.contains("role=\"heading\" aria-level=\"2\">Environment variables")
             && html.contains("Use OS")
             && html.contains("Override")
             && html.contains("Disabled")

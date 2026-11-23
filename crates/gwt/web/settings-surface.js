@@ -988,6 +988,7 @@ export function createSettingsSurface({
   onReloadProfile,
   renderProjectEnvironments = null,
   renderPmEnvironments = null,
+  projectEnvironmentSetsModel = createUiStateStore({}),
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1180,6 +1181,24 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
+      function renderProjectEnvironmentSet(body, snapshots = projectEnvironmentSetsModel.read()) {
+        const event = snapshots[body.dataset.settingsProjectRoot];
+        const select = body.querySelector("[data-project-environment-set]");
+        if (!event || !select) return;
+        const names = event.names || [];
+        const options = [createNode("option", "", "None"), ...names.map(name => createNode("option", "", name))];
+        options[0].value = "";
+        select.replaceChildren(...options);
+        select.value = event.assigned || "";
+        select.disabled = Boolean(event.error && !names.length);
+        body.querySelector("[data-project-environment-set-status]").textContent =
+          event.error || "Applies to new agent sessions in this project.";
+      }
+      projectEnvironmentSetsModel.subscribe(state => state, state => {
+        for (const body of settingsWindowBodies) {
+          renderProjectEnvironmentSet(body, state);
+        }
+      });
       const hookDoctorModel = createUiStateStore({}, { scheduleFrame });
       let nextHookDoctorRequest = 0;
       function requestHookDoctor(projectRoot, repair = false, recovering = false, userHookChange = null) {
@@ -1558,6 +1577,7 @@ export function createSettingsSurface({
 
       function requestSettingsSnapshots(recovering = false) {
         if (activeProjectTab()?.project_root) {
+          send({ kind: "get_project_environment_set" });
           send({ kind: "list_issue_monitor" });
           send({ kind: "get_repository_labels", refresh: false });
           send({ kind: "get_issue_monitor_profiles" });
@@ -1804,6 +1824,27 @@ export function createSettingsSurface({
         const controls = createDiv();
         controls.dataset.settingsIssuesControls = "";
         panelIssues.appendChild(controls);
+        if (project?.project_root) {
+          const environmentSet = createNode("fieldset", "settings-section");
+          environmentSet.appendChild(createNode("legend", "", "Environment variables"));
+          const field = createNode("label", "settings-field");
+          field.appendChild(createNode("span", "", "Environment variable set"));
+          const select = createNode("select", "settings-select");
+          select.dataset.projectEnvironmentSet = "";
+          select.disabled = true;
+          field.appendChild(select);
+          environmentSet.appendChild(field);
+          const status = createNode("p", "settings-help", "Loading environment variable sets…");
+          status.setAttribute("role", "status");
+          status.dataset.projectEnvironmentSetStatus = "";
+          environmentSet.appendChild(status);
+          select.addEventListener("change", () => {
+            if (activeProjectTab()?.project_root !== project.project_root) return;
+            select.disabled = true;
+            send({ kind: "set_project_environment_set", name: select.value || null });
+          });
+          panelIssues.appendChild(environmentSet);
+        }
         const environments = createDiv();
         environments.dataset.settingsEnvironments = "";
         panelIssues.appendChild(environments);
@@ -1838,6 +1879,9 @@ export function createSettingsSurface({
         settingsWindowBodies.add(body);
         body.addEventListener("settings:section-changed", event => {
           if (event.detail.section === "hooks") requestHookDoctor(body.dataset.settingsProjectRoot);
+          if (event.detail.section === "issues" && body.dataset.settingsProjectRoot) {
+            send({ kind: "get_project_environment_set" });
+          }
         });
         renderHookCenterPanels();
         renderUpdateStatus(body, globalUpdateModel.read());
@@ -1854,6 +1898,7 @@ export function createSettingsSurface({
           });
         });
         renderProjectSettings(body);
+        renderProjectEnvironmentSet(body);
         renderPmEnvironmentsPanel(body);
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);

@@ -150,6 +150,8 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `LoadThemes` | 読み取り | — | テーマ画面に出す、プロジェクトのテーマ（sub-issue を持つ Issue）と今日の完了数を読む（Issue #7643）。 |
 | `DeleteTheme` | 対象外 | — | テーマを削除する（テーマの GitHub Issue を not planned で閉じる）。テーマ画面の確認ダイアログを経る操作に限る（Issue #7643）。 |
 | `GetExecutionEnvironments` | 読み取り | — | 実行環境の定義、アカウント、開いているプロジェクトの優先度リストを取得する。 |
+| `GetProjectEnvironmentSet` | 読み取り | — | プロジェクト設定に表示する環境変数セットの候補名と割り当てを取得する。 |
+| `SetProjectEnvironmentSet` | 対象外 | — | プロジェクト設定から、次のエージェント起動に使う環境変数セットの割り当てを保存する（Issue #7651）。 |
 | `AddExecutionEnvironment` | 対象外 | — | アカウントと経由ツールの組をホストに登録する。実行環境の画面からの操作に限る（Issue #7741）。 |
 | `UpdateExecutionEnvironment` | 対象外 | — | 実行環境の名前と実行時指定を変更する。実行環境の画面からの操作に限る（Issue #7741）。 |
 | `DeleteExecutionEnvironment` | 対象外 | — | 実行環境を削除し、各プロジェクトのリストから外す。確認画面を経る操作に限る（Issue #7741）。 |

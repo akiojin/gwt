@@ -73,6 +73,9 @@ pub struct ProfilesConfig {
     /// Currently active profile name.
     #[serde(default)]
     pub active: Option<String>,
+    /// Absent in legacy settings. An empty assignment explicitly uses no set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_environments: Option<BTreeMap<String, String>>,
 }
 
 /// Resolved active profile metadata.
@@ -105,11 +108,56 @@ impl Default for ProfilesConfig {
         Self {
             profiles: vec![default_profile()],
             active: Some("default".to_string()),
+            project_environments: None,
         }
     }
 }
 
 impl ProfilesConfig {
+    pub fn migrate_environment_assignments<'a>(
+        &mut self,
+        registered: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        if self.project_environments.is_some() {
+            return false;
+        }
+        let legacy = self.normalize_active_profile().name;
+        self.project_environments = Some(
+            registered
+                .into_iter()
+                .map(|key| (key.to_owned(), legacy.clone()))
+                .collect(),
+        );
+        true
+    }
+
+    pub fn register_environment_project(&mut self, key: &str) {
+        if let Some(assignments) = &mut self.project_environments {
+            assignments.entry(key.to_owned()).or_default();
+        }
+    }
+
+    pub fn assign_environment(&mut self, key: &str, name: Option<&str>) -> Result<(), String> {
+        if let Some(name) = name {
+            if self.get(name).is_none() {
+                return Err(format!("environment set '{name}' not found"));
+            }
+        }
+        let assignments = self
+            .project_environments
+            .as_mut()
+            .ok_or("environment assignments have not been migrated")?;
+        assignments.insert(key.to_owned(), name.unwrap_or_default().to_owned());
+        Ok(())
+    }
+
+    pub fn environment_profile(&self, project: Option<&str>) -> Option<&Profile> {
+        if let Some(name) = project.and_then(|key| self.project_environments.as_ref()?.get(key)) {
+            return self.get(name);
+        }
+        self.active_profile().or_else(|| self.get("default"))
+    }
+
     fn ensure_default_profile(&mut self) {
         if let Some(profile) = self
             .profiles
@@ -197,6 +245,14 @@ impl ProfilesConfig {
         if active_matches {
             self.active = Some(new_name.to_string());
         }
+        if let Some(assignments) = &mut self.project_environments {
+            for name in assignments
+                .values_mut()
+                .filter(|name| *name == current_name)
+            {
+                *name = new_name.to_owned();
+            }
+        }
         Ok(())
     }
 
@@ -238,6 +294,14 @@ impl ProfilesConfig {
         self.ensure_default_profile();
         if active_switched_to_default {
             self.active = Some("default".to_string());
+        }
+        if let Some(assignments) = &mut self.project_environments {
+            for assignment in assignments
+                .values_mut()
+                .filter(|assignment| *assignment == name)
+            {
+                assignment.clear();
+            }
         }
         Ok(ProfileDeleteOutcome {
             active_switched_to_default,
@@ -373,10 +437,33 @@ mod tests {
     }
 
     #[test]
+    fn legacy_environment_assignment_is_migrated_once() {
+        let mut config = ProfilesConfig::default();
+        let mut legacy = Profile::new("legacy");
+        legacy.disabled_env.push("GITHUB_TOKEN".into());
+        config.add(legacy).unwrap();
+        config.switch("legacy").unwrap();
+
+        config.migrate_environment_assignments(["registered"]);
+        config.register_environment_project("new");
+        let inherited = [("GITHUB_TOKEN".into(), "fixture".into())];
+        for project in [Some("registered"), Some("unregistered"), None] {
+            let profile = config.environment_profile(project).unwrap();
+            assert!(profile.merged_env_pairs(inherited.clone()).is_empty());
+        }
+        assert!(config.environment_profile(Some("new")).is_none());
+
+        config.assign_environment("registered", None).unwrap();
+        assert!(!config.migrate_environment_assignments(["registered", "new"]));
+        assert!(config.environment_profile(Some("registered")).is_none());
+    }
+
+    #[test]
     fn normalize_active_profile_falls_back_to_default_when_active_is_missing() {
         let mut c = ProfilesConfig {
             profiles: vec![Profile::new("default"), Profile::new("dev")],
             active: Some("missing".to_string()),
+            ..ProfilesConfig::default()
         };
 
         let resolved = c.normalize_active_profile();
