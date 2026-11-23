@@ -2745,6 +2745,13 @@ pub(crate) fn write_current_attachment_input(
     use super::events::OwnerAttachmentInputOutcome;
     let mut attempted = false;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Issue #7701: a human attachment outranks an unconfirmed wake.
+        super::pm_delivery::release_retained_wake(
+            entry,
+            None,
+            super::pm_delivery::RetainedWakeRelease::HumanInput,
+            Instant::now(),
+        )?;
         let reservation = with_current_writer(writers, id, entry, |handle| {
             Arc::clone(handle)
                 .reserve_input_transaction()

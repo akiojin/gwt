@@ -9379,7 +9379,7 @@ mod tests {
         let member: agent_names::AgentMember = serde_json::from_str(&output).unwrap();
         assert_eq!(member.name, "Additional teammate");
         assert_eq!(member.agent_id.as_deref(), Some("codex"));
-        assert!(member.enabled && member.implementation_eligible());
+        assert!(member.implementation_eligible());
         assert!(member.assignment.is_none());
         let key = gwt_core::paths::project_scope_hash(&repo);
         let persisted = crate::agent_registry::SessionMemberSnapshot::load()

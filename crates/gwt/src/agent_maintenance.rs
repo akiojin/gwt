@@ -93,6 +93,7 @@ pub fn run_maintenance(
     let mut installed_path = None;
     let operation = (|| -> Result<String, String> {
         let mut checked_target = None;
+        let mut update_source = None;
         let (program, args) = match action {
             MaintenanceAction::Install => install_command(descriptor).ok_or_else(|| {
                 "No installer is available; install this CLI manually".to_string()
@@ -135,6 +136,43 @@ pub fn run_maintenance(
                 checked_target = Some(latest_semver);
                 if descriptor.id == AgentId::Antigravity {
                     ("agy".into(), vec!["update".into()])
+                } else if descriptor.id == AgentId::GrokBuild {
+                    // Issue #7819: update through the route that owns the
+                    // installed binary; npm must not overwrite another
+                    // installer's binary or symlink.
+                    let executable = detected.as_ref().map(|agent| agent.path.as_path());
+                    let package = descriptor.distribution.npm_package().unwrap_or_default();
+                    let source = executable.map_or(GrokInstallSource::Other, |path| {
+                        grok_install_source(
+                            path,
+                            package,
+                            home_directory(&environment.0).as_deref(),
+                        )
+                    });
+                    update_source = Some(source);
+                    match source {
+                        GrokInstallSource::OfficialInstaller => (
+                            descriptor.command.into(),
+                            vec!["update".into(), "--version".into(), latest.clone()],
+                        ),
+                        GrokInstallSource::NpmGlobal => (
+                            "npm".into(),
+                            vec!["install".into(), "-g".into(), format!("{package}@{latest}")],
+                        ),
+                        GrokInstallSource::Other => {
+                            return Err(format!(
+                                "Cannot update {}: {} was not installed by npm or the Grok installer (~/.grok), so gwt will not overwrite it. Update it with the tool that installed it.",
+                                descriptor.display_name,
+                                executable.map_or_else(
+                                    || descriptor.command.to_string(),
+                                    |path| std::fs::canonicalize(path)
+                                        .unwrap_or_else(|_| path.to_path_buf())
+                                        .display()
+                                        .to_string(),
+                                ),
+                            ));
+                        }
+                    }
                 } else {
                     let package = descriptor
                         .distribution
@@ -149,6 +187,19 @@ pub fn run_maintenance(
         };
         let output = execute(&program, &args, &environment, cwd, INSTALL_TIMEOUT)?;
         if !output.success() {
+            if let Some(source) = update_source {
+                return Err(format!(
+                    "{} update from {} failed. Ran `{}`. {} Next: {}",
+                    descriptor.display_name,
+                    source.label(),
+                    std::iter::once(program.as_str())
+                        .chain(args.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    process_failure(&output),
+                    source.next_step(),
+                ));
+            }
             return Err(format!(
                 "{} Check installer prerequisites and the active profile's permissions/PATH, then retry.",
                 process_failure(&output)
@@ -211,7 +262,23 @@ pub fn run_maintenance(
             result.success = true;
             result.message = message;
         }
-        Err(message) => result.message = message,
+        Err(message) => {
+            result.message = message;
+            // Issue #7819 AC-3: a failed update reports the version that is
+            // still installed instead of leaving "after" unknown.
+            if action == MaintenanceAction::Update
+                && result.after_version.is_none()
+                && detected.is_some()
+            {
+                result.after_version = AgentDetector::detect_by_command_with_environment(
+                    agent_id,
+                    &environment.0,
+                    &environment.1,
+                    Some(cwd),
+                )
+                .and_then(|agent| agent.version);
+            }
+        }
     }
     result.message = redact_output(&result.message, &environment.0);
     result.before_version = result
@@ -239,6 +306,73 @@ pub fn run_maintenance(
         }
     }
     result
+}
+
+/// Who owns an installed `grok` executable (Issue #7819).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrokInstallSource {
+    /// `npm install -g` (the binary resolves into `node_modules/<package>`).
+    NpmGlobal,
+    /// xAI's own installer, which keeps the binary under `~/.grok`.
+    OfficialInstaller,
+    /// Anything else; gwt leaves it untouched.
+    Other,
+}
+
+impl GrokInstallSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NpmGlobal => "the npm global install",
+            Self::OfficialInstaller => "the Grok installer (~/.grok)",
+            Self::Other => "an unrecognized installation",
+        }
+    }
+
+    fn next_step(self) -> &'static str {
+        match self {
+            Self::NpmGlobal => "check npm's global prefix and its write permissions in the active profile, then retry.",
+            Self::OfficialInstaller => "run `grok update` in a terminal to see the installer's full output, fix the reported problem, then retry.",
+            Self::Other => "update it with the tool that installed it.",
+        }
+    }
+}
+
+fn home_directory(environment: &HashMap<String, String>) -> Option<std::path::PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|key| {
+            environment
+                .get(*key)
+                .filter(|value| !value.is_empty())
+                .cloned()
+        })
+        .or_else(|| std::env::var("HOME").ok())
+        .map(std::path::PathBuf::from)
+}
+
+fn grok_install_source(executable: &Path, package: &str, home: Option<&Path>) -> GrokInstallSource {
+    let resolved = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    let package_directory = Path::new("node_modules").join(package);
+    // Unix npm links resolve into `node_modules/<package>`; Windows npm shims
+    // sit next to `node_modules/<package>` in the npm prefix.
+    if resolved
+        .ancestors()
+        .any(|ancestor| ancestor.ends_with(&package_directory))
+        || executable
+            .parent()
+            .is_some_and(|directory| directory.join(&package_directory).is_dir())
+    {
+        return GrokInstallSource::NpmGlobal;
+    }
+    if let Some(home) = home {
+        let installer_root = home.join(".grok");
+        let canonical_root =
+            std::fs::canonicalize(&installer_root).unwrap_or(installer_root.clone());
+        if executable.starts_with(&installer_root) || resolved.starts_with(&canonical_root) {
+            return GrokInstallSource::OfficialInstaller;
+        }
+    }
+    GrokInstallSource::Other
 }
 
 fn version_check_command(descriptor: &BuiltinAgentDescriptor) -> String {
@@ -1223,5 +1357,150 @@ INSTALLER"#,
         assert!(!result.success);
         assert!(result.message.contains("version"));
         assert!(!fixture.calls().contains("install"));
+    }
+
+    /// Issue #7819: a Grok build at `<home>/<layout>` reached through
+    /// `<home>/bin/grok`, the way Homebrew's prefix links the official
+    /// installer's binary. npm and the Grok binary log every call to `calls`.
+    #[cfg(unix)]
+    fn grok_fixture(layout: &str, grok_script: &str) -> Fixture {
+        let fixture = Fixture::new(
+            "printf 'npm %s\\n' \"$*\" >> \"$HOME/calls\"\nif [ \"$1\" = view ]; then printf '\"1.0.92\"\\n'; fi",
+            None,
+        );
+        let home = fixture.root.path();
+        let binary = home.join(layout);
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, format!("#!/bin/sh\n{grok_script}\n")).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&binary, home.join("bin/grok")).unwrap();
+        let mut settings = gwt_config::Settings::load_from_path(&fixture.config).unwrap();
+        settings.profiles.profiles[0].env_vars.extend([
+            ("HOME".into(), home.display().to_string()),
+            (
+                "PATH".into(),
+                format!(
+                    "{}:{}:/usr/bin:/bin",
+                    home.join("bin").display(),
+                    home.display()
+                ),
+            ),
+        ]);
+        settings.save(&fixture.config).unwrap();
+        fixture
+    }
+
+    #[cfg(unix)]
+    fn run_grok_update(fixture: &Fixture) -> MaintenanceResult {
+        run_maintenance(
+            "grok",
+            MaintenanceAction::Update,
+            &fixture.config,
+            fixture.root.path(),
+        )
+    }
+
+    // Issue #7819 AC-1 / AC-2 / AC-4: the official installer's binary, even
+    // through a Homebrew-prefix symlink, updates with `grok update`, never npm.
+    #[cfg(unix)]
+    #[test]
+    fn grok_from_the_official_installer_updates_with_grok_update_not_npm() {
+        let fixture = grok_fixture(
+            ".grok/downloads/grok-macos-aarch64",
+            r#"if [ "$1" = update ]; then
+  printf 'grok %s\n' "$*" >> "$HOME/calls"
+  printf '#!/bin/sh\nprintf "grok 1.0.92 (abc)\\n"\n' > "$0"
+  exit 0
+fi
+printf 'grok 1.0.77 (50ca579fa996)\n'"#,
+        );
+        let result = run_grok_update(&fixture);
+        assert!(result.success, "{}", result.message);
+        assert_eq!(
+            result.before_version.as_deref(),
+            Some("grok 1.0.77 (50ca579fa996)")
+        );
+        assert_eq!(result.after_version.as_deref(), Some("grok 1.0.92 (abc)"));
+        let calls = fixture.calls();
+        assert!(calls.contains("grok update --version 1.0.92"), "{calls}");
+        assert!(!calls.contains("npm install"), "{calls}");
+    }
+
+    // Issue #7819 AC-1: an npm global install keeps the npm route.
+    #[cfg(unix)]
+    #[test]
+    fn grok_from_npm_global_updates_with_npm() {
+        let fixture = grok_fixture(
+            "lib/node_modules/@xai-official/grok/bin/grok",
+            "printf 'grok 1.0.77\\n'",
+        );
+        let result = run_grok_update(&fixture);
+        assert!(!result.success, "fixture npm never upgrades the binary");
+        let calls = fixture.calls();
+        assert!(
+            calls.contains("npm install -g @xai-official/grok@1.0.92"),
+            "{calls}"
+        );
+        assert!(!calls.contains("grok update"), "{calls}");
+    }
+
+    // Issue #7819 AC-2: an unrecognised installation is never overwritten.
+    #[cfg(unix)]
+    #[test]
+    fn grok_from_an_unknown_source_is_left_untouched() {
+        let fixture = grok_fixture("opt/grok/grok", "printf 'grok 1.0.77\\n'");
+        let result = run_grok_update(&fixture);
+        assert!(!result.success);
+        let calls = fixture.calls();
+        assert!(!calls.contains("npm install"), "{calls}");
+        assert!(!calls.contains("grok update"), "{calls}");
+        assert!(
+            result.message.contains("opt/grok/grok"),
+            "{}",
+            result.message
+        );
+        assert!(
+            result.message.contains("tool that installed it"),
+            "{}",
+            result.message
+        );
+    }
+
+    // Issue #7819 AC-3: a failed update names the source, the command and the
+    // next step, and still reports the version that remains installed.
+    #[cfg(unix)]
+    #[test]
+    fn grok_update_failure_reports_source_command_and_unchanged_version() {
+        let fixture = grok_fixture(
+            ".grok/bin/grok",
+            r#"if [ "$1" = update ]; then printf 'download failed\n' >&2; exit 3; fi
+printf 'grok 1.0.77 (50ca579fa996)\n'"#,
+        );
+        let result = run_grok_update(&fixture);
+        assert!(!result.success);
+        assert!(
+            result.message.contains("Grok installer"),
+            "{}",
+            result.message
+        );
+        assert!(
+            result.message.contains("`grok update --version 1.0.92`"),
+            "{}",
+            result.message
+        );
+        assert!(
+            result.message.contains("download failed"),
+            "{}",
+            result.message
+        );
+        assert!(result.message.contains("retry"), "{}", result.message);
+        assert_eq!(
+            result.after_version.as_deref(),
+            Some("grok 1.0.77 (50ca579fa996)")
+        );
     }
 }

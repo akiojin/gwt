@@ -42,7 +42,7 @@ test.describe("Issue #6732: Agent limit Auto recovery (live backend)", () => {
       await expect.poll(policy).toMatchObject({ mode: "manual", manual_limit: 8 });
       await expect.poll(() => latestStatus(page)).toMatchObject({ enabled: false, max_active_agents_override: 8 });
       const roster = JSON.parse(await readFile(preferences, "utf8")).agent_roster;
-      expect(roster.members.some((member: any) => member.enabled)).toBe(true);
+      expect(roster.members.length).toBeGreaterThan(0);
       const auto = surface.getByRole("button", { name: "Set Agent limit to Auto", exact: true });
       await auto.scrollIntoViewIfNeeded();
       await expect(auto).toBeVisible();

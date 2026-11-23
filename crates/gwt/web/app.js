@@ -5883,7 +5883,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       installBrowserFileDropBridge();
       installNativeFileDropBridge();
 
-      window.addEventListener("unload", () => {
+      // Chromium no longer allows unload handlers (Permissions Policy), and
+      // registering one logs a console error. pagehide also fires when the
+      // page enters the back/forward cache; it may be restored from there, so
+      // only a page that is really going away is disposed.
+      window.addEventListener("pagehide", (event) => {
+        if (event.persisted) return;
         disposeAttachmentProgress();
         disposeProjectShellSurface();
 
@@ -5895,7 +5900,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         agentActivityModel.dispose();
         switchModel.dispose();
         launchWizardVisibilityModel.dispose();
-      }, { once: true });
+      });
 
       window.addEventListener(
         "keydown",
@@ -6172,11 +6177,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
           requestAgentRoster({ kind: "add", name, pm_eligible: pmEligible });
         },
-        onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
         onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
         onSetTraits: (memberId, traits) => requestAgentRoster({ kind: "set_traits", member_id: memberId, traits }),
-        onActivateMember: memberId => requestAgentRoster({ kind: "activate", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
         onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),

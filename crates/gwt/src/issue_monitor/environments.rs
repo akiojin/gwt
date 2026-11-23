@@ -162,17 +162,92 @@ impl IssueMonitorPrefs {
             .collect()
     }
 
-    /// Issue #7771: a registered agent's saved candidate as a launch chosen
-    /// by hand starts it — on the project's environment when the project
-    /// saved a list, else on the tool the agent was registered with. `None`
-    /// when the project keeps no candidate for the agent, which a launch
-    /// cannot reserve.
+    /// Issue #7771: resolve a registered member's launch as it would start.
+    /// A saved project environment supplies the tool for every member.
+    /// Projects without a list use the member's saved launch profile or a
+    /// general launch profile for the member's registered tool.
     pub fn member_launch_candidate(&self, member_id: &str) -> Option<IssueMonitorLaunchProfile> {
-        let saved = self
-            .launch_profile_pool()
-            .into_iter()
-            .find(|profile| profile.agent_member_id.as_deref() == Some(member_id))?;
-        self.agent_candidates_on_environment(vec![saved]).pop()
+        let pool = self.launch_profile_pool();
+        let member = self
+            .agent_roster
+            .as_ref()?
+            .members
+            .iter()
+            .find(|member| member.agent_member_id == member_id)?;
+        if let Some(tool) = self.environment_tool_for_agents() {
+            return Some(self.member_candidate_on_environment(&pool, member_id, &tool));
+        }
+        self.legacy_member_candidate(&pool, member)
+    }
+
+    pub(super) fn legacy_member_profile<'pool>(
+        pool: &'pool [IssueMonitorLaunchProfile],
+        member: &crate::agent_names::AgentMember,
+    ) -> Option<&'pool IssueMonitorLaunchProfile> {
+        pool.iter()
+            .find(|profile| profile.agent_member_id.as_deref() == Some(&member.agent_member_id))
+            .or_else(|| {
+                let tool = normalize_issue_monitor_provider(member.agent_id.as_deref()?)?;
+                pool.iter().find(|profile| {
+                    profile.prefer_for.is_empty()
+                        && normalize_issue_monitor_provider(&profile.agent_id).as_ref()
+                            == Some(&tool)
+                })
+            })
+    }
+
+    pub(super) fn legacy_member_candidate(
+        &self,
+        pool: &[IssueMonitorLaunchProfile],
+        member: &crate::agent_names::AgentMember,
+    ) -> Option<IssueMonitorLaunchProfile> {
+        let profile = Self::legacy_member_profile(pool, member)?;
+        let tool = member
+            .agent_id
+            .as_deref()
+            .and_then(normalize_issue_monitor_provider);
+        if normalize_issue_monitor_provider(&profile.agent_id) != tool {
+            return None;
+        }
+        let mut candidate = if profile
+            .agent_member_id
+            .as_ref()
+            .is_some_and(|id| id != &member.agent_member_id)
+        {
+            // Another member's general profile authorizes the tool. Its
+            // per-member launch settings stay with that member.
+            self.default_member_candidate(&member.agent_member_id, &profile.agent_id)
+        } else {
+            profile.clone()
+        };
+        candidate.agent_member_id = Some(member.agent_member_id.clone());
+        Some(candidate)
+    }
+
+    pub(super) fn member_candidate_on_environment(
+        &self,
+        pool: &[IssueMonitorLaunchProfile],
+        member_id: &str,
+        tool: &str,
+    ) -> IssueMonitorLaunchProfile {
+        let mut candidate = pool
+            .iter()
+            .find(|profile| profile.agent_member_id.as_deref() == Some(member_id))
+            .cloned()
+            .map_or_else(
+                || self.default_member_candidate(member_id, tool),
+                |profile| profile.on_tool(tool),
+            );
+        candidate.agent_member_id = Some(member_id.to_string());
+        candidate
+    }
+
+    fn default_member_candidate(&self, member_id: &str, tool: &str) -> IssueMonitorLaunchProfile {
+        let mut candidate = environment_candidate(tool);
+        if let Some(core) = self.agent_registry_profiles.get(member_id) {
+            core.apply(&mut candidate);
+        }
+        candidate.on_tool(tool)
     }
 
     /// Whether `tool` is one of the project's saved environments, which any
@@ -445,9 +520,16 @@ mod tests {
         assert_eq!(pick(&prefs, 41).as_deref(), Some("codex"));
 
         prefs.execution_environments = listed(&[("claude", "claude")]);
+        let mut pool = prefs.launch_profile_pool();
+        pool.retain(|profile| profile.agent_member_id.as_deref() != Some("m-codex"));
+        prefs.set_launch_profile_pool(pool);
         let pool = prefs.registered_launch_profiles_for_issue(41);
         assert_eq!(tools(&pool), ["claude"]);
         assert_eq!(pool[0].agent_member_id.as_deref(), Some("m-codex"));
+        assert_eq!(
+            prefs.member_launch_candidate("m-codex"),
+            pool.first().cloned()
+        );
     }
 
     #[test]

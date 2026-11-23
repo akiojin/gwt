@@ -6855,7 +6855,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
             .unwrap()
             .members
             .iter()
-            .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+            .filter(|member| member.agent_id.as_deref() == Some("codex"))
             .take(2)
             .map(|member| {
                 let mut profile = base.clone();
@@ -7084,7 +7084,6 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
                     .iter()
                     .any(|member| {
                         Some(&member.agent_member_id) == profile.agent_member_id.as_ref()
-                            && member.enabled
                             && member.assignment.is_none()
                     })
         })

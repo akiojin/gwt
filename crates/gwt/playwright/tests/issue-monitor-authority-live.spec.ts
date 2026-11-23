@@ -192,7 +192,7 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
       await rename(machinePath + ".twelve-pty.tmp", machinePath);
       const prefs = await readPrefs();
       expect(prefs.max_active_agents).toBe(12);
-      if (prefs.agent_roster) expect(prefs.agent_roster.members.filter((member: any) => member.enabled)).toHaveLength(12);
+      if (prefs.agent_roster) expect(prefs.agent_roster.members).toHaveLength(12);
       expect(prefs.enabled).toBe(false);
       expect(prefs.autonomous_mode).toBe(false);
       // This fixture starts after remote claim acquisition. It exercises the

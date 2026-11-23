@@ -356,6 +356,96 @@ fn issue6842_same_delivery_preparation_without_progress_is_bounded() {
     );
 }
 
+/// Issue #7726: closing or stopping an Issue withdraws its delivery from the
+/// durable prefs. The exhausted preparation then has no delivery to reject,
+/// and the GUI used to read its missing prefs stamp as "prefs changed" and
+/// prepare again — forever, with no durable row left for a stop to address.
+#[test]
+fn issue7726_exhausted_preparation_of_a_withdrawn_delivery_ends_instead_of_repreparing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "withdrawn-delivery",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let _owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let repo = fixture.project_root.clone();
+    let delivery_id = fixture.delivery_id.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let prepare = |fixture: &mut MonitorRelaunchFixture| {
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &repo,
+                3165,
+                LinkedIssueKind::Spec,
+                delivery_id.clone(),
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            )
+    };
+    for _ in 0..3 {
+        prepare(&mut fixture);
+        drain_queued_blocking_tasks(&queued);
+        drop(take_issue4803_monitor_preparation(&fixture.recorded_events));
+        fixture.runtime.issue_monitor_launch_preparations.clear();
+    }
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.pending_launch_deliveries.clear();
+    prefs.launching_issues.clear();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+
+    prepare(&mut fixture);
+    drain_queued_blocking_tasks(&queued);
+    let exhausted = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    assert!(
+        exhausted.rejection.is_none(),
+        "a withdrawn delivery leaves nothing durable to reject"
+    );
+    let events = fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(exhausted);
+    drain_queued_blocking_tasks(&queued);
+
+    assert!(
+        !fixture
+            .recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_))),
+        "an exhausted delivery must not be prepared again"
+    );
+    assert!(
+        fixture.runtime.issue_monitor_launch_preparations.is_empty(),
+        "the ended delivery releases the project preparation lane"
+    );
+    assert!(
+        matches!(
+            fixture.runtime.issue_monitor_launch_deliveries.get(delivery_id.as_deref().unwrap()),
+            Some(super::super::IssueMonitorLaunchDeliveryState::LaunchFailed { message, .. })
+                if message.contains("3 preparations")
+        ),
+        "the delivery ends as a failed launch"
+    );
+    assert!(
+        events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, issue_number: Some(3165), .. }
+                if level == "error"
+        )),
+        "the bounded failure is reported for its Issue: {events:?}"
+    );
+}
+
 #[test]
 fn monitor_scan_recovery_failure_emits_one_attention_notice() {
     let temp = tempdir().unwrap();
@@ -914,7 +1004,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
                 .unwrap()
                 .members
                 .iter()
-                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .filter(|member| member.agent_id.as_deref() == Some("codex"))
                 .take(3)
                 .map(|member| {
                     let mut profile = base.clone();
@@ -1645,18 +1735,21 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         Some(&roster),
         "read-only preparation must not consume a member"
     );
-    // Keep the existing pane and proposed window ID unchanged. Resting the
-    // first member changes canonical admission without exhausting capacity.
-    let current = gwt::agent_names::mutate_project_roster(
+    // Mark the selected member busy without changing the existing pane or
+    // exhausting machine capacity.
+    let first = &roster.members[0];
+    gwt::agent_names::reserve_project_member_for_agent(
         &fixture.project_root,
         &fixture.runtime.sessions_dir,
-        gwt::agent_names::AgentRosterAction::Rest {
-            member_id: roster.members[0].agent_member_id.clone(),
-        },
-        Some(roster.revision),
+        "new-assignment-after-preparation",
+        Some(3166),
+        None,
+        None,
+        None,
+        first.agent_id.as_deref().unwrap(),
+        Some(&first.agent_member_id),
     )
-    .expect("rest the first member after preparation");
-    assert!(current.revision > roster.revision);
+    .expect("reserve the first member for other work after preparation");
     assert_eq!(fs::read(&history_path).unwrap(), member_names);
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(fixture
@@ -1736,20 +1829,25 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         .find(|window| window.linked_issue_number == Some(3165))
         .and_then(|window| window.agent_name.as_ref())
         .expect("revalidated pane has a persistent member name");
-    assert_eq!(launched_name, &current.members[1].name);
+    assert_eq!(launched_name, &roster.members[1].name);
     assert_eq!(windows.len(), 2);
     let assigned = gwt::load_issue_monitor_prefs(&prefs_path)
         .unwrap()
         .agent_roster
         .unwrap();
-    assert!(!assigned.members[0].enabled);
-    assert!(assigned.members[0].assignment.is_none());
-    assert!(assigned.members[1].enabled);
+    assert_eq!(
+        assigned.members[0]
+            .assignment
+            .as_ref()
+            .unwrap()
+            .issue_number,
+        Some(3166)
+    );
     assert_eq!(
         assigned.members[1]
             .assignment
             .as_ref()
-            .expect("the enabled canonical member was reserved")
+            .expect("the next idle member was reserved")
             .issue_number,
         Some(3165)
     );
@@ -1801,7 +1899,7 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
                 .unwrap()
                 .members
                 .iter()
-                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .filter(|member| member.agent_id.as_deref() == Some("codex"))
                 .take(2)
                 .map(|member| {
                     let mut profile = base.clone();
@@ -1864,7 +1962,6 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
                     .iter()
                     .any(|member| {
                         Some(&member.agent_member_id) == profile.agent_member_id.as_ref()
-                            && member.enabled
                             && member.assignment.is_none()
                     })
         })
@@ -2281,7 +2378,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
                 .unwrap()
                 .members
                 .iter()
-                .filter(|member| member.enabled && member.agent_id.as_deref() == Some("codex"))
+                .filter(|member| member.agent_id.as_deref() == Some("codex"))
                 .take(2)
                 .map(|member| {
                     let mut profile = base.clone();
@@ -2697,8 +2794,7 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             .members
             .iter()
             .position(|member| {
-                member.enabled
-                    && member.assignment.is_none()
+                member.assignment.is_none()
                     && source.agent_member_id.as_deref() != Some(member.agent_member_id.as_str())
             })
             .expect("an unassigned spare distinct from the exact asking member");

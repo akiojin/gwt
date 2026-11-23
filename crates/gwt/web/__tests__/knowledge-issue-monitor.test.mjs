@@ -1609,6 +1609,22 @@ test("Issue #6922: stopped Auto-refill explains Start beside the switch and in t
   assert.match(empty().textContent, /turn on Auto-refill/);
 });
 
+test("Issue #7813: empty Queued column states why Auto-refill adds nothing", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({kind:"knowledge_entries",id:"win-1",knowledge_kind:"issue",request_id:load.request_id,
+    entries:[],refresh_enabled:true});
+  const empty = () => body.querySelector('[data-queue-column="queued"] .knowledge-empty');
+  surface.applyIssueMonitorStatus({enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,terminal_queue:[]});
+  assert.match(empty().textContent, /next Issues scan/);
+  surface.applyIssueMonitorStatus({terminal_queue_refill_hold:"limit_reached"});
+  assert.doesNotMatch(empty().textContent, /next Issues scan/);
+  assert.match(empty().textContent, /refill limit \(4\)/);
+  surface.applyIssueMonitorStatus({terminal_queue_refill_hold:"no_candidates"});
+  assert.doesNotMatch(empty().textContent, /next Issues scan/);
+  assert.match(empty().textContent, /no eligible Backlog issue/);
+});
+
 test("Issue queue drops include hold-labeled cards and retain server projection", async (t) => {
   const { body, surface, load, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

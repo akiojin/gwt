@@ -7,9 +7,20 @@ run when `GWT_PLAYWRIGHT_BASE_URL` is set.
 
 ## Run
 
-The visual test runner supports Node.js 22.x, the version used by CI.
-Check `node --version` before running the suite. If another version is
-active, put Node.js 22.x first on `PATH` and try again.
+The visual test runner supports Node.js 22.x and 26.x. CI runs the unit and
+smoke tests on Node.js 22 and the browser specs inside the official Playwright
+image, which ships Node.js 26. Check `node --version` before running the
+suite. If another version is active, put Node.js 22.x or 26.x first on `PATH`
+and try again.
+
+The pinned Playwright must stay at 1.65.1 or later for Node.js 26. Playwright
+1.49.1 bundled yauzl 2.10.0 and fd-slicer 1.1.0, whose read stream set
+`destroyed = true` on itself before it pushed the end of the data. Node.js 22
+still delivers the data buffered in such a stream; Node.js 26 does not, and
+never emits `end`. A trace with an entry whose compressed size is over 64 KB
+(a font, for example) then never got its central directory, and a test
+recorded with `--trace=on` passed its assertions and timed out (Issues #7494
+and #7791).
 
 ```bash
 # from repo root — runs every spec; specs without GWT_PLAYWRIGHT_BASE_URL

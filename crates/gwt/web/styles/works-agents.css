@@ -302,7 +302,6 @@
 .roster-traits > [data-action="save-traits"] { align-self: flex-start; margin-top: var(--space-1); }
 /* Issue 7646: ledger order and deletion controls on every member row. */
 /* Buttons take their label's width, so the body of a row stays its selection target. */
-.roster-who > [data-action="activate"] { align-self: flex-start; }
 .roster-row > .roster-avatar,
 .roster-row > .roster-who { grid-row: 1 / span 2; }
 .roster-row > .roster-state { grid-row: 1; grid-column: 3; }

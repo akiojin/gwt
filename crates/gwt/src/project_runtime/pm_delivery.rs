@@ -2023,6 +2023,28 @@ mod retained_wake_tests {
         finish(&entry, &id);
     }
 
+    /// A pasted attachment is human input too: it must not be refused while
+    /// an unconfirmed wake still holds the reservation.
+    #[test]
+    fn human_attachment_outranks_an_unconfirmed_wake() {
+        use crate::project_runtime::events::OwnerAttachmentInputOutcome;
+        let base = Instant::now();
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
+        let writers: crate::project_runtime::agent_dispatch::PtyWriterRegistry = Arc::new(
+            std::sync::RwLock::new([(id.clone(), Arc::clone(&entry))].into_iter().collect()),
+        );
+        let outcome = crate::project_runtime::agent_dispatch::write_current_attachment_input(
+            &writers,
+            &id,
+            &entry,
+            &AtomicBool::new(true),
+            b"attachment",
+        );
+        assert!(matches!(outcome, OwnerAttachmentInputOutcome::Written));
+        assert!(entry.pm_delivery_replay.lock().unwrap().is_none());
+        finish(&entry, &id);
+    }
+
     #[test]
     fn retention_is_released_only_after_its_deadline() {
         let base = Instant::now();

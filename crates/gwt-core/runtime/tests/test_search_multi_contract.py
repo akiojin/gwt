@@ -9,6 +9,7 @@ batch or silently returning empty results for broken scopes.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import math
@@ -1755,6 +1756,103 @@ class SearchWorkerTests(unittest.TestCase):
                 endpoint = base / "background-worker/endpoint.json"
                 if endpoint.exists():
                     os.kill(json.loads(endpoint.read_text())["pid"], signal.SIGTERM)
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "requires POSIX process groups")
+    def test_cold_start_survives_a_caller_that_gives_up(self):
+        """Issue #7493: a caller deadline must not discard the cold model load."""
+        import signal
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project = base / "project"
+            project.mkdir()
+            gate = base / "model-gate"
+            env = dict(os.environ, HOME=tmp, USERPROFILE=tmp, GWT_INDEX_FAKE_EMBEDDING="1",
+                       GWT_TEST_MODEL_GATE=str(gate))
+            subprocess.run(["git", "init", "--quiet", str(project)], env=env,
+                           check=True, capture_output=True, timeout=30)
+            # The model constructor blocks until the gate opens, standing in
+            # for a load that outlasts the caller's deadline.
+            launcher = base / "gated_runner.py"
+            launcher.write_text(
+                "import os, sys, time\n"
+                "from pathlib import Path\n"
+                f"sys.path.insert(0, {str(Path(runner.__file__).resolve().parent)!r})\n"
+                "import chroma_index_runner as runner\n"
+                "runner.__file__ = __file__\n"
+                "gate = Path(os.environ['GWT_TEST_MODEL_GATE'])\n"
+                "class GatedModel(runner._FakeEmbeddingModel):\n"
+                "    def __init__(self):\n"
+                "        while not gate.exists():\n"
+                "            time.sleep(0.1)\n"
+                "runner._FakeEmbeddingModel = GatedModel\n"
+                "sys.exit(runner.main())\n",
+                encoding="utf-8",
+            )
+            memory = base / ".gwt" / "projects" / REPO_HASH / "work-notes" / "memory.md"
+            memory.parent.mkdir(parents=True)
+            memory.write_text("## 2026-11-22 — alpha worker\n\nPersistent search model.\n",
+                              encoding="utf-8")
+            common = ["--repo-hash", REPO_HASH, "--project-root", str(project),
+                      "--worktree-hash", WORKTREE_HASH, "--file-index-protocol", "v2"]
+            indexed = subprocess.run(
+                [sys.executable, str(Path(runner.__file__).resolve()), *common,
+                 "--worker-dir", str(base / "background-worker"), "--action", "index-memory"],
+                env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(indexed.returncode, 0, indexed.stderr + indexed.stdout)
+            search = [sys.executable, str(launcher), *common,
+                      "--worker-dir", str(base / "worker"), "--action", "search-multi",
+                      "--scopes", "memory", "--query", "alpha worker"]
+            endpoint = base / "worker" / "endpoint.json"
+
+            def worker_state():
+                try:
+                    return json.loads(endpoint.read_text())
+                except (OSError, ValueError):
+                    return {}
+
+            def wait_for_model_state(expected, pid=None):
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    state = worker_state()
+                    if state.get("model_state") == expected:
+                        return state
+                    if pid is not None:
+                        try:
+                            os.kill(pid, 0)
+                        except OSError:
+                            self.fail(f"worker {pid} was discarded before reaching {expected}")
+                    time.sleep(0.1)
+                self.fail(f"worker never reached {expected}: {worker_state()}")
+
+            # Its own process group mirrors the deadline-bounded Rust spawn,
+            # whose expiry kills that whole group.
+            caller = subprocess.Popen(search, env=env, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, start_new_session=True)
+            worker_pid = None
+            try:
+                worker_pid = wait_for_model_state("warming")["pid"]
+                os.killpg(caller.pid, signal.SIGKILL)
+                caller.wait(timeout=10)
+                gate.touch()
+                wait_for_model_state("warm", pid=worker_pid)
+
+                retry = subprocess.run(search, env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(retry.returncode, 0, retry.stderr + retry.stdout)
+                payload = json.loads(retry.stdout.strip().splitlines()[-1])
+                self.assertTrue(payload["ok"], payload)
+                self.assertEqual(payload["worker_pid"], worker_pid)
+                self.assertTrue(payload["scope_results"]["memory"]["memoryResults"], payload)
+            finally:
+                gate.touch()
+                if caller.poll() is None:
+                    caller.kill()
+                    caller.wait()
+                for pid in {worker_pid, worker_state().get("pid"),
+                            json.loads((base / "background-worker" / "endpoint.json").read_text())["pid"]
+                            if (base / "background-worker" / "endpoint.json").exists() else None}:
+                    if pid:
+                        with contextlib.suppress(OSError):
+                            os.kill(pid, signal.SIGKILL)
 
     def test_worker_readiness_surrounds_model_construction_and_cache_hits(self):
         with tempfile.TemporaryDirectory() as tmp:

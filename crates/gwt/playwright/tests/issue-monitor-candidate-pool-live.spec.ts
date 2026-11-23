@@ -85,8 +85,8 @@ test.describe("Issues candidate pool", () => {
         roster = next;
         return added[0];
       };
-      while (roster.members.filter((member: any) => member.enabled && member.agent_id === "codex").length < 2) await register("codex");
-      const claudeMember = roster.members.find((member: any) => member.enabled && member.agent_id === "claude") ?? await register("claude");
+      while (roster.members.filter((member: any) => member.agent_id === "codex").length < 2) await register("codex");
+      const claudeMember = roster.members.find((member: any) => member.agent_id === "claude") ?? await register("claude");
       // Custom registration remains an actual UI action. Bind the saved pool
       // to the existing Claude member so migration cannot rest this new person.
       const customMember = await register(CUSTOM_ID);
@@ -111,7 +111,7 @@ test.describe("Issues candidate pool", () => {
       const claudeId = seeded.profiles[0].agent_member_id;
       expect(claudeId).toBe(claudeMember.agent_member_id);
       const claudeName = claudeMember.name;
-      const codexMembers = roster.members.filter((member: any) => member.enabled && member.agent_id === "codex");
+      const codexMembers = roster.members.filter((member: any) => member.agent_id === "codex");
       expect(codexMembers.length).toBeGreaterThanOrEqual(2);
       const [codexMember, secondCodex] = codexMembers;
       const codexId = codexMember.agent_member_id, codexName = codexMember.name;

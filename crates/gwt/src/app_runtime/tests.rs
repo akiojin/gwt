@@ -2835,6 +2835,7 @@ fn issue_monitor_autonomous_record(
         last_failure_message: None,
         delivering_since: None,
         review_attempts: None,
+        gate_hold: None,
         cancelled_claim_phase: None,
     }
 }
@@ -3919,16 +3920,15 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let (repo, owner, _) =
         owner_monitor_fixture(temp.path(), 42, false, &["pane-contract-fixture"]);
-    let resize = |size| {
-        gwt::agent_names::mutate_project_roster(
-            &repo,
-            &gwt_core::paths::gwt_sessions_dir(),
-            gwt::agent_names::AgentRosterAction::Resize { size },
-            None,
+    let set_machine_limit = |limit| {
+        gwt::machine_agent_settings::set(
+            Some(limit),
+            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
         )
         .unwrap();
     };
-    resize(1);
+    set_machine_limit(1);
     let mut config = pane_control_tests::control_launch_config(&repo, 42);
     config.launch_route = gwt_agent::LaunchRoute::Autonomous;
     let held = pane_control_tests::control_owner_launch(&owner, "agent", config);
@@ -4050,7 +4050,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
 
     // A same-Issue implementation still blocks duplication when another native
     // slot is available, even though this manual request has no delivery token.
-    resize(3);
+    set_machine_limit(3);
     owner_fixture_block_on(
         owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
             id: held.id.clone(),
@@ -8335,7 +8335,6 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             agent_member_id: format!("member-{name}"),
             agent_id: None,
             name: name.into(),
-            enabled: true,
             created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin_session_id: None,
             last_issue_number: None,

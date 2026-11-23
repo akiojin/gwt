@@ -786,7 +786,7 @@ export function renderAgentsSettingsPanel(panel, options) {
       && provider(savedMember.agent_id) !== provider(profile.agent_id);
     rows.push({ row, profile, staleTool });
     const memberChoices = (availableMembers || []).filter(implementationEligible).map(member => ({ value: member.member_id || member.agent_member_id,
-      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})${member.enabled ? "" : " · Resting"}` }));
+      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})` }));
     if ((!savedMember || !implementationEligible(savedMember)) && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
     const agent = field(row, "Agent", "agent_member_id", profile.agent_member_id || "", "text", memberChoices);
     agent.disabled = availableMembers === null;
@@ -855,7 +855,7 @@ export function renderAgentsSettingsPanel(panel, options) {
       toolValue.textContent = entry?.name || tool;
       memberStatus.textContent = availableMembers === null ? "Loading registered members…" : !member
         ? "Selected member is unavailable. Choose a registered member; no substitute will be launched."
-        : !implementationEligible(member) ? "This member holds a Project Manager role and is unavailable for implementation launches." : !member.enabled ? "Resting member. Future launches wait until this member is enabled." : "";
+        : !implementationEligible(member) ? "This member holds a Project Manager role and is unavailable for implementation launches." : "";
       memberStatus.hidden = !memberStatus.textContent;
       if (!changed || agentChanged) {
         setChoices(mode, entry?.session_modes || ["Normal"], agentChanged ? "Normal" : mode.value);
@@ -896,7 +896,7 @@ export function renderAgentsSettingsPanel(panel, options) {
   panel.appendChild(add);
   const remaining = (availableMembers || []).filter(member => implementationEligible(member) && !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
   const candidate = field(add, "Add candidate", "new", "", "text", [{ value: "", label: "Select a registered member…" },
-    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})${member.enabled ? "" : " · Resting"}` }))]);
+    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})` }))]);
   const addButton = button(add, "Add candidate", "add-candidate", () => {
     const memberId = candidate.value.trim(), next = draft();
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === memberId);

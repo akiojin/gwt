@@ -717,14 +717,15 @@ test("Agents Settings binds registered members and keeps tool choices fixed", ()
   assert.equal(sent.at(-1).profiles[1].agent_id, "codex");
 });
 
-test("Agents Settings preserves unavailable and resting members without provider substitution", () => {
+test("Agents Settings preserves unavailable and legacy members without provider substitution", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, { choices: candidateChoices,
-    availableMembers: [{ member_id: "rest", name: "Resting member", agent_id: "codex", enabled: false }],
+    availableMembers: [{ member_id: "rest", name: "Legacy member", agent_id: "codex", enabled: false }],
     profiles: [{ agent_member_id: "rest", agent_id: "codex" }, { agent_member_id: "missing", agent_id: "claude", model: "saved-model" }],
     send: () => assert.fail("rendering must not substitute a member") });
-  assert.match(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Resting/);
+  assert.match(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Legacy member/);
+  assert.doesNotMatch(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Resting/);
   assert.match(panel.querySelector('[data-agent-member-id="missing"]').textContent, /unavailable/i);
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="agent_member_id"]').value, "missing");
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-member-tuning-field="model"]').disabled, true);

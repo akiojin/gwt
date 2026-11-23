@@ -153,7 +153,6 @@ fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
     }
 
     let before = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
-    assert_eq!(before.enabled_count(), 1);
     assert_eq!(before.members.len(), 2);
     // Physical resume capacity is independent of the registered roster size.
     gwt::machine_agent_settings::set(
@@ -187,14 +186,17 @@ fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
     assert!(runtime.restore_launch_windows.is_empty());
     let roster = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
     assert_eq!(
-        roster.enabled_count(),
-        1,
-        "restore does not enlarge the configured capacity"
-    );
-    assert_eq!(
-        roster.members.len(),
-        2,
-        "the excess restored member is retained"
+        roster
+            .members
+            .iter()
+            .map(|member| &member.agent_member_id)
+            .collect::<Vec<_>>(),
+        before
+            .members
+            .iter()
+            .map(|member| &member.agent_member_id)
+            .collect::<Vec<_>>(),
+        "restoring Sessions preserves the registered roster"
     );
     for window_id in runtime.runtimes.keys().cloned().collect::<Vec<_>>() {
         close_test_owner_runtime(&mut runtime, &window_id);
