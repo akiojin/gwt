@@ -5537,6 +5537,9 @@ pub struct AutonomousIssueSummary {
     /// its current head has no PASS verdict from the independent review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_hold: Option<String>,
+    /// Issue #7810 AC-2: the inputs keeping the reviewed PR's gate closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_hold: Option<AutonomousGateHold>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -6364,7 +6367,28 @@ pub struct AutonomousIssueRecord {
     /// off. A new head SHA starts the count over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_attempts: Option<AutonomousReviewAttempts>,
+    /// Issue #7810 AC-2: the gate inputs that kept a reviewed PR unmerged on
+    /// the last consecutive scans. Cleared when the gate opens or a new
+    /// review binds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_hold: Option<AutonomousGateHold>,
 }
+
+/// Issue #7810 AC-2: consecutive gate evaluations that kept a reviewed PR
+/// unmerged, and the inputs that closed the gate on the last one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousGateHold {
+    pub reason: String,
+    /// RFC3339 of the first evaluation in this closed run.
+    pub since: String,
+    /// Closed evaluations in a row, this one included.
+    pub scans: u32,
+}
+
+/// Issue #7810 AC-2: closed gate evaluations in a row before the Issue is
+/// parked for a human. A gate re-reads at most once a minute while CI runs,
+/// so this is at least two hours of a closed gate.
+pub const AUTONOMOUS_GATE_HOLD_MAX_SCANS: u32 = 120;
 
 /// Issue #4815: the review-dispatch half of the retry ladder, keyed by the
 /// reviewed SHA.
@@ -6987,6 +7011,7 @@ impl AutonomousIssueRecord {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         }
     }
@@ -11153,6 +11178,61 @@ impl IssueMonitorState {
         // the authentication diagnosis or admit an automatic retry.
         record.retry_hold_provider = None;
         true
+    }
+
+    /// Issue #7810 AC-2: count one gate evaluation that kept `issue_number`'s
+    /// reviewed PR unmerged, recording which inputs closed it (shown in
+    /// `issue.monitor.status`). A changed reason raises a notice; reaching
+    /// [`AUTONOMOUS_GATE_HOLD_MAX_SCANS`] parks the Issue for a human, since
+    /// the gate has shown it will not open by itself. Returns whether it did.
+    pub fn record_gate_closed(
+        &mut self,
+        issue_number: u64,
+        reason: impl Into<String>,
+        now: &str,
+    ) -> bool {
+        let reason = reason.into();
+        let record = self.autonomous_record_mut(issue_number);
+        let previous = record.gate_hold.take();
+        let changed = previous.as_ref().is_none_or(|hold| hold.reason != reason);
+        let hold = AutonomousGateHold {
+            reason: reason.clone(),
+            since: previous
+                .as_ref()
+                .map_or_else(|| now.to_string(), |hold| hold.since.clone()),
+            scans: previous.map_or(0, |hold| hold.scans).saturating_add(1),
+        };
+        let scans = hold.scans;
+        let since = hold.since.clone();
+        record.gate_hold = Some(hold);
+        let pr = record
+            .pr_number
+            .map_or_else(|| "the PR".to_string(), |pr| format!("PR #{pr}"));
+        if changed {
+            self.push_autonomous_notice(
+                "warn",
+                issue_number,
+                format!("Issue #{issue_number} gate closed for {pr}: {reason}"),
+            );
+        }
+        if scans < AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            return false;
+        }
+        self.escalate_to_needs_human(
+            issue_number,
+            NeedsHumanKind::UserChoiceRequired,
+            format!(
+                "the autonomous gate kept {pr} unmerged for {scans} scans since {since}: {reason}; fix the closed input or merge it by hand"
+            ),
+        );
+        true
+    }
+
+    /// Issue #7810 AC-2: the gate opened or routed elsewhere.
+    pub fn clear_gate_hold(&mut self, issue_number: u64) {
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.gate_hold = None;
+        }
     }
 
     /// Issue #3944 AC-2: ask the PM to steer `issue_number` — a live launch the
@@ -16103,6 +16183,7 @@ impl IssueMonitorState {
                         steering: record.steering.clone(),
                         review_dispatch_hold: record.review_dispatch_hold.clone(),
                         merge_hold: record.merge_hold_reason(),
+                        gate_hold: record.gate_hold.clone(),
                         pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
                             handoff_id: handoff.handoff_id.clone(),
                             question: handoff.question.clone(),
@@ -18374,6 +18455,7 @@ impl IssueMonitorState {
         record.pr_number = Some(pr_number);
         record.reviewed_sha = Some(reviewed_sha.into());
         record.review_passed = None;
+        record.gate_hold = None;
     }
 
     /// SPEC #3200 FR-015: record the independent-review verdict for the in-flight
@@ -18382,6 +18464,10 @@ impl IssueMonitorState {
         let max = self.autonomous_tuning.max_attempts;
         let record = self.autonomous_record_mut(issue_number);
         record.review_passed = Some(passed);
+        // Issue #7810 AC-3: the previous attempt's failure is history once a
+        // fresh verdict arrives; the gate evaluates it anew.
+        record.last_failure_message = None;
+        record.gate_hold = None;
         let exhausted = if passed {
             // Issue #4815: a PASS ends the review ladder for this SHA.
             record.review_attempts = None;
@@ -31964,6 +32050,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let disk = IssueMonitorPrefs {
@@ -32091,6 +32178,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         save_issue_monitor_prefs(
@@ -32164,6 +32252,7 @@ mod tests {
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..IssueMonitorPrefs::default()
@@ -32237,6 +32326,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let older_disk = IssueMonitorPrefs {
@@ -32299,6 +32389,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let mut stale = test_monitor_with_prefs(
@@ -53408,6 +53499,77 @@ mod tests {
             evaluate_autonomous_gate(&advanced),
             GateDecision::Fail(_)
         ));
+    }
+
+    /// Issue #7810 AC-3: a fresh verdict ends the story the previous
+    /// attempt's failure told; the stale message must not outlive it.
+    #[test]
+    fn issue_7810_a_new_verdict_clears_the_previous_failure_message() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.autonomous_record_mut(7).last_failure_message =
+            Some("HEAD advanced past the reviewed SHA — re-review".to_string());
+        monitor.record_review_verdict(7, true);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().last_failure_message,
+            None
+        );
+
+        monitor.begin_review(7, 99, "def456");
+        monitor.autonomous_record_mut(7).last_failure_message = Some("stale".to_string());
+        monitor.record_review_verdict(7, false);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().last_failure_message,
+            None
+        );
+    }
+
+    /// Issue #7810 AC-2: a gate that stays closed is counted per scan and
+    /// parked for a human once the count reaches its limit; an open gate (or
+    /// a new review) starts the count over.
+    #[test]
+    fn issue_7810_a_gate_closed_for_too_many_scans_needs_a_human() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_review_verdict(7, true);
+        for scan in 1..AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            assert!(!monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T09:00:00Z"));
+            let hold = monitor
+                .autonomous_record(7)
+                .unwrap()
+                .gate_hold
+                .clone()
+                .unwrap();
+            assert_eq!(
+                (hold.scans, hold.reason.as_str()),
+                (scan, "ci: Rust (pending)")
+            );
+            assert_eq!(hold.since, "2026-11-23T09:00:00Z");
+        }
+        monitor.clear_gate_hold(7);
+        assert_eq!(monitor.autonomous_record(7).unwrap().gate_hold, None);
+
+        for _ in 1..AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T10:00:00Z");
+        }
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().phase,
+            AutonomousPhase::Reviewing
+        );
+        assert!(monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T12:00:00Z"));
+        let record = monitor.autonomous_record(7).unwrap();
+        assert_eq!(record.phase, AutonomousPhase::NeedsHuman);
+        assert!(monitor
+            .failed_issues
+            .get(&7)
+            .is_some_and(|reason| reason.contains("ci: Rust (pending)")));
+
+        // A new review binding starts over.
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T09:00:00Z");
+        monitor.begin_review(7, 99, "def456");
+        assert_eq!(monitor.autonomous_record(7).unwrap().gate_hold, None);
     }
 
     #[test]

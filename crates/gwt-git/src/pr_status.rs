@@ -834,11 +834,9 @@ pub fn ready_to_promote_blocker(fields: &PrInventoryFields) -> Option<&'static s
         Some(0) => {}
         Some(_) => return Some("unresolved_review_threads"),
     }
-    match fields.coderabbit_review_complete {
-        None => return Some("coderabbit_review_unknown"),
-        Some(false) => return Some("coderabbit_review_pending"),
-        Some(true) => {}
-    }
+    // Issue #7810 AC-1b (owner ruling 2026-11-23): a CodeRabbit review is
+    // not a merge condition. Branch-protection checks and the independent
+    // review verdict decide; `coderabbit_review_complete` is informational.
     match agent_visual_check(&fields.body) {
         AgentVisualCheck::Fail => return Some("agent_visual_check_failed"),
         AgentVisualCheck::Absent => return Some("agent_visual_check_unknown"),
@@ -2211,9 +2209,7 @@ where
         // its review threads read.
         if !matches!(
             item.ready_to_promote_blocker.as_deref(),
-            Some("review_threads_unknown")
-                | Some("coderabbit_review_unknown")
-                | Some("agent_visual_check_unknown")
+            Some("review_threads_unknown") | Some("agent_visual_check_unknown")
         ) {
             continue;
         }
@@ -4954,6 +4950,8 @@ pub struct PrGateReadback {
     pub status_check_rollup: String,
     pub head_sha: Option<String>,
     pub merge: PrMergeReadback,
+    /// Issue #7810: the PR's base branch, whose protection the gate applies.
+    pub base_ref: Option<String>,
 }
 
 pub fn try_fetch_pr_gate_readback(repo_path: &Path, number: u64) -> Result<PrGateReadback> {
@@ -4976,7 +4974,7 @@ where
             "view",
             &number,
             "--json",
-            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus",
+            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName",
         ],
     )?;
     if !output.success {
@@ -4991,6 +4989,16 @@ where
         status_check_rollup: extract_status_check_rollup(&output.stdout),
         head_sha: parse_pr_head_sha(&output.stdout),
         merge,
+        base_ref: serde_json::from_str::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("baseRefName")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|base| !base.is_empty())
+                    .map(str::to_string)
+            }),
     })
 }
 
@@ -5013,12 +5021,12 @@ mod tests {
                     "view",
                     "7",
                     "--json",
-                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus"
+                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName"
                 ]
             );
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","baseRefName":"develop"}"#.to_string(),
                 stderr: String::new(),
             })
         })
@@ -5026,6 +5034,8 @@ mod tests {
         assert_eq!(calls, 1);
         assert!(readback.status_check_rollup.contains("\"build\""));
         assert_eq!(readback.head_sha.as_deref(), Some("abc"));
+        // Issue #7810: the gate reads the protection of the PR's own base.
+        assert_eq!(readback.base_ref.as_deref(), Some("develop"));
         assert_eq!(readback.merge.state, "OPEN");
         assert!(
             try_fetch_pr_gate_readback_with(Path::new("/repo"), 7, |_, _| Ok(GhCliOutput {
@@ -6975,6 +6985,26 @@ mod tests {
             snapshot.inventory.completion_blocker(),
             Some("review_threads_unknown")
         );
+    }
+
+    /// Issue #7810 AC-1b: a PR with no CodeRabbit review — unread, never
+    /// posted, or skipped by a rate limit — is promotable and completable on
+    /// its required checks alone.
+    #[test]
+    fn issue_7810_coderabbit_review_is_not_a_promotion_or_completion_condition() {
+        for coderabbit in [None, Some(false), Some(true)] {
+            let fields = PrInventoryFields {
+                coderabbit_review_complete: coderabbit,
+                ..promotable_fields()
+            };
+            assert_eq!(ready_to_promote_blocker(&fields), None, "{coderabbit:?}");
+            let row = inventory_item_from_fields(
+                fields,
+                UtcTimestamp::now(),
+                &PrInventoryOptions::default(),
+            );
+            assert_eq!(row.completion_blocker(), None, "{coderabbit:?}");
+        }
     }
 
     #[test]
@@ -9740,20 +9770,6 @@ mod tests {
                 "unresolved_review_threads",
                 PrInventoryFields {
                     unresolved_review_threads: Some(2),
-                    ..promotable_fields()
-                },
-            ),
-            (
-                "coderabbit_review_unknown",
-                PrInventoryFields {
-                    coderabbit_review_complete: None,
-                    ..promotable_fields()
-                },
-            ),
-            (
-                "coderabbit_review_pending",
-                PrInventoryFields {
-                    coderabbit_review_complete: Some(false),
                     ..promotable_fields()
                 },
             ),
