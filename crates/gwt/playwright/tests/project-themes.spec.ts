@@ -234,7 +234,7 @@ test.describe("Themes", () => {
     await expect(row).toContainText("0 issues under it · 0 completed");
     await row.click();
     const origin = screen.locator("[data-theme-origin]");
-    await expect(origin.getByRole("heading", { name: "Where it came from" })).toBeVisible();
+    await expect(origin.getByRole("heading", { name: "Source of this theme" })).toBeVisible();
     await expect(origin).toContainText("Recorded automatically from the conversation on Home");
     await expect(screen.locator("[data-theme-no-issues]")).toContainText("No issues sit under this theme yet.");
     await page.screenshot({ path: info.outputPath("theme-recorded.png"), fullPage: true });

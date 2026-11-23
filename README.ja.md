@@ -2337,7 +2337,7 @@ project 固有の規約を明示的に渡すには、
 ## サーフェス操作
 
 - レールから **Themes**、**Issues**、**Works**、**Agents**、**Board**、**Settings** を選びます。
-- **Themes** は、プロジェクトのテーマ（sub-issue を持つ GitHub Issue と、ホームの会話から PM が記録したテーマ）を一覧します。依頼や決定をすると、PM が追加の操作なしにテーマ（`gwt-theme` ラベル付きの GitHub Issue）として記録するか、既存のテーマに追記します。テーマにしたくないものは PM にそう伝えてください。記録されたテーマには **Where it came from** が表示され、**Show in conversation** で元のメッセージを PM の会話で開けます。各行には、テーマ配下の課題数と完了数を GitHub の集計どおりに表示します。テーマを選ぶと配下の課題が並び、課題を選ぶと Issues で開きます。**Issues completed today** は、gwt が今日取り込んだ Close の件数です。**Delete theme** は確認のあとで、テーマの GitHub Issue を not planned で閉じます。配下の課題は残り、GitHub で Issue を開き直すとテーマが戻ります。
+- **Themes** は、プロジェクトのテーマ（sub-issue を持つ GitHub Issue と、ホームの会話から PM が記録したテーマ）を一覧します。依頼や決定をすると、PM が追加の操作なしにテーマ（`gwt-theme` ラベル付きの GitHub Issue）として記録するか、既存のテーマに追記します。テーマにしたくないものは PM にそう伝えてください。記録されたテーマには **Source of this theme** が表示され、**Show in conversation** で元のメッセージを PM の会話で開けます。各行には、テーマ配下の課題数と完了数を GitHub の集計どおりに表示します。テーマを選ぶと配下の課題が並び、課題を選ぶと Issues で開きます。**Issues completed today** は、gwt が今日取り込んだ Close の件数です。**Delete theme** は確認のあとで、テーマの GitHub Issue を not planned で閉じます。配下の課題は残り、GitHub で Issue を開き直すとテーマが戻ります。
 - **Logs**・**Index**・**Profile** はサイドバーの各項目から直接開けます。高さが足りないときはサイドバーを縦にスクロールします。全停止は Command Palette から実行でき、個別エージェントの停止・再起動も既存の操作から実行できます。
 - **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。割り当てられた名前と PM バッジは Agents の先頭にも表示します。
 - **Works** は端末上で稼働する Agent を1人1行で表示し、直近の出力を載せます。**Settings → System → Works output lines** で3〜10行（既定3行）を選べ、読み取り専用の一覧にも即時反映し、再読み込み・アプリ再起動後も保持します。出力は選択・スクロールでき、端末を開きません。出力欄以外の行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。

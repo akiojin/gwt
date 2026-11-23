@@ -30,7 +30,7 @@ const COPY = {
   github: number => `This theme is a GitHub Issue: #${number}`,
   openGithub: "Open on GitHub",
   about: "About this theme",
-  origin: "Where it came from",
+  origin: "Source of this theme",
   recorded: at => `Recorded automatically from the conversation on Home${at ? ` on ${formatDate(at)}` : ""}. What was asked or decided later is added to the GitHub Issue.`,
   openConversation: "Show in conversation",
   noSummary: "This theme has no description.",
