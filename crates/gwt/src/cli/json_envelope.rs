@@ -2346,6 +2346,46 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 })
             }
         }
+        "pm.theme.record" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "original", "decision", "title", "summary", "number", "note", "reason",
+                ],
+                "pm.theme.record",
+            )?;
+            let text = |key: &'static str| required_nonempty_workspace_reopen_string(params, key);
+            let decision = match text("decision")?.as_str() {
+                "create" => crate::themes::ThemeDecision::Create {
+                    title: text("title")?,
+                    summary: text("summary")?,
+                },
+                "update" => crate::themes::ThemeDecision::Update {
+                    number: required_u64(params, "number")?,
+                    note: text("note")?,
+                },
+                "none" => crate::themes::ThemeDecision::None {
+                    reason: text("reason")?,
+                },
+                "declined" => crate::themes::ThemeDecision::Declined {
+                    reason: text("reason")?,
+                },
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "decision",
+                        reason: "expected one of: create, update, none, declined",
+                    })
+                }
+            };
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeRecord {
+                original: required_string(params, "original")?,
+                decision,
+            })
+        }
+        "pm.theme.list" => {
+            reject_unknown_params(params, &[], "pm.theme.list")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeList)
+        }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
             project_root: optional_string(params, "project_root")?,
         }),

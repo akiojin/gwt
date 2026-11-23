@@ -927,6 +927,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "pm.status"
             | "project.execution.status"
             | "pm.report.list"
+            | "pm.theme.list"
             | "search"
     )
 }

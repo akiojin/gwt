@@ -6,6 +6,9 @@
  * AC-3: a project with no themes says what a theme is.
  * A-23: deleting a theme asks first and says what happens: its GitHub Issue
  *       is closed, the issues under it stay, and it can be reopened.
+ * Issue #7644: a theme the PM recorded from the conversation on Home is listed
+ *       before any issue sits under it, says where it came from, and opens
+ *       the PM on that message.
  *
  * Runs against the embedded frontend with a stub backend, in both themes,
  * with zero console / page errors.
@@ -172,7 +175,7 @@ test.describe("Themes", () => {
 
     const empty = screen.locator("[data-themes-empty]");
     await expect(empty.getByRole("heading", { name: "No themes yet" })).toBeVisible();
-    await expect(empty).toContainText("A theme is a GitHub Issue that has sub-issues.");
+    await expect(empty).toContainText("The PM records a theme when you ask for something or decide something in the conversation on Home.");
     await expect(screen.locator("[data-themes-list]")).toHaveCount(0);
     await expect(screen.locator('[data-themes-stat="completed_today"]')).toHaveText("5");
     await page.screenshot({ path: info.outputPath("themes-empty.png"), fullPage: true });
@@ -211,6 +214,34 @@ test.describe("Themes", () => {
     await expect(screen.locator("[data-themes-list] [data-theme-number]")).toHaveCount(1);
     const deletes = await sentOf(page, "delete_theme");
     expect(deletes.map(message => message.number)).toEqual([7007]);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("a theme recorded from the conversation leads back to it (Issue #7644)", async ({ page }, info) => {
+    const errors = captureErrors(page);
+    const recorded = {
+      number: 7800, title: "Search in the log screen", summary: "Add search to the log screen.",
+      url: "https://github.com/example/repo/issues/7800", issues_total: 0, issues_completed: 0, issues: [],
+      recorded_from: { session_id: "pm-session", message_id: "native-turn", recorded_at: "2026-11-23T10:00:00Z" },
+    };
+    const screen = await open(page, [recorded, ...THEMES]);
+    // A theme made on GitHub has no conversation to open.
+    await screen.locator('[data-theme-number="7007"]').click();
+    await expect(screen.locator("[data-theme-origin]")).toHaveCount(0);
+    await screen.locator("[data-themes-back]").click();
+
+    const row = screen.locator('[data-theme-number="7800"]');
+    await expect(row).toContainText("0 issues under it · 0 completed");
+    await row.click();
+    const origin = screen.locator("[data-theme-origin]");
+    await expect(origin.getByRole("heading", { name: "Where it came from" })).toBeVisible();
+    await expect(origin).toContainText("Recorded automatically from the conversation on Home");
+    await expect(screen.locator("[data-theme-no-issues]")).toContainText("No issues sit under this theme yet.");
+    await page.screenshot({ path: info.outputPath("theme-recorded.png"), fullPage: true });
+
+    // The PM opens on the message the theme came from.
+    await origin.getByRole("button", { name: "Show in conversation" }).click();
+    await expect.poll(async () => (await sentOf(page, "open_pm_agent")).length).toBe(1);
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
