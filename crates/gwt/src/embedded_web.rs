@@ -260,6 +260,10 @@ root_js_modules! {
     // top level, so a missing entry would hang the splash.
     "surface-rail.js" => "installSurfaceRail",
     "split-surfaces.js" => "createSplitSurfaces",
+    // Issue #7635 — the avatar part every Agent display shares. app-chrome.js
+    // and agents-surface.js import it at module top level, so the asset MUST
+    // be registered or the ES module load 404s and the splash hangs.
+    "agent-avatar.js" => "agentAvatar",
     "agents-surface.js" => "createAgentsSurface",
     "works-surface.js" => "createWorksSurface",
     "terminal-text-preview.js" => "createTerminalTextPreview",

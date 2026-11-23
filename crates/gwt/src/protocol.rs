@@ -6615,6 +6615,10 @@ mod tests {
             serde_json::json!({"kind":"set_traits","member_id":"member-1","traits":{
                 "reasoning_level":"max","speed":"fastest","personality":"Verify before changing."
             }}),
+            serde_json::json!({"kind":"set_avatar","member_id":"member-1","avatar":{"kind":"default"}}),
+            serde_json::json!({"kind":"set_avatar","member_id":"member-1","avatar":{
+                "kind":"preset","preset_id":"fox"
+            }}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
                 "kind":"agent_roster", "action":action, "expected_revision":3

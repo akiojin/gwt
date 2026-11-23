@@ -187,3 +187,18 @@ test("AC-3: the header is a brand row plus one sideways-scrolling row", async ()
   assert.match(phone, /\.app-head\s*\{[^}]*flex-wrap:\s*wrap/, "the brand takes its own row on a phone");
   assert.match(phone, /\.app-head__row\s*\{[^}]*flex:\s*1 0 100%/, "the nav row spans the full width below it");
 });
+
+// Issue #7635 AC-1 / AC-2: the PM entry draws the PM agent's avatar through
+// the shared avatar part, and falls back to the initial when none is set.
+test("the PM entry draws the PM's avatar and follows a preset change", () => {
+  const { chrome, item } = projectPage();
+  chrome.setPm({ name: "Hikari", decisions: 0, avatar: { kind: "preset", preset_id: "fox" } });
+  const avatar = () => item("pm").querySelector(".app-head__avatar");
+  assert.equal(avatar().textContent, "🦊");
+  chrome.setPm({ name: "Hikari", decisions: 0, avatar: { kind: "preset", preset_id: "owl" } });
+  assert.equal(avatar().textContent, "🦉");
+  chrome.setPm({ name: "Hikari", decisions: 0, avatar: { kind: "preset", preset_id: "retired" } });
+  assert.equal(avatar().textContent, "H", "an unknown preset falls back to the initial");
+  chrome.setPm({ name: "Hikari", decisions: 0 });
+  assert.equal(avatar().textContent, "H");
+});

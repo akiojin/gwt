@@ -40,13 +40,13 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], traitsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const opened = [], traitsSaved = [], avatarsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
   if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
-  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onSetAvatar: (id, avatar) => avatarsSaved.push([id, avatar]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { traitsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { traitsSaved, avatarsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
@@ -1101,5 +1101,39 @@ test("the ledger shows and saves each member's traits and keeps the draft until 
   assert.equal(value("reasoning_level"), "", "each member has its own traits");
   assert.match(styles, /\.roster-traits textarea\s*\{[^}]*resize:\s*vertical/s);
   assert.match(source, /querySelectorAll\("button, select, input, textarea"\)/, "a split preview keeps the personality read-only");
+  f.surface.dispose();
+});
+
+// Issue #7635 AC-1 / AC-2 / AC-4: every ledger row and the detail draw the
+// member's avatar, and the detail chooses a preset or the default.
+test("the ledger draws each member's avatar and saves a chosen preset", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const rowAvatar = id => root.querySelector(`.roster-row[data-member-id="${id}"] .roster-avatar`);
+  const detailAvatar = () => root.querySelector(".roster-detail .roster-detail-heading .roster-avatar");
+  const picker = () => root.querySelector(".roster-detail [data-member-avatar]");
+  const choice = id => picker().querySelector(`[data-avatar-choice="${id}"]`);
+  assert.equal(rowAvatar("m1").textContent, "O", "an unset member shows its initial");
+  assert.equal(rowAvatar("m2").textContent, "T");
+  assert.deepEqual([...picker().querySelectorAll("[data-avatar-choice]")].map(button => button.dataset.avatarChoice),
+    ["default", "cat", "owl", "bear", "fox", "penguin", "robot"]);
+  assert.equal(choice("default").getAttribute("aria-checked"), "true");
+
+  choice("fox").click();
+  assert.deepEqual(f.avatarsSaved, [["m1", { kind: "preset", preset_id: "fox" }]]);
+  f.rosterModel.update(state => ({ ...state, revision: "4", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "preset", preset_id: "fox" } } : member) })); f.flush();
+  assert.equal(rowAvatar("m1").textContent, "🦊", "the row follows the saved preset");
+  assert.equal(detailAvatar().textContent, "🦊", "the detail follows the saved preset");
+  assert.equal(choice("fox").getAttribute("aria-checked"), "true");
+  assert.equal(choice("default").getAttribute("aria-checked"), "false");
+  choice("fox").click();
+  assert.equal(f.avatarsSaved.length, 1, "choosing the current avatar sends nothing");
+
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(choice("cat").disabled, true, "another pending ledger change holds the choice");
+  f.rosterModel.update(state => ({ ...state, pending_roster: null })); f.flush();
+  choice("default").click();
+  assert.deepEqual(f.avatarsSaved[1], ["m1", { kind: "default" }]);
+  assert.equal(rowAvatar("m2").textContent, "T", "each member keeps its own avatar");
   f.surface.dispose();
 });

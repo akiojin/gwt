@@ -3184,6 +3184,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                         last_owner_project_key: None,
                         assignment: None,
                         traits: Default::default(),
+                        avatar: Default::default(),
                     });
                 if !configured {
                     registry
@@ -7098,6 +7099,126 @@ mod tests {
             of(&read()),
             expected,
             "reordering, tuning and a launch leave the saved traits alone"
+        );
+    }
+
+    // Issue #7635 AC-1..AC-4: the avatar is the agent's own attribute. An
+    // unset member stays as stored before avatars existed, a preset survives a
+    // reload and a tool change, and an unknown preset is refused.
+    #[test]
+    fn ledger_avatar_is_saved_on_the_member_and_kept_across_tool_changes() {
+        use crate::agent_names::{AgentAvatar, AgentAvatarKind};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, _, _) = source();
+        ensure_active_for_project(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let read = || {
+            crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                AgentRosterAction::Read,
+                None,
+            )
+            .unwrap()
+        };
+        let added = ledger_add(&root, "Birch", false);
+        let birch = added.members[1].agent_member_id.clone();
+        assert!(
+            added.members.iter().all(|member| member.avatar.is_unset()),
+            "a member starts on the default avatar"
+        );
+        assert!(
+            !serde_json::to_string(&added).unwrap().contains("avatar"),
+            "an unset member is stored as it was before avatars existed"
+        );
+        let fox = AgentAvatar {
+            kind: AgentAvatarKind::Preset,
+            preset_id: Some("fox".into()),
+        };
+        let saved = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SetAvatar {
+                member_id: birch.clone(),
+                avatar: fox.clone(),
+            },
+            Some(added.revision),
+        )
+        .unwrap();
+        assert!(saved.revision > added.revision);
+        let of = |roster: &AgentRoster| {
+            roster
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == birch)
+                .unwrap()
+                .avatar
+                .clone()
+        };
+        assert_eq!(of(&saved), fox);
+        assert_eq!(of(&read()), fox, "the avatar survives a reload");
+
+        for refused in [
+            AgentAvatar {
+                kind: AgentAvatarKind::Preset,
+                preset_id: Some("unicorn".into()),
+            },
+            AgentAvatar {
+                kind: AgentAvatarKind::Preset,
+                preset_id: None,
+            },
+            AgentAvatar {
+                kind: AgentAvatarKind::Upload,
+                preset_id: None,
+            },
+        ] {
+            let error = crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                AgentRosterAction::SetAvatar {
+                    member_id: birch.clone(),
+                    avatar: refused,
+                },
+                Some(saved.revision),
+            )
+            .unwrap_err();
+            assert!(error.contains("avatar"), "{error}");
+        }
+        assert_eq!(of(&read()), fox, "a refused write changes nothing");
+
+        let core = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&birch)
+            .unwrap();
+        let tuned = set_member_tuning(&crate::agent_names::MemberTuning {
+            member_id: birch.clone(),
+            model: None,
+            reasoning: None,
+            expected_core_revision: core.1,
+            agent_id: Some("claude".into()),
+            runtime_target: None,
+            skip_permissions: None,
+        });
+        assert_eq!(tuned.error, None);
+        assert_eq!(of(&read()), fox, "a tool change leaves the avatar alone");
+
+        let cleared = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SetAvatar {
+                member_id: birch.clone(),
+                avatar: AgentAvatar::default(),
+            },
+            Some(read().revision),
+        )
+        .unwrap();
+        assert!(
+            of(&cleared).is_unset(),
+            "the default avatar can be restored"
         );
     }
 

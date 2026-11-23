@@ -1264,6 +1264,38 @@ test.describe("Works and Agents approved baseline", () => {
     expect(box!.height).toBeGreaterThanOrEqual(44);
   });
 
+  test("Issue #7635 the ledger draws each agent's avatar and saves a chosen preset", async ({ page }, info) => {
+    await page.locator('.project-bar [data-destination="agents"]').click();
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    const row = roster(page).locator('.roster-row[data-member-id="m-idle"]');
+    const saved = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_avatar").map(message => message.action);
+    // A member with no avatar shows its initial, in every row.
+    await expect(row.locator(".roster-avatar")).toHaveText("C");
+    await expect(roster(page).locator('.roster-row[data-member-id="m-two"] .roster-avatar')).toHaveText("B");
+    await row.click();
+    const picker = roster(page).locator(".roster-detail [data-member-avatar]");
+    const heading = roster(page).locator(".roster-detail .roster-detail-heading > .roster-avatar");
+    await expect(picker.getByRole("radiogroup", { name: "Avatar" })).toBeVisible();
+    await expect(picker.getByRole("radio")).toHaveCount(7);
+    await expect(picker.getByRole("radio", { name: "Initial" })).toHaveAttribute("aria-checked", "true");
+
+    await picker.getByRole("radio", { name: "Fox" }).click();
+    await expect(row.locator(".roster-avatar")).toHaveText("🦊");
+    await expect(heading).toHaveText("🦊");
+    await expect(picker.getByRole("radio", { name: "Fox" })).toHaveAttribute("aria-checked", "true");
+    expect(await saved()).toEqual([{ kind: "set_avatar", member_id: "m-idle", avatar: { kind: "preset", preset_id: "fox" } }]);
+    await expect(roster(page).locator('.roster-row[data-member-id="m-two"] .roster-avatar')).toHaveText("B");
+    await page.screenshot({ path: info.outputPath("agent-ledger-avatar-preset.png") });
+
+    await picker.getByRole("radio", { name: "Initial" }).click();
+    await expect(row.locator(".roster-avatar")).toHaveText("C");
+    expect((await saved())[1]).toEqual({ kind: "set_avatar", member_id: "m-idle", avatar: { kind: "default" } });
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
+
+    await page.setViewportSize({ width: 400, height: 900 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+  });
+
   test("shared member and PM tuning retain identity, history and narrow layout", async ({ page }, info) => {
     await openRail(page, "agents");
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
@@ -1467,6 +1499,7 @@ async function installWorksAgentsBackend(page: Page) {
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id || "codex", name: message.action.name, pm_eligible: message.action.pm_eligible === true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "move") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id), target = index + (message.action.direction === "up" ? -1 : 1); if (index >= 0 && target >= 0 && target < members.length) { [members[index], members[target]] = [members[target], members[index]]; revision++; } }
           if (message.action.kind === "set_traits") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.traits = message.action.traits; revision++; } }
+          if (message.action.kind === "set_avatar") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.avatar = message.action.avatar; revision++; } }
           if (message.action.kind === "remove") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id); if (index >= 0 && members[index].agent_member_id !== pmMemberId && !members[index].assignment) { members.splice(index, 1); revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
           if (message.action.kind === "set_pm_eligibility" && deferredEligibility) {
