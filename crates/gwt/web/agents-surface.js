@@ -3,14 +3,21 @@ import { renderMemberTuningControls } from "./settings-surface.js";
 import { createFocusTrap } from "./focus-trap.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { mountIsland } from "./react/islands.js";
-import { AVATAR_PRESETS, agentAvatar } from "./agent-avatar.js";
+import { AVATAR_PRESETS, AVATAR_UPLOAD_TYPES, agentAvatar, prepareAvatarUpload } from "./agent-avatar.js";
 
 const configuredPm = member => !!member?.pm_project_key;
 const holdsPmRole = member => !!member && (member.is_pm || !!member.pm_project_key || member.assignment?.role === "pm");
-// Draw `member`'s avatar (Issue #7635) into an existing node and return it.
+// Draw `member`'s avatar (Issues #7635 / #7636) into an existing node: an
+// uploaded image as an <img>, otherwise its glyph.
 function renderAgentAvatar(node, member) {
   const view = agentAvatar(member);
-  if (node.textContent !== view.glyph) node.textContent = view.glyph;
+  const img = node.querySelector(":scope > img.agent-avatar-image");
+  if (view.imageUrl) {
+    if (!img) {
+      const created = node.ownerDocument.createElement("img"); created.className = "agent-avatar-image"; created.alt = "";
+      created.src = view.imageUrl; node.replaceChildren(created);
+    } else if (img.getAttribute("src") !== view.imageUrl) img.src = view.imageUrl;
+  } else if (img || node.textContent !== view.glyph) node.textContent = view.glyph;
   node.dataset.avatarKind = view.kind;
   if (view.presetId) node.dataset.avatarPreset = view.presetId;
   else delete node.dataset.avatarPreset;
@@ -424,11 +431,31 @@ export function createAgentsSurface({ document, storage, executionModel, project
         button.addEventListener("click", () => {
           const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
           if (disposed || !latest || !rosterReady(roster) || roster.pending_roster || button.getAttribute("aria-checked") === "true") return;
-          onSetAvatar(latest.member_id, choice.id === "default" ? { kind: "default" } : { kind: "preset", preset_id: choice.id });
+          showAvatarError(""); onSetAvatar(latest.member_id, choice.id === "default" ? { kind: "default" } : { kind: "preset", preset_id: choice.id });
         });
         avatarChoices.append(button);
       }
-      avatarPicker.append(avatarTitle, avatarChoices); field.avatarPicker = avatarPicker;
+      // Issue #7636 (T-018): an image picked from this machine. It is cropped
+      // and scaled here and saved only in the local ledger; a refused file
+      // shows why and leaves the saved avatar untouched.
+      const upload = document.createElement("button"); upload.type = "button"; upload.className = "roster-avatar roster-avatar-choice";
+      upload.dataset.avatarChoice = "upload"; upload.setAttribute("role", "radio"); upload.setAttribute("aria-label", "Upload image"); upload.title = "Upload image";
+      const file = document.createElement("input"); file.type = "file"; file.accept = AVATAR_UPLOAD_TYPES.join(","); file.hidden = true; file.tabIndex = -1; file.dataset.avatarFile = "";
+      const avatarError = document.createElement("p"); avatarError.className = "roster-avatar-error"; avatarError.setAttribute("role", "alert"); avatarError.hidden = true;
+      const showAvatarError = message => { avatarError.textContent = message || ""; avatarError.hidden = !message; };
+      upload.addEventListener("click", () => { if (!disposed && !upload.disabled) file.click(); });
+      file.addEventListener("change", async () => {
+        const picked = file.files?.[0]; file.value = "";
+        if (!picked || disposed) return;
+        const prepared = await prepareAvatarUpload(picked, { createCanvas: () => document.createElement("canvas") });
+        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+        if (disposed || !latest) return;
+        if (prepared.error) { showAvatarError(prepared.error); return; }
+        if (!rosterReady(roster) || roster.pending_roster) { showAvatarError("Another ledger change is in progress. Try again."); return; }
+        showAvatarError(""); onSetAvatar(latest.member_id, prepared.avatar);
+      });
+      avatarChoices.append(upload);
+      avatarPicker.append(avatarTitle, avatarChoices, file, avatarError); field.avatarPicker = avatarPicker; field.showAvatarError = showAvatarError;
       label.append(input); who.append(name, meta, label, status, retry, avatarPicker, eligibleLabel, selectPm, traits, tuning); field.avatar = avatar(member); head.append(field.avatar, who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
@@ -471,8 +498,9 @@ export function createAgentsSurface({ document, storage, executionModel, project
     for (const button of field.avatarPicker.querySelectorAll("[data-avatar-choice]")) {
       const id = button.dataset.avatarChoice;
       if (id === "default") renderAgentAvatar(button, { name: member.name });
+      else if (id === "upload") { if (shown.avatarKind === "upload") renderAgentAvatar(button, member); else if (button.textContent !== "＋") button.textContent = "＋"; }
       else button.textContent = AVATAR_PRESETS.find(preset => preset.id === id).glyph;
-      button.setAttribute("aria-checked", String(id === (shown.avatarPreset || "default")));
+      button.setAttribute("aria-checked", String(id === (shown.avatarKind === "upload" ? "upload" : shown.avatarPreset || "default")));
       button.disabled = held;
     }
     // Issue #7647 (SPEC #7007 item 27): a member has no tool of its own, so

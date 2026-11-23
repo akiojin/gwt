@@ -30,7 +30,11 @@ function Entry({ entry, menuOpen, onActivate }) {
       aria-expanded={expanded === undefined ? undefined : String(expanded)}
       onClick={event => onActivate(entry, event.currentTarget)}
     >
-      {entry.avatar ? <span className="app-head__avatar" aria-hidden="true">{entry.avatar}</span> : null}
+      {entry.avatar ? (
+        <span className="app-head__avatar" aria-hidden="true">
+          {entry.avatarImage ? <img className="agent-avatar-image" src={entry.avatarImage} alt="" /> : entry.avatar}
+        </span>
+      ) : null}
       <span className="app-head__label">{entry.label}</span>
       {entry.count === undefined ? null : (
         <span className="app-head__count" hidden={!entry.count} data-has-error={String(Boolean(entry.hasError))}>{entry.count}</span>

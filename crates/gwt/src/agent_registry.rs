@@ -7138,6 +7138,7 @@ mod tests {
         let fox = AgentAvatar {
             kind: AgentAvatarKind::Preset,
             preset_id: Some("fox".into()),
+            image: None,
         };
         let saved = crate::agent_names::mutate_project_roster(
             &root,
@@ -7166,14 +7167,17 @@ mod tests {
             AgentAvatar {
                 kind: AgentAvatarKind::Preset,
                 preset_id: Some("unicorn".into()),
+                image: None,
             },
             AgentAvatar {
                 kind: AgentAvatarKind::Preset,
                 preset_id: None,
+                image: None,
             },
             AgentAvatar {
                 kind: AgentAvatarKind::Upload,
                 preset_id: None,
+                image: None,
             },
         ] {
             let error = crate::agent_names::mutate_project_roster(

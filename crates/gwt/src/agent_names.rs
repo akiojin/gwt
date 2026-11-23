@@ -50,8 +50,8 @@ pub struct AgentMember {
 /// each id; an id outside this list is refused when saved.
 pub const AVATAR_PRESET_IDS: &[&str] = &["cat", "owl", "bear", "fox", "penguin", "robot"];
 
-/// Where an agent's avatar comes from. `Upload` is reserved for an image the
-/// user provides (T-018) and cannot be saved yet.
+/// Where an agent's avatar comes from. `Upload` is an image the user
+/// provides (T-018).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentAvatarKind {
@@ -68,7 +68,16 @@ pub struct AgentAvatar {
     pub kind: AgentAvatarKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
+    /// The uploaded image (T-018) as a `data:image/png;base64,` URL. The GUI
+    /// crops and scales the picked file to a small square PNG, and it is kept
+    /// only in this machine's ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
+
+/// Largest uploaded avatar PNG the ledger keeps, in decoded bytes.
+pub const AVATAR_IMAGE_MAX_BYTES: usize = 64 * 1024;
+const AVATAR_IMAGE_PREFIX: &str = "data:image/png;base64,";
 
 impl AgentAvatar {
     pub fn is_unset(&self) -> bool {
@@ -80,10 +89,42 @@ impl AgentAvatar {
         match self.kind {
             AgentAvatarKind::Default => Ok(Self::default()),
             AgentAvatarKind::Preset => match self.preset_id.as_deref() {
-                Some(id) if AVATAR_PRESET_IDS.contains(&id) => Ok(self),
+                Some(id) if AVATAR_PRESET_IDS.contains(&id) => Ok(Self {
+                    image: None,
+                    ..self
+                }),
                 _ => Err("Choose one of the preset avatars".into()),
             },
-            AgentAvatarKind::Upload => Err("Uploading an avatar image is not available yet".into()),
+            AgentAvatarKind::Upload => {
+                use base64::Engine as _;
+                let refused = || {
+                    format!(
+                        "The avatar image must be a PNG of at most {} KiB",
+                        AVATAR_IMAGE_MAX_BYTES / 1024
+                    )
+                };
+                let encoded = self
+                    .image
+                    .as_deref()
+                    .and_then(|image| image.strip_prefix(AVATAR_IMAGE_PREFIX))
+                    .ok_or_else(refused)?;
+                // Bound the work before decoding: 4 base64 chars carry 3 bytes.
+                if encoded.len() > AVATAR_IMAGE_MAX_BYTES.div_ceil(3) * 4 {
+                    return Err(refused());
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| refused())?;
+                if bytes.len() > AVATAR_IMAGE_MAX_BYTES || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                {
+                    return Err(refused());
+                }
+                Ok(Self {
+                    kind: AgentAvatarKind::Upload,
+                    preset_id: None,
+                    image: self.image,
+                })
+            }
         }
     }
 }
@@ -4593,5 +4634,54 @@ mod tests {
         let lock = std::fs::File::open(&history).unwrap();
         lock.lock_exclusive().unwrap();
         assert!(allocate(&history, "en", &HashSet::new(), &HashSet::new()).is_err());
+    }
+
+    // Issue #7636 AC-2 / AC-4: an uploaded avatar is a small PNG kept inline
+    // in the machine-local ledger; anything else is refused so the stored
+    // avatar stays as it was, and a preset or the default drops the image.
+    #[test]
+    fn uploaded_avatar_accepts_only_a_small_png_and_presets_drop_it() {
+        use base64::Engine as _;
+        let encode = |bytes: &[u8]| {
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0; 32]);
+        let upload = |image: Option<String>| AgentAvatar {
+            kind: AgentAvatarKind::Upload,
+            preset_id: None,
+            image,
+        };
+        let accepted = upload(Some(encode(&png))).validated().unwrap();
+        assert_eq!(accepted.image, Some(encode(&png)));
+
+        let mut oversized = png.clone();
+        oversized.resize(AVATAR_IMAGE_MAX_BYTES + 1, 0);
+        for refused in [
+            None,
+            Some(encode(b"GIF89a not a png")),
+            Some(encode(&oversized)),
+            Some(format!("data:image/jpeg;base64,{}", &encode(&png)[22..])),
+            Some("data:image/png;base64,!!!".to_string()),
+            Some("https://example.com/avatar.png".to_string()),
+        ] {
+            let error = upload(refused).validated().unwrap_err();
+            assert!(error.contains("avatar"), "{error}");
+        }
+
+        let preset = AgentAvatar {
+            kind: AgentAvatarKind::Preset,
+            preset_id: Some("fox".into()),
+            image: Some(encode(&png)),
+        };
+        assert_eq!(preset.validated().unwrap().image, None);
+        let default = AgentAvatar {
+            image: Some(encode(&png)),
+            ..AgentAvatar::default()
+        };
+        assert!(default.validated().unwrap().is_unset());
     }
 }

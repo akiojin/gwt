@@ -279,6 +279,9 @@
 .agents-surface button.roster-avatar-choice { padding: 0; border-color: var(--color-border); border-radius: var(--radius-pill); font-size: var(--type-md); }
 .agents-surface button.roster-avatar-choice[aria-checked="true"] { border-color: var(--color-state-active); box-shadow: 0 0 0 2px var(--color-focus-ring); }
 .agents-surface button.roster-avatar-choice:disabled { cursor: not-allowed; opacity: 0.6; }
+/* Issue 7636: a refused upload says why, under the choices. */
+.roster-avatar { overflow: hidden; }
+.roster-avatar-error { margin: var(--space-1) 0 0; font-size: var(--type-xs); color: var(--color-state-blocked); }
 .roster-detail-heading h3 { margin: 0; font-size: var(--type-md); white-space: nowrap; overflow-x: auto; }
 .roster-detail-heading p { margin: var(--space-1) 0 0; font-size: var(--type-xs); color: var(--color-text-muted); overflow-wrap: anywhere; }
 .roster-history h4 { margin: var(--space-1) 0 var(--space-2); font-size: var(--type-sm); }

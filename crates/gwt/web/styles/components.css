@@ -1009,6 +1009,16 @@ body::after {
   border-radius: var(--radius-pill);
   color: var(--color-state-active);
   line-height: 1;
+  overflow: hidden;
+}
+
+/* Issue 7636: an uploaded avatar fills its round frame wherever it is drawn. */
+.agent-avatar-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  object-fit: cover;
 }
 
 .app-head__count {

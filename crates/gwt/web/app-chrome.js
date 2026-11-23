@@ -89,7 +89,9 @@ function chromeView(state, handlers) {
     if (destination.kind === "pm") {
       const waiting = countOf(state.decisions);
       view.label = pmName || view.label;
-      view.avatar = agentAvatar({ name: view.label, avatar: state.pmAvatar }).glyph;
+      const avatar = agentAvatar({ name: view.label, avatar: state.pmAvatar });
+      view.avatar = avatar.glyph;
+      if (avatar.imageUrl) view.avatarImage = avatar.imageUrl;
       view.count = waiting;
       if (!view.reason) {
         view.title = `${COPY.pm.title}${pmName ? ` ${pmName}` : ""}: ${waiting ? COPY.pm.waiting(waiting) : COPY.pm.none}`;
