@@ -3068,25 +3068,6 @@ fn theme_page(nodes: serde_json::Value, next: Option<&str>) -> HttpResponse {
 }
 
 #[test]
-fn parent_theme_uses_github_progress_and_omits_missing_parents() {
-    let transport = FakeTransport::new();
-    transport.enqueue(graphql_ok(serde_json::json!({
-        "repository": { "issue": { "parent": {
-            "number": 7, "title": "Theme", "url": "https://github.com/o/r/issues/7",
-            "subIssuesSummary": { "total": 4, "completed": 1 }
-        }}}
-    })));
-    transport.enqueue(graphql_ok(serde_json::json!({
-        "repository": { "issue": { "parent": null }}
-    })));
-    let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
-    let theme = client.parent_theme(IssueNumber(8)).unwrap().unwrap();
-    assert_eq!(theme.number, IssueNumber(7));
-    assert_eq!((theme.sub_issues_total, theme.sub_issues_completed), (4, 1));
-    assert!(client.parent_theme(IssueNumber(9)).unwrap().is_none());
-}
-
-#[test]
 fn list_themes_returns_only_issues_with_sub_issues_across_pages() {
     let transport = FakeTransport::new();
     transport.enqueue(theme_page(

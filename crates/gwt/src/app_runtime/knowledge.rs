@@ -2054,7 +2054,6 @@ impl AppRuntime {
         let client_factory = Arc::clone(&self.issue_client_factory);
         self.blocking_tasks.spawn(move || {
             let detail = (|| {
-                let mut issue_client = None;
                 if let Some(title) = subtask_title {
                     let (owner, repo) =
                         gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
@@ -2067,32 +2066,8 @@ impl AppRuntime {
                         number,
                         &title,
                     )?;
-                    issue_client = Some(client);
                 }
-                let mut detail = gwt::load_knowledge_bridge_detail(&project_root, kind, number)?;
-                if kind == KnowledgeKind::Issue {
-                    let client = issue_client.or_else(|| {
-                        let (owner, repo) =
-                            gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
-                                .ok()?;
-                        client_factory(&owner, &repo).ok()
-                    });
-                    detail.parent_theme = client
-                        .and_then(|client| {
-                            client
-                                .parent_theme(gwt_github::IssueNumber(number))
-                                .ok()
-                                .flatten()
-                        })
-                        .map(|parent| gwt::knowledge_bridge::KnowledgeParentTheme {
-                            number: parent.number.0,
-                            title: parent.title,
-                            url: parent.url,
-                            total: parent.sub_issues_total,
-                            completed: parent.sub_issues_completed,
-                        });
-                }
-                Ok::<_, String>(detail)
+                gwt::load_knowledge_bridge_detail(&project_root, kind, number)
             })();
             let event = match detail {
                 Ok(mut detail) => {

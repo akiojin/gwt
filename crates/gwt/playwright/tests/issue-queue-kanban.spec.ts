@@ -30,6 +30,7 @@ test.beforeEach(async ({ page }, info) => {
     inboxFirst: info.title.startsWith("Issue #5287"),
     includeAgent: info.title.startsWith("AC-M1/M2:") || info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
+    includeTheme: info.title.startsWith("Issue #7645"),
   });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
@@ -1689,6 +1690,7 @@ test("card selection keeps issue body, acceptance and provenance beside switchab
 
 test("Issue #7645 shows theme progress and adds a subtask to the issue body", async ({ page }) => {
   const detail = page.locator(".knowledge-detail-pane");
+  await expect(row(page, 3)).toContainText("In theme Project theme");
   await row(page, 3).locator(".knowledge-row-select").click();
   await expect(detail.getByRole("link", { name: "Project theme (#70)" })).toHaveAttribute(
     "href", "https://github.com/example/repo/issues/70",
@@ -1981,9 +1983,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false } = {}) {
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false, includeTheme = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -2119,11 +2121,16 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
           if (message.kind==="load_knowledge_bridge") fixture.__queueBaseLoad=fixture.__queueLoad;
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
+        else if(message.kind==="load_themes") {
+          this.emit({kind:"themes",request_id:message.request_id,view:{themes:includeTheme ? [{
+            number:70,title:"Project theme",url:"https://github.com/example/repo/issues/70",
+            issues_total:4,issues_completed:1,issues:[{number:3,in_repository:true}],
+          }] : []}});
+        }
         else if(message.kind==="select_knowledge_bridge_entry" || message.kind==="add_issue_subtask") {
           fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
-          if (message.number === 3) {
+          if (includeTheme && message.number === 3) {
             const detail = fixture.__queueLastDetail.detail;
-            detail.parent_theme = { number: 70, title: "Project theme", url: "https://github.com/example/repo/issues/70", total: 4, completed: 1 };
             detail.sections[0].body += "\n\n## 子課題\n\n- [x] Confirm the issue";
             if (message.kind === "add_issue_subtask") detail.sections[0].body += `\n- [ ] ${message.title}`;
           }
@@ -2133,5 +2140,5 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings});
+  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme});
 }

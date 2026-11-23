@@ -337,6 +337,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
       const windowMap = new Map();
       let splitSurfaces = null;
+      let loadIssueThemes = () => {};
       let worksSurface = null;
       let agentsSurface = null;
       let rosterHost = null;
@@ -3875,6 +3876,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
+        parentThemeForIssue: number => projectThemes.parentTheme(number),
+        loadIssueThemes: () => loadIssueThemes(),
         currentProjectRoot: () => activeProjectTab()?.project_root,
         sendKnowledgeSemanticSearchNow,
         createNode,
@@ -6225,7 +6228,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         document, send, repliesModel: themeRepliesModel, // An issue under a theme opens in the Issues screen, like an Issue link
         // in a window header.
         onOpenIssue: number => runIssueWindowHeaderAction("open-issue", { linked_issue_number: number }),
+        getProjectKey: activeProjectKey,
+        onHierarchyChange: renderAllKnowledgeBridgeWindows,
       });
+      loadIssueThemes = projectThemes.loadHierarchy;
       const themesElement = projectThemes.element;
       themesElement.hidden = true;
       document.querySelector(".surface-area").appendChild(themesElement);

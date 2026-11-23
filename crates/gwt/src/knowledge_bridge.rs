@@ -291,17 +291,6 @@ pub struct KnowledgeDetailView {
     pub launch_issue_number: Option<u64>,
     #[serde(default)]
     pub related_works: Vec<KnowledgeRelatedWorkView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_theme: Option<KnowledgeParentTheme>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KnowledgeParentTheme {
-    pub number: u64,
-    pub title: String,
-    pub url: String,
-    pub total: u64,
-    pub completed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -647,6 +636,7 @@ pub fn append_issue_subtask(
 fn append_subtask_markdown(body: &str, title: &str) -> String {
     use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 
+    const SUBTASK_MARKER: &str = "<!-- gwt-subtask --> ";
     let mut heading = None;
     let mut section = None;
     let mut section_start = 0;
@@ -676,9 +666,10 @@ fn append_subtask_markdown(body: &str, title: &str) -> String {
     }
     if section.is_some()
         && body[section_start..insert_at].lines().any(|line| {
-            ["- [ ] ", "- [x] ", "- [X] "]
-                .iter()
-                .any(|prefix| line.strip_prefix(prefix) == Some(title))
+            ["- [ ] ", "- [x] ", "- [X] "].iter().any(|prefix| {
+                line.strip_prefix(prefix)
+                    .is_some_and(|item| item.strip_prefix(SUBTASK_MARKER).unwrap_or(item) == title)
+            })
         })
     {
         return body.to_string();
@@ -692,6 +683,8 @@ fn append_subtask_markdown(body: &str, title: &str) -> String {
         result.push_str("## 子課題\n\n");
     }
     result.push_str("- [ ] ");
+    // Keep titles such as "AC-1: ..." distinct from execution acceptance items.
+    result.push_str(SUBTASK_MARKER);
     result.push_str(title);
     result.push('\n');
     if !after.is_empty() {
@@ -707,11 +700,11 @@ fn issue_subtask_is_inserted_before_the_next_body_section() {
     let body = "## Description\n\nKeep this.\n\n## 子課題\n\n- [x] First\n\n## Acceptance criteria\n\n- [ ] AC-1: Keep this too\n";
     assert_eq!(
         append_subtask_markdown(body, "Second"),
-        "## Description\n\nKeep this.\n\n## 子課題\n\n- [x] First\n\n- [ ] Second\n\n## Acceptance criteria\n\n- [ ] AC-1: Keep this too\n",
+        "## Description\n\nKeep this.\n\n## 子課題\n\n- [x] First\n\n- [ ] <!-- gwt-subtask --> Second\n\n## Acceptance criteria\n\n- [ ] AC-1: Keep this too\n",
     );
     assert_eq!(
         append_subtask_markdown("Existing description", "First"),
-        "Existing description\n\n## 子課題\n\n- [ ] First\n",
+        "Existing description\n\n## 子課題\n\n- [ ] <!-- gwt-subtask --> First\n",
     );
     assert_eq!(append_subtask_markdown(body, "First"), body);
 }
@@ -1380,7 +1373,6 @@ fn issue_detail_view(
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
         related_works: Vec::new(),
-        parent_theme: None,
     }
 }
 
@@ -1429,7 +1421,6 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
         related_works: Vec::new(),
-        parent_theme: None,
     }
 }
 

@@ -630,11 +630,12 @@ export function issueChildProgress(sections) {
     const heading = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
     if (heading) {
       if (headingLevel && heading[1].length <= headingLevel) break;
-      if (/^(子課題|Subtasks)$/i.test(heading[2])) headingLevel = heading[1].length;
+      // The escaped heading matches Japanese source Markdown, not UI copy.
+      if (/^(\u5b50\u8ab2\u984c|Subtasks)$/i.test(heading[2])) headingLevel = heading[1].length;
       continue;
     }
     const item = headingLevel && /^ {0,3}[-*+]\s+\[([ xX])\]\s+(\S.*)$/.exec(line);
-    if (item) items.push({ done: item[1] !== " ", text: item[2].trim() });
+    if (item) items.push({ done: item[1] !== " ", text: item[2].replace(/^<!-- gwt-subtask -->\s*/, "").trim() });
   }
   return { items, done: items.filter(item => item.done).length, total: items.length };
 }
@@ -827,6 +828,8 @@ export function renderIssueWindowHeader(doc, model, onAction = () => {}) {
 
 export function createKnowledgeKanbanSurface({
   send,
+  parentThemeForIssue = () => undefined,
+  loadIssueThemes = () => {},
   currentProjectRoot = () => undefined,
   // Semantic search must never use the reconnect queue. This dependency
   // performs one atomic OPEN check + socket.send and reports whether the
@@ -4813,8 +4816,8 @@ export function createKnowledgeKanbanSurface({
         if (state.detailLoading) {
           scroll.appendChild(createNode("div", "knowledge-detail-empty", "Loading detail"));
         }
-        if (detail.parent_theme) {
-          const parent = detail.parent_theme;
+        const parent = parentThemeForIssue(number);
+        if (parent) {
           const progress = renderIssueDetailProgress("Theme progress", {
             items: [],
             done: Math.min(parent.completed, parent.total),
@@ -4831,7 +4834,7 @@ export function createKnowledgeKanbanSurface({
         }
         const children = renderIssueDetailProgress("Subtasks", issueChildProgress(detail.sections));
         if (children) scroll.appendChild(children);
-        if (!entry.is_spec && detail.state?.toLowerCase() !== "closed" && !state.detailLoading) {
+        if (!entry.is_spec && detail.state?.toLowerCase() !== "closed" && !state.detailLoading && !state.error) {
           const form = createNode("form", "knowledge-section");
           const label = createNode("label", null, "Subtask title");
           const input = createNode("input");
@@ -5435,6 +5438,8 @@ export function createKnowledgeKanbanSurface({
 
         const tierChips = issueTierChips(entry.number);
         const secondaryItems = [...model.secondary, ...tierChips];
+        const parent = parentThemeForIssue(entry.number);
+        if (parent) secondaryItems.push({ key: "parent-theme", kind: "theme", label: `In theme ${parent.title}` });
         if (secondaryItems.length > 0) {
           const secondary = createNode("div", "knowledge-row-secondary");
           for (const item of secondaryItems) {
@@ -5710,6 +5715,7 @@ export function createKnowledgeKanbanSurface({
       function mountKnowledgeWindow(windowData, body) {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           if (knowledgeKind !== "issue" && knowledgeKind !== "spec") return;
+        if (knowledgeKind === "issue") loadIssueThemes();
           send({ kind: "get_repository_labels", refresh: false });
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
           // Backlog / Draft / Planning / Implementation / Review / Done.

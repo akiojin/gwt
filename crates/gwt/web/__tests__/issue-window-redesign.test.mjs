@@ -1068,12 +1068,12 @@ test("T-7a: explanation styling extends the shared popover with Operator tokens"
 });
 
 test("child issue progress reads the checklist in the issue description only", async () => {
-  const { issueChildProgress } = await importSurfaceModule();
+  const { issueChildProgress, issueAcceptanceProgress } = await importSurfaceModule();
   const description = [
     "- [x] Unrelated checklist item",
     "## 子課題",
     "- [x] Reproduce the problem",
-    "- [ ] Repair the problem",
+    "- [ ] <!-- gwt-subtask --> AC-2: Repair the problem",
     "## Acceptance criteria",
     "- [x] AC-1: Existing behavior",
   ].join("\n");
@@ -1083,9 +1083,10 @@ test("child issue progress reads the checklist in the issue description only", a
   ]), {
     items: [
       { done: true, text: "Reproduce the problem" },
-      { done: false, text: "Repair the problem" },
+      { done: false, text: "AC-2: Repair the problem" },
     ],
     done: 1,
     total: 2,
   });
+  assert.equal(issueAcceptanceProgress(description).total, 1);
 });

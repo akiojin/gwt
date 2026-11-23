@@ -22,7 +22,7 @@ const settle = async () => {
   await new Promise(resolve => setImmediate(resolve));
 };
 
-function fixture({ sendResult = "sent" } = {}) {
+function fixture({ sendResult = "sent", getProjectKey } = {}) {
   const { document, window } = parseHTML("<!doctype html><html><body></body></html>");
   globalThis.document = document;
   globalThis.window = window;
@@ -33,6 +33,7 @@ function fixture({ sendResult = "sent" } = {}) {
     document, repliesModel,
     send: message => { sent.push(message); return sendResult; },
     onOpenIssue: number => opened.push(number),
+    getProjectKey,
     scheduleFrame: callback => { callback(); return () => {}; },
   });
   document.body.appendChild(themes.element);
@@ -75,6 +76,23 @@ test("an answer to an older request does not replace the newer one", async () =>
   assert.doesNotMatch(page.text(), /Theme 7/, "the first request was superseded");
   await page.reply({ kind: "themes", request_id: 2, view: view([theme(20)]) });
   assert.match(page.text(), /Theme 20/);
+  page.themes.dispose();
+});
+
+test("Issues shares the Themes hierarchy only for the active project", async () => {
+  let project = "first";
+  const page = fixture({ getProjectKey: () => project });
+  page.themes.loadHierarchy();
+  page.themes.loadHierarchy();
+  assert.equal(page.sent.length, 1);
+  await page.reply({ kind: "themes", request_id: 1, view: view([theme(7)]) });
+  assert.equal(page.themes.parentTheme(8).number, 7);
+  project = "second";
+  assert.equal(page.themes.parentTheme(8), undefined);
+  page.themes.loadHierarchy();
+  await page.reply({ kind: "themes", request_id: 2, view: view([theme(20)]) });
+  assert.equal(page.themes.parentTheme(8), undefined);
+  assert.equal(page.themes.parentTheme(21).number, 20);
   page.themes.dispose();
 });
 
