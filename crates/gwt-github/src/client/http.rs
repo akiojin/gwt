@@ -2823,11 +2823,17 @@ mod transport_tests {
     }
 }
 
-/// A theme is an Issue that has sub-issues; any other node yields `None`.
+/// A theme is an Issue that has sub-issues or carries the theme label; any
+/// other node yields `None`.
 fn parse_theme_issue(node: &Value, repository: &str) -> Option<ThemeIssue> {
     let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_string();
     let total = node["subIssuesSummary"]["total"].as_u64().unwrap_or(0);
-    if total == 0 {
+    let recorded = node["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|label| label["name"].as_str() == Some(super::THEME_LABEL));
+    if total == 0 && !recorded {
         return None;
     }
     let sub_issues = node["subIssues"]["nodes"]
@@ -3373,6 +3379,7 @@ query($owner:String!,$repo:String!,$after:String){
     issues(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT,direction:DESC}){
       nodes{
         number title body url
+        labels(first:20){ nodes{ name } }
         subIssuesSummary{ total completed }
         subIssues(first:100){ nodes{ number title state url repository{ nameWithOwner } } }
       }

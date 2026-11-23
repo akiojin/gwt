@@ -462,7 +462,12 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   cancelReply.type = 'button';
   replyChip.append(replyLabel, cancelReply);
   composer.append(replyChip, draft, sendButton, composerStatus);
-  chatBody.append(chatActions, chatNotice, chatLog, composer);
+  // Issue #7644: says when the message a theme came from is not shown here.
+  const targetNotice = element('p', 'pm-chat__notice');
+  targetNotice.setAttribute('role', 'status');
+  targetNotice.dataset.pmMessageTargetNotice = '';
+  targetNotice.hidden = true;
+  chatBody.append(chatActions, chatNotice, targetNotice, chatLog, composer);
   const tasksBody = element('section', 'pm-chat__tasks');
   tasksBody.setAttribute('aria-label', 'Request tasks');
   const tasksHeader = element('div', 'pm-chat__history-header');
@@ -599,6 +604,27 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const showChat = () => showView('chat');
   const showTasks = () => showView('tasks');
   const showReports = () => showView('reports');
+  // Issue #7644: open the human message a recorded theme came from. A
+  // conversation that has not arrived yet is answered once it does.
+  let messageTarget = null;
+  function revealMessageTarget() {
+    if (messageTarget == null || latestState?.conversation?.availability !== 'ready') return;
+    const id = messageTarget;
+    messageTarget = null;
+    const bubble = [...chatLog.querySelectorAll('.pm-chat__bubble--user')]
+      .find(node => node.dataset.messageId === id);
+    targetNotice.textContent = bubble ? ''
+      : 'The message this theme came from is no longer in the conversation shown here. The theme\'s GitHub Issue keeps what was recorded.';
+    targetNotice.hidden = !targetNotice.textContent;
+    bubble?.scrollIntoView({ block: 'center' });
+    bubble?.focus({ preventScroll: true });
+  }
+  const showMessage = messageId => {
+    if (disposed) return;
+    messageTarget = String(messageId);
+    showChat();
+    revealMessageTarget();
+  };
   const showLog = () => showView('log');
   const openTerminal = () => {
     terminalStatus.hidden = onOpenTerminal(session) !== false;
@@ -1108,6 +1134,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
         : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
     chatNotice.hidden = !chatNotice.textContent;
     if (following) chatLog.scrollTop = chatLog.scrollHeight;
+    revealMessageTarget();
   }
   function syncComposer() {
     // A free-form decision answer freezes the draft the same way a chat send does.
@@ -1374,6 +1401,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showReports, receiveHumanAttention, dispose,
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showMessage, showTasks, showReports, receiveHumanAttention, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }

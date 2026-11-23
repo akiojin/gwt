@@ -28,6 +28,11 @@ struct TurnReceipt {
     stop_reminder_sent: bool,
     #[serde(default)]
     unverified_intake_candidate_id: Option<String>,
+    /// Issue #7644: the PM recorded this turn's theme decision.
+    #[serde(default)]
+    theme_recorded: bool,
+    #[serde(default)]
+    theme_reminder_sent: bool,
 }
 
 fn project_store(repo: &Path) -> PathBuf {
@@ -358,6 +363,8 @@ pub(crate) fn handle_user_prompt_submit(worktree: &Path, input: &str) -> io::Res
             requires_qa,
             qa_report_id: None,
             stop_reminder_sent: false,
+            theme_recorded: false,
+            theme_reminder_sent: false,
             prompt_sha256: prompt
                 .as_deref()
                 .filter(|_| requires_qa)
@@ -397,6 +404,8 @@ pub(crate) fn capture_qa_turn(repo: &Path) -> io::Result<Option<QaTurn>> {
                         prompt_sha256: None,
                         stop_reminder_sent: false,
                         unverified_intake_candidate_id: None,
+                        theme_recorded: false,
+                        theme_reminder_sent: false,
                     };
                     write_receipt(repo, &receipt)?;
                     receipt
@@ -490,6 +499,96 @@ pub(crate) fn handle_stop(worktree: &Path, session: Option<&str>) -> HookOutput 
     });
     result.unwrap_or_else(|error| {
         tracing::warn!(%error, "PM reporting Stop reminder failed open");
+        HookOutput::Silent
+    })
+}
+
+/// One theme decision of the PM, kept machine-local next to the turn
+/// receipts (Issue #7644). A declined theme is kept here, so "not a theme"
+/// stays an explicit, readable decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ThemeDecisionRecord {
+    pub decision: String,
+    pub number: Option<u64>,
+    pub reason: Option<String>,
+    pub source: crate::themes::ThemeSource,
+}
+
+pub(crate) fn theme_decisions_path(repo: &Path) -> PathBuf {
+    project_store(repo).join("project-state/pm-theme-decisions.jsonl")
+}
+
+/// Keep the decision and settle the turn's theme obligation. Called after the
+/// GitHub side of the decision succeeded.
+pub(crate) fn record_theme_decision(
+    repo: &Path,
+    turn: &QaTurn,
+    decision: &crate::themes::ThemeDecision,
+    number: Option<u64>,
+    source: &crate::themes::ThemeSource,
+) -> io::Result<ThemeDecisionRecord> {
+    use crate::themes::ThemeDecision;
+    let (kind, reason) = match decision {
+        ThemeDecision::Create { .. } => ("create", None),
+        ThemeDecision::Update { .. } => ("update", None),
+        ThemeDecision::None { reason } => ("none", Some(reason.clone())),
+        ThemeDecision::Declined { reason } => ("declined", Some(reason.clone())),
+    };
+    let record = ThemeDecisionRecord {
+        decision: kind.to_owned(),
+        number,
+        reason,
+        source: source.clone(),
+    };
+    with_receipt_lock(repo, &turn.session_id, || {
+        let path = theme_decisions_path(repo);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut line = serde_json::to_string(&record).map_err(io::Error::other)?;
+        line.push('\n');
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?
+            .write_all(line.as_bytes())?;
+        if let Some(mut receipt) = read_receipt(repo, &turn.session_id)? {
+            if receipt.identity == *turn {
+                receipt.theme_recorded = true;
+                write_receipt(repo, &receipt)?;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(record)
+}
+
+/// Issue #7644: every human PM turn ends with a theme decision, so what was
+/// asked or decided is never left unrecorded. Once per turn, like the Q&A
+/// reminder; a turn the PM cannot bind to its native message is not gated.
+pub(crate) fn handle_theme_stop(worktree: &Path, session: Option<&str>) -> HookOutput {
+    let Some(session) = registered_pm_session(worktree, session) else {
+        return HookOutput::Silent;
+    };
+    let result = with_receipt_lock(worktree, &session, || {
+        let Some(mut receipt) = read_receipt(worktree, &session)? else {
+            return Ok(HookOutput::Silent);
+        };
+        if receipt.identity.session_id != session
+            || !receipt.requires_qa
+            || receipt.theme_recorded
+            || receipt.theme_reminder_sent
+            || native_prompt_identity(&receipt).is_err()
+        {
+            return Ok(HookOutput::Silent);
+        }
+        receipt.theme_reminder_sent = true;
+        write_receipt(worktree, &receipt)?;
+        Ok(HookOutput::stop_block("This human PM turn has no theme decision. Record it with JSON operation `pm.theme.record`, passing the user's message as `original` and one `decision`: `create` (title, summary) for a new request or decision, `update` (number, note) when it belongs to an existing theme from `pm.theme.list`, `declined` (reason) when the user said not to make it a theme, or `none` (reason) when nothing was asked or decided. This reminder is issued once per turn."))
+    });
+    result.unwrap_or_else(|error| {
+        tracing::warn!(%error, "PM theme Stop reminder failed open");
         HookOutput::Silent
     })
 }
@@ -617,6 +716,159 @@ mod tests {
             "message":{"role":"user","content":original}
         }))).unwrap();
         native
+    }
+
+    fn theme_record(
+        original: &str,
+        decision: crate::themes::ThemeDecision,
+    ) -> crate::cli::pm::PmCommand {
+        crate::cli::pm::PmCommand::ThemeRecord {
+            original: original.into(),
+            decision,
+        }
+    }
+
+    #[test]
+    fn a_human_turn_is_recorded_as_a_theme_that_leads_back_to_its_message() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let original = "ログ画面に検索を付けて";
+        let _native = native_human_fixture(home.path(), &worktree, original);
+        let mut env = crate::cli::TestEnv::new(home.path().join("repo"));
+        handle_user_prompt_submit(
+            &worktree,
+            &serde_json::json!({"prompt":original}).to_string(),
+        )
+        .unwrap();
+        let create = || crate::themes::ThemeDecision::Create {
+            title: "Search in the log screen".into(),
+            summary: "Add search to the log screen.".into(),
+        };
+
+        // The theme gate holds Stop once, independent of the Q&A report.
+        assert!(matches!(
+            handle_theme_stop(&worktree, Some("pm-session")),
+            HookOutput::StopBlock { .. }
+        ));
+        assert!(matches!(
+            handle_theme_stop(&worktree, Some("pm-session")),
+            HookOutput::Silent
+        ));
+        // Only the latest human message can be recorded.
+        assert!(crate::cli::pm::run(
+            &mut env,
+            theme_record("別の依頼", create()),
+            &mut String::new()
+        )
+        .is_err());
+        assert!(env
+            .client
+            .call_log()
+            .iter()
+            .all(|call| !call.starts_with("create_issue")));
+
+        let mut output = String::new();
+        crate::cli::pm::run(&mut env, theme_record(original, create()), &mut output).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(saved["theme"]["decision"], "create");
+        assert_eq!(saved["theme"]["source"]["session_id"], "pm-session");
+        assert_eq!(saved["theme"]["source"]["message_id"], "native-qa-turn");
+        let number = saved["theme"]["number"].as_u64().unwrap();
+        let gwt_github::FetchResult::Updated(issue) =
+            gwt_github::IssueClient::fetch(&env.client, gwt_github::IssueNumber(number), None)
+                .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            issue.labels,
+            vec![gwt_github::client::THEME_LABEL.to_string()]
+        );
+        let source = crate::themes::parse_theme_source(&issue.body).unwrap();
+        assert_eq!(
+            (source.session_id.as_str(), source.message_id.as_str()),
+            ("pm-session", "native-qa-turn")
+        );
+        assert!(
+            read_receipt(&worktree, "pm-session")
+                .unwrap()
+                .unwrap()
+                .theme_recorded
+        );
+
+        // A recorded turn no longer holds Stop, even on a fresh reminder.
+        handle_user_prompt_submit(
+            &worktree,
+            &serde_json::json!({"prompt":original}).to_string(),
+        )
+        .unwrap();
+        crate::cli::pm::run(
+            &mut env,
+            theme_record(
+                original,
+                crate::themes::ThemeDecision::Declined {
+                    reason: "The user said not to make it a theme.".into(),
+                },
+            ),
+            &mut String::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            handle_theme_stop(&worktree, Some("pm-session")),
+            HookOutput::Silent
+        ));
+        let decisions: Vec<serde_json::Value> = fs::read_to_string(theme_decisions_path(&worktree))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[1]["decision"], "declined");
+        assert_eq!(decisions[1]["number"], serde_json::Value::Null);
+        assert_eq!(decisions[1]["source"]["message_id"], "native-qa-turn");
+    }
+
+    #[test]
+    fn theme_records_need_the_registered_pm_and_a_human_turn() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = fixture(home.path());
+        let mut env = crate::cli::TestEnv::new(home.path().join("repo"));
+        let none = || {
+            theme_record(
+                "状況は？",
+                crate::themes::ThemeDecision::None {
+                    reason: "A status question.".into(),
+                },
+            )
+        };
+        {
+            let _other = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "ordinary");
+            assert!(crate::cli::pm::run(&mut env, none(), &mut String::new()).is_err());
+        }
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        // An automatic prompt is no human turn: nothing to record, no gate.
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"$gwt-pm"}"#).unwrap();
+        assert!(crate::cli::pm::run(&mut env, none(), &mut String::new()).is_err());
+        assert!(matches!(
+            handle_theme_stop(&worktree, Some("pm-session")),
+            HookOutput::Silent
+        ));
+        assert!(!theme_decisions_path(&worktree).exists());
     }
 
     #[test]

@@ -735,6 +735,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.theme.record",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.theme.list",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.pause",
         aliases: &[],
     },

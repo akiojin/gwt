@@ -6,7 +6,8 @@ import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 // sub-issues: the backend reads them (`load_themes` → `themes`) together with
 // the number of Issues completed today, and this host only derives rows and
 // keeps what the screen is doing: which theme is open, the delete
-// confirmation, and the request it is waiting on.
+// confirmation, and the request it is waiting on. A theme the PM recorded
+// from the conversation on Home names the message it came from (Issue 7644).
 
 const NOT_CONNECTED = "Not connected to gwt. Try again once the connection is back.";
 
@@ -25,6 +26,11 @@ function themeRows(view) {
       completed,
       percent: total ? Math.round((completed / total) * 100) : 0,
       status: total > 0 && completed === total ? "almost_done" : "in_progress",
+      recordedFrom: theme.recorded_from?.session_id && theme.recorded_from?.message_id ? {
+        sessionId: theme.recorded_from.session_id,
+        messageId: theme.recorded_from.message_id,
+        recordedAt: theme.recorded_from.recorded_at || "",
+      } : null,
       issues: (theme.issues || []).map(issue => ({
         number: issue.number,
         title: issue.title,
@@ -42,7 +48,7 @@ const INITIAL = Object.freeze({
 });
 
 export function createProjectThemes({
-  document, send, repliesModel, onOpenIssue, scheduleFrame,
+  document, send, repliesModel, onOpenIssue, onOpenConversation, scheduleFrame,
   getProjectKey = () => null, onHierarchyChange = () => {},
 }) {
   const model = createUiStateStore(INITIAL, { scheduleFrame });
@@ -110,6 +116,7 @@ export function createProjectThemes({
     openTheme: number => model.update(state => ({ ...state, selected: number, notice: null })),
     closeTheme: () => model.update(state => ({ ...state, selected: null, dialog: null, deleteError: null })),
     openIssue: number => onOpenIssue(number),
+    openConversation: ({ sessionId, messageId }) => onOpenConversation?.({ sessionId, messageId }),
     askDelete: number => model.update(state => ({ ...state, dialog: { number }, deleteError: null })),
     cancelDelete: () => model.update(state => (state.deleting ? state : { ...state, dialog: null, deleteError: null })),
     confirmDelete: () => {
