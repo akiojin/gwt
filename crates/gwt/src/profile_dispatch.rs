@@ -49,10 +49,11 @@ pub fn migrate_environment_assignments<'a>(
         .into_iter()
         .map(|root| gwt_core::paths::project_scope_hash(root).to_string())
         .collect();
-    Settings::update_at_path(path, |settings| {
-        settings
-            .profiles
-            .migrate_environment_assignments(keys.iter().map(String::as_str));
+    if keys.is_empty() {
+        return Ok(());
+    }
+    Settings::update_project_environment_assignments(path, |profiles| {
+        profiles.migrate_environment_assignments(keys.iter().map(String::as_str));
         Ok(())
     })?;
     Ok(())
@@ -65,12 +66,13 @@ pub fn register_environment_project(path: &Path, root: &Path) -> Result<(), Prof
         .profiles
         .project_environments
         .as_ref()
-        .is_none_or(|assignments| assignments.contains_key(&key))
+        .is_some_and(|assignments| assignments.contains_key(&key))
     {
         return Ok(());
     }
-    Settings::update_at_path(path, |settings| {
-        settings.profiles.register_environment_project(&key);
+    Settings::update_project_environment_assignments(path, |profiles| {
+        profiles.migrate_environment_assignments([]);
+        profiles.register_environment_project(&key);
         Ok(())
     })?;
     Ok(())
@@ -83,15 +85,16 @@ pub fn project_environment_set(
     let key = gwt_core::paths::project_scope_hash(root).to_string();
     let result = config_path().and_then(|path| {
         let error = change.and_then(|name| {
-            Settings::update_at_path(&path, |settings| {
-                settings
-                    .profiles
+            Settings::update_project_environment_assignments(&path, |profiles| {
+                profiles
                     .assign_environment(&key, name.as_deref())
                     .map_err(|reason| gwt_config::ConfigError::ValidationError { reason })
             })
             .err()
         });
-        Ok((load_settings_or_default(&path)?, error))
+        let mut settings = load_settings_or_default(&path)?;
+        settings.profiles.normalize_active_profile();
+        Ok((settings, error))
     });
     let (names, assigned, error) = match result {
         Ok((settings, error)) => (
