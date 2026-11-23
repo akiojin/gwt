@@ -52138,7 +52138,7 @@ mod tests {
         monitor.terminal_queue_push(&[1, 2], "operator", now);
         for number in [1, 2] {
             monitor.record_candidate(issue(number));
-            monitor.complete_active_launch_at(number, &format!("tab::agent-{number}"), now);
+            monitor.complete_active_launch_at(number, format!("tab::agent-{number}"), now);
         }
         assert!(monitor.active_launches.contains(&1) && monitor.active_launches.contains(&2));
 
