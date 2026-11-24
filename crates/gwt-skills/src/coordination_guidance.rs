@@ -622,6 +622,12 @@ heavy verification command. The order is build → `verify.plan` → `verify.run
 build the checkout binary without holding or waiting for any lease, and only
 then run canonical verification through it.
 
+Identity comes first: `pane.name` → `workspace.ensure` → `cargo build -p gwt --bin gwtd`.
+The Workspace identity gate refuses every other command, the bootstrap build
+included, until `workspace.ensure` succeeds, so run that first `pane.name` and
+`workspace.ensure` through the resolved installed gwtd. The checkout-binary
+rule below applies from the build onward.
+
 Decide first whether the checkout binary is needed. Only operations that
 execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
 `verify.*`, and any operation added in the checkout. Read-only `issue.*`,
@@ -1032,6 +1038,12 @@ gwtd をソースから build する checkout（gwt リポジトリ自身）で�
 検証コマンドではありません。順序は build → `verify.plan` → `verify.run` です。
 lease を保持・待機せずに checkout binary を build し、その後にはじめて
 canonical 検証をその binary で実行します。
+
+identity が最初です: `pane.name` → `workspace.ensure` → `cargo build -p gwt --bin gwtd`。
+Workspace identity gate は `workspace.ensure` が成功するまで bootstrap build を
+含む他のすべてのコマンドを拒否するため、最初の `pane.name` と `workspace.ensure`
+は解決済みの installed gwtd で実行します。下記の checkout binary の規則は
+build 以降に適用されます。
 
 先に checkout binary が必要かを判断します。必要なのは checkout のコードを
 実行する operation だけです: `execution.*`、`workspace.*`、`build.*`、
@@ -1517,6 +1529,9 @@ mod tests {
         assert!(SKILL_BODY_JA.contains("canonical `verify.run` だけ"));
     }
 
+    const BOOTSTRAP_IDENTITY_FIRST: &str =
+        "`pane.name` \u{2192} `workspace.ensure` \u{2192} `cargo build -p gwt --bin gwtd`";
+
     /// Issue #4352 AC-1 / AC-3: the gwtd bootstrap order is defined once in
     /// the canonical source, names which operations need the checkout
     /// binary, and reaches both generated mirrors byte-identically.
@@ -1547,6 +1562,15 @@ mod tests {
         }
         assert!(SKILL_BODY_EN.contains("lease-free bootstrap step"));
         assert!(SKILL_BODY_JA.contains("lease \u{4e0d}\u{8981}\u{306e} bootstrap step"));
+        // Issue #7335 (#6252): the identity gate refuses the bootstrap build
+        // until `workspace.ensure` succeeds, so the documented order must put
+        // identity first and route it through the installed gwtd.
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA, &render_contract()] {
+            assert!(
+                body.contains(BOOTSTRAP_IDENTITY_FIRST),
+                "bootstrap order must set identity before the build"
+            );
+        }
 
         let tmp = TempDir::new().unwrap();
         generate_coordination_guidance(tmp.path()).unwrap();
