@@ -268,10 +268,12 @@ fn resume_candidate(
         return Err(not_yours());
     }
     let eligible = if admitted {
-        // The tool may finish before the Agent's busy pane becomes idle.
+        // Only a live attempt can have an abandoned caller. Once completed,
+        // the tool already returned its result; a later idle pane is the
+        // caller finishing its task, not waiting on this attempt (#5993).
         matches!(
             record.status,
-            AttemptStatus::Waiting | AttemptStatus::Running | AttemptStatus::Completed
+            AttemptStatus::Waiting | AttemptStatus::Running
         )
     } else {
         record.status == AttemptStatus::Deferred
@@ -699,6 +701,27 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "explicit cancellation must suppress resume after admission interruption"
+        );
+    }
+
+    #[test]
+    fn admitted_resume_stops_once_the_attempt_completes() {
+        let repo = tempfile::tempdir().unwrap();
+        let key = TargetKey::verification("mine", "worktree");
+        let commands = vec!["cargo test --workspace".to_string()];
+        let attempt =
+            begin_for_caller(repo.path(), "mine", &authority(), &key, &commands, "token").unwrap();
+        assert_eq!(
+            admitted_resume_candidate(repo.path(), attempt.id(), "token", "mine").unwrap(),
+            Some(commands),
+            "a live admitted attempt may still wake an idle caller"
+        );
+        trusted_store::with_write_lease(repo.path(), || attempt.complete_under_lease()).unwrap();
+        assert!(
+            admitted_resume_candidate(repo.path(), attempt.id(), "token", "mine")
+                .unwrap()
+                .is_none(),
+            "#5993: a completed attempt already returned its result; a later idle pane must not get the admitted notice"
         );
     }
 
