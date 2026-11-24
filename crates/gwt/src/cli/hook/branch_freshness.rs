@@ -704,6 +704,7 @@ mod tests {
 
     #[test]
     fn codex_without_an_exit_status_gets_a_recovery_that_can_record_one() {
+        let _lock = gwt_core::test_support::env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(dir.path().join("home"));
         let repo = dir.path().join("repository with spaces");
