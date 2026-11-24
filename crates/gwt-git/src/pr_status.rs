@@ -4260,6 +4260,18 @@ pub fn try_fetch_pr_diff(
     try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
 }
 
+pub fn try_fetch_pr_diff_in_repository(
+    repo_path: &Path,
+    repository: &str,
+    number: u64,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, |path, args| {
+        let args = pinned_pr_command_args(Some(repository), args);
+        run_gh_command(path, &args.iter().map(String::as_str).collect::<Vec<_>>())
+    })
+}
+
 fn try_fetch_pr_diff_with<F>(
     repo_path: &Path,
     number: u64,

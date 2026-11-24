@@ -500,6 +500,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["issue.monitor.review-verdict"],
     },
     Operation {
+        name: "issue.monitor.review_merged_evidence",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.schedule.read",
         aliases: &[],
     },
