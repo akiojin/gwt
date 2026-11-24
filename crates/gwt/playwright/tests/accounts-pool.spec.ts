@@ -57,6 +57,13 @@ if [ "$1" = login ]; then
 fi
 exec "$(dirname "$0")/codex-recorder" "$@"
 `);
+      await writeFixtureNodeCommand(bin, "gh", `#!/bin/sh
+if [ "$1" = copilot ] && [ "$2" = --version ]; then
+  echo 'GitHub Copilot CLI 1.0.113'
+  exit 0
+fi
+exit 1
+`);
       await writeFile(join(home, ".codex", "auth.json"), authFixture("default"));
     },
   });
@@ -100,7 +107,15 @@ exec "$(dirname "$0")/codex-recorder" "$@"
     const provider = add.getByRole("combobox", { name: "Provider" });
     await expect(provider.locator('option[value="agy"]')).toBeDisabled();
     await expect(add.getByRole("list", { name: "Providers that cannot be added" })).toContainText("Antigravity");
+    if (process.platform === "darwin") {
+      await expect(provider.locator('option[value="gh"]')).toBeEnabled();
+      await provider.selectOption("gh");
+      await expect(add.getByLabel("GitHub login")).toBeVisible();
+      await expect(add.getByLabel("Fine-grained personal access token")).toHaveAttribute("type", "password");
+      await expect(add.getByRole("button", { name: "Save Copilot account" })).toBeVisible();
+    }
     await provider.selectOption("codex");
+    await expect(add.getByLabel("Fine-grained personal access token")).toHaveCount(0);
     await add.getByRole("button", { name: "Open login terminal" }).click();
     const terminal = page.getByRole("dialog", { name: /^Login terminal/ });
     const input = terminal.locator(".xterm-helper-textarea");

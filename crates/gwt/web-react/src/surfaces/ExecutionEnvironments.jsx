@@ -4,7 +4,7 @@ import { focusElement } from "../hosts/focus.js";
 import { fillLegacySlot } from "../hosts/legacy-slot.js";
 import { localTimeLabel } from "./time-labels.js";
 import { AddEnvironment, DeleteEnvironment, EditEnvironment } from "./ExecutionEnvironmentForms.jsx";
-import { AccountLogin, AccountSessions, AddPoolAccount, DeletePoolAccount } from "./AccountPool.jsx";
+import { AccountLogin, AccountSessions, AddPoolAccount, CopilotSignIn, DeletePoolAccount } from "./AccountPool.jsx";
 
 // Execution environments (Issue #7648, SPEC #7007 T-030; Issue #7741). The
 // landing view lists the environments agents run on, as the backend defines
@@ -141,13 +141,17 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
 
 function Accounts({
   model, headingRef, onNavigate, onOpenToolManagement, onAddPoolAccount, onSignInPoolAccount,
-  onUsePoolAccount, onMovePoolAccount, onDeletePoolAccount, onResumeNextPoolAccount, onMountLoginTerminal, onCloseLogin,
+  onUsePoolAccount, onMovePoolAccount, onDeletePoolAccount, onResumeNextPoolAccount, onMountLoginTerminal, onCloseLogin, onSaveCopilotAccount,
 }) {
   const accounts = model.accounts || [];
   const [dialog, setDialog] = useState(null);
   const deleting = accounts.find(account => account.id === dialog?.accountId);
   const login = model.login;
   const closeDialog = () => setDialog(null);
+  const saveCopilot = (id, login, token) => {
+    closeDialog();
+    onSaveCopilotAccount(id, login, token);
+  };
   useEffect(() => { if (login) setDialog(null); }, [login]);
   return (
     <>
@@ -196,7 +200,9 @@ function Accounts({
                     onClick={() => onUsePoolAccount(account.id)}>Use this account</button>
                   {account.canSignIn ? (
                     <button type="button" aria-label={`Sign in to ${account.name}`} disabled={model.saving}
-                      onClick={() => onSignInPoolAccount(account.id)}>{account.signedIn ? "Sign in again" : "Sign in"}</button>
+                      onClick={() => account.tool === "gh"
+                        ? setDialog({ kind: "copilot", accountId: account.id })
+                        : onSignInPoolAccount(account.id)}>{account.signedIn ? "Sign in again" : "Sign in"}</button>
                   ) : null}
                   <button type="button" aria-label={`Move ${account.name} up`} disabled={!account.canMoveUp || model.saving}
                     onClick={() => onMovePoolAccount(account.id, "up")}>Up</button>
@@ -223,7 +229,9 @@ function Accounts({
         <AccountLogin login={login} account={accounts.find(account => account.id === login.accountId)}
           error={model.error} onMount={onMountLoginTerminal} onClose={onCloseLogin} />
       ) : dialog?.kind === "add" ? (
-        <AddPoolAccount options={model.poolProviders} saving={model.saving} error={model.error} onAdd={onAddPoolAccount} onDismiss={closeDialog} />
+        <AddPoolAccount options={model.poolProviders} saving={model.saving} error={model.error} onAdd={onAddPoolAccount} onSaveCopilot={saveCopilot} onDismiss={closeDialog} />
+      ) : deleting && dialog.kind === "copilot" ? (
+        <CopilotSignIn account={deleting} saving={model.saving} onSave={saveCopilot} onDismiss={closeDialog} />
       ) : deleting ? (
         <DeletePoolAccount account={deleting} onDismiss={closeDialog} onDelete={() => { closeDialog(); onDeletePoolAccount(deleting.id); }} />
       ) : null}
@@ -297,6 +305,7 @@ export function ExecutionEnvironments({
   onDelete = () => {},
   onAddPoolAccount = () => {},
   onSignInPoolAccount = () => {},
+  onSaveCopilotAccount = () => {},
   onMovePoolAccount = () => {},
   onUsePoolAccount = () => {},
   onDeletePoolAccount = () => {},
@@ -322,7 +331,7 @@ export function ExecutionEnvironments({
       {view.name === "accounts" ? (
         <Accounts
           model={model} headingRef={headingRef} onNavigate={onNavigate} onOpenToolManagement={onOpenToolManagement}
-          onAddPoolAccount={onAddPoolAccount} onSignInPoolAccount={onSignInPoolAccount}
+          onAddPoolAccount={onAddPoolAccount} onSignInPoolAccount={onSignInPoolAccount} onSaveCopilotAccount={onSaveCopilotAccount}
           onMovePoolAccount={onMovePoolAccount} onUsePoolAccount={onUsePoolAccount}
           onDeletePoolAccount={onDeletePoolAccount} onResumeNextPoolAccount={onResumeNextPoolAccount}
           onMountLoginTerminal={onMountLoginTerminal} onCloseLogin={onCloseLogin}

@@ -748,8 +748,88 @@ pub fn enroll_pool_account(tool: &str) -> io::Result<Account> {
         return Err(refusal.into());
     }
     let tool = tool_command(tool).expect("supported pool tool");
+    if tool == "gh" {
+        return Err(io::Error::other(
+            "Enter a fine-grained token in Accounts to add a Copilot account.",
+        ));
+    }
     adopt_default_accounts(&[&tool])?;
     mutate(|store| store.add_pool_account(&tool)).map(|(_, account)| account)
+}
+
+pub fn save_copilot_account(account_id: Option<&str>, login: &str, token: &str) -> io::Result<()> {
+    if let Some(refusal) = Store::pool_add_refusal("gh") {
+        return Err(refusal.into());
+    }
+    let identity = crate::account_homes::verify_copilot_enrollment(login, token)?;
+    if account_id.is_none() {
+        adopt_default_accounts(&["gh"])?;
+    }
+    save_verified_copilot_account(
+        account_id,
+        &identity,
+        token,
+        crate::account_homes::save_copilot_token,
+        crate::account_homes::remove_copilot_token,
+    )
+}
+
+fn save_verified_copilot_account(
+    account_id: Option<&str>,
+    identity: &str,
+    token: &str,
+    save_token: impl FnOnce(&str, &str, bool) -> io::Result<()>,
+    remove_token: impl FnOnce(&str),
+) -> io::Result<()> {
+    let mut created = None;
+    let result = mutate(|store| {
+        if let Some(id) = account_id {
+            let account = store
+                .account(id)
+                .filter(|account| account.tool == "gh" && account.credential_home.is_some())
+                .ok_or_else(|| io::Error::other("The managed Copilot account was not found."))?;
+            if account
+                .sign_in_identity
+                .as_deref()
+                .is_none_or(|expected| !expected.eq_ignore_ascii_case(identity))
+            {
+                return Err(io::Error::other(
+                    "Copilot authentication belongs to a different account.",
+                ));
+            }
+            return save_token(id, token, true);
+        }
+        if store.accounts.iter().any(|account| {
+            account.tool == "gh"
+                && account
+                    .sign_in_identity
+                    .as_deref()
+                    .is_some_and(|existing| existing.eq_ignore_ascii_case(identity))
+        }) {
+            return Err(io::Error::other(
+                "This Copilot account is already registered.",
+            ));
+        }
+        let account = store.add_pool_account("gh")?;
+        created = Some((account.id.clone(), false));
+        save_token(&account.id, token, false)?;
+        created = Some((account.id.clone(), true));
+        store
+            .accounts
+            .last_mut()
+            .expect("just added account")
+            .sign_in_identity = Some(identity.to_owned());
+        Ok(())
+    });
+    if result.is_err() {
+        if let Some((id, saved)) = created {
+            if saved {
+                remove_token(&id);
+            }
+            let _ = crate::account_homes::remove("gh", &id);
+        }
+    }
+    result.map(|_| ())
 }
 
 pub(crate) fn adopt_default_accounts(tools: &[&str]) -> io::Result<Store> {
@@ -1045,6 +1125,39 @@ mod tests {
             assert!(store.add_pool_account(tool).is_err());
         }
         assert_eq!(store, before);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copilot_enrollment_stores_only_the_verified_identity_in_definitions() {
+        const TOKEN: &str = "github_pat_FIXTURE_ONLY";
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        save_verified_copilot_account(
+            None,
+            "github.com/fixture-user",
+            TOKEN,
+            |id, token, replace| {
+                assert_eq!((id, token, replace), ("gh-2", TOKEN, false));
+                Ok(())
+            },
+            |_| panic!("successful enrollment must keep the Keychain item"),
+        )
+        .unwrap();
+        let store = load().unwrap();
+        assert_eq!(
+            store.accounts[0].sign_in_identity.as_deref(),
+            Some("github.com/fixture-user")
+        );
+        assert!(!fs::read_to_string(path()).unwrap().contains(TOKEN));
+        assert!(save_verified_copilot_account(
+            Some("gh-2"),
+            "github.com/different-user",
+            TOKEN,
+            |_, _, _| panic!("a different login must not replace the Keychain item"),
+            |_| panic!("a different login must not remove the Keychain item"),
+        )
+        .is_err());
     }
 
     #[test]

@@ -978,7 +978,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["add_pool_account", "sign_in_pool_account", "move_pool_account", "use_pool_account", "delete_pool_account",
+        if (["add_pool_account", "sign_in_pool_account", "save_copilot_account", "move_pool_account", "use_pool_account", "delete_pool_account",
               "resume_next_pool_account", "pool_account_login_input", "close_pool_account_login"].includes(message.kind) ||
             ["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||

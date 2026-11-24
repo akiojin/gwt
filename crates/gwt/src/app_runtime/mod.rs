@@ -12035,6 +12035,7 @@ impl AppRuntime {
             event @ (FrontendEvent::GetExecutionEnvironments
             | FrontendEvent::AddPoolAccount { .. }
             | FrontendEvent::SignInPoolAccount { .. }
+            | FrontendEvent::SaveCopilotAccount { .. }
             | FrontendEvent::MovePoolAccount { .. }
             | FrontendEvent::UsePoolAccount { .. }
             | FrontendEvent::DeletePoolAccount { .. }
@@ -13473,6 +13474,7 @@ impl AppRuntime {
             event @ (FrontendEvent::GetExecutionEnvironments
             | FrontendEvent::AddPoolAccount { .. }
             | FrontendEvent::SignInPoolAccount { .. }
+            | FrontendEvent::SaveCopilotAccount { .. }
             | FrontendEvent::MovePoolAccount { .. }
             | FrontendEvent::UsePoolAccount { .. }
             | FrontendEvent::DeletePoolAccount { .. }

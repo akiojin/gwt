@@ -497,7 +497,9 @@ impl AppRuntime {
                 for (row, account) in view.accounts.iter_mut().zip(&store.accounts) {
                     let sign_in = account_homes::pool_sign_in(account);
                     row.signed_in = sign_in.is_some();
-                    row.sign_in_identity = sign_in.and_then(|state| state.identity);
+                    row.sign_in_identity = sign_in
+                        .and_then(|state| state.identity)
+                        .or_else(|| account.sign_in_identity.clone());
                     row.sign_in_blocked_reason =
                         account_homes::pool_login_refusal(account).map(str::to_owned);
                     row.delete_blocked_reason = store
@@ -660,6 +662,19 @@ impl AppRuntime {
                         .account(&account_id)
                         .cloned()
                         .ok_or_else(|| "Account not found.".to_owned())
+                });
+            }
+            FrontendEvent::SaveCopilotAccount {
+                account_id,
+                login,
+                token,
+            } => {
+                return self.refresh_execution_environments_after(client_id, context, move || {
+                    environments::save_copilot_account(
+                        account_id.as_deref(),
+                        &login,
+                        token.expose(),
+                    )
                 });
             }
             FrontendEvent::PoolAccountLoginInput { login_id, data } => {
@@ -1056,6 +1071,19 @@ fn name_affected_agents(impact: &mut PoolAccountDeletionImpact, names: &HashMap<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copilot_enrollment_keeps_the_token_out_of_frontend_logs() {
+        let token = "github_pat_FIXTURE_ONLY";
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "save_copilot_account",
+            "login": "fixture-user",
+            "token": token,
+        }))
+        .unwrap();
+        assert!(!format!("{event:?}").contains(token));
+        assert!(super::super::frontend_user_action_log(&event).is_none());
+    }
 
     #[test]
     fn deleting_the_last_pool_account_lists_affected_sessions_and_agents() {

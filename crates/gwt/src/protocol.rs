@@ -534,6 +534,22 @@ pub enum PmRequestTaskResult {
     },
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct CopilotAccountToken(String);
+
+impl CopilotAccountToken {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CopilotAccountToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[redacted]")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -1284,6 +1300,12 @@ pub enum FrontendEvent {
     },
     SignInPoolAccount {
         account_id: String,
+    },
+    SaveCopilotAccount {
+        #[serde(default)]
+        account_id: Option<String>,
+        login: String,
+        token: CopilotAccountToken,
     },
     MovePoolAccount {
         account_id: String,

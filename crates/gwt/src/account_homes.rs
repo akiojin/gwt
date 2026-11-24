@@ -46,6 +46,7 @@ const COPILOT_ADOPTION_OVERRIDES: &[&str] = &[
     COPILOT_TOKEN_ENV,
     "COPILOT_GH_HOST",
     "COPILOT_HOME",
+    "COPILOT_API_URL",
     "COPILOT_PROVIDER_API_KEY",
     "COPILOT_PROVIDER_API_KEY_COMMAND",
     "COPILOT_PROVIDER_BASE_URL",
@@ -55,6 +56,7 @@ const COPILOT_ADOPTION_OVERRIDES: &[&str] = &[
     "GH_HOST",
     "GH_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
+    "GITHUB_COPILOT_API_TOKEN",
     "GITHUB_TOKEN",
     "XDG_CONFIG_HOME",
 ];
@@ -92,9 +94,8 @@ pub struct AccountLogin {
 pub(crate) fn pool_login_tool_refusal(tool: &str) -> Option<&'static str> {
     match resolve_agent_id(tool) {
         Some(AgentId::ClaudeCode | AgentId::Codex | AgentId::GrokBuild) => None,
-        Some(AgentId::Copilot) => {
-            Some("Copilot account enrollment requires secure Keychain-only device sign-in.")
-        }
+        Some(AgentId::Copilot) if cfg!(target_os = "macos") => None,
+        Some(AgentId::Copilot) => Some("Adding Copilot accounts requires macOS Keychain."),
         _ => Some("This provider allows only one account."),
     }
 }
@@ -102,7 +103,10 @@ pub(crate) fn pool_login_tool_refusal(tool: &str) -> Option<&'static str> {
 pub fn pool_login_refusal(
     account: &crate::execution_environments::Account,
 ) -> Option<&'static str> {
-    pool_login_tool_refusal(&account.tool)
+    pool_login_tool_refusal(&account.tool).or_else(|| {
+        (account.tool == "gh" && account.credential_home.is_none())
+            .then_some("Manage the default account in Copilot CLI.")
+    })
 }
 
 pub fn login_command(account: &crate::execution_environments::Account) -> io::Result<AccountLogin> {
@@ -117,6 +121,12 @@ pub fn login_command(account: &crate::execution_environments::Account) -> io::Re
             &["login", "--device-auth"],
             &["GROK_API_KEY", "XAI_API_KEY", "XAI_BASE_URL"],
         ),
+        AgentId::Copilot => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Enter a fine-grained token in Accounts to sign in to Copilot.",
+            ));
+        }
         _ => unreachable!("supported pool tool"),
     };
     let home_key = home_env_key(&account.tool).expect("supported pool tool");
@@ -420,43 +430,86 @@ fn confirm_copilot_identity(
     Ok(token)
 }
 
-#[cfg(target_os = "macos")]
-fn keychain_copilot_token(account_id: &str) -> Option<String> {
-    if cfg!(test)
-        || gwt_config::home::gwt_home_override().is_some()
-        || !normal_component(account_id)
-    {
-        return None;
-    }
-    let output = spawn_logged_blocking_with_deadline(
-        &process_console::global(),
-        ProcessKind::AgentBootstrap,
-        "/usr/bin/security",
-        &[
-            "find-generic-password",
-            "-s",
-            COPILOT_KEYCHAIN_SERVICE,
-            "-a",
-            account_id,
-            "-w",
-        ],
-        SpawnOptions::new("Read Copilot account credential")
-            .capture(true, false)
-            .forward_output(false),
-        Instant::now() + PROBE_TIMEOUT,
-    )
-    .ok()?;
-    if !output.success() {
-        return None;
-    }
-    let token = output.stdout.trim().to_owned();
-    (!token.is_empty()).then_some(token)
+pub(crate) fn verify_copilot_enrollment(login: &str, token: &str) -> io::Result<String> {
+    let cwd = user_home()?;
+    let removals: Vec<_> = COPILOT_ADOPTION_OVERRIDES
+        .iter()
+        .map(|key| (*key).into())
+        .collect();
+    let executable = copilot_executable(&HashMap::new(), &removals, &cwd)
+        .ok_or_else(|| io::Error::other("Install Copilot CLI before adding a Copilot account."))?;
+    let probe_home = tempfile::tempdir()?;
+    let path = probe_home
+        .path()
+        .to_str()
+        .ok_or_else(|| io::Error::other("Copilot probe path is not valid Unicode."))?;
+    let env = HashMap::from([
+        ("COPILOT_HOME".into(), path.into()),
+        ("GH_CONFIG_DIR".into(), path.into()),
+    ]);
+    copilot_enrollment_identity(login, token, |token| {
+        copilot_status(&executable, Some(token), &env, &removals, &cwd)
+    })
 }
+
+fn copilot_enrollment_identity(
+    login: &str,
+    token: &str,
+    probe: impl FnOnce(&str) -> Option<String>,
+) -> io::Result<String> {
+    let login = login.trim();
+    if login.is_empty()
+        || login.len() > 39
+        || !login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(io::Error::other("Enter a valid GitHub login."));
+    }
+    if !token.strip_prefix("github_pat_").is_some_and(|body| {
+        !body.is_empty()
+            && body.len() <= 256
+            && body
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }) {
+        return Err(io::Error::other(
+            "Enter a fine-grained GitHub personal access token.",
+        ));
+    }
+    let identity = format!("github.com/{}", login.to_ascii_lowercase());
+    let actual =
+        probe(token).ok_or_else(|| io::Error::other("Could not verify the Copilot account."))?;
+    if !identity.eq_ignore_ascii_case(&actual) {
+        return Err(io::Error::other(
+            "Copilot authentication belongs to a different account.",
+        ));
+    }
+    Ok(identity)
+}
+
+#[cfg(target_os = "macos")]
+mod copilot_keychain;
+
+#[cfg(target_os = "macos")]
+pub(crate) use copilot_keychain::{
+    read as keychain_copilot_token, remove as remove_copilot_token, save as save_copilot_token,
+};
 
 #[cfg(not(target_os = "macos"))]
 fn keychain_copilot_token(_account_id: &str) -> Option<String> {
     None
 }
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn save_copilot_token(_id: &str, _token: &str, _replace: bool) -> io::Result<()> {
+    Err(io::Error::other(
+        "Adding Copilot accounts requires macOS Keychain.",
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn remove_copilot_token(_id: &str) {}
 
 fn copilot_executable(
     env: &HashMap<String, String>,
@@ -575,7 +628,9 @@ async fn copilot_status_rpc(
         .env("GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS", "false")
         .env("GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP", "false");
     if let Some(token) = token {
-        request = request.env(COPILOT_TOKEN_ENV, token);
+        request = request
+            .args([format!("--secret-env-vars={COPILOT_TOKEN_ENV}")])
+            .env(COPILOT_TOKEN_ENV, token);
     }
     // The gh wrapper downloads a missing executable. Probing the same
     // already available binary avoids installation during startup.
@@ -1061,6 +1116,29 @@ mod tests {
         assert_eq!(
             confirm_copilot_identity("alice", Some(DUMMY_TOKEN.into()), |_| None),
             Err("Could not verify the Copilot account")
+        );
+    }
+
+    #[test]
+    fn copilot_enrollment_binds_a_fine_grained_token_to_the_selected_login() {
+        const TOKEN: &str = "github_pat_FIXTURE_ONLY";
+        assert_eq!(
+            copilot_enrollment_identity("Fixture-User", TOKEN, |token| {
+                assert_eq!(token, TOKEN);
+                Some("github.com/fixture-user".into())
+            })
+            .unwrap(),
+            "github.com/fixture-user"
+        );
+        assert!(copilot_enrollment_identity("fixture-user", TOKEN, |_| {
+            Some("github.com/another-user".into())
+        })
+        .is_err());
+        assert!(
+            copilot_enrollment_identity("fixture-user", "ghp_fixture", |_| {
+                panic!("classic PAT must not reach the authentication probe")
+            })
+            .is_err()
         );
     }
 

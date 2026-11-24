@@ -47,6 +47,8 @@ Agent workspace を materialize するために worktree を使いますが、�
   かかわらずこの順で決まった実行環境のツールで始まります。
   Accounts はサインイン済みの既定アカウントを取り込みます。**Add account** を選ぶと、
   Claude Code、Codex、Grok Build の追加アカウント用にログインターミナルが開きます。
+  macOS で GitHub Copilot を追加する場合は、GitHub ログイン名と Copilot Requests 権限付きの
+  fine-grained personal access token を入力します。gwt は認証主体を照合し、トークンを macOS Keychain に保存します。
   サインインが確認できるまではセッションの選択対象から外れます。再サインイン、
   優先順の変更、プールからの削除もここで行えます。**Use this account** を選ぶと、
   次の開始・再開からそのアカウントを最初に試します。稼働中のセッションや PM では、

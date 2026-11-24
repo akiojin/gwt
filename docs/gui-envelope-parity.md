@@ -153,6 +153,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `GetExecutionEnvironments` | 読み取り | — | 実行環境の定義、アカウント、開いているプロジェクトの優先度リストを取得する。 |
 | `AddPoolAccount` | 対象外 | — | 追加アカウントを登録してブラウザ専用のサインインターミナルを開く（Issue #7842）。 |
 | `SignInPoolAccount` | 対象外 | — | 既存アカウントのサインインターミナルを開く（Issue #7842）。 |
+| `SaveCopilotAccount` | 対象外 | — | 認証主体を確認して Copilot の PAT を macOS Keychain に保存する。入力値は操作ログから除外する（Issue #7842）。 |
 | `MovePoolAccount` | 対象外 | — | 同じプロバイダー内でアカウントの優先順を変更する（Issue #7842）。 |
 | `UsePoolAccount` | 対象外 | — | サインイン済みのアカウントをプールの先頭に移す（Issue #7842）。 |
 | `DeletePoolAccount` | 対象外 | — | 確認画面を経て追加アカウントをプールから削除する（Issue #7842）。 |

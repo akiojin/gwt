@@ -38,14 +38,62 @@ function AccountDialog({ title, initialFocus, onDismiss, terminal = false, child
   );
 }
 
-export function AddPoolAccount({ options, saving, error, onAdd, onDismiss }) {
+function CopilotTokenFields({ login }) {
+  return (
+    <>
+      <label className="exec-env__field">
+        <span>GitHub login</span>
+        <input name="login" defaultValue={login} readOnly={Boolean(login)}
+          autoComplete="off" maxLength={39} required />
+      </label>
+      <label className="exec-env__field">
+        <span>Fine-grained personal access token</span>
+        <input name="token" type="password" autoComplete="off" spellCheck={false} maxLength={267} required />
+      </label>
+      <p className="exec-env__hint">Grant the token the Copilot Requests permission. gwt checks the GitHub login and saves the token in macOS Keychain.</p>
+    </>
+  );
+}
+
+function submitCopilot(form, callback) {
+  const login = form.querySelector('[name="login"]').value;
+  const token = form.querySelector('[name="token"]').value;
+  form.reset();
+  callback(login, token);
+}
+
+export function CopilotSignIn({ account, saving, onSave, onDismiss }) {
+  const login = account.signInIdentity?.split("/")[1];
+  return (
+    <AccountDialog title={`Sign in to ${account.name}`} initialFocus={login ? '[name="token"]' : '[name="login"]'} onDismiss={onDismiss}>
+      <form onSubmit={event => {
+        event.preventDefault();
+        if (!saving) submitCopilot(event.currentTarget, (login, token) => onSave(account.id, login, token));
+      }}>
+        <div className="modal-body"><CopilotTokenFields login={login} /></div>
+        <div className="modal-footer">
+          <button type="button" className="text-button" onClick={onDismiss}>Cancel</button>
+          <button type="submit" className="wizard-button primary" disabled={saving}>Save Copilot account</button>
+        </div>
+      </form>
+    </AccountDialog>
+  );
+}
+
+export function AddPoolAccount({ options, saving, error, onAdd, onSaveCopilot, onDismiss }) {
   const [chosen, choose] = useState(null);
   const allowed = options.filter(option => !option.blocked_reason);
   const blocked = options.filter(option => option.blocked_reason);
   const tool = allowed.find(option => option.tool === chosen) || allowed[0];
+  const copilot = tool?.tool === "gh";
   return (
     <AccountDialog title="Add an account" initialFocus={tool ? "select" : "[data-account-cancel]"} onDismiss={onDismiss}>
-      <form onSubmit={event => { event.preventDefault(); if (tool && !saving) onAdd(tool.tool); }}>
+      <form onSubmit={event => {
+        event.preventDefault();
+        if (!tool || saving) return;
+        if (copilot) submitCopilot(event.currentTarget, (login, token) => onSaveCopilot(null, login, token));
+        else onAdd(tool.tool);
+      }}>
         <div className="modal-body">
           <label className="exec-env__field">
             <span>Provider</span>
@@ -57,6 +105,7 @@ export function AddPoolAccount({ options, saving, error, onAdd, onDismiss }) {
               ))}
             </select>
           </label>
+          {copilot ? <CopilotTokenFields /> : null}
           {blocked.length ? (
             <ul className="exec-env__reasons" aria-label="Providers that cannot be added">
               {blocked.map(option => (
@@ -69,7 +118,7 @@ export function AddPoolAccount({ options, saving, error, onAdd, onDismiss }) {
         <div className="modal-footer">
           <button type="button" className="text-button" data-account-cancel onClick={onDismiss}>Cancel</button>
           <button type="submit" className="wizard-button primary" disabled={!tool || saving}>
-            {saving ? "Opening terminal…" : "Open login terminal"}
+            {copilot ? "Save Copilot account" : saving ? "Opening terminal…" : "Open login terminal"}
           </button>
         </div>
       </form>

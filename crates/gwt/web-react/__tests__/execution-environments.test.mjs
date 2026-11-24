@@ -98,6 +98,7 @@ async function mount(snapshot, {
     onDelete: id => calls.deleted.push(id),
     onAddPoolAccount: tool => calls.pool.push(["add", tool]),
     onSignInPoolAccount: id => calls.pool.push(["sign-in", id]),
+    onSaveCopilotAccount: (...values) => calls.pool.push(["save-copilot", ...values]),
     onMovePoolAccount: (id, direction) => calls.pool.push(["move", id, direction]),
     onUsePoolAccount: id => calls.pool.push(["use", id]),
     onDeletePoolAccount: id => calls.pool.push(["delete", id]),
@@ -108,6 +109,29 @@ async function mount(snapshot, {
     item.textContent.trim() === label || item.getAttribute("aria-label") === label);
   return { document, model, calls, click, button, focused };
 }
+
+test("Copilot enrollment uses a masked token input instead of a login terminal", async () => {
+  const { document, click, button, calls } = await mount({ accounts: [] }, {
+    view: { name: "accounts", key: null },
+    extra: { poolProviders: [{ tool: "gh", tool_name: "GitHub Copilot" }] },
+  });
+  await click(button("Add an account"));
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.ok(dialog.querySelector('input[name="login"]'));
+  assert.equal(dialog.querySelector('input[name="token"]').type, "password");
+  assert.ok(button("Save Copilot account"));
+  assert.equal(button("Open login terminal"), undefined);
+  const token = dialog.querySelector('input[name="token"]');
+  const form = dialog.querySelector("form");
+  form.reset = () => { token.value = ""; };
+  dialog.querySelector('input[name="login"]').value = "fixture-user";
+  token.value = "github_pat_FIXTURE_ONLY";
+  await act(async () => {
+    form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  });
+  assert.equal(token.value, "");
+  assert.deepEqual(calls.pool, [["save-copilot", null, "fixture-user", "github_pat_FIXTURE_ONLY"]]);
+});
 
 test("account management shows pending sign-in, pool order and affected sessions before deletion", async () => {
   const view = {

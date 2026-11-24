@@ -958,10 +958,12 @@ test("account login input belongs to its current connection and is never replaye
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
   const input = { kind: "pool_account_login_input", login_id: "fixture-login", data: "fixture" };
+  const copilot = { kind: "save_copilot_account", login: "fixture-user", token: "github_pat_FIXTURE_ONLY" };
   assert.equal(context.send(input), "unavailable");
+  assert.equal(context.send(copilot), "unavailable");
   assert.deepEqual(context.pendingMessages, []);
   sockets.at(-1).open();
-  assert.equal(sockets.at(-1).sent.some(event => event.kind === input.kind), false);
+  assert.equal(sockets.at(-1).sent.some(event => [input.kind, copilot.kind].includes(event.kind)), false);
   assert.equal(context.send(input), "sent");
   assert.deepEqual(sockets.at(-1).sent.at(-1), input);
 });

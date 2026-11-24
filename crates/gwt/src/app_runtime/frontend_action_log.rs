@@ -906,6 +906,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::GetExecutionEnvironments
         | FrontendEvent::AddPoolAccount { .. }
         | FrontendEvent::SignInPoolAccount { .. }
+        | FrontendEvent::SaveCopilotAccount { .. }
         | FrontendEvent::MovePoolAccount { .. }
         | FrontendEvent::UsePoolAccount { .. }
         | FrontendEvent::DeletePoolAccount { .. }
