@@ -6210,7 +6210,7 @@ pub fn autonomous_eligibility(
             gwt_git::branch_protection::BranchProtectionStatus::Unreadable(detail) => {
                 format!("branch protection could not be verified (permissions): {detail}")
             }
-            _ => "branch protection absent or structurally insufficient".to_string(),
+            _ => "branch protection absent or structurally insufficient: the base branch needs at least one required status check (repository.required_checks.update) and force pushes disabled (repository.branch_protection.update with allow_force_pushes:false)".to_string(),
         };
         return EligibilityDecision::NotReady(reason);
     }
@@ -47358,10 +47358,23 @@ mod tests {
             other => panic!("expected NotReady, got {other:?}"),
         }
         match autonomous_eligibility(true, true, &ok, &absent, false) {
-            EligibilityDecision::NotReady(reason) => assert!(
-                reason.contains("branch protection"),
-                "names branch protection: {reason}"
-            ),
+            EligibilityDecision::NotReady(reason) => {
+                assert!(
+                    reason.contains("branch protection"),
+                    "names branch protection: {reason}"
+                );
+                // Issue #7311: the reason names the checked conditions and the
+                // canonical operations that clear them, so the PM does not
+                // guess at unrelated protection fields.
+                for needle in [
+                    "required status check",
+                    "force pushes",
+                    "repository.required_checks.update",
+                    "repository.branch_protection.update",
+                ] {
+                    assert!(reason.contains(needle), "names {needle}: {reason}");
+                }
+            }
             other => panic!("expected NotReady, got {other:?}"),
         }
         match autonomous_eligibility(true, true, &ok, &unreadable, false) {

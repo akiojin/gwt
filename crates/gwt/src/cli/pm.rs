@@ -356,6 +356,12 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         "Use a recorded scoped instruction_id or pm.approval.request; only develop/main required check contexts change",
     ),
     (
+        "repository.branch_protection.update",
+        r#"{}"#,
+        CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request; only typed develop/main protection toggles change (allow_force_pushes, required_conversation_resolution, enforce_admins, strict)",
+    ),
+    (
         "update.settings.set", r#"{}"#, CapabilityGapReason::Permission,
         "Use a recorded scoped instruction_id or pm.approval.request; changes the app-wide Settings preference",
     ),
