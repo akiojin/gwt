@@ -1313,6 +1313,14 @@ are kept by default because their rebuild lands on whoever opens them next.
 Running worktrees, the main worktree, the calling worktree, and the worktree
 hosting the running `gwtd` are never touched, whatever the flags say.
 
+To remove the worktrees themselves, use `worktree.remove_merged`. It removes
+each `work/*` worktree whose HEAD is merged into `origin/<base>`, that has no
+uncommitted or untracked changes, and that has neither a running process nor a
+live gwt launch, together with its local branch. An unqualified call is a dry
+run listing the candidates and every kept worktree with its reason; pass
+`dry_run: false` to remove and `branches: [...]` to limit the sweep. Shared
+base-branch workspaces and the same protected worktrees are never removed.
+
 Automatic low-disk GC reclaims merged idle caches first. If disk space still
 falls below the configured `[build_artifact_gc]` thresholds, it then reclaims
 idle unmerged caches, checking disk space before each one. Live processes and

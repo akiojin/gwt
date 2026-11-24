@@ -1196,6 +1196,13 @@ Issueのcloseやcancelだけでは数えません。エージェントによる�
 場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
 実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
+worktree 自体を削除するには `worktree.remove_merged` を使います。HEAD が
+`origin/<base>` にマージ済みで、未コミット・未追跡の変更が無く、稼働中プロセスも
+live な gwt launch も無い `work/*` worktree を、そのローカルブランチごと削除します。
+引数無しの呼び出しは dry run で、候補と除外した worktree とその理由を報告します。
+削除するには `dry_run: false` を、対象を絞るには `branches: [...]` を渡します。
+共有の base ブランチ workspace と上記の保護対象 worktree は決して削除しません。
+
 低容量時の自動 GC は、マージ済みの idle キャッシュを先に回収します。それでも
 `[build_artifact_gc]` の設定閾値を下回る場合は、空き容量を1件ごとに確認しながら
 未マージの idle キャッシュを回収します。両段階とも生存プロセスと launch を保護します。
