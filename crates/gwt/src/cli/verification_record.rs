@@ -8241,7 +8241,7 @@ pub(crate) mod tests {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().unwrap();
-        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        crate::cli::trusted_store::init_cargo_repo_with_origin(dir.path());
         let git = |args: &[&str]| {
             let status = gwt_core::process::hidden_command("git")
                 .arg("-C")
@@ -8339,7 +8339,7 @@ pub(crate) mod tests {
         crate::cli::test_support::with_fake_gh("pre-pr-writer-probe", |worktree| {
             let home = tempfile::tempdir().unwrap();
             let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
-            crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+            crate::cli::trusted_store::init_cargo_repo_with_origin(worktree);
             assert!(gwt_core::process::hidden_command("git")
                 .current_dir(worktree)
                 .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
@@ -17877,7 +17877,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().expect("explicit plan diff repository");
-        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        crate::cli::trusted_store::init_cargo_repo_with_origin(dir.path());
         let git = |args: &[&str]| {
             let status = gwt_core::process::hidden_command("git")
                 .arg("-C")
