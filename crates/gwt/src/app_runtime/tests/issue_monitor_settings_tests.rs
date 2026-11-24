@@ -3363,3 +3363,134 @@ fn app_runtime_issue_monitor_launch_now_uses_owner_delivery_prompt() {
     );
     assert!(!ahead.contains("close Issue #3165 and finish"), "{ahead}");
 }
+
+/// Issue #7728 AC-1/AC-2: one project stop/start halts and resumes Issue
+/// Monitor assignment and the PM patrol together, from the Hub or the Project.
+#[test]
+fn app_runtime_project_autonomy_stops_and_starts_monitor_and_pm_together() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let roots = [temp.path().join("first"), temp.path().join("other")];
+    for root in &roots {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+        gwt::save_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(root),
+            &gwt::IssueMonitorPrefs {
+                launch_auto: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let tabs = roots
+        .iter()
+        .zip(["first", "other"])
+        .map(|(root, id)| sample_project_tab(id, id, root.clone(), ProjectKind::Git, &[]))
+        .collect();
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("first"));
+    let paused = |root: &std::path::Path| {
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(root))
+            .expect("PM prefs")
+            .settings
+            .paused
+    };
+    let autonomy = |runtime: &AppRuntime, key: &str| {
+        runtime
+            .hub_state_view()
+            .projects
+            .into_iter()
+            .find(|project| project.project_key == key)
+            .and_then(|project| project.autonomy)
+            .expect("hub reports project autonomy")
+    };
+    let other = runtime.project_context("other").unwrap();
+    let other_key = other.project_key.to_string();
+    assert!(!autonomy(&runtime, &other_key).pm_paused);
+
+    // The Hub stops the named Project: the PM patrol pauses with assignment.
+    let events = runtime.handle_frontend_event_in_scope(
+        "hub-client".into(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: Some(other_key.clone()),
+            running: false,
+        },
+        &ClientScope::Hub,
+    );
+    assert!(paused(&roots[1]), "project stop pauses the PM patrol");
+    assert!(!paused(&roots[0]), "other projects are untouched");
+    assert!(autonomy(&runtime, &other_key).pm_paused);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::HubState { .. })),
+        "the Hub list refreshes after a stop"
+    );
+
+    // A Project connection cannot steer another Project.
+    let first = runtime.project_context("first").unwrap();
+    runtime.handle_frontend_event_in_scope(
+        "first-client".into(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: Some(other_key.clone()),
+            running: true,
+        },
+        &ClientScope::Project(first.project_key.clone()),
+    );
+    assert!(paused(&roots[1]), "a foreign start is refused");
+
+    // Settings starts its own Project through the same operation.
+    runtime.handle_frontend_event_in_scope(
+        "other-client".into(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: None,
+            running: true,
+        },
+        &ClientScope::Project(other.project_key.clone()),
+    );
+    assert!(!paused(&roots[1]), "project start resumes the PM patrol");
+}
+
+/// Issue #7728: a start that cannot assign work yet (no launch profile) opens
+/// the profile setup and keeps the PM patrol stopped (fail closed).
+#[test]
+fn app_runtime_project_autonomy_start_without_profile_keeps_pm_stopped() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs::default(),
+    )
+    .unwrap();
+    gwt::pm_registry::set_pm_paused(&repo, true).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: None,
+            running: true,
+        },
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. } if message == "Issues settings opened"
+    )));
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .unwrap()
+            .settings
+            .paused,
+        "the PM stays stopped until assignment can start"
+    );
+}

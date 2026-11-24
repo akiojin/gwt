@@ -124,11 +124,9 @@ test("Issue #3165: missing saved settings explain why Start has not launched an 
     assert.equal(guidance.textContent,
       "Agent not started: no saved Agent settings. Save Agent settings, then select Start.");
   }
-  const cursor = sent.length;
-  body.querySelector('[data-action="monitor-toggle"]').click();
-  assert.deepEqual(sent.slice(cursor), [{ kind: "set_issue_monitor_enabled", enabled: true }]);
-  assert.equal(guidance.hidden, false, "opening settings is not monitoring success");
-  assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
+  // Issue #7728 AC-2: Start lives in the one project stop/start, not here.
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]'), null);
+  assert.equal(body.querySelector('[data-role="monitor-state"]').textContent, "Not assigning");
   surface.applyIssueMonitorStatus({ ...status, launch_profile_source: "saved" });
   assert.equal(guidance.hidden, true, "saving settings clears the recovery text");
   surface.applyIssueMonitorStatus({ ...status, launch_profile_source: "default", active_count: 1 });
@@ -1115,11 +1113,7 @@ test("Issue rows render monitor projections and send controls from the full cano
     '[data-action="monitor-capacity-auto"]',
   ]) assert.equal(body.querySelector(selector), null, `${selector} belongs in Settings`);
 
-  body.querySelector('[data-action="monitor-toggle"]').click();
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_enabled",
-    enabled: true,
-  });
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]'), null, "Issues has no own Start/Stop");
   body.querySelector('[data-action="monitor-autonomous"]').click();
   assert.deepEqual(sent.at(-1), {
     kind: "set_issue_monitor_autonomous_mode",
@@ -1143,7 +1137,7 @@ test("Issue rows render monitor projections and send controls from the full cano
   });
 
   assert.equal(monitorBand(body).text(), "Stopped | Queue 3 | Active 0 · 0 issues · PM 0");
-  assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
+  assert.equal(body.querySelector('[data-role="monitor-state"]').textContent, "Not assigning");
   // Issue #3561: the click above only sent the request; the switch still shows
   // the server state (Off) until a status confirms the change.
   assert.equal(
@@ -1239,15 +1233,13 @@ test("Issue #3561: Autonomous switch exposes aria-checked and shows server state
   assert.equal(toggle.getAttribute("aria-checked"), "true");
   assert.equal(stateWord(), "On");
 
-  // AC-5: Start/Stop is an action button (label = what the press does, state
-  // lives in the Issues band pill) and it does not move on click either.
-  const startStop = body.querySelector('[data-action="monitor-toggle"]');
-  assert.equal(startStop.textContent, "Start");
-  startStop.click();
-  assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_enabled", enabled: true });
-  assert.equal(startStop.textContent, "Start");
+  // Issue #7728 AC-2: assignment is a read-only state here; the project
+  // stop/start in Settings and the project list is the only action.
+  const assignment = body.querySelector('[data-role="monitor-state"]');
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]'), null);
+  assert.equal(assignment.textContent, "Not assigning");
   surface.applyIssueMonitorStatus(status(true, { enabled: true, state: "idle" }));
-  assert.equal(startStop.textContent, "Stop");
+  assert.equal(assignment.textContent, "Assigning");
   assert.equal(monitorBand(body).pill.textContent, "Waiting · Empty");
 });
 
@@ -1464,7 +1456,7 @@ test("Issue board has four queue columns, labelled controls and one filter row",
   assert.ok(controls.querySelector('[data-action="monitor-auto-refill"]'));
   assert.ok(controls.querySelector('[data-action="monitor-autonomous"]'));
   for (const [action, label] of [["monitor-auto-refill", "Auto-refill"], ["monitor-autonomous", "Autonomous"],
-    ["monitor-toggle", "Start"], ["monitor-settings", "Issues settings"]]) {
+    ["monitor-settings", "Issues settings"]]) {
     assert.ok(controls.querySelector(`[data-action="${action}"]`).textContent.includes(label), `${action} has a visible label`);
   }
 
@@ -1504,7 +1496,7 @@ test("AC-M1: approved header reads status, actions, then one filter row", async 
   limit.value="4";
   limit.dispatchEvent(new window.Event("change",{bubbles:true}));
   assert.deepEqual(sent.at(-1),{kind:"set_issue_monitor_max_active_agents",max_active_agents:4});
-  assert.equal(controls.querySelector('[data-action="monitor-toggle"]').classList.contains("destructive"),true);
+  assert.equal(controls.querySelector('[data-role="monitor-state"]').dataset.state,"running");
   limit.value="5";
   limit.dispatchEvent(new window.Event("input",{bubbles:true}));
   surface.applyIssueMonitorStatus({max_active_agents:3,max_active_agents_override:3});
@@ -1599,11 +1591,11 @@ test("Issue #6922: stopped Auto-refill explains Start beside the switch and in t
   assert.ok(hint(), "the stopped explanation is visible near Issues controls");
   assert.equal(hint().hidden, false);
   assert.equal(hint().getAttribute("role"), "status");
-  assert.equal(hint().textContent, "Start the Issues to begin Auto-refill.");
-  assert.match(empty().textContent, /Start the Issues to begin Auto-refill/);
+  assert.equal(hint().textContent, "Start the project to begin Auto-refill.");
+  assert.match(empty().textContent, /Start the project to begin Auto-refill/);
   surface.applyIssueMonitorStatus({enabled:true});
   assert.equal(hint().hidden, true);
-  assert.doesNotMatch(empty().textContent, /Start the Issues/);
+  assert.doesNotMatch(empty().textContent, /Start the project/);
   surface.applyIssueMonitorStatus({enabled:false,terminal_queue_auto_refill:false});
   assert.equal(hint().hidden, true);
   assert.match(empty().textContent, /turn on Auto-refill/);

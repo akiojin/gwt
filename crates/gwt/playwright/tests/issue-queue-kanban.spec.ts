@@ -119,7 +119,8 @@ test.describe("Issues touch navigation", () => {
       await page.setViewportSize({ width, height: 844 });
       const measured = await sizes();
       expect(measured.map(control => control.label)).toEqual(expect.arrayContaining(["Auto-refill", "Autonomous mode", "Agent limit", "Issues settings", "Refresh cached work items"]));
-      expect(measured).toHaveLength(9);
+      // Issue #7728: the Start/Stop button left with the project stop/start.
+      expect(measured).toHaveLength(8);
       for (const control of measured) {
         expect(control.width, `${control.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
         expect(control.height, `${control.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
@@ -706,6 +707,50 @@ test("Issue #5396 lazy preview retains DOM across unchanged list and detail repl
   await expect(detail.locator(".knowledge-detail-title")).toHaveText("Refreshed issue");
 });
 
+// Issue #7728 AC-1/AC-2: Settings stops and starts the project through the
+// same confirmation and the same operation as the Hub project list.
+test("Issue #7728 Settings stops and starts the project through the shared confirmation", async ({ page }, info) => {
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  const pm = (paused: boolean) => ({ kind: "pm_status", project_key: new URL(page.url()).pathname.split("/").filter(Boolean).at(-1),
+    available: true, paused, auto_start: true, configured_agent_id: "claude", loop_interval_secs: 60, is_running: true });
+  const sent = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) => message.kind === "set_project_autonomy"));
+  await page.locator('.issue-bridge-root [data-action="monitor-settings"]').click();
+  await expect(settings).toBeVisible();
+  const controls = settings.locator("[data-settings-issues-controls]");
+  const project = controls.locator('[data-settings-launch-action="project-autonomy"]');
+  const state = project.locator("[data-project-autonomy-state]");
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toHaveCount(0);
+  await page.evaluate(event => { (window as any).__queueStatus({ enabled: true, active_count: 1 }); (window as any).__queueEvent(event); }, pm(false));
+  await expect(state).toHaveText("Running");
+
+  const dialog = page.getByRole("dialog", { name: "Stop this project?" });
+  await project.getByRole("button", { name: "Stop…" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("New assignments and the Project Manager patrol stop now");
+  await expect(dialog).toContainText("A stop cannot be cancelled");
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  const path = info.outputPath(`project-stop-settings-${info.project.name}.png`);
+  await page.screenshot({ path });
+  await info.attach(`project-stop-settings-${info.project.name}`, { path, contentType: "image/png" });
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  expect(await sent()).toEqual([]);
+  await project.getByRole("button", { name: "Stop…" }).click();
+  await dialog.getByRole("button", { name: "Stop project" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await sent()).toEqual([{ kind: "set_project_autonomy", running: false }]);
+
+  // Stop pending is one-way; the project settles as Stopped once agents finish.
+  await page.evaluate(event => { (window as any).__queueStatus({ enabled: false, active_count: 1 }); (window as any).__queueEvent(event); }, pm(true));
+  await expect(state).toHaveText("Stop pending · 1 agent finishing");
+  await expect(project.getByRole("button")).toHaveCount(0);
+  await page.evaluate(() => (window as any).__queueStatus({ enabled: false, active_count: 0 }));
+  await expect(state).toHaveText("Stopped");
+  await project.getByRole("button", { name: "Start" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect((await sent()).at(-1)).toEqual({ kind: "set_project_autonomy", running: true });
+});
+
 test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280px and 400px", async ({ page }, info) => {
   const issues = page.locator('.workspace-window[data-preset="issue"]');
   const root = issues.locator(".issue-bridge-root");
@@ -749,7 +794,8 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
     await expect(controls.getByLabel(name, { exact: true })).toHaveCount(0);
   }
   await expect(controls.getByLabel("Autonomous", { exact: true })).toBeVisible();
-  await expect(controls.getByLabel("Monitoring", { exact: true })).toBeVisible();
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toHaveCount(0);
+  await expect(controls.locator('[data-settings-launch-action="project-autonomy"]')).toBeVisible();
   await expect(settings.locator('[data-settings-panel="system"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
   await expect(settings.locator('[data-settings-panel="issues"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
@@ -1354,7 +1400,7 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await page.mouse.move(1590, 1090);
   for (const selector of [
     '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
-    '[data-action="monitor-settings"]', '[data-action="monitor-toggle"]',
+    '[data-action="monitor-settings"]',
     '[data-action="monitor-autonomous"]',
   ]) {
     const target = page.locator(selector);

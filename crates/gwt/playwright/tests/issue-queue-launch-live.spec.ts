@@ -130,9 +130,15 @@ test.describe("Issue queue real backend launch", () => {
       expect(beforeStart.enabled).toBe(false);
       expect(Object.values(beforeStart.terminal_queues ?? {}).flatMap((queue: any) => queue.entries)).toEqual([]);
       await expect(page.locator('[data-role="monitor-refill-guidance"]')).toBeVisible();
-      await expect(page.locator('[data-queue-column="queued"] .knowledge-empty')).toContainText("Start the Issues to begin Auto-refill.");
+      await expect(page.locator('[data-queue-column="queued"] .knowledge-empty')).toContainText("Start the project to begin Auto-refill.");
+      // Issue #7728: Issues has no own Start; the project stop/start in Settings starts it.
+      await expect(controls.getByRole("button", { name:"Start", exact:true })).toHaveCount(0);
+      await controls.getByRole("button", { name:"Issues settings", exact:true }).click();
+      const projectStart = settings.locator('[data-settings-launch-action="project-autonomy"] [data-project-autonomy-action="start"]');
+      await expect(projectStart).toBeVisible();
       const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
-      await controls.getByRole("button", { name:"Start", exact:true }).click();
+      await projectStart.click();
+      await page.locator('[data-surface="issues"]').click();
       const firstScan = await page.waitForFunction(({ cursor, previousScan }) => {
         return ((window as any).__gwtPlaywrightMessages ?? []).find(({ sequence, payload }: any) =>
           sequence > cursor && payload.kind === "issue_monitor_status" && payload.status.enabled
