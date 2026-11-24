@@ -1931,6 +1931,8 @@ mod tests {
     fn byte_identical_moves_between_ui_paths_are_not_a_ui_surface() {
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        // derive refuses a checkout without a root Cargo.toml (no matrix).
+        write(dir.path(), "Cargo.toml", "[workspace]\n");
         write(dir.path(), "wireframes/home.html", "<main>home</main>\n");
         write(dir.path(), "app/globals.css", "body { margin: 0; }\n");
         git(dir.path(), &["add", "."]);
