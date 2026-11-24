@@ -284,6 +284,12 @@ pub enum OwnerCommand {
         cols: u16,
         rows: u16,
     },
+    SwitchExecutionAccount {
+        id: String,
+        incarnation: u64,
+        #[serde(default)]
+        deleted_account_id: Option<String>,
+    },
     LaunchAgent {
         id: String,
         operation_id: String,

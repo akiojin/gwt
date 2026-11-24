@@ -151,6 +151,15 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `LoadThemes` | 読み取り | — | テーマ画面に出す、プロジェクトのテーマ（sub-issue を持つ Issue）と今日の完了数を読む（Issue #7643）。 |
 | `DeleteTheme` | 対象外 | — | テーマを削除する（テーマの GitHub Issue を not planned で閉じる）。テーマ画面の確認ダイアログを経る操作に限る（Issue #7643）。 |
 | `GetExecutionEnvironments` | 読み取り | — | 実行環境の定義、アカウント、開いているプロジェクトの優先度リストを取得する。 |
+| `AddPoolAccount` | 対象外 | — | 追加アカウントを登録してブラウザ専用のサインインターミナルを開く（Issue #7842）。 |
+| `SignInPoolAccount` | 対象外 | — | 既存アカウントのサインインターミナルを開く（Issue #7842）。 |
+| `SaveCopilotAccount` | 対象外 | — | 認証主体を確認して Copilot の PAT を macOS Keychain に保存する。入力値は操作ログから除外する（Issue #7842）。 |
+| `MovePoolAccount` | 対象外 | — | 同じプロバイダー内でアカウントの優先順を変更する（Issue #7842）。 |
+| `UsePoolAccount` | 対象外 | — | サインイン済みのアカウントをプールの先頭に移す（Issue #7842）。 |
+| `DeletePoolAccount` | 対象外 | — | 確認画面を経て追加アカウントをプールから削除する（Issue #7842）。 |
+| `ResumeNextPoolAccount` | 対象外 | — | 対象のセッションのターン終了後に別のアカウントで再開する（Issue #7842）。 |
+| `PoolAccountLoginInput` | 対象外 | — | 操作元のブラウザ専用サインインターミナルへ入力する（Issue #7842）。 |
+| `ClosePoolAccountLogin` | 対象外 | — | 操作元のブラウザ専用サインインターミナルを閉じる（Issue #7842）。 |
 | `GetProjectEnvironmentSet` | 読み取り | — | プロジェクト設定に表示する環境変数セットの候補名と割り当てを取得する。 |
 | `SetProjectEnvironmentSet` | 対象外 | — | プロジェクト設定から、次のエージェント起動に使う環境変数セットの割り当てを保存する（Issue #7651）。 |
 | `AddExecutionEnvironment` | 対象外 | — | アカウントと経由ツールの組をホストに登録する。実行環境の画面からの操作に限る（Issue #7741）。 |

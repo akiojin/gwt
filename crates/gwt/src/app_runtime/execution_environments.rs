@@ -4,16 +4,38 @@
 //! with that project's Issues settings. This module builds the view the
 //! screens show and applies their requests.
 
+use std::{
+    io::Read,
+    sync::{mpsc, Arc},
+};
+
 use super::*;
+use base64::Engine;
+use gwt::account_homes;
 use gwt::execution_environments::{self as environments, Store};
 use gwt::protocol::{
     AccountSignInView, ExecutionAccountView, ExecutionEnvironmentProjectView,
     ExecutionEnvironmentViaOptionView, ExecutionEnvironmentView, ExecutionEnvironmentsView,
-    PmExecutionEnvironmentsView, ProjectExecutionEnvironmentView, ProjectExecutionEnvironmentsView,
+    PmExecutionEnvironmentsView, PoolAccountDeletionImpact, PoolAccountDirection,
+    PoolAccountProviderView, PoolAccountSessionView, PoolExecutionAccountView,
+    ProjectExecutionEnvironmentView, ProjectExecutionEnvironmentsView,
 };
 use gwt::ProjectExecutionEnvironment;
+use gwt_terminal::{pty::SpawnConfig, PtyHandle};
 
 const TOOLS_THAT_READ_THEIR_OWN_SETTINGS: [&str; 3] = ["hermes", "openclaw", "opencode"];
+const POOL_PROVIDER_CHOICES: [&str; 6] = ["claude", "codex", "grok", "gh", "agy", "qwen"];
+
+pub(crate) struct PoolAccountLoginTerminal {
+    id: String,
+    active: Option<ActivePoolAccountLogin>,
+}
+
+struct ActivePoolAccountLogin {
+    account_id: String,
+    pty: Arc<PtyHandle>,
+    input: mpsc::SyncSender<String>,
+}
 
 fn tool_name(tool: &str) -> String {
     gwt_agent::resolve_agent_id(tool).map_or_else(
@@ -85,6 +107,7 @@ pub(crate) fn execution_environments_view(
                         })
                     })
                     .collect(),
+                delete_impact: None,
             }
         })
         .collect();
@@ -146,6 +169,8 @@ pub(crate) fn execution_environments_view(
     ExecutionEnvironmentsView {
         pm,
         agent_priorities: store.agent_priorities.clone(),
+        pool_providers: Vec::new(),
+        active_sessions: Vec::new(),
         accounts: store
             .accounts
             .iter()
@@ -159,12 +184,80 @@ pub(crate) fn execution_environments_view(
                     Some(false) => AccountSignInView::SignedOut,
                     None => AccountSignInView::Unknown,
                 },
+                sign_in_identity: None,
+                sign_in_blocked_reason: None,
+                delete_blocked_reason: None,
+                delete_impact: None,
             })
             .collect(),
         environments,
         via_options,
         project,
     }
+}
+
+fn deletion_impact(
+    store: &Store,
+    sessions: &[PoolAccountSessionView],
+    account_id: Option<&str>,
+    deleted_environments: &[String],
+) -> PoolAccountDeletionImpact {
+    let sessions = sessions
+        .iter()
+        .filter(|session| account_id == Some(session.execution_account.account_id.as_str()))
+        .map(|session| session.title.clone())
+        .collect();
+    let agents = store
+        .agent_priorities
+        .iter()
+        .filter(|(_, priority)| {
+            priority
+                .environment_ids
+                .iter()
+                .any(|id| deleted_environments.contains(id))
+        })
+        .map(|(member_id, _)| member_id.clone())
+        .collect();
+    PoolAccountDeletionImpact {
+        sessions,
+        agents,
+        unknown_sessions: Vec::new(),
+    }
+}
+
+fn account_deletion_impact(
+    store: &Store,
+    sessions: &[PoolAccountSessionView],
+    account_id: &str,
+) -> (Vec<String>, PoolAccountDeletionImpact) {
+    let removed = store.clone().delete_account(account_id);
+    let impact = deletion_impact(store, sessions, Some(account_id), &removed);
+    (removed, impact)
+}
+
+fn account_session_view(
+    sessions_dir: &Path,
+    active: ActiveAgentSession,
+    project_root: Option<&Path>,
+) -> Option<PoolAccountSessionView> {
+    let session =
+        gwt_agent::session_ledger::load_session_candidate(sessions_dir, &active.session_id)?;
+    let is_pm = gwt::pm_registry::session_is_registered_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(
+            project_root.unwrap_or_else(|| Path::new(&active.agent_project_root)),
+        ),
+        &session.id,
+    );
+    let account = session.execution_account?;
+    Some(PoolAccountSessionView {
+        id: active.window_id,
+        title: active.display_name,
+        is_pm,
+        execution_account: PoolExecutionAccountView {
+            account_id: account.account_id,
+        },
+        account_switches: session.account_switches,
+    })
 }
 
 /// Issue #7652 (SPEC #7007 items 243 and 251): the execution environment a
@@ -348,6 +441,8 @@ impl AppRuntime {
         projects: &[KnownProject],
         installed: &[String],
         project_root: Option<&Path>,
+        active: Vec<(ActiveAgentSession, Option<PathBuf>)>,
+        sessions_dir: &Path,
     ) -> BackendEvent {
         match store {
             Ok(store) => {
@@ -358,15 +453,113 @@ impl AppRuntime {
                             .any(|id| gwt_agent::resolve_agent_id(id).as_ref() == Some(&agent))
                     })
                 };
+                let sign_ins: HashMap<_, _> = store
+                    .accounts
+                    .iter()
+                    .map(|account| (account.id.as_str(), account_homes::pool_sign_in(account)))
+                    .collect();
+                let mut view = execution_environments_view(
+                    &store,
+                    projects,
+                    project_root,
+                    &is_installed,
+                    &environments::tool_settings,
+                    &|account| {
+                        let signed_in = sign_ins[account.id.as_str()].is_some();
+                        match gwt_agent::resolve_agent_id(&account.tool)? {
+                            gwt_agent::AgentId::Antigravity => None,
+                            _ => Some(signed_in),
+                        }
+                    },
+                );
+                let unknown_via_sessions = |ids: &[String]| {
+                    let mut titles: Vec<_> = active
+                        .iter()
+                        .filter(|(session, _)| {
+                            ids.iter().any(|id| {
+                                store.environment(id).is_some_and(|env| {
+                                    store.kind(env) == environments::EnvironmentKind::Via
+                                        && env.via_tool == session.agent_id
+                                })
+                            })
+                        })
+                        .map(|(session, _)| session.display_name.clone())
+                        .collect();
+                    titles.sort();
+                    titles
+                };
+                let mut sessions: Vec<_> = active
+                    .iter()
+                    .filter_map(|(active, root)| {
+                        let visible =
+                            project_root.is_none_or(|scope| root.as_deref() == Some(scope));
+                        Some((
+                            visible,
+                            account_session_view(sessions_dir, active.clone(), root.as_deref())?,
+                        ))
+                    })
+                    .collect();
+                sessions.sort_by(|(_, a), (_, b)| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
+                let all_sessions: Vec<_> = sessions.iter().map(|(_, row)| row.clone()).collect();
+                view.active_sessions = sessions
+                    .into_iter()
+                    .filter_map(|(visible, row)| visible.then_some(row))
+                    .collect();
+                view.pool_providers = POOL_PROVIDER_CHOICES
+                    .iter()
+                    .map(|&tool| PoolAccountProviderView {
+                        tool: tool.to_owned(),
+                        tool_name: tool_name(tool),
+                        blocked_reason: Store::pool_add_refusal(tool)
+                            .map(|reason| reason.0)
+                            .or_else(|| {
+                                (!is_installed(tool))
+                                    .then(|| "Install this tool before adding an account.".into())
+                            }),
+                    })
+                    .collect();
+                let names = gwt::agent_registry::SessionMemberSnapshot::load()
+                    .map(|snapshot| {
+                        snapshot
+                            .registered_members()
+                            .into_iter()
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                for (row, account) in view.accounts.iter_mut().zip(&store.accounts) {
+                    row.sign_in_identity = sign_ins[account.id.as_str()]
+                        .as_ref()
+                        .and_then(|state| state.identity.clone())
+                        .or_else(|| account.sign_in_identity.clone());
+                    row.sign_in_blocked_reason =
+                        account_homes::pool_login_refusal(account).map(str::to_owned);
+                    row.delete_blocked_reason = store
+                        .pool_delete_refusal(&account.id)
+                        .map(|reason| reason.0);
+                    if row.delete_blocked_reason.is_none() {
+                        let (removed, mut impact) =
+                            account_deletion_impact(&store, &all_sessions, &account.id);
+                        impact.unknown_sessions = unknown_via_sessions(&removed);
+                        name_affected_agents(&mut impact, &names);
+                        row.delete_impact = Some(impact);
+                    }
+                }
+                for row in &mut view.environments {
+                    if row.delete_blocked_reason.is_none() {
+                        let mut impact = deletion_impact(
+                            &store,
+                            &all_sessions,
+                            None,
+                            std::slice::from_ref(&row.id),
+                        );
+                        impact.unknown_sessions =
+                            unknown_via_sessions(std::slice::from_ref(&row.id));
+                        name_affected_agents(&mut impact, &names);
+                        row.delete_impact = Some(impact);
+                    }
+                }
                 BackendEvent::ExecutionEnvironments {
-                    view: Box::new(execution_environments_view(
-                        &store,
-                        projects,
-                        project_root,
-                        &is_installed,
-                        &environments::tool_settings,
-                        &environments::account_signed_in,
-                    )),
+                    view: Box::new(view),
                 }
             }
             Err(error) => BackendEvent::ExecutionEnvironmentError {
@@ -381,43 +574,90 @@ impl AppRuntime {
         client_id: &str,
         context: Option<&ProjectContext>,
     ) -> Vec<OutboundEvent> {
+        // Issue #7869 AC-2: a plain refresh resent while this client's read
+        // runs joins it. A refresh after a mutation always runs its own step.
+        let root = context.map(|context| context.project_root.to_string_lossy().into_owned());
+        let key = format!(
+            "execution-environments\0{client_id}\0{}",
+            root.unwrap_or_default()
+        );
+        self.spawn_execution_environments_refresh(client_id, context, || Ok(()), Some(key))
+    }
+
+    fn refresh_execution_environments_after(
+        &self,
+        client_id: &str,
+        context: Option<&ProjectContext>,
+        before_refresh: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+    ) -> Vec<OutboundEvent> {
+        self.spawn_execution_environments_refresh(client_id, context, before_refresh, None)
+    }
+
+    fn spawn_execution_environments_refresh(
+        &self,
+        client_id: &str,
+        context: Option<&ProjectContext>,
+        before_refresh: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+        coalesce_key: Option<String>,
+    ) -> Vec<OutboundEvent> {
         // Issue #7869 AC-1: project prefs reads and agent detection can wait
         // on other processes, so only in-memory state is captured here.
         let roots = self.known_project_roots();
         let agent_cache = self.launch_wizard_cache.clone();
         let root = context.map(|context| context.project_root.clone());
+        let active: Vec<_> = self
+            .active_agent_sessions
+            .values()
+            .map(|active| {
+                (
+                    active.clone(),
+                    self.tab(&active.tab_id).map(|tab| tab.project_root.clone()),
+                )
+            })
+            .collect();
+        let sessions_dir = self.sessions_dir.clone();
         let proxy = self.proxy.clone();
         let reply_to = client_id.to_owned();
-        // AC-2: a resend while this client's read runs joins it.
-        let key = format!(
-            "execution-environments\0{client_id}\0{}",
-            root.as_deref()
-                .map(Path::to_string_lossy)
-                .unwrap_or_default()
-        );
         let reads = self.coalesced_reads.clone();
-        if !reads.begin(&key) {
-            return Vec::new();
+        if let Some(key) = &coalesce_key {
+            if !reads.begin(key) {
+                return Vec::new();
+            }
         }
-        let worker_key = key.clone();
+        let worker_key = coalesce_key.clone();
         let worker_reads = reads.clone();
         match self.blocking_tasks.try_spawn(move || {
-            worker_reads.run(&worker_key, || {
-                let event = Self::execution_environments_event(
-                    environments::adopt_signed_in_accounts(),
-                    &load_known_projects(roots.clone()),
-                    &installed_tools(&agent_cache),
-                    root.as_deref(),
-                );
+            let prepared = before_refresh();
+            let read = || {
+                let event = match &prepared {
+                    Ok(()) => Self::execution_environments_event(
+                        environments::adopt_signed_in_accounts(),
+                        &load_known_projects(roots.clone()),
+                        &installed_tools(&agent_cache),
+                        root.as_deref(),
+                        active.clone(),
+                        &sessions_dir,
+                    ),
+                    Err(error) => BackendEvent::ExecutionEnvironmentError {
+                        message: error.to_string(),
+                        project_root: root.as_ref().map(|path| path.display().to_string()),
+                    },
+                };
                 proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                     reply_to.clone(),
                     event,
                 )]));
-            });
+            };
+            match &worker_key {
+                Some(key) => worker_reads.run(key, read),
+                None => read(),
+            }
         }) {
             Ok(_) => Vec::new(),
             Err(error) => {
-                reads.abandon(&key);
+                if let Some(key) = &coalesce_key {
+                    reads.abandon(key);
+                }
                 Self::execution_environment_error(client_id, context, error.to_string())
             }
         }
@@ -466,9 +706,109 @@ impl AppRuntime {
         context: Option<&ProjectContext>,
         event: FrontendEvent,
     ) -> Vec<OutboundEvent> {
+        if matches!(
+            event,
+            FrontendEvent::AddPoolAccount { .. } | FrontendEvent::SignInPoolAccount { .. }
+        ) && self.pool_account_logins.contains_key(client_id)
+        {
+            return Self::execution_environment_error(
+                client_id,
+                context,
+                "Close the current sign-in terminal first.".into(),
+            );
+        }
         let outcome: Result<(), String> = match event {
             FrontendEvent::GetExecutionEnvironments => {
                 return self.refresh_execution_environments(client_id, context);
+            }
+            FrontendEvent::AddPoolAccount { tool } => {
+                return self.prepare_pool_account_login(client_id, context, move || {
+                    environments::enroll_pool_account(&tool).map_err(|error| error.to_string())
+                });
+            }
+            FrontendEvent::SignInPoolAccount { account_id } => {
+                return self.prepare_pool_account_login(client_id, context, move || {
+                    environments::load()
+                        .map_err(|error| error.to_string())?
+                        .account(&account_id)
+                        .cloned()
+                        .ok_or_else(|| "Account not found.".to_owned())
+                });
+            }
+            FrontendEvent::SaveCopilotAccount {
+                account_id,
+                login,
+                token,
+            } => {
+                return self.refresh_execution_environments_after(client_id, context, move || {
+                    environments::save_copilot_account(
+                        account_id.as_deref(),
+                        &login,
+                        token.expose(),
+                    )
+                });
+            }
+            FrontendEvent::PoolAccountLoginInput { login_id, data } => {
+                if let Some(login) = self
+                    .pool_account_logins
+                    .get(client_id)
+                    .filter(|login| login.id == login_id)
+                    .and_then(|login| login.active.as_ref())
+                {
+                    if login.input.try_send(data).is_err() {
+                        return Self::execution_environment_error(
+                            client_id,
+                            context,
+                            "The sign-in terminal is busy or closed.".into(),
+                        );
+                    }
+                }
+                return Vec::new();
+            }
+            FrontendEvent::ClosePoolAccountLogin { login_id } => {
+                if self
+                    .pool_account_logins
+                    .get(client_id)
+                    .is_some_and(|login| login.id == login_id)
+                {
+                    self.close_pool_account_login(client_id);
+                }
+                return Vec::new();
+            }
+            FrontendEvent::ResumeNextPoolAccount { id } => {
+                let mut events = self.resume_with_next_account_events(&id);
+                events.extend(self.refresh_execution_environments(client_id, context));
+                return events;
+            }
+            FrontendEvent::MovePoolAccount {
+                account_id,
+                direction,
+            } => {
+                return self.refresh_execution_environments_after(client_id, context, move || {
+                    environments::mutate(|store| {
+                        Ok(store.move_pool_account(
+                            &account_id,
+                            direction == PoolAccountDirection::Up,
+                        )?)
+                    })
+                    .map(|_| ())
+                });
+            }
+            FrontendEvent::UsePoolAccount { account_id } => {
+                return self.refresh_execution_environments_after(client_id, context, move || {
+                    environments::mutate(|store| Ok(store.use_pool_account(&account_id)?))
+                        .map(|_| ())
+                });
+            }
+            FrontendEvent::DeletePoolAccount { account_id } => {
+                return match self.delete_pool_account(&account_id) {
+                    Ok(()) => {
+                        let mut events = self.resume_after_account_deletion(&account_id);
+                        events.extend(self.refresh_execution_environments(client_id, context));
+                        events
+                    }
+                    Err(message) => Self::execution_environment_error(client_id, context, message),
+                };
             }
             FrontendEvent::AddExecutionEnvironment {
                 account_id,
@@ -511,17 +851,225 @@ impl AppRuntime {
             _ => return Vec::new(),
         };
         match outcome {
-            Ok(()) => vec![OutboundEvent::reply(
-                client_id,
-                Self::execution_environments_event(
-                    environments::load(),
-                    &self.known_projects(),
-                    &self.installed_tools(),
-                    context.map(|context| context.project_root.as_path()),
-                ),
-            )],
+            Ok(()) => self.refresh_execution_environments(client_id, context),
             Err(message) => Self::execution_environment_error(client_id, context, message),
         }
+    }
+
+    fn prepare_pool_account_login(
+        &mut self,
+        client_id: &str,
+        context: Option<&ProjectContext>,
+        prepare: impl FnOnce() -> Result<environments::Account, String> + Send + 'static,
+    ) -> Vec<OutboundEvent> {
+        let login_id = uuid::Uuid::new_v4().to_string();
+        let pending_id = login_id.clone();
+        let reply_to = client_id.to_owned();
+        let project_root = context.map(|context| context.project_root.clone());
+        let proxy = self.proxy.clone();
+        match self.blocking_tasks.try_spawn(move || {
+            proxy.send(UserEvent::PoolAccountLoginPrepared {
+                client_id: reply_to,
+                login_id,
+                project_root,
+                result: prepare(),
+            });
+        }) {
+            Ok(_) => {
+                self.pool_account_logins.insert(
+                    client_id.to_owned(),
+                    PoolAccountLoginTerminal {
+                        id: pending_id,
+                        active: None,
+                    },
+                );
+                Vec::new()
+            }
+            Err(error) => Self::execution_environment_error(client_id, context, error.to_string()),
+        }
+    }
+
+    pub(crate) fn pool_account_login_prepared(
+        &mut self,
+        client_id: String,
+        login_id: String,
+        root: Option<PathBuf>,
+        result: Result<environments::Account, String>,
+    ) -> Vec<OutboundEvent> {
+        if self
+            .pool_account_logins
+            .get(&client_id)
+            .is_none_or(|login| login.id != login_id)
+        {
+            return Vec::new();
+        }
+        let outcome = result
+            .and_then(|account| self.start_pool_account_login(&client_id, &login_id, &account));
+        let context = root.as_ref().and_then(|root| {
+            self.project_contexts()
+                .into_iter()
+                .find(|context| context.project_root == *root)
+        });
+        match outcome {
+            Ok(event) => {
+                let mut events = vec![OutboundEvent::reply(&client_id, event)];
+                events.extend(self.refresh_execution_environments(&client_id, context.as_ref()));
+                events
+            }
+            Err(message) => {
+                self.close_pool_account_login(&client_id);
+                Self::execution_environment_error(&client_id, context.as_ref(), message)
+            }
+        }
+    }
+
+    fn start_pool_account_login(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        account: &environments::Account,
+    ) -> Result<BackendEvent, String> {
+        if environments::load()
+            .map_err(|error| error.to_string())?
+            .account(&account.id)
+            != Some(account)
+        {
+            return Err("This account changed. Reload and try again.".into());
+        }
+        if self
+            .pool_account_logins
+            .values()
+            .filter_map(|login| login.active.as_ref())
+            .any(|login| login.account_id == account.id)
+        {
+            return Err("This account already has an open sign-in terminal.".into());
+        }
+        let command = account_homes::login_command(account).map_err(|error| error.to_string())?;
+        let pty = Arc::new(
+            PtyHandle::spawn(SpawnConfig {
+                command: command.program,
+                args: command.args,
+                env: command.env,
+                remove_env: command.remove_env,
+                cols: 80,
+                rows: 24,
+                cwd: gwt_config::home::user_home(),
+            })
+            .map_err(|error| format!("Could not open the sign-in terminal: {error}"))?,
+        );
+        let mut reader = pty.reader().map_err(|error| error.to_string())?;
+        let (input, submitted) = mpsc::sync_channel::<String>(64);
+        let writer = Arc::clone(&pty);
+        std::thread::Builder::new()
+            .name("pool-account-login-input".into())
+            .spawn(move || {
+                for text in submitted {
+                    if writer.write_input(text.as_bytes()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("Could not open input for the sign-in terminal: {error}"))?;
+        self.pool_account_logins
+            .get_mut(client_id)
+            .ok_or("The sign-in request was closed.")?
+            .active = Some(ActivePoolAccountLogin {
+            account_id: account.id.clone(),
+            pty,
+            input,
+        });
+        let reply_to = client_id.to_owned();
+        let login_id = id.to_owned();
+        let proxy = self.proxy.clone();
+        let worker = std::thread::Builder::new()
+            .name("pool-account-login".into())
+            .spawn(move || {
+                let mut bytes = [0; 8192];
+                // This terminal is client-scoped and has no persistent transcript.
+                while let Ok(count) = reader.read(&mut bytes) {
+                    if count == 0 {
+                        break;
+                    }
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                        reply_to.clone(),
+                        BackendEvent::PoolAccountLoginOutput {
+                            login_id: login_id.clone(),
+                            data_base64: base64::engine::general_purpose::STANDARD
+                                .encode(&bytes[..count]),
+                        },
+                    )]));
+                }
+                drop(reader);
+                proxy.send(UserEvent::PoolAccountLoginEnded {
+                    client_id: reply_to,
+                    login_id,
+                });
+            });
+        if let Err(error) = worker {
+            self.close_pool_account_login(client_id);
+            return Err(format!("Could not stream the sign-in terminal: {error}"));
+        }
+        Ok(BackendEvent::PoolAccountLoginStarted {
+            login_id: id.into(),
+            account_id: account.id.clone(),
+        })
+    }
+
+    pub(crate) fn close_pool_account_login(&mut self, client_id: &str) {
+        if let Some(login) = self
+            .pool_account_logins
+            .remove(client_id)
+            .and_then(|login| login.active)
+        {
+            let _ = login.pty.kill();
+        }
+    }
+
+    pub(crate) fn pool_account_login_ended(
+        &mut self,
+        client_id: String,
+        login_id: String,
+    ) -> Vec<OutboundEvent> {
+        if self
+            .pool_account_logins
+            .get(&client_id)
+            .is_none_or(|login| login.id != login_id)
+        {
+            return Vec::new();
+        }
+        self.close_pool_account_login(&client_id);
+        vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::PoolAccountLoginFinished { login_id },
+        )]
+    }
+
+    fn delete_pool_account(&self, account_id: &str) -> Result<(), String> {
+        if self
+            .pool_account_logins
+            .values()
+            .filter_map(|login| login.active.as_ref())
+            .any(|login| login.account_id == account_id)
+        {
+            return Err("Close this account's sign-in terminal before deleting it.".into());
+        }
+        let projects = self.known_projects();
+        environments::mutate(|store| {
+            if let Some(refusal) = store.pool_delete_refusal(account_id) {
+                return Err(refusal.into());
+            }
+            let before = store.clone();
+            let deleted = store.delete_account(account_id);
+            for (root, list) in lists_without_environments(&before, &projects, &deleted) {
+                self.save_project_execution_environments(&root, list)
+                    .map_err(std::io::Error::other)?;
+            }
+            // Running CLI processes may still be finishing their current turn.
+            // Removing the account from the store prevents new launches with it.
+            Ok(())
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
 
     fn set_project_execution_environments(
@@ -583,9 +1131,52 @@ impl AppRuntime {
     }
 }
 
+fn name_affected_agents(impact: &mut PoolAccountDeletionImpact, names: &HashMap<String, String>) {
+    for member_id in &mut impact.agents {
+        if let Some(name) = names.get(member_id) {
+            member_id.clone_from(name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copilot_enrollment_keeps_the_token_out_of_frontend_logs() {
+        let token = "github_pat_FIXTURE_ONLY";
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "save_copilot_account",
+            "login": "fixture-user",
+            "token": token,
+        }))
+        .unwrap();
+        assert!(!format!("{event:?}").contains(token));
+        assert!(super::super::frontend_user_action_log(&event).is_none());
+    }
+
+    #[test]
+    fn deleting_the_last_pool_account_lists_affected_sessions_and_agents() {
+        let mut store = store();
+        store
+            .set_agent_list("reviewer", &["codex".into(), "claude".into()])
+            .unwrap();
+        store.set_agent_list("writer", &["claude".into()]).unwrap();
+        let sessions = [PoolAccountSessionView {
+            id: "window".into(),
+            title: "Review".into(),
+            is_pm: false,
+            execution_account: PoolExecutionAccountView {
+                account_id: "codex".into(),
+            },
+            account_switches: Vec::new(),
+        }];
+        let (removed, impact) = account_deletion_impact(&store, &sessions, "codex");
+        assert_eq!(removed, ["codex"]);
+        assert_eq!(impact.sessions, ["Review"]);
+        assert_eq!(impact.agents, ["reviewer"]);
+    }
 
     fn store() -> Store {
         let mut store = Store::default();

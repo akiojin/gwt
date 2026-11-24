@@ -1,6 +1,6 @@
 //! Resolve the execution account against the final host profile before spawn.
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use gwt_agent::{
     AccountSwitch, AccountSwitchReason, AgentId, ExecutionAccount, LaunchConfig, Session,
@@ -17,12 +17,57 @@ pub(crate) struct PoolAccountLaunch {
     pub(crate) copilot: Option<VerifiedCopilot>,
 }
 
+/// Refusals observed in one pane during a switch. Existing sessions outside
+/// this pane never inherit these exclusions.
+#[derive(Default)]
+pub(crate) struct PoolSwitchAttempt {
+    held_accounts: HashMap<String, Option<UtcTimestamp>>,
+}
+
+impl PoolSwitchAttempt {
+    pub(crate) fn record_limit(&mut self, account: &str, reset: Option<UtcTimestamp>) {
+        self.held_accounts.insert(account.to_owned(), reset);
+    }
+
+    pub(crate) fn next_account<'a>(
+        &self,
+        pool: impl IntoIterator<Item = &'a str>,
+        current: &str,
+        now: UtcTimestamp,
+    ) -> Option<&'a str> {
+        let mut pool: Vec<_> = pool.into_iter().collect();
+        if let Some(index) = pool.iter().position(|id| *id == current) {
+            pool.rotate_left(index + 1);
+        }
+        pool.into_iter().find(|id| {
+            self.held_accounts
+                .get(*id)
+                .is_none_or(|reset| reset.is_some_and(|at| at <= now))
+        })
+    }
+
+    pub(crate) fn next_reset<'a>(
+        &self,
+        pool: impl IntoIterator<Item = &'a str>,
+        now: UtcTimestamp,
+    ) -> Option<UtcTimestamp> {
+        pool.into_iter()
+            .filter_map(|id| self.held_accounts.get(id).copied().flatten())
+            .filter(|at| *at > now)
+            .min()
+    }
+}
+
 pub(crate) fn pool_account_for_launch(
     config: &mut LaunchConfig,
     predecessor: Option<&Session>,
     cwd: &Path,
     mut report: impl FnMut(String),
 ) -> Result<Option<PoolAccountLaunch>, String> {
+    let switching = config.execution_account_switch_reason.is_some();
+    if switching && config.execution_account_id.is_none() {
+        return Err("An account switch requires an exact target account.".into());
+    }
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host {
         return Ok(None);
     }
@@ -31,6 +76,9 @@ pub(crate) fn pool_account_for_launch(
         return Ok(None);
     };
     if has_auth_override(config, env_key) {
+        if switching {
+            return Err("The configured authentication prevents an account switch.".into());
+        }
         let message = format!(
             "Using the configured {} authentication instead of an account pool.",
             config.agent_id.display_name()
@@ -58,6 +106,9 @@ pub(crate) fn pool_account_for_launch(
     let previous = predecessor.and_then(|session| session.execution_account.as_ref());
     let preferred = config.execution_account_id.as_deref();
     let selected = choose_account(&store, tool, previous, preferred, |account| {
+        if switching && preferred != Some(account.id.as_str()) {
+            return None;
+        }
         let home = account.credential_home.as_deref().map(Path::new);
         if home.is_some_and(|home| !account_homes::is_managed_home(tool, &account.id, home)) {
             tracing::info!(account_id = %account.id, "execution account home is unavailable");
@@ -119,10 +170,10 @@ fn choose_account<'a, T>(
             "The selected execution account is unavailable for {tool}."
         ));
     }
-    let preferred = explicit.or_else(|| previous.map(|account| account.account_id.as_str()));
-    let account = store.select_pool_account(tool, preferred, usable);
+    let account = store.select_pool_account(tool, explicit, usable);
     if account.is_none()
-        && (preferred.is_some()
+        && (explicit.is_some()
+            || previous.is_some()
             || store.accounts.iter().any(|account| {
                 account.tool == tool
                     && (account.origin.is_some() || account.credential_home.is_some())
@@ -189,6 +240,7 @@ pub(crate) fn record_launch_account(
     session: &mut Session,
     predecessor: Option<&Session>,
     account: Option<ExecutionAccount>,
+    reason: Option<AccountSwitchReason>,
 ) {
     session.execution_account = account;
     if let Some(predecessor) = predecessor {
@@ -205,7 +257,7 @@ pub(crate) fn record_launch_account(
                 session.account_switches.push(AccountSwitch {
                     from: from.account_id.clone(),
                     to: to.account_id.clone(),
-                    reason: AccountSwitchReason::Manual,
+                    reason: reason.unwrap_or(AccountSwitchReason::Manual),
                     at: UtcTimestamp::now(),
                 });
             }
@@ -219,7 +271,25 @@ mod tests {
     use crate::execution_environments::AccountOrigin;
 
     #[test]
-    fn host_launch_restores_the_recorded_home_and_records_fallback() {
+    fn quota_switch_selects_the_next_account_and_waits_for_the_earliest_reset() {
+        let mut attempt = PoolSwitchAttempt::default();
+        let now = UtcTimestamp::now();
+        let reset_a = now + time::Duration::hours(2);
+        let reset_b = now + time::Duration::hours(1);
+        let pool = ["a", "b", "c"];
+
+        attempt.record_limit("a", Some(reset_a));
+        assert_eq!(attempt.next_account(pool, "a", now), Some("b"));
+        attempt.record_limit("b", Some(reset_b));
+        assert_eq!(attempt.next_account(pool, "b", now), Some("c"));
+        attempt.record_limit("c", None);
+        assert_eq!(attempt.next_account(pool, "c", now), None);
+        assert_eq!(attempt.next_reset(pool, now), Some(reset_b));
+        assert_eq!(attempt.next_account(pool, "c", reset_b), Some("b"));
+    }
+
+    #[test]
+    fn a_resume_uses_current_pool_priority_and_records_the_account_change() {
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -249,32 +319,55 @@ mod tests {
         .unwrap();
         let fresh = || gwt_agent::AgentLaunchBuilder::new(AgentId::GrokBuild).build();
         let mut previous = Session::new(home.path(), "develop", AgentId::GrokBuild);
+        previous.agent_session_id = Some("existing-conversation".into());
         let mut config = fresh();
         config.execution_account_id = Some("second".into());
         let launch = pool_account_for_launch(&mut config, None, home.path(), |_| {})
             .unwrap()
             .unwrap();
-        record_launch_account(&mut previous, None, Some(launch.account));
+        record_launch_account(&mut previous, None, Some(launch.account), None);
         assert_eq!(config.env_vars["GROK_HOME"], second.to_str().unwrap());
 
-        let mut config = fresh();
+        let mut config = crate::session_launch::launch_config_from_persisted_session(&previous);
         let launch = pool_account_for_launch(&mut config, Some(&previous), home.path(), |_| {})
             .unwrap()
             .unwrap();
-        assert_eq!(launch.account.account_id, "second");
-        assert_eq!(config.env_vars["GROK_HOME"], second.to_str().unwrap());
+        assert_eq!(launch.account.account_id, "first");
+        assert_eq!(config.env_vars["GROK_HOME"], first.to_str().unwrap());
 
         account_homes::remove("grok", "second").unwrap();
-        let mut config = fresh();
+        let mut config = crate::session_launch::launch_config_from_persisted_session(&previous);
+        config.execution_account_id = Some("first".into());
+        config.execution_account_switch_reason = Some(AccountSwitchReason::RateLimit);
         let launch = pool_account_for_launch(&mut config, Some(&previous), home.path(), |_| {})
             .unwrap()
             .unwrap();
         assert_eq!(config.env_vars["GROK_HOME"], first.to_str().unwrap());
-        let mut resumed = Session::new(home.path(), "develop", AgentId::GrokBuild);
-        record_launch_account(&mut resumed, Some(&previous), Some(launch.account));
+        let mut resumed =
+            crate::session_launch::initialize_launch_session(home.path(), home.path(), &config);
+        record_launch_account(
+            &mut resumed,
+            Some(&previous),
+            Some(launch.account),
+            config.execution_account_switch_reason,
+        );
+        assert_eq!(
+            resumed.exact_resume_session_id(),
+            previous.exact_resume_session_id()
+        );
         assert_eq!(resumed.execution_account.unwrap().account_id, "first");
         assert_eq!(resumed.account_switches[0].from, "second");
         assert_eq!(resumed.account_switches[0].to, "first");
+        assert_eq!(
+            resumed.account_switches[0].reason,
+            AccountSwitchReason::RateLimit
+        );
+        let mut config = fresh();
+        config.execution_account_id = Some("second".into());
+        config.execution_account_switch_reason = Some(AccountSwitchReason::RateLimit);
+        assert!(
+            pool_account_for_launch(&mut config, Some(&previous), home.path(), |_| {}).is_err()
+        );
     }
 
     #[test]

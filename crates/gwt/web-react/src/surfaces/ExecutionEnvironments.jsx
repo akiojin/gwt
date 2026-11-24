@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStoreSelector } from "../store/useStoreSelector.js";
 import { focusElement } from "../hosts/focus.js";
 import { fillLegacySlot } from "../hosts/legacy-slot.js";
 import { localTimeLabel } from "./time-labels.js";
 import { AddEnvironment, DeleteEnvironment, EditEnvironment } from "./ExecutionEnvironmentForms.jsx";
+import { AccountLogin, AccountSessions, AddPoolAccount, CopilotSignIn, DeletePoolAccount } from "./AccountPool.jsx";
 
 // Execution environments (Issue #7648, SPEC #7007 T-030; Issue #7741). The
 // landing view lists the environments agents run on, as the backend defines
@@ -160,64 +161,109 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
   );
 }
 
-function AccountRow({ pool, account, onNavigate }) {
-  const usage = account.usage;
-  return (
-    <li className="exec-env__card" data-account={account.id} data-sign-in={account.signIn.kind}>
-      <div className="exec-env__card-head">
-        <h3>{account.name}</h3>
-        <span className="exec-env__chips">
-          {account.inUse ? <span className="exec-env__chip">In use</span> : null}
-          <LimitChip account={usage} />
-        </span>
-      </div>
-      <p className="exec-env__meta">
-        {[pool.toolName, usage?.accountLabel, usage?.plan, account.signIn.label, usage?.usage ? usage.status.label : null]
-          .filter(Boolean).join(" · ")}
-      </p>
-      <UsageLine account={usage} />
-      <LastLimit account={usage} />
-      <div className="exec-env__actions">
-        <button type="button" aria-label={`Details for the ${account.name} account`} onClick={() => onNavigate("account", account.id)}>
-          Details
-        </button>
-      </div>
-    </li>
-  );
-}
-
-function Accounts({ model, headingRef, onNavigate, onOpenToolManagement }) {
+function Accounts({
+  model, headingRef, onNavigate, onOpenToolManagement, onAddPoolAccount, onSignInPoolAccount,
+  onUsePoolAccount, onMovePoolAccount, onDeletePoolAccount, onResumeNextPoolAccount, onMountLoginTerminal, onCloseLogin, onSaveCopilotAccount,
+}) {
   const pools = model.pools || [];
+  const accounts = pools.flatMap(pool => pool.accounts);
+  const [dialog, setDialog] = useState(null);
+  const deleting = accounts.find(account => account.id === dialog?.accountId);
+  const login = model.login;
+  const closeDialog = () => setDialog(null);
+  const saveCopilot = (id, login, token) => {
+    closeDialog();
+    onSaveCopilotAccount(id, login, token);
+  };
+  useEffect(() => { if (login) setDialog(null); }, [login]);
   return (
     <>
       <div className="exec-env__header">
         <button type="button" className="exec-env__back" onClick={() => onNavigate("environments")}>← Execution environments</button>
         <h1 ref={headingRef} tabIndex={-1}>Accounts</h1>
         <p className="exec-env__lead">
-          Usage, reset times and limits are shown here, once per account. Each tool's accounts form a pool; sessions
-          start with the first account that can be used.
+          {model.poolProviders ? "New sessions try signed-in accounts in order." : "Usage, reset times and limits are shown here, once per account."}
         </p>
       </div>
+      {model.poolProviders ? (
+        <div className="exec-env__actions">
+          <button type="button" className="exec-env__primary" disabled={model.saving} onClick={() => setDialog({ kind: "add" })}>Add an account</button>
+        </div>
+      ) : null}
+      {model.error && !dialog && !login ? <p className="exec-env__error" role="alert">{model.error}</p> : null}
       {pools.length === 0 ? (
         <div className="exec-env__empty">
-          <h2>{model.loaded ? "No accounts yet" : "Loading accounts…"}</h2>
-          <p>An account appears once its tool is signed in on this device.</p>
+          <h2>{model.loaded ? model.poolProviders ? "No accounts yet" : "No accounts report usage yet" : "Loading accounts…"}</h2>
+          {model.poolProviders ? null : <p>An account appears once its tool has been used on this device.</p>}
         </div>
       ) : pools.map(pool => (
         <section className="exec-env__pool" key={pool.tool} data-pool={pool.tool} aria-label={`${pool.toolName} accounts`}>
           <h2>{pool.toolName}</h2>
           <p className="exec-env__meta">{`${pool.accounts.length} account${pool.accounts.length === 1 ? "" : "s"} in pool, in priority order`}</p>
           <ul className="exec-env__list">
-            {pool.accounts.map(account => <AccountRow key={account.id} pool={pool} account={account} onNavigate={onNavigate} />)}
+          {pool.accounts.map(account => (
+            <li className="exec-env__card" key={account.id} data-account={account.id} data-sign-in={account.signIn.kind}>
+              <div className="exec-env__card-head">
+                <h3>{account.name}</h3>
+                <span className="exec-env__chips">
+                  {account.inUse ? <span className="exec-env__chip">{account.registered ? "First choice" : "In use"}</span> : null}
+                  <LimitChip account={account.usage} />
+                </span>
+              </div>
+              <p className="exec-env__meta">
+                {[
+                  pool.toolName, account.signInIdentity || account.usage?.accountLabel, account.usage?.plan,
+                  account.registered && account.managed && !account.signedIn ? "Waiting for sign-in" : account.signIn.label,
+                  account.usage?.usage ? account.usage.status.label : null,
+                ].filter(Boolean).join(" · ") || "Account"}
+              </p>
+              <UsageLine account={account.usage} />
+              <LastLimit account={account.usage} />
+              <div className="exec-env__actions">
+                  <button type="button" aria-label={`Details for the ${account.name} account`} onClick={() => onNavigate("account", account.id)}>
+                    Details
+                  </button>
+                {account.registered ? <>
+                  <button type="button" aria-label={`Use ${account.name}`} disabled={!account.canUse || model.saving}
+                    onClick={() => onUsePoolAccount(account.id)}>Use this account</button>
+                  {account.canSignIn ? (
+                    <button type="button" aria-label={`Sign in to ${account.name}`} disabled={model.saving}
+                      onClick={() => account.tool === "gh"
+                        ? setDialog({ kind: "copilot", accountId: account.id })
+                        : onSignInPoolAccount(account.id)}>{account.signedIn ? "Sign in again" : "Sign in"}</button>
+                  ) : null}
+                  <button type="button" aria-label={`Move ${account.name} up`} disabled={!account.canMoveUp || model.saving}
+                    onClick={() => onMovePoolAccount(account.id, "up")}>Up</button>
+                  <button type="button" aria-label={`Move ${account.name} down`} disabled={!account.canMoveDown || model.saving}
+                    onClick={() => onMovePoolAccount(account.id, "down")}>Down</button>
+                  <button type="button" className="exec-env__danger" aria-label={`Delete ${account.name}`}
+                    disabled={Boolean(account.deleteBlockedReason) || model.saving}
+                    onClick={() => setDialog({ kind: "delete", accountId: account.id })}>Delete</button>
+                </> : null}
+              </div>
+              {account.deleteBlockedReason ? <p className="exec-env__reason">{account.deleteBlockedReason}</p> : null}
+            </li>
+          ))}
           </ul>
         </section>
       ))}
+      <AccountSessions sessions={model.activeSessions || []} accounts={accounts} saving={model.saving} onResume={onResumeNextPoolAccount} />
       <section className="exec-env__manage" aria-label="Manage">
         <div className="exec-env__manage-row">
           <button type="button" onClick={onOpenToolManagement}>Tool management</button>
           <p>Installing or updating a tool is separate from its account.</p>
         </div>
       </section>
+      {login ? (
+        <AccountLogin login={login} account={accounts.find(account => account.id === login.accountId)}
+          error={model.error} onMount={onMountLoginTerminal} onClose={onCloseLogin} />
+      ) : dialog?.kind === "add" ? (
+        <AddPoolAccount options={model.poolProviders} saving={model.saving} error={model.error} onAdd={onAddPoolAccount} onSaveCopilot={saveCopilot} onDismiss={closeDialog} />
+      ) : deleting && dialog.kind === "copilot" ? (
+        <CopilotSignIn account={deleting} saving={model.saving} onSave={saveCopilot} onDismiss={closeDialog} />
+      ) : deleting ? (
+        <DeletePoolAccount account={deleting} onDismiss={closeDialog} onDelete={() => { closeDialog(); onDeletePoolAccount(deleting.id); }} />
+      ) : null}
     </>
   );
 }
@@ -293,6 +339,15 @@ export function ExecutionEnvironments({
   onAdd = () => {},
   onUpdate = () => {},
   onDelete = () => {},
+  onAddPoolAccount = () => {},
+  onSignInPoolAccount = () => {},
+  onSaveCopilotAccount = () => {},
+  onMovePoolAccount = () => {},
+  onUsePoolAccount = () => {},
+  onDeletePoolAccount = () => {},
+  onResumeNextPoolAccount = () => {},
+  onMountLoginTerminal = () => {},
+  onCloseLogin = () => {},
 }) {
   const model = useStoreSelector(store, selectModel, { frame: true }) || {};
   const view = model.view || { name: "environments", key: null };
@@ -310,7 +365,13 @@ export function ExecutionEnvironments({
   return (
     <section className="exec-env" aria-label="Execution environments" data-view={view.name}>
       {view.name === "accounts" ? (
-        <Accounts model={model} headingRef={headingRef} onNavigate={onNavigate} onOpenToolManagement={onOpenToolManagement} />
+        <Accounts
+          model={model} headingRef={headingRef} onNavigate={onNavigate} onOpenToolManagement={onOpenToolManagement}
+          onAddPoolAccount={onAddPoolAccount} onSignInPoolAccount={onSignInPoolAccount} onSaveCopilotAccount={onSaveCopilotAccount}
+          onMovePoolAccount={onMovePoolAccount} onUsePoolAccount={onUsePoolAccount}
+          onDeletePoolAccount={onDeletePoolAccount} onResumeNextPoolAccount={onResumeNextPoolAccount}
+          onMountLoginTerminal={onMountLoginTerminal} onCloseLogin={onCloseLogin}
+        />
       ) : view.name === "account" ? (
         <AccountDetail
           model={model}

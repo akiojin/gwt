@@ -93,6 +93,8 @@ export function createProviderUsageSurface({
             return "No data yet";
           case "unavailable":
             return state.reason ? `Unavailable — ${state.reason}` : "Unavailable";
+          case "unknown":
+            return state.reason ? `Usage unknown (${state.reason})` : "Usage unknown";
           case "stale":
             return `stale ${Math.round((state.age_secs || 0) / 60)}m`;
           default:
@@ -109,7 +111,8 @@ export function createProviderUsageSurface({
       }
 
       function applyProviderUsageUi(snapshot) {
-        const account = (snapshot?.accounts || []).find(item => item.provider === "codex");
+        const account = (snapshot?.accounts || []).find(item => item.provider === "codex" &&
+          (!item.pool_account_id || item.pool_account_id === "codex"));
         const balance = account?.credits?.balance;
         const timestamp = Date.parse(account?.fetched_at);
         if (!account?.account_id || !["ok", "stale"].includes(account.state?.kind) ||
@@ -418,7 +421,7 @@ export function createProviderUsageSurface({
       // degraded reason) + consumption grid + 7-day sparkline + bounded session
       // list. Grouping all of one provider's data together is the key
       // readability win.
-      function buildUsageProviderCard(account) {
+      function buildUsageProviderCard(account, includeProviderRollups) {
         const card = document.createElement("div");
         card.className = "op-usage-card";
         card.dataset.provider = account.provider;
@@ -492,13 +495,13 @@ export function createProviderUsageSurface({
             : Number.isFinite(credits.balance) && credits.balance >= 0
               ? `${credits.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits` : "— credits";
           row.textContent = `Balance: ${amount}`;
-          if (Number.isFinite(codexCreditRate)) {
+          if (includeProviderRollups && Number.isFinite(codexCreditRate)) {
             row.textContent += ` · ${codexCreditRate.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits/hour (observed)`;
           }
           card.appendChild(row);
         }
 
-        const pc = usageConsumptionFor(account.provider);
+        const pc = includeProviderRollups ? usageConsumptionFor(account.provider) : null;
         if (pc) {
           const cwrap = document.createElement("div");
           cwrap.className = "op-usage-card__cons";
@@ -509,19 +512,19 @@ export function createProviderUsageSurface({
           card.appendChild(cwrap);
         }
 
-        const sessions = buildUsageSessionsSection(account.provider);
+        const sessions = includeProviderRollups ? buildUsageSessionsSection(account.provider) : null;
         if (sessions) card.appendChild(sessions);
         return card;
       }
 
       // Issue #7648 — draw one account's usage card into the Execution
       // environments account detail, the single surface for usage and limits.
-      // Issue #7841: a provider can have several accounts; the pool account
-      // picks the one (a row without one is the provider's default account).
       function renderAccountUsage(container, provider, poolAccountId = null) {
-        const account = (latestProviderUsage().accounts || []).find(item => item.provider === provider &&
-          (poolAccountId == null || usagePoolAccountId(item) === poolAccountId));
-        container.replaceChildren(...(account ? [buildUsageProviderCard(account)] : []));
+        const account = (latestProviderUsage().accounts || []).find(item =>
+          item.provider === provider && (poolAccountId == null || usagePoolAccountId(item) === poolAccountId));
+        const defaultAccountId = { codex: "codex", claude_code: "claude" }[provider];
+        const includeProviderRollups = !poolAccountId || poolAccountId === defaultAccountId;
+        container.replaceChildren(...(account ? [buildUsageProviderCard(account, includeProviderRollups)] : []));
       }
 
       // Issue #7648 — Settings keeps only the way to Accounts; usage, reset

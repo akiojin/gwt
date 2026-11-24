@@ -82,7 +82,7 @@ async function mount(snapshot, {
     registeredAccounts: definitions.accounts, viaOptions: definitions.via_options, error: null, saving: false, saved: false, ...extra,
   });
   const model = createUiStateStore({ ...state(), view }, { scheduleFrame: callback => { callback(); return () => {}; } });
-  const calls = { tools: 0, collection: [], rendered: [], added: [], updated: [], deleted: [] };
+  const calls = { tools: 0, collection: [], rendered: [], added: [], updated: [], deleted: [], pool: [] };
   const navigate = (name, key = null) => model.update(current => ({ ...current, view: { name, key } }));
   const root = createRoot(document.body);
   await act(async () => root.render(React.createElement(ExecutionEnvironments, {
@@ -97,12 +97,100 @@ async function mount(snapshot, {
     onAdd: input => calls.added.push(input),
     onUpdate: (id, change) => calls.updated.push([id, change]),
     onDelete: id => calls.deleted.push(id),
+    onAddPoolAccount: tool => calls.pool.push(["add", tool]),
+    onSignInPoolAccount: id => calls.pool.push(["sign-in", id]),
+    onSaveCopilotAccount: (...values) => calls.pool.push(["save-copilot", ...values]),
+    onMovePoolAccount: (id, direction) => calls.pool.push(["move", id, direction]),
+    onUsePoolAccount: id => calls.pool.push(["use", id]),
+    onDeletePoolAccount: id => calls.pool.push(["delete", id]),
+    onResumeNextPoolAccount: id => calls.pool.push(["resume", id]),
   })));
   const click = async element => { await act(async () => { element.click(); }); };
   const button = label => [...document.querySelectorAll("button")].find(item =>
     item.textContent.trim() === label || item.getAttribute("aria-label") === label);
   return { document, model, calls, click, button, focused };
 }
+
+test("Copilot enrollment uses a masked token input instead of a login terminal", async () => {
+  const { document, click, button, calls } = await mount({ accounts: [] }, {
+    view: { name: "accounts", key: null },
+    extra: { poolProviders: [{ tool: "gh", tool_name: "GitHub Copilot" }] },
+  });
+  await click(button("Add an account"));
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.ok(dialog.querySelector('input[name="login"]'));
+  assert.equal(dialog.querySelector('input[name="token"]').type, "password");
+  assert.ok(button("Save Copilot account"));
+  assert.equal(button("Open login terminal"), undefined);
+  const token = dialog.querySelector('input[name="token"]');
+  const form = dialog.querySelector("form");
+  form.reset = () => { token.value = ""; };
+  dialog.querySelector('input[name="login"]').value = "fixture-user";
+  token.value = "github_pat_FIXTURE_ONLY";
+  await act(async () => {
+    form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  });
+  assert.equal(token.value, "");
+  assert.deepEqual(calls.pool, [["save-copilot", null, "fixture-user", "github_pat_FIXTURE_ONLY"]]);
+});
+
+test("account management shows pending sign-in, pool order and affected sessions before deletion", async () => {
+  const view = {
+    pool_providers: [{ tool: "codex", tool_name: "Codex" }, {
+      tool: "agy", tool_name: "Antigravity", blocked_reason: "Antigravity supports one account.",
+    }],
+    accounts: [
+      { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1", sign_in: "signed_in" },
+      { id: "codex-2", tool: "codex", tool_name: "Codex", name: "Codex 2", sign_in: "signed_out",
+        delete_impact: { sessions: ["Issue agent"], agents: ["Reviewer"] } },
+    ],
+    active_sessions: [{
+      id: "pm", title: "Project Manager", is_pm: true, execution_account: { account_id: "codex" },
+      account_switches: [{ from: "codex-2", to: "codex", reason: "rate_limit", at: RESET }],
+    }],
+  };
+  const usage = { accounts: [codex()] };
+  const { document, click, button, calls, focused } = await mount(usage, {
+    view: { name: "accounts", key: null },
+    definitions: view,
+    extra: { poolProviders: view.pool_providers, activeSessions: view.active_sessions },
+  });
+  const rows = [...document.querySelectorAll("[data-account]")];
+  assert.deepEqual(rows.map(row => row.dataset.account), ["codex", "codex-2"]);
+  assert.match(rows[0].textContent, /First choice/);
+  assert.match(rows[1].textContent, /Waiting for sign-in/);
+  assert.doesNotMatch(rows[1].textContent, /90% used/, "the default account's usage is not given to an added account");
+  assert.equal(accountPools(view, accountRows({
+    accounts: [codex(), codex({ pool_account_id: "codex-2", windows: [{ kind: "weekly", used_percent: 42 }] })],
+  }))[0].accounts[1].usage.usage, "42% used", "a measured pool account displays its own usage");
+  assert.equal(button("Use Codex 2").disabled, true);
+  await click(button("Sign in to Codex 2"));
+  await click(button("Move Codex 2 up"));
+  assert.deepEqual(calls.pool, [["sign-in", "codex-2"], ["move", "codex-2", "up"]]);
+
+  await click(button("Delete Codex 2"));
+  const dialog = document.querySelector('[role="dialog"].modal-shell');
+  assert.equal(dialog.parentElement.classList.contains("modal-backdrop"), true);
+  assert.equal(dialog.getAttribute("aria-modal"), "true");
+  assert.deepEqual(["header", "body", "footer"].map(part => Boolean(dialog.querySelector(`.modal-${part}`))), [true, true, true]);
+  assert.match(dialog.textContent, /Issue agent/);
+  assert.match(dialog.textContent, /Reviewer/);
+  assert.equal(focused.at(-1).textContent, "Cancel");
+  await click(dialog.querySelector(".modal-footer button:last-child"));
+  assert.deepEqual(calls.pool.at(-1), ["delete", "codex-2"]);
+
+  const active = document.querySelector('[data-account-session="pm"]');
+  assert.match(active.textContent, /Codex 2 → Codex 1 \(rate limit\)/);
+  await click(active.querySelector("button"));
+  assert.deepEqual(calls.pool.at(-1), ["resume", "pm"]);
+
+  await click(button("Add an account"));
+  const add = document.querySelector('[role="dialog"].modal-shell');
+  assert.equal(add.querySelector('option[value="agy"]').hasAttribute("disabled"), true);
+  assert.match(add.textContent, /Antigravity supports one account/);
+  await act(async () => add.querySelector("form").dispatchEvent(new document.defaultView.Event("submit", { bubbles: true, cancelable: true })));
+  assert.deepEqual(calls.pool.at(-1), ["add", "codex"]);
+});
 
 // AC-1: every environment's state is visible on the landing view.
 test("the landing view lists every environment with its tool, usage and limit state", async () => {
@@ -313,7 +401,7 @@ test("an environment through a tool that reads its own settings shows them read-
 // AC-4: the confirmation names the projects that use the environment.
 test("deleting an environment names the projects that use it before it is deleted", async () => {
   const { document, click, button, calls } = await mount({ accounts: [claude()] }, {
-    definitions: definitionsOf(definition("claude"), hermes()),
+    definitions: definitionsOf(definition("claude"), { ...hermes(), delete_impact: { unknown_sessions: ["Hermes review"] } }),
   });
   await click(button("Delete Claude Code 1 (via Hermes Agent)"));
   assert.equal(document.querySelector("h1").textContent, "Delete this execution environment?");
@@ -321,6 +409,7 @@ test("deleting an environment names the projects that use it before it is delete
   assert.deepEqual(projects, ["alpha — priority 2"]);
   assert.match(document.body.textContent, /taken off the list of each of these projects/);
   assert.match(document.body.textContent, /The Claude Code 1 account and its other environments stay/);
+  assert.match(document.body.textContent, /Impact unknown.*Hermes review/s);
   assert.deepEqual(calls.deleted, []);
   await click(button("Delete"));
   assert.deepEqual(calls.deleted, ["claude:hermes"]);

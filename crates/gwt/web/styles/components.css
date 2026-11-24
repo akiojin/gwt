@@ -6385,6 +6385,8 @@ button.workspace-board-ref:focus-visible {
 .exec-env__facts > div { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .exec-env__facts dt { min-width: 6rem; color: var(--color-text-muted); }
 .exec-env__facts dd { margin: 0; }
+.modal-shell.exec-env__login-dialog { width: min(48rem, calc(100vw - var(--space-6))); }
+.exec-env__login-terminal { overflow: auto; padding: var(--space-2); background: var(--color-surface); }
 .project-environments__list { display: flex; flex-direction: column; gap: var(--space-2); margin: 0 0 var(--space-2); padding: 0; list-style: none; }
 .project-environments__item { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
 .project-environments__text { display: flex; flex-direction: column; min-width: 0; }

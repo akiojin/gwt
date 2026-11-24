@@ -904,6 +904,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::GetExecutionEnvironments
+        | FrontendEvent::AddPoolAccount { .. }
+        | FrontendEvent::SignInPoolAccount { .. }
+        | FrontendEvent::SaveCopilotAccount { .. }
+        | FrontendEvent::MovePoolAccount { .. }
+        | FrontendEvent::UsePoolAccount { .. }
+        | FrontendEvent::DeletePoolAccount { .. }
+        | FrontendEvent::ResumeNextPoolAccount { .. }
+        | FrontendEvent::PoolAccountLoginInput { .. }
+        | FrontendEvent::ClosePoolAccountLogin { .. }
         | FrontendEvent::GetProjectEnvironmentSet
         | FrontendEvent::SetProjectEnvironmentSet { .. }
         | FrontendEvent::GetFirstRunSetup { .. }
