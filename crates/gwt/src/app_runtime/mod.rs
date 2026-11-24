@@ -13096,41 +13096,37 @@ impl AppRuntime {
                 self.handle_launch_wizard_action_for_client(context, Some(&client_id), action)
             }
             FrontendEvent::SetIssueMonitorEnabled { enabled } => {
-                if enabled {
-                    if !issue_monitor_has_launch_profile(&context.project_root) {
-                        let project_root = Some(context.project_root.clone());
-                        let mut events = self.open_issue_monitor_configure_profile_wizard_events(
-                            context, &client_id,
+                if enabled && !issue_monitor_has_launch_profile(&context.project_root) {
+                    let project_root = Some(context.project_root.clone());
+                    let mut events = self
+                        .open_issue_monitor_configure_profile_wizard_events(context, &client_id);
+                    if let Some(project_root) = project_root {
+                        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+                        let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+                            .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
+                        let mut monitor = gwt::IssueMonitorState::with_prefs(
+                            gwt::IssueMonitorConfig::default(),
+                            prefs,
                         );
-                        if let Some(project_root) = project_root {
-                            let prefs_path =
-                                gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-                            let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
-                                .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
-                            let mut monitor = gwt::IssueMonitorState::with_prefs(
-                                gwt::IssueMonitorConfig::default(),
-                                prefs,
-                            );
-                            gwt::issue_monitor_worker::bind_issue_monitor_source_repository(
-                                &mut monitor,
-                                &project_root,
-                            );
-                            let mut status = monitor.status_view();
-                            self.apply_issue_monitor_launch_profile_status(
-                                &mut status,
-                                Some(project_root.as_path()),
-                            );
-                            self.fill_update_drain_blocking(&mut status, &monitor);
-                            self.remember_issue_monitor_status(Some(&project_root), &status);
-                            events.push(OutboundEvent::reply(
-                                client_id.clone(),
-                                BackendEvent::IssueMonitorStatus {
-                                    status: Box::new(status),
-                                },
-                            ));
-                        }
-                        return events;
+                        gwt::issue_monitor_worker::bind_issue_monitor_source_repository(
+                            &mut monitor,
+                            &project_root,
+                        );
+                        let mut status = monitor.status_view();
+                        self.apply_issue_monitor_launch_profile_status(
+                            &mut status,
+                            Some(project_root.as_path()),
+                        );
+                        self.fill_update_drain_blocking(&mut status, &monitor);
+                        self.remember_issue_monitor_status(Some(&project_root), &status);
+                        events.push(OutboundEvent::reply(
+                            client_id.clone(),
+                            BackendEvent::IssueMonitorStatus {
+                                status: Box::new(status),
+                            },
+                        ));
                     }
+                    return events;
                 }
                 let publication = self.publish_project_issue_monitor_control(
                     context,
