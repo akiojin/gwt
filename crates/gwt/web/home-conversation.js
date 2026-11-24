@@ -137,7 +137,7 @@ function matchesSentText(nativeText, text, attachments) {
   if (!nativeText.startsWith(`${text}\n\n`)) return false;
   const suffix = nativeText.slice(text.length + 2);
   if (!/^Files?: (?:\[)?"/.test(suffix)) return false;
-  return attachments.every(({ uploadId }) => suffix.includes(`".gwt/drop-files/${uploadId.replaceAll("-", "")}-`));
+  return attachments.every(({ uploadPathPrefix }) => suffix.includes(uploadPathPrefix));
 }
 
 // What the outcome of the message to a PM changes: a refusal says why.
@@ -351,7 +351,8 @@ export function createHomeConversation({
       const project = current.projects.find(candidate => candidate.key === projectKey);
       if (!project) return false;
       const sentAttachments = attachments.map(({ file, id, preview }, index) => ({
-        name: file.name, id, preview, uploadId: uploads[index].upload_id,
+        name: file.name, id, preview,
+        uploadPathPrefix: `".gwt/drop-files/${uploads[index].upload_id.replaceAll("-", "")}-`,
       }));
       const previousIds = (project.conversation?.messages || [])
         .filter(message => message.role === "user" && matchesSentText(message.text, body, sentAttachments)).map(message => message.id);

@@ -100,6 +100,7 @@ export function HomeConversation({ store, actions }) {
   const attachmentSendCount = useRef(null);
   const nextAttachmentId = useRef(0);
   const fileInputRef = useRef(null);
+  const [fileSelection, setFileSelection] = useState(0);
   const [chosenProject, setChosenProject] = useState("");
   const [query, setQuery] = useState("");
   const [removing, setRemoving] = useState(null);
@@ -401,9 +402,9 @@ export function HomeConversation({ store, actions }) {
         {!composer.replyTo ? <Attachments attachments={attachments} onRemove={removeAttachment} disabled={!canAttach} /> : null}
         <div className="gwt-home__compose-row">
           {!composer.replyTo ? <>
-            <input type="file" ref={fileInputRef} multiple hidden onChange={event => {
+            <input key={fileSelection} type="file" ref={fileInputRef} multiple hidden onChange={event => {
               addAttachments(Array.from(event.target.files));
-              event.target.value = "";
+              setFileSelection(selection => selection + 1);
             }} />
             <button type="button" className="wizard-button" disabled={!canAttach}
               onClick={() => fileInputRef.current.click()}>Attach files</button>
