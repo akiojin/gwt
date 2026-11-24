@@ -4332,16 +4332,34 @@ pub(crate) fn snapshot_bound_terminal_compatibility_authority(
     }))
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TerminalCompatibilityError {
+    #[error("{0}")]
+    Authority(&'static str),
+    #[error("terminal compatibility continuation was refused: {0}")]
+    Workspace(#[from] AgentWorkspaceUpdateError),
+}
+
+impl TerminalCompatibilityError {
+    pub(crate) fn is_workspace_operation_in_flight(&self) -> bool {
+        matches!(
+            self,
+            Self::Workspace(error)
+                if error.code == AgentWorkspaceUpdateErrorCode::TransactionConflict
+                    && error.diagnostic_reason.as_deref() == Some("workspace_operation_in_flight")
+        )
+    }
+}
+
 pub(crate) fn confirm_bound_terminal_compatibility_authority(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
-) -> Result<()> {
+) -> std::result::Result<(), TerminalCompatibilityError> {
     let mut confirmation = authority.clone();
     confirmation.disposition = BoundTerminalCompatibilityDisposition::ConfirmOnly;
-    let receipt =
-        continue_bound_terminal_compatibility(&confirmation, request).map_err(mutation_error)?;
+    let receipt = continue_bound_terminal_compatibility(&confirmation, request)?;
     if receipt.outcome != AgentWorkTerminalizationOutcome::AlreadyMatching {
-        return Err(mutation_error(
+        return Err(TerminalCompatibilityError::Authority(
             "canonical Work terminal readback does not match the pre-request authority",
         ));
     }
@@ -4352,17 +4370,16 @@ pub(crate) fn confirm_bound_terminal_compatibility_authority_held_global_lease(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
     held_trusted_dir: &Path,
-) -> Result<()> {
+) -> std::result::Result<(), TerminalCompatibilityError> {
     let mut confirmation = authority.clone();
     confirmation.disposition = BoundTerminalCompatibilityDisposition::ConfirmOnly;
     let receipt = continue_bound_terminal_compatibility_held_global_lease(
         &confirmation,
         request,
         held_trusted_dir,
-    )
-    .map_err(mutation_error)?;
+    )?;
     if receipt.outcome != AgentWorkTerminalizationOutcome::AlreadyMatching {
-        return Err(mutation_error(
+        return Err(TerminalCompatibilityError::Authority(
             "canonical Work terminal readback does not match the pre-request authority",
         ));
     }
@@ -4372,7 +4389,7 @@ pub(crate) fn confirm_bound_terminal_compatibility_authority_held_global_lease(
 pub(crate) fn continue_bound_terminal_compatibility(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     continue_bound_terminal_compatibility_inner(authority, request, None)
 }
 
@@ -4380,7 +4397,7 @@ pub(crate) fn continue_bound_terminal_compatibility_held_global_lease(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
     held_trusted_dir: &Path,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     continue_bound_terminal_compatibility_inner(authority, request, Some(held_trusted_dir))
 }
 
@@ -4388,14 +4405,13 @@ fn continue_bound_terminal_compatibility_inner(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
     held_trusted_dir: Option<&Path>,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     if request.claimed_session_id != authority.identity.session_id
         || request.terminal_kind != authority.requested_terminal
     {
-        return Err(
-            "terminal compatibility continuation request does not match its authority snapshot"
-                .to_string(),
-        );
+        return Err(TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation request does not match its authority snapshot",
+        ));
     }
     let expected_identity = authority.identity.clone();
     let project_state_root = authority.project_state_root.clone();
@@ -4414,8 +4430,9 @@ fn continue_bound_terminal_compatibility_inner(
         authority
             .requires_blocked_build_abort_bridge()
             .map_err(|_| {
-                "terminal compatibility continuation could not inspect Blocked abort authority"
-                    .to_string()
+                TerminalCompatibilityError::Authority(
+                    "terminal compatibility continuation could not inspect Blocked abort authority",
+                )
             })?;
     let result = if use_blocked_build_abort {
         if let Some(held_trusted_dir) = held_trusted_dir {
@@ -4487,19 +4504,21 @@ fn continue_bound_terminal_compatibility_inner(
         )
     }
     .map_err(|_| {
-            "terminal compatibility continuation could not validate the durable authority"
-                .to_string()
+            TerminalCompatibilityError::Authority(
+                "terminal compatibility continuation could not validate the durable authority",
+            )
         })?;
     let receipt = result.ok_or_else(|| {
-        "terminal compatibility continuation authority changed before commit".to_string()
+        TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation authority changed before commit",
+        )
     })??;
     match receipt.outcome {
         AgentWorkTerminalizationOutcome::Emitted
         | AgentWorkTerminalizationOutcome::AlreadyMatching => Ok(receipt),
-        _ => Err(
-            "terminal compatibility continuation did not reach the requested canonical terminal"
-                .to_string(),
-        ),
+        _ => Err(TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation did not reach the requested canonical terminal",
+        )),
     }
 }
 
@@ -4511,9 +4530,11 @@ fn apply_terminal_compatibility_under_lease(
     policy: gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
     request: AgentWorkTerminalizationRequest,
     blocked_build_abort: bool,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     let current = Session::load(session_path).map_err(|_| {
-        "terminal compatibility continuation could not reload the durable Session".to_string()
+        TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation could not reload the durable Session",
+        )
     })?;
     if current.runtime_target != LaunchRuntimeTarget::Host
         || current.docker_runtime_binding.is_some()
@@ -4523,9 +4544,9 @@ fn apply_terminal_compatibility_under_lease(
             .as_ref()
             != Some(expected_identity)
     {
-        return Err(
-            "terminal compatibility continuation authority changed before commit".to_string(),
-        );
+        return Err(TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation authority changed before commit",
+        ));
     }
     let result = if blocked_build_abort {
         apply_bound_authenticated_blocked_build_abort_for_exact_work(
@@ -4546,7 +4567,7 @@ fn apply_terminal_compatibility_under_lease(
             request,
         )
     };
-    result.map_err(|error| format!("terminal compatibility continuation was refused: {error}"))
+    result.map_err(TerminalCompatibilityError::from)
 }
 
 /// Prove that an active, exact-owner Host build has no canonical Work to abort.

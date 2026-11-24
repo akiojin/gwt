@@ -1299,7 +1299,13 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                     request,
                 )
             };
-            return confirmation.map_err(|error| terminal_refusal(error.to_string()));
+            return confirmation.map_err(|error| {
+                if error.is_workspace_operation_in_flight() {
+                    error.to_string()
+                } else {
+                    terminal_refusal(error.to_string())
+                }
+            });
         }
         let blocked_build_abort = compatibility_authority
             .requires_blocked_build_abort_bridge()
@@ -1387,7 +1393,8 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                     request,
                 )
             }
-            .map(|_| ()),
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
             crate::AgentWorkTerminalizationOutcome::AmbiguousTerminal => {
                 map_agent_terminal_outcome(receipt.outcome, close_kind)
             }
@@ -4669,6 +4676,65 @@ format_version: Some(1),
             assert_build_still_active(&fixture.git);
             server.assert_no_request();
         }
+    }
+
+    #[test]
+    fn managed_build_complete_waits_for_in_flight_workspace_operation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.terminalize_canonical_done();
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+        );
+
+        let repo = &fixture.git.repo;
+        let current = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(repo);
+        let works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo);
+        let events = gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo);
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let action = SkillStateAction::Complete {
+            spec: 3327,
+            pr: None,
+        };
+        with_terminal_bridge_env(&fixture, &server, |env| {
+            let result = std::thread::scope(|scope| {
+                let finalizer = scope.spawn(move || {
+                    gwt_core::workspace_projection::transact_workspace_state_at_with_commit(
+                        &current,
+                        &works,
+                        &events,
+                        repo,
+                        "competing-workspace-operation",
+                        |_, _, _| Ok(((), Vec::new())),
+                        || {
+                            prepared_tx.send(()).expect("signal prepared transaction");
+                            let _ = release_rx.recv();
+                            Ok(())
+                        },
+                    )
+                });
+                prepared_rx.recv().expect("observe prepared transaction");
+                let result = record_current_work_terminal_before_finalize(env, &action);
+                drop(release_tx);
+                finalizer.join().expect("join finalizer").expect("finalize");
+                result
+            });
+            let error = result.expect_err("confirmation must wait for the finalizer");
+            assert!(error.contains("wait for its finalizer"), "{error}");
+            assert!(!error.contains("workspace.ensure"), "{error}");
+            assert!(!error.contains("execution.status"), "{error}");
+            assert_build_still_active(&fixture.git);
+            record_current_work_terminal_before_finalize(env, &action)
+                .expect("the same completion confirmation succeeds after the finalizer");
+        });
+        server.assert_no_request();
     }
 
     #[test]
