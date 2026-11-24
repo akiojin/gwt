@@ -595,6 +595,14 @@ fn sleep_until(deadline: Instant, poll: Duration) {
     std::thread::sleep(remaining.min(poll));
 }
 
+// Board bodies are copied into shared Work events. Only these fixed reasons
+// cross that boundary; detailed holder and target diagnostics stay local.
+enum BoardWaitReason {
+    WorktreeClaim,
+    CargoTarget,
+    HostAdmission,
+}
+
 /// One Board `status` post per admission, and only once the wait has
 /// outlived a poll: a wait nobody can see is the failure mode #3844 records.
 #[derive(Default)]
@@ -608,12 +616,17 @@ impl BoardNotice {
         env: &mut E,
         started: Instant,
         max_wait: Duration,
-        reason: &str,
+        reason: BoardWaitReason,
     ) {
         if self.posted || started.elapsed() < BOARD_NOTICE_AFTER {
             return;
         }
         self.posted = true;
+        let reason = match reason {
+            BoardWaitReason::WorktreeClaim => "同じ worktree の検証予約を待機中",
+            BoardWaitReason::CargoTarget => "Cargo target は別の検証またはGCが使用中",
+            BoardWaitReason::HostAdmission => "ホストの検証枠を待機中",
+        };
         let body = format!(
             "現在の状態: verify.run は admission 待ちです（{}s 経過、上限 {}s）。\n\n\
              理由: {reason}\n\n\
@@ -782,14 +795,7 @@ fn admit_inner<E: CliEnv>(
                 None,
             ));
         }
-        notice.maybe_post(
-            env,
-            started,
-            max_wait,
-            waiting_for_target
-                .as_deref()
-                .unwrap_or("同じ worktree の予約更新を待機"),
-        );
+        notice.maybe_post(env, started, max_wait, BoardWaitReason::WorktreeClaim);
         sleep_until(deadline, poll);
     };
     check_cancellation(attempt)?;
@@ -846,15 +852,7 @@ fn admit_inner<E: CliEnv>(
                             None,
                         ));
                     }
-                    notice.maybe_post(
-                        env,
-                        started,
-                        max_wait,
-                        &format!(
-                            "Cargo target {} は別の検証またはGCが使用中",
-                            target.display()
-                        ),
-                    );
+                    notice.maybe_post(env, started, max_wait, BoardWaitReason::CargoTarget);
                     sleep_until(deadline, poll);
                 }
             }
@@ -984,7 +982,7 @@ fn admit_inner<E: CliEnv>(
                     deferral.queue_position = queue_position;
                     return Err(VerificationError::Deferred(Box::new(deferral)));
                 }
-                notice.maybe_post(env, started, max_wait, &holder.detail);
+                notice.maybe_post(env, started, max_wait, BoardWaitReason::HostAdmission);
             }
             Err(CoordinatorError::Cancelled { attempt_id }) => {
                 return Err(cancelled(&attempt_id).into())
@@ -1057,6 +1055,35 @@ fn admit_inner<E: CliEnv>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_wait_work_event_omits_host_diagnostics() {
+        use gwt_core::workspace_projection::{
+            workspace_work_event_from_board_entry, WorkspaceProjection,
+        };
+
+        let repo = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(repo.path());
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        let mut notice = BoardNotice::default();
+        notice.maybe_post(
+            &mut env,
+            Instant::now().checked_sub(BOARD_NOTICE_AFTER).unwrap(),
+            Duration::from_secs(DEFAULT_MAX_WAIT_SECS),
+            BoardWaitReason::HostAdmission,
+        );
+
+        let snapshot = gwt_core::coordination::rebuild_snapshot_from_segments(repo.path()).unwrap();
+        let [entry] = snapshot.board.entries.as_slice() else {
+            panic!("expected one persisted admission wait notice");
+        };
+        let projection = WorkspaceProjection::default_for_project(repo.path());
+        let event = workspace_work_event_from_board_entry(&projection, entry);
+        let summary = event.summary.as_deref().unwrap();
+        assert!(summary.contains("admission 待ち"));
+        assert!(summary.contains("\n\n理由: ホストの検証枠を待機中\n\n次:"));
+        assert!(summary.contains("issue.monitor.wait"));
+    }
 
     #[test]
     fn deferral_separates_wait_budget_from_required_cleanup() {
