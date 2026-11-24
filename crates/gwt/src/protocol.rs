@@ -808,6 +808,8 @@ pub enum FrontendEvent {
     /// for the Home conversation. Hub connections only.
     LoadHomeConversation {
         request_id: u64,
+        #[serde(default)]
+        history: std::collections::BTreeMap<String, String>,
     },
     /// Issue #7639: send one message from Home to the PM of an open project.
     /// The host resolves the PM pane from the project; the client never names
@@ -1986,7 +1988,7 @@ pub struct HomeProjectConversationView {
     pub waiting_count: usize,
     pub decisions: Vec<gwt_core::decision_queue::DecisionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<crate::pm_conversation::PmConversationSnapshot>,
+    pub conversation: Option<crate::pm_conversation::HomeConversationPage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -6284,7 +6286,7 @@ mod tests {
         .expect("Home reads every open project's decisions with one request");
         assert!(matches!(
             load,
-            FrontendEvent::LoadHomeConversation { request_id: 3 }
+            FrontendEvent::LoadHomeConversation { request_id: 3, history } if history.is_empty()
         ));
         let send: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "home_pm_send",
@@ -6384,12 +6386,14 @@ mod tests {
                     id: "u1".to_owned(),
                     role: PmConversationRole::User,
                     text: "# not a heading <b>raw</b>".to_owned(),
+                    timestamp: None,
                     source_key: Some("b".repeat(64)),
                 },
                 PmConversationMessage {
                     id: "a1".to_owned(),
                     role: PmConversationRole::Assistant,
                     text: "# Plan\n\n- one\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\ncargo test\n```\n\n<script>alert(1)</script>".to_owned(),
+                    timestamp: None,
                     source_key: None,
                 },
             ],

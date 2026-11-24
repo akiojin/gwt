@@ -68,11 +68,13 @@ const EMPTY_STATE = Object.freeze({
 // view below reads them.
 function withDecisions(state, event) {
   if (!Number.isSafeInteger(event.request_id) || event.request_id <= state.appliedRequest) return state;
+  const priorProjects = new Map(state.projects.map(project => [project.key, project]));
   const projects = (event.projects || []).map(project => ({
     key: project.project_key, title: project.title || project.project_key,
     pmAvailable: Boolean(project.pm_available), pmInterrupted: Boolean(project.pm_interrupted), error: project.error || null,
     decisions: project.decisions || [], waitingCount: project.waiting_count ?? 0,
     conversation: project.conversation,
+    ...conversationHistory(priorProjects.get(project.project_key), project.conversation),
   }));
   // A rejected worker reply has queues with errors but no fresh PM view.
   const pm = event.pm === undefined ? state.pm : event.pm;
@@ -80,6 +82,25 @@ function withDecisions(state, event) {
     ...state, pm, loaded: true, appliedRequest: event.request_id,
     sent: reconcileSent(state.sent, projects),
   }, projects);
+}
+
+function conversationHistory(previous, conversation) {
+  const latest = conversation?.messages || [];
+  const sameSource = previous?.conversation?.conversation_id === conversation?.conversation_id;
+  const prior = sameSource ? previous?.history || [] : [];
+  const older = conversation?.older_messages || [];
+  const latestIds = new Set(latest.map(message => message.id));
+  const overlap = prior.findIndex(message => latestIds.has(message.id));
+  // Keep loaded pages as the latest page advances. Drop them if the source
+  // was replaced or the two latest snapshots no longer overlap.
+  const messages = new Map();
+  for (const message of [...older, ...prior.slice(0, Math.max(0, overlap)), ...latest]) {
+    messages.set(message.id, message);
+  }
+  return {
+    history: [...messages].map(([, message]) => message),
+    hasOlder: Boolean(conversation?.has_older) && (older.length > 0 || overlap < 0 || previous?.hasOlder),
+  };
 }
 
 function withProjects(state, projects) {
@@ -205,7 +226,7 @@ function homeConversationView(state, route) {
   const history = [], recent = [...waiting, ...messages];
   for (const project of state.projects) {
     let sentAt;
-    for (const message of project.conversation?.messages || []) {
+    for (const message of project.history) {
       const id = topicId(project.key, message.id);
       if (message.role === "user") sentAt = sentByNativeId.get(id)?.at;
       const receipt = sentByNativeId.get(id);
@@ -213,8 +234,9 @@ function homeConversationView(state, route) {
         project: project.title, lines: [receipt?.text ?? message.text], attachments: receipt?.attachments };
       // Keep a submitted turn at its delivery position when native history
       // replaces the optimistic user message and the reply starts.
-      if (sentAt === undefined) history.push(topic);
-      else recent.push({ ...topic, sortAt: isoTime(sentAt) });
+      if (message.timestamp) recent.push({ ...topic, sortAt: message.timestamp });
+      else if (sentAt !== undefined) recent.push({ ...topic, sortAt: isoTime(sentAt) });
+      else history.push(topic);
     }
   }
   const topics = route.decisions ? waiting : [...history, ...recent
@@ -244,6 +266,7 @@ function homeConversationView(state, route) {
     resolved: state.settled.filter(entry => !state.hidden.includes(entry.id))
       .map(entry => ({ ...entry, answeredAt: isoTime(entry.answeredAt) })),
     topics,
+    hasOlder: state.projects.some(project => project.hasOlder),
     decisionsOnly: route.decisions,
     initialMessage: route.project && route.message ? topicId(route.project, route.message) : null,
     busy: Boolean(pending),
@@ -271,10 +294,11 @@ export function createHomeConversation({
   let sendTimer = null;
   let refreshTimer = null;
   let lastPm = null;
+  let historyRequest = null;
 
   // The one read of the decisions Home shows.
   function requestDecisions() {
-    send({ kind: "load_home_conversation", request_id: ++requestSequence });
+    if (!historyRequest) send({ kind: "load_home_conversation", request_id: ++requestSequence });
   }
 
   // The one send of a message to the PM of a project. The pane input path
@@ -321,6 +345,19 @@ export function createHomeConversation({
   }
 
   const actions = {
+    loadOlder() {
+      if (historyRequest) return false;
+      const history = Object.fromEntries(state.read().projects
+        .filter(project => project.hasOlder && project.history.length)
+        .map(project => [project.key, project.history[0].id]));
+      if (!Object.keys(history).length) return false;
+      const requestId = ++requestSequence;
+      if (send({ kind: "load_home_conversation", request_id: requestId, history }) !== "sent") return false;
+      historyRequest = requestId;
+      win.setTimeout(() => { if (historyRequest === requestId) historyRequest = null; }, SEND_TIMEOUT_MS);
+      return true;
+    },
+
     answer(id, optionIndex) {
       const option = decision(id)?.item.options?.[optionIndex];
       if (option != null) answer(id, option, optionIndex, false);
@@ -373,6 +410,7 @@ export function createHomeConversation({
   // A receive only commits state; everything that follows from it is below.
   function receive(event) {
     if (event?.kind === "home_conversation") {
+      if (event.request_id === historyRequest) historyRequest = null;
       state.update(current => withDecisions(current, event));
       return true;
     }

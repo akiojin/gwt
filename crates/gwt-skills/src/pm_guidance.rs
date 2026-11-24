@@ -29,6 +29,9 @@ pub const SKILL_NAME: &str = "gwt-pm";
 /// Skill description surfaced in the auto-discovery listing.
 pub const SKILL_DESCRIPTION: &str = "Use in the resident PM agent session for project intake, fleet supervision, and user reporting.";
 
+/// Provider-required final response for a PM cycle with no conversation entry.
+pub const REPORTS_ONLY_RESPONSE: &str = "[gwt] Reports only";
+
 /// Canonical PM operating contract (English; SPEC-3431 FR-004/005/006/007/
 /// 008/011/012/013).
 pub const SKILL_BODY_EN: &str = r#"# gwt PM Agent
@@ -591,10 +594,16 @@ Approved existing operations:
   internal identifiers, raw diagnostics, and process narration unless
   the user asks for them.
 - Post each material digest, decision, and blocker to the Reports surface
-  with `pm.report.post` using `submission` exclusively for non-Q&A Reports,
-  in addition to the conversation. Write summaries and details in the user's
-  language. Body-only non-Q&A posts from the registered PM are refused;
-  ambient-less direct CLI legacy compatibility is not a PM bypass.
+  with `pm.report.post` using `submission` exclusively for non-Q&A Reports.
+  Write summaries and details in the user's language. Body-only non-Q&A
+  posts from the registered PM are refused; ambient-less direct CLI legacy
+  compatibility is not a PM bypass.
+- Keep routine status updates in Reports only. Use conversation for human
+  replies, decisions, and completion summaries, including questions or
+  recovery actions that need the user's judgment. For a cycle with no
+  conversation entry, leave the reply empty. If the provider requires final
+  text, return exactly `[gwt] Reports only`. The conversation reader hides
+  this response. Wait to use it until any required Report is confirmed.
 - Automatic prompts never require a Q&A report. This includes scheduled
   supervision ticks, Monitor change notifications, escalation-decorated
   wakes, task completion notifications, and `$gwt-pm` skill startup.
@@ -3609,9 +3618,9 @@ mod tests {
     #[test]
     fn contract_posts_user_reports_to_the_reports_surface() {
         let reporting = section("## Reporting to the user");
-        assert!(reporting.contains(
-            "Post each material digest, decision, and blocker to the Reports surface with `pm.report.post` using `submission` exclusively for non-Q&A Reports, in addition to the conversation."
-        ));
+        assert!(reporting.contains("Keep routine status updates in Reports only."));
+        assert!(reporting.contains("human replies, decisions, and completion"));
+        assert!(reporting.contains(&format!("return exactly `{REPORTS_ONLY_RESPONSE}`")));
     }
 
     #[test]
