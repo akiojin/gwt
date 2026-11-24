@@ -342,6 +342,40 @@ pub fn prepare_agent_launch(
         environment
             .with_project_root(&worktree_path)
             .apply_to_config(&mut config);
+        let predecessor = matches!(
+            config.session_mode,
+            gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
+        )
+        .then(|| {
+            pm_restore_prior
+                .as_ref()
+                .map(|(session, _)| session.clone())
+                .or_else(|| {
+                    let id = config.predecessor_session_id.as_deref()?;
+                    gwt_agent::validate_session_id_path_component(id).ok()?;
+                    let session =
+                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()?;
+                    (session.id == id).then_some(session)
+                })
+        })
+        .flatten()
+        .filter(|session| {
+            session.agent_id == config.agent_id
+                && (session.worktree_path == worktree_path
+                    || session.project_state_root.as_deref() == Some(Path::new(&project_root)))
+        });
+        let provider_cwd =
+            pm_provider_runtime_dir(&config).unwrap_or_else(|| worktree_path.clone());
+        let selected_account = gwt::account_switch::pool_account_for_launch(
+            &mut config,
+            predecessor.as_ref(),
+            &provider_cwd,
+            |message| emit(AgentLaunchEvent::Progress { message }),
+        )?;
+        let (execution_account, verified_copilot) = selected_account
+            .map_or((None, None), |selected| {
+                (Some(selected.account), selected.copilot)
+            });
         if let Some(managed_worktree) = managed_codex_worktree.as_ref() {
             let report = register_codex_managed_project_trust_for_resolved_launch(
                 &profile_config_path,
@@ -369,6 +403,31 @@ pub fn prepare_agent_launch(
         let runner_health_report = (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host)
             .then(|| resolve_host_runner_health_checked(&mut config))
             .transpose()?;
+        let copilot_token = verified_copilot.and_then(|copilot| {
+            // Use the runner that verified the identity. The gh wrapper
+            // would perform executable lookup again at spawn time.
+            config.command = copilot.executable.to_string_lossy().into_owned();
+            if config.args.first().is_some_and(|arg| arg == "copilot") {
+                config.args.remove(0);
+                if config.args.first().is_some_and(|arg| arg == "--") {
+                    config.args.remove(0);
+                }
+            }
+            config.env_vars.insert("COPILOT_GH".into(), "true".into());
+            config
+                .env_vars
+                .insert("COPILOT_AUTO_UPDATE".into(), "false".into());
+            if copilot.token.is_some() {
+                config.args.insert(
+                    0,
+                    format!(
+                        "--secret-env-vars={}",
+                        gwt::account_homes::COPILOT_TOKEN_ENV
+                    ),
+                );
+            }
+            copilot.token
+        });
         phases.mark("runner_health");
         phase.finish();
         let phase = LaunchPhaseTimer::start("managed_assets");
@@ -465,6 +524,11 @@ pub fn prepare_agent_launch(
         let agent_id = config.agent_id.clone();
         let mut session =
             initialize_launch_session(&worktree_path, Path::new(&project_root), &config);
+        gwt::account_switch::record_launch_account(
+            &mut session,
+            predecessor.as_ref(),
+            execution_account,
+        );
         // Keep a separate observation identity if the resumed authority
         // cannot be installed. Never overwrite the coordinator's Session.
         let unbound_session_id = session.id.clone();
@@ -900,11 +964,15 @@ pub fn prepare_agent_launch(
         let expected_execution_identity =
             gwt_agent::SessionExecutionIdentity::from_session(&session)?;
 
+        let mut spawn_env = config.env_vars.clone();
+        if let Some(token) = copilot_token {
+            spawn_env.insert(gwt::account_homes::COPILOT_TOKEN_ENV.into(), token);
+        }
         let process_launch = ProcessLaunch {
             initial_prompt_file,
             command: config.command.clone(),
             args: config.args.clone(),
-            env: config.env_vars.clone(),
+            env: spawn_env,
             remove_env: config.remove_env.clone(),
             cwd: pm_provider_runtime_dir(&config).or_else(|| config.working_dir.clone()),
             resource_policy,

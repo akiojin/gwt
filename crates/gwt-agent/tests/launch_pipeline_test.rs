@@ -222,6 +222,7 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         session_mode: SessionMode::Normal,
         resume_session_id: None,
         predecessor_session_id: None,
+        execution_account_id: None,
         skip_permissions: false,
         fast_mode: false,
         codex_speed: Default::default(),
