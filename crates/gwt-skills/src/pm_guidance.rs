@@ -530,7 +530,7 @@ Supported direct scoped operations:
   required_conversation_resolution?, enforce_admins?, strict?}` changes only
   the named boolean protection fields on `develop` or `main`; every other
   protection field is carried through unchanged and the response is verified.
-  Use it when the Issue Monitor reports `not_ready` because force pushes are
+  Use it when Issues reports `not_ready` because force pushes are
   allowed; add a missing required check with `repository.required_checks.update`.
 - `update.settings.set {auto_apply_updates}` changes the global application
   setting, across all projects. Read saved/effective state and blockers with

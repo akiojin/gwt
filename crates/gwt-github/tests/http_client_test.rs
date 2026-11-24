@@ -2944,7 +2944,7 @@ fn pm_bounded_settings_refuse_foreign_snapshots_and_unconfirmed_mutations() {
 }
 
 /// Issue #7311 (feedback #5975): the PM had no canonical operation to clear a
-/// branch protection deficiency the Issue Monitor flagged. The typed
+/// branch protection deficiency that Issues flagged. The typed
 /// `repository.branch_protection.update` rewrites only the requested fields
 /// and carries every other protection field through the full-replacement PUT.
 #[test]
