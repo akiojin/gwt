@@ -33,6 +33,7 @@ test.describe("Agent title role and worktree badges", () => {
     await installAgentTitleBadgeBackend(page, undefined, false, false, true);
     await page.goto(appUrl);
     await page.locator("#op-pm-entry").click();
+    await page.getByRole("button", { name: "Open PM terminal" }).click();
     const pane = page.locator('.workspace-window[data-id="agent-1"]');
     const title = pane.locator(".title-text");
     await expect(title).toHaveText("Project Manager · Maple — Starting");
@@ -297,7 +298,7 @@ async function installAgentTitleBadgeBackend(
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
           this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "title-badge-fixture", observed_at: new Date().toISOString(), agents: [
-          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: pmScenario, issue_number: null },
           { window_id: 'agent-2', session_id: 'agent-2-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
           { window_id: 'agent-3', session_id: 'agent-3-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
         ] } } });

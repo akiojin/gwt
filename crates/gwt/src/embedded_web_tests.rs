@@ -4107,24 +4107,28 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
 fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     let js = app_js();
     let pm_chat = root_js_module_source("/pm-chat.js");
-    assert!(js.contains("import { createPmChat, createPmWindowModel } from \"/pm-chat.js\""));
-    assert!(pm_chat.contains("export function createPmChat"));
+    assert!(js.contains("import { createPmWindowModel } from \"/pm-chat.js\""));
     assert!(pm_chat.contains("export function createPmWindowModel"));
-    assert!(js.contains("windowData.is_pm && presetSurface(windowData.preset) === \"terminal\""));
+    assert!(js.contains("windowData.is_pm && surface === \"terminal\""));
     assert!(pm_chat.contains("event.session_id !== previous.sessionId"));
     let render_key = js_braced_block_after(js, "function workspaceWindowsRenderKey(").unwrap();
     assert!(render_key.contains("windowData?.session_id"));
     assert!(render_key.contains("windowData?.is_pm"));
     assert!(js.contains("bindPmWindowState(windowData.id, windowData.session_id)"));
-    assert!(js.contains("view.controller.update(state)"));
-    assert!(js.contains("view.unsubscribe()"));
-    assert!(js.contains("view.controller.dispose()"));
     assert!(js.contains("requestPmReports(windowData.id, resync)"));
     assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
     assert!(js.contains("case \"pm_reports\""));
     assert!(
         js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
     );
+}
+
+#[test]
+fn embedded_web_pm_windows_mount_only_the_terminal() {
+    let js = app_js();
+    assert!(!js.contains("createPmChat"));
+    assert!(js.contains("function openHomeDecisions("));
+    assert!(js.contains("HUB_DECISIONS_URL_PATH"));
 }
 
 #[test]

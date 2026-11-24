@@ -69,6 +69,7 @@ function withDecisions(state, event) {
     key: project.project_key, title: project.title || project.project_key,
     pmAvailable: Boolean(project.pm_available), error: project.error || null,
     decisions: project.decisions || [], waitingCount: project.waiting_count ?? 0,
+    conversation: project.conversation,
   }));
   // A rejected worker reply has queues with errors but no fresh PM view.
   const pm = event.pm === undefined ? state.pm : event.pm;
@@ -132,7 +133,7 @@ function decisionsOf(state) {
 }
 
 // The model the React surface renders, derived from the conversation state.
-function homeConversationView(state) {
+function homeConversationView(state, route) {
   const settled = new Set(state.settled.map(entry => entry.id));
   const projects = state.projects.map(project => ({
     key: project.key, title: project.title, pmAvailable: project.pmAvailable,
@@ -156,8 +157,12 @@ function homeConversationView(state) {
     createdAt: isoTime(message.at), lines: [message.text], status: COPY.delivered(message.project),
   }));
   // Oldest at the top, newest at the bottom (design item 230).
-  const topics = [...waiting, ...messages]
-    .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
+  const history = state.projects.flatMap(project => (project.conversation?.messages || []).map(message => ({
+    id: topicId(project.key, message.id), kind: message.role === "assistant" ? "pm-message" : "message",
+    project: project.title, lines: [message.text],
+  })));
+  const topics = route.decisions ? waiting : [...history, ...[...waiting, ...messages]
+    .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))];
   // Issue #7742 AC-4: the queues' own waiting counts, never a recount of the
   // topics drawn here.
   const count = state.loaded ? state.projects.reduce((sum, project) => sum + project.waitingCount, 0) : null;
@@ -183,6 +188,8 @@ function homeConversationView(state) {
     resolved: state.settled.filter(entry => !state.hidden.includes(entry.id))
       .map(entry => ({ ...entry, answeredAt: isoTime(entry.answeredAt) })),
     topics,
+    decisionsOnly: route.decisions,
+    initialMessage: route.project && route.message ? topicId(route.project, route.message) : null,
     busy: Boolean(pending),
     composer: {
       replyTo: replyTo && { id: replyTo.id, subject: replyTo.subject, projectKey: replyTo.projectKey, project: replyTo.project },
@@ -201,7 +208,9 @@ export function createHomeConversation({
   onOpenProjects = () => {}, scheduleFrame,
 }) {
   const state = createUiStateStore(EMPTY_STATE);
-  const model = createUiStateStore(homeConversationView(EMPTY_STATE), { scheduleFrame });
+  const query = new URL(win.location.href).searchParams;
+  const route = { decisions: query.get("view") === "decisions", project: query.get("project"), message: query.get("message") };
+  const model = createUiStateStore(homeConversationView(EMPTY_STATE, route), { scheduleFrame });
   let requestSequence = 0;
   let sendTimer = null;
   let refreshTimer = null;
@@ -309,7 +318,7 @@ export function createHomeConversation({
   }
 
   state.subscribe(current => current, current => {
-    const view = homeConversationView(current);
+    const view = homeConversationView(current, route);
     const waitingChanged = view.waiting !== model.read().waiting;
     model.update(() => view);
     if (waitingChanged || current.pm !== lastPm) {

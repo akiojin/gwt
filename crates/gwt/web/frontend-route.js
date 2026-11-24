@@ -26,6 +26,7 @@ export function projectUrlPath(projectKey) {
 
 export const HUB_URL_PATH = "/";
 // Issue #7639: `/` opens on Home; this link opens its Projects view.
+export const HUB_DECISIONS_URL_PATH = "/?view=decisions";
 export const HUB_PROJECTS_URL_PATH = "/?view=projects";
 
 // The WebSocket scope is derived from the route, never from page state:

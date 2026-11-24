@@ -152,7 +152,7 @@ test("Agents identifies the exact PM before the implementation pool without addi
   assert.equal(identity.querySelector(".window-role-badge").textContent, "PM");
   const children = [...f.surface.element.children];
   assert.ok(children.indexOf(identity) < children.indexOf(f.surface.element.querySelector(".roster-team")));
-  assert.equal(identity.querySelectorAll("button").length, 0, "PM is not a selectable or restable member");
+  assert.deepEqual([...identity.querySelectorAll("button")].map(button => button.textContent), ["Open PM terminal"]);
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
   assert.equal(f.surface.element.querySelectorAll(".roster-list .roster-row").length, 2);
   assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");

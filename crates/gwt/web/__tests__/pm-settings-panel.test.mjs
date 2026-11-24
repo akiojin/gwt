@@ -223,7 +223,7 @@ test("FR-132: rail gear remains separate from the PM launcher without a standalo
     /document\.getElementById\("op-pm-entry"\)/,
     "PM ランチャーの click 配線は維持する",
   );
-  assert.match(appJs, /send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/);
+  assert.match(appJs, /openAgents\("ledger"\)/);
 });
 
 test("FR-132: gear and command route to Agents without mutation", () => {

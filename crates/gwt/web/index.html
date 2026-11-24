@@ -101,16 +101,8 @@
              symbols; hover flyouts carry the label + real shortcut. -->
         <aside class="op-rail" id="op-rail" aria-label="Command rail">
           <div class="op-rail__group" role="group" aria-label="Navigate">
-            <!-- SPEC-3431 FR-018/FR-019/FR-021: the PM is the user's single
-                 conversational window, so its launcher leads the Navigate
-                 group. One click always lands on the PM — an existing pane is
-                 framed in the viewport, a missing one is started first. The
-                 state dot reports running / stopped / not started. -->
-            <!-- SPEC-3431 FR-026: the settings gear is a SIBLING of the PM
-                 button, never a child. Nested, its click would bubble into the
-                 launcher and start/frame the PM every time the user only
-                 wanted to configure it. It stays hidden until the shell is
-                 hovered or focused so the rail keeps one icon per row. -->
+            <!-- The PM status dot remains visible. Open the agent ledger
+                 to use the PM terminal or manage the project's PM. -->
             <div class="pm-launcher-shell">
               <button
                 class="op-rail__item op-rail__item--pm"

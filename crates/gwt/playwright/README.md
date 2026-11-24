@@ -40,7 +40,7 @@ bash scripts/run-visual-tests.sh
 | `tests/home-conversation.spec.ts` | Issue #7639 Home (PM conversation) / Projects view of the page at `/` | embedded-frontend fixture |
 | `tests/first-run-setup.spec.ts` | Issue #7731 first-run setup on the page at `/` (tool gate, Project Manager row, reopening a step from Settings) | embedded-frontend fixture |
 | `tests/agent-history-plans.spec.ts` | Issue #7649 agent history and planned assignments on the project's Agents screen; the ledger shows neither | embedded-frontend fixture |
-| `tests/task-experience.spec.ts` | SPEC #7007 T-016 (Issue #7634) regression of the PM window's Home / Decide / Progress and the notification Log: one decision snapshot through a WebSocket reconnect, a project switch and a decision answered elsewhere first | isolated checkout (`GWT_PLAYWRIGHT_TASK_EXPERIENCE=1`, real `decision.*` gwtd operations) |
+| `tests/task-experience.spec.ts` | SPEC #7007 T-022 (Issue #7640) verifies Home decisions, PM conversation history, the Agents terminal and direct Notifications | isolated checkout (`GWT_PLAYWRIGHT_TASK_EXPERIENCE=1`, real `decision.*` gwtd operations) |
 | `tests/project-open-surfaces.spec.ts` | Project Picker / Open Folder / Clone / non-Git onboarding | embedded-frontend fixture through the shared live harness |
 
 `live-gwt` specs require the CI workflow (or a developer) to launch a

@@ -1910,6 +1910,8 @@ pub struct HomeProjectConversationView {
     pub waiting_count: usize,
     pub decisions: Vec<gwt_core::decision_queue::DecisionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<crate::pm_conversation::PmConversationSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -1938,6 +1940,7 @@ impl HomeProjectConversationView {
             pm_available,
             waiting_count: queue.waiting_count,
             decisions: queue.items,
+            conversation: None,
             error,
         }
     }
