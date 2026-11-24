@@ -249,6 +249,7 @@ fn reconcile_with_health(
         && pool
             .first()
             .is_some_and(|profile| profile.agent_member_id.is_some());
+    let store = crate::execution_environments::load().ok();
     let mut ineligible = BTreeMap::new();
     let mut members = Vec::new();
     for member in roster.members.iter().filter(|member| {
@@ -261,9 +262,12 @@ fn reconcile_with_health(
             .get(&member.agent_member_id)
             .cloned()
             .or_else(|| {
-                bound
-                    .then(|| automatic_member_ineligibility(&pool, member))
-                    .flatten()
+                (bound
+                    && store.as_ref().is_none_or(|store| {
+                        store.agent_priority_ids(&member.agent_member_id).is_none()
+                    }))
+                .then(|| automatic_member_ineligibility(&pool, member))
+                .flatten()
             }) {
             Some(reason) if member.assignment.is_none() => {
                 ineligible.insert(member.agent_member_id.clone(), reason);
@@ -531,7 +535,9 @@ fn member_runner_health(
         return failures;
     };
     let pool = prefs.launch_profile_pool();
-    let environment = prefs.environment_tool_for_agents();
+    let Ok(store) = crate::execution_environments::load() else {
+        return failures;
+    };
     for member in &roster.members {
         // An existing assignment (including one on another host) retains its
         // delivery authority; only future local automatic work is inspected.
@@ -539,19 +545,28 @@ fn member_runner_health(
             continue;
         }
         let id = &member.agent_member_id;
-        let profile = if let Some(tool) = environment.as_deref() {
-            Some(prefs.member_candidate_on_environment(&pool, id, tool))
-        } else {
-            prefs.legacy_member_candidate(&pool, member)
-        };
-        let Some(profile) = profile else {
-            continue;
-        };
         // Members of the same tool/runtime share this installed runner. Retry
         // a failed probe next snapshot, rather than once per member this pass.
-        // Issue #7647: the runner inspected is the one the member starts with.
-        let key = format!("{}:{:?}", profile.agent_id, profile.runtime_target);
-        if let Err(error) = probes.entry(key).or_insert_with(|| probe(&profile)) {
+        let mut check = |profile: &IssueMonitorLaunchProfile| {
+            let key = format!("{}:{:?}", profile.agent_id, profile.runtime_target);
+            probes.entry(key).or_insert_with(|| probe(profile)).clone()
+        };
+        let mut rejected = None;
+        let profile = prefs.member_candidate_with_store(&store, &pool, member, |tool| {
+            let candidate = prefs.member_candidate_on_environment(&pool, id, tool);
+            match check(&candidate) {
+                Ok(()) => true,
+                Err(error) => {
+                    rejected = Some(error);
+                    false
+                }
+            }
+        });
+        let error = match profile {
+            Some(profile) => check(&profile).err(),
+            None => rejected,
+        };
+        if let Some(error) = error {
             failures.insert(id.clone(), format!("runner_health_check_failed: {error}"));
         }
     }
@@ -590,7 +605,8 @@ fn mutate_project_agent_schedule_with_probe(
             if !target.implementation_eligible() || target.assignment.as_ref().is_some_and(|assignment| !assignment.host_id.is_empty() && assignment.host_id != host) {
                 return Err(io::Error::other("Target Agent must be eligible for implementation and belong to this host; read issue.monitor.schedule.read and choose a local member"));
             }
-            let tool_exclusion = if source_member_id != target_member_id && prefs.environment_tools().is_none() {
+            let override_set = crate::execution_environments::load().is_ok_and(|store| store.agent_priority_ids(target_member_id).is_some());
+            let tool_exclusion = if source_member_id != target_member_id && prefs.environment_tools().is_none() && !override_set {
                 selected_member_tool_exclusion(&prefs.launch_profile_pool(), Some(target), target_member_id)
             } else {
                 None
@@ -787,7 +803,9 @@ impl IssueMonitorState {
         });
         let uses_environment =
             !normalize_project_execution_environments(self.execution_environments.clone())
-                .is_empty();
+                .is_empty()
+                || crate::execution_environments::load()
+                    .is_ok_and(|store| store.agent_priority_ids(id).is_some());
         let tool_matches = (!uses_environment
             && self
                 .launch_profiles

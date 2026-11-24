@@ -144,6 +144,7 @@ pub(crate) fn execution_environments_view(
     };
     ExecutionEnvironmentsView {
         pm,
+        agent_priorities: store.agent_priorities.clone(),
         accounts: store
             .accounts
             .iter()
@@ -460,6 +461,10 @@ impl AppRuntime {
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             }
+            FrontendEvent::SetAgentExecutionEnvironments {
+                member_id,
+                environment_ids,
+            } => self.set_agent_execution_environments(&member_id, &environment_ids),
             _ => return Vec::new(),
         };
         match outcome {
@@ -489,6 +494,25 @@ impl AppRuntime {
         let (_, current) = environments::project_list(&store, &prefs);
         let list = project_list_for_ids(&store, &current, environment_ids)?;
         self.save_project_execution_environments(project_root, list)
+    }
+
+    fn set_agent_execution_environments(
+        &self,
+        member_id: &str,
+        environment_ids: &[String],
+    ) -> Result<(), String> {
+        let registry = gwt::agent_registry::SessionMemberSnapshot::load()
+            .map_err(|error| error.to_string())?;
+        if !registry
+            .registered_members()
+            .iter()
+            .any(|(id, _)| id == member_id)
+        {
+            return Err("This agent is no longer registered. Reload and try again.".into());
+        }
+        environments::mutate(|store| Ok(store.set_agent_list(member_id, environment_ids)?))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     /// Take the environment off every project's list first, then delete it,

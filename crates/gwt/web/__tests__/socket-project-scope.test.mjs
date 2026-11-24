@@ -426,6 +426,7 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   });
   t.after(() => { for (const id of ["knowledge", "offline", "closing", "foreign"]) knowledge.clearKnowledgeBridgeState(id); });
   const themeConnections = [];
+  const executionEnvironmentsModel = createUiStateStore({});
   Object.assign(context, {
     handleKnowledgeTransportChange: knowledge.handleKnowledgeTransportChange,
     updateThemeConnection: connected => themeConnections.push(connected),
@@ -434,12 +435,22 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
     clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
     tuningController: { disconnectTuning() {} },
     handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
+    executionEnvironmentsModel: {
+      read: executionEnvironmentsModel.read,
+      // The actual handlers run in the VM, but the store belongs to this realm.
+      update: change => executionEnvironmentsModel.update(state => structuredClone(change(state))),
+    },
+    rosterHost: {},
   });
   context.connectionOverlay.setConnected = () => {};
   context.document.getElementById = () => null;
+  vm.runInContext(functionSource("failAgentEnvironmentPriority"), context);
+  vm.runInContext(functionSource("setAgentEnvironmentPriority"), context);
   vm.runInContext(functionSource("setConnectionState"), context);
   context.connectSocket();
   sockets[1].open();
+  context.setAgentEnvironmentPriority("m-1", ["codex"]);
+  assert.equal(executionEnvironmentsModel.read().agentPriorityPending, "m-1");
   knowledge.requestKnowledgeBridge("knowledge", "issue");
   const oldRead = sockets[1].sent.find(message => message.kind === "load_knowledge_bridge");
   const foreign = knowledge.ensureKnowledgeBridgeState("foreign", "issue");
@@ -449,6 +460,8 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   knowledge.requestKnowledgeBridge("closing", "issue");
   const closingRead = context.pendingMessages.find(entry => entry.message.id === "closing").message;
   sockets[1].close();
+  assert.equal(executionEnvironmentsModel.read().agentPriorityPending, null);
+  assert.equal(executionEnvironmentsModel.read().agentPriorityError.memberId, "m-1");
   knowledge.requestKnowledgeBridge("offline", "issue");
   const queuedRead = context.pendingMessages.find(entry => entry.message.id === "offline").message;
   t.mock.timers.tick(5000);
@@ -463,6 +476,8 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   context.reconnectCallbacks.at(-1)(); // reports offline for a second time
   sockets.at(-1).open();
   assert.deepEqual(themeConnections.slice(-3), [false, false, true]);
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "get_execution_environments").length, 1);
+  assert.equal(sockets.at(-1).sent.some(message => message.kind === "set_agent_execution_environments"), false);
   const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
   assert.equal(reads.filter(message => message.id === "knowledge").length, 1,
     "normal close/timer/open replaces the interrupted read");

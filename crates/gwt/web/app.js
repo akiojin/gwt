@@ -979,7 +979,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         // Never replay an unacknowledged write after reconnect.
         if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
+            (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" || message.kind === "set_agent_execution_environments" ||
             (message.kind === "get_hook_doctor" && message.repair === true) || message.kind === "update_user_hooks") {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
@@ -1244,6 +1244,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         connectionOverlay.setConnected(connected);
         updateThemeConnection(connected);
         handleLaunchWizardTransportChange(connected);
+        if (!connected) {
+          failAgentEnvironmentPriority("Connection lost before the priority change was confirmed.");
+        } else if (rosterHost) {
+          send({ kind: "get_execution_environments" });
+        }
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
@@ -5434,7 +5439,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             break;
           case "execution_environments":
             applyExecutionEnvironments(event.view);
-            executionEnvironmentsModel.update(state => ({ ...state, view: event.view }));
+            executionEnvironmentsModel.update(state => ({ ...state, view: event.view, agentPriorityPending: null, agentPriorityError: null }));
             break;
           case "project_environment_set":
             projectEnvironmentSetsModel.update(state => ({ ...state, [event.project_root]: event }));
@@ -5445,6 +5450,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             break;
           case "execution_environment_error":
             applyExecutionEnvironmentError(event);
+            failAgentEnvironmentPriority(event.message);
             executionEnvironmentsModel.update(state => ({ ...state, refusal: { message: event.message } }));
             break;
           case "issue_monitor_profiles_write_failed":
@@ -6002,6 +6008,18 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (send(request) !== "sent" && action.kind !== "read") applyAgentRosterError({ project_key: routeProjectKey,
           request_id: request.request_id, message: "Member change could not be sent. Reload members and retry when connected." });
       }
+      function failAgentEnvironmentPriority(message) {
+        executionEnvironmentsModel.update(state => state.agentPriorityPending
+          ? { ...state, agentPriorityPending: null, agentPriorityError: { memberId: state.agentPriorityPending, message } }
+          : state);
+      }
+      function setAgentEnvironmentPriority(memberId, environmentIds) {
+        if (executionEnvironmentsModel.read().agentPriorityPending) return;
+        executionEnvironmentsModel.update(state => ({ ...state, agentPriorityPending: memberId, agentPriorityError: null }));
+        if (send({ kind: "set_agent_execution_environments", member_id: memberId, environment_ids: environmentIds }) !== "sent") {
+          failAgentEnvironmentPriority("Reconnect before changing the execution environment priority.");
+        }
+      }
       function requestAgentSchedule(action = { kind: "read" }) {
         if (action.kind !== "read" && action.expected_roster_revision !== rosterModel.read().revision) {
           applyAgentScheduleError({ project_key: routeProjectKey, message: "Members changed. Refresh plans before reassigning." });
@@ -6020,7 +6038,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
         if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch();
-          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); }
+          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); send({ kind: "get_execution_environments" }); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -6029,7 +6047,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, executionEnvironmentsModel, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onReloadProfile: () => requestAgentRoster(),
         onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
         onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
@@ -6043,6 +6061,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
         onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
         onSetTraits: (memberId, traits) => requestAgentRoster({ kind: "set_traits", member_id: memberId, traits }),
+        onSetEnvironmentPriority: setAgentEnvironmentPriority,
         onSetAvatar: (memberId, avatar) => requestAgentRoster({ kind: "set_avatar", member_id: memberId, avatar }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
