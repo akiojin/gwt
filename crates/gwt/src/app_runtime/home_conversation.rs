@@ -134,6 +134,55 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #7654: count the waiting decisions of every open project's queue
+    /// for a project page. Only the queues are read, never a conversation.
+    pub(super) fn decision_counts_events(
+        &self,
+        client_id: ClientId,
+        request_id: u64,
+    ) -> Vec<OutboundEvent> {
+        let projects: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                Some((
+                    self.project_key_for_tab(&tab.id)?.to_string(),
+                    tab.project_root.clone(),
+                ))
+            })
+            .collect();
+        let proxy = self.proxy.clone();
+        let reply_client = client_id.clone();
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let projects = projects
+                .into_iter()
+                .map(|(project_key, root)| gwt::DecisionCountView {
+                    project_key,
+                    waiting_count: gwt::pm_current::load_decisions(&root)
+                        .map(|queue| queue.waiting_count),
+                })
+                .collect();
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                &reply_client,
+                BackendEvent::DecisionCounts {
+                    request_id,
+                    projects,
+                },
+            )]));
+        });
+        match spawn {
+            Ok(()) => Vec::new(),
+            // Unknown counts, so the page keeps showing none rather than zero.
+            Err(_) => vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::DecisionCounts {
+                    request_id,
+                    projects: Vec::new(),
+                },
+            )],
+        }
+    }
+
     /// Issue #7742: answer (`Some`) or defer (`None`) one decision of an open
     /// project from Home. No PM has to be running: the queue is the project's.
     pub(super) fn home_decision_events(

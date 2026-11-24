@@ -811,6 +811,11 @@ pub enum FrontendEvent {
         #[serde(default)]
         history: std::collections::BTreeMap<String, String>,
     },
+    /// Issue #7654: read how many decisions every open project's queue has
+    /// waiting, so a project page counts what Home shows without a PM window.
+    LoadDecisionCounts {
+        request_id: u64,
+    },
     /// Issue #7639: send one message from Home to the PM of an open project.
     /// The host resolves the PM pane from the project; the client never names
     /// a session or a window.
@@ -1971,6 +1976,14 @@ pub struct ProjectOwnerHealthView {
     pub detail: Option<String>,
 }
 
+/// Issue #7654: one open project's waiting decisions, as its queue counts
+/// them. `None` when the queue could not be read: unknown, never zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecisionCountView {
+    pub project_key: String,
+    pub waiting_count: Option<usize>,
+}
+
 /// Issue #7639: what one open project contributes to the Home conversation.
 /// Project work status and counts stay on the project's own
 /// page (design item 5). Issue #7742: they are the project's gwtd decision
@@ -3072,6 +3085,11 @@ pub enum BackendEvent {
         pm: Option<Option<HomePmView>>,
         projects: Vec<HomeProjectConversationView>,
     },
+    /// Issue #7654: client-scoped reply to [`FrontendEvent::LoadDecisionCounts`].
+    DecisionCounts {
+        request_id: u64,
+        projects: Vec<DecisionCountView>,
+    },
     PmReports {
         id: String,
         session_id: Option<String>,
@@ -4062,6 +4080,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "decision_counts",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "themes",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -4762,6 +4785,7 @@ impl BackendEvent {
             BackendEvent::PmConversation { .. } => "pm_conversation",
             BackendEvent::PmReports { .. } => "pm_reports",
             BackendEvent::HomeConversation { .. } => "home_conversation",
+            BackendEvent::DecisionCounts { .. } => "decision_counts",
             BackendEvent::PmRequestTask { .. } => "pm_request_task",
             BackendEvent::DecisionResult { .. } => "decision_result",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",

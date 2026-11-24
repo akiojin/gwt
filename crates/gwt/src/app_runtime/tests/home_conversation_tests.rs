@@ -237,3 +237,66 @@ fn a_project_connection_cannot_use_the_home_send() {
     assert_eq!(value["kind"], "pane_send_result");
     assert_eq!(value["ok"], false);
 }
+
+/// Issue #7654: a project page reads the waiting count of every open
+/// project's decision queue, with no PM window, so its header and status bar
+/// count what Home shows.
+#[test]
+fn a_project_connection_reads_the_decision_counts_without_a_pm_window() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    for target in ["storage", "ordering", "naming"] {
+        queue::register(
+            temp.path(),
+            &queue::Registration {
+                issue: Some(7654),
+                kind: Some("product".into()),
+                target: Some(target.into()),
+                question: Some(format!("Which {target}?")),
+                materials: Some("Both options work.".into()),
+                options: vec!["Keep".into(), "Change".into()],
+                recommendation: Some("Keep".into()),
+                reason: None,
+                session_id: Some("waiting-agent".into()),
+            },
+        )
+        .unwrap();
+    }
+    let (mut runtime, recorded, tasks, project_key) = home_runtime(temp.path());
+    let scope = ClientScope::Project(runtime.test_context().project_key.clone());
+    let immediate = runtime.handle_frontend_event_in_scope(
+        "project".into(),
+        serde_json::from_value(
+            serde_json::json!({"kind": "load_decision_counts", "request_id": 4}),
+        )
+        .unwrap(),
+        &scope,
+    );
+    assert!(
+        immediate.is_empty(),
+        "the queues are read off the event loop"
+    );
+    let task = tasks.lock().unwrap().remove(0);
+    task();
+
+    let replies: Vec<serde_json::Value> = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(events) => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| event.target == DispatchTarget::Client("project".into()))
+        .map(|event| serde_json::to_value(&event.event).unwrap())
+        .filter(|value| value["kind"] == "decision_counts")
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["request_id"], 4);
+    assert_eq!(
+        replies[0]["projects"],
+        serde_json::json!([{"project_key": project_key, "waiting_count": 3}])
+    );
+}

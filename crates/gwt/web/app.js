@@ -484,6 +484,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // route, never from in-page selection, so reconnects rebind the same
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      // Issue #7654: the last decision-count read sent, and the counts of the
+      // newest reply: every open project's total, and this project's own.
+      let decisionCountsRequested = 0;
+      const decisionCountsModel = createUiStateStore({ applied: 0, total: null, own: null });
+      // Decisions registered by other processes appear within this period, as on Home.
+      const DECISION_COUNTS_REFRESH_MS = 5_000;
       const projectExecutionPolicy = createProjectExecutionPolicyModel(routeProjectKey);
       const projectViewReadiness = createProjectViewReadiness({ document, projectKey: routeProjectKey, send });
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
@@ -1254,6 +1260,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           send({ kind: "get_execution_environments" });
         }
         if (connected) executionEnvironments.refreshVisibleAccounts();
+        if (connected) requestDecisionCounts();
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
@@ -2600,13 +2607,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         const previousPmId = pmWindowId;
         pmWindowId = pmWindow?.id ?? null;
         if (previousPmId !== pmWindowId) {
-          if (previousPmId) {
-            applyPmDecisions(previousPmId, null);
-            applyPmReviewAttention(previousPmId, null);
-          }
+          if (previousPmId) applyPmReviewAttention(previousPmId, null);
           if (pmWindowId) {
             const current = readPmWindowState().windows[pmWindowId];
-            applyPmDecisions(pmWindowId, { waiting: current?.decisions?.waiting_count });
             applyPmReviewAttention(pmWindowId, current?.current?.facts?.review_attention);
           }
         }
@@ -4468,9 +4471,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           renderedTerminalPackets.set(state.windowId, packet);
         }
       });
-      subscribePmWindowState(state => state.windows[pmWindowId]?.decisions, decisions => {
-        if (pmWindowId) applyPmDecisions(pmWindowId, { waiting: decisions?.waiting_count });
-      });
       subscribePmWindowState(state => state.windows[pmWindowId]?.current?.facts?.review_attention, items => {
         if (pmWindowId) applyPmReviewAttention(pmWindowId, items);
       });
@@ -5420,6 +5420,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             applyPmWindowReceiveEvent(event);
             break;
           }
+          case "decision_counts":
+            decisionCountsModel.update(current => decisionCountsFrom(current, event));
+            break;
           case "pm_launch_profile_result":
             tuningController.applyPmTuningResult(event);
             break;
@@ -5993,8 +5996,35 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         const name = String(pmWindow?.agent_name || rosterModel.read().members.find(member => member.is_pm)?.name || "").trim();
         // Issue #7635: names are unique in the ledger, so the PM's avatar is its member's.
         const avatar = name ? rosterModel.read().members.find(member => member.name === name)?.avatar : null;
-        appChrome.setPm({ name, avatar, decisions: issueMonitorModel.read().pmDecisionAttention.count });
+        appChrome.setPm({ name, avatar, decisions: decisionCountsModel.read().total });
       }
+
+      // A reply older than the newest one applied changes nothing.
+      function decisionCountsFrom(current, event) {
+        if (!Number.isSafeInteger(event.request_id) || event.request_id <= current.applied) return current;
+        const known = (event.projects || []).filter(project => Number.isSafeInteger(project.waiting_count));
+        const own = known.find(project => project.project_key === routeProjectKey);
+        return {
+          applied: event.request_id,
+          total: known.length ? known.reduce((sum, project) => sum + project.waiting_count, 0) : null,
+          own: own ? own.waiting_count : null,
+        };
+      }
+
+      // Issue #7654: the header and the status bar count the decisions of the
+      // project queues themselves, as Home does, whether or not a PM window is
+      // open. The header's PM is the device's, so it counts every open
+      // project; the status bar counts this project's queue.
+      function requestDecisionCounts() {
+        if (document.visibilityState === "hidden") return;
+        send({ kind: "load_decision_counts", request_id: ++decisionCountsRequested });
+      }
+      decisionCountsModel.subscribe(state => state.total, syncAppChromePm);
+      decisionCountsModel.subscribe(state => state.own, own => {
+        applyPmDecisions("decision-queue", own == null ? null : { waiting: own });
+      });
+      // A hidden page skips the read; the next tick after it shows again catches up.
+      window.setInterval(requestDecisionCounts, DECISION_COUNTS_REFRESH_MS);
       pmLauncherModel.subscribe(state => state.workspace, syncAppChromePm);
       rosterModel.subscribe(state => state.revision, syncAppChromePm);
       issueMonitorModel.subscribe(model => model.pmDecisionAttention.count, syncAppChromePm);

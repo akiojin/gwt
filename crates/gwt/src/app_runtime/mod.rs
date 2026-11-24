@@ -12353,6 +12353,9 @@ impl AppRuntime {
             }
             // Issue #7639: the Home conversation belongs to the Hub connection.
             FrontendEvent::LoadHomeConversation { .. } => Vec::new(),
+            FrontendEvent::LoadDecisionCounts { request_id } => {
+                self.decision_counts_events(client_id, request_id)
+            }
             // Issue #7731: so does the first-run setup.
             FrontendEvent::GetFirstRunSetup { .. } | FrontendEvent::SaveFirstRunSetup { .. } => {
                 Vec::new()
