@@ -6152,6 +6152,12 @@ pub(crate) mod tests {
             // Issue #4146 AC-2: every checkbox is `[x]`, but the plain rows
             // below them are untracked work, so the Issue is not complete.
             (49, "- [x] T-001\n- T-002 never tracked"),
+            (
+                50,
+                "- [x] T-L101 replacement delivered\n\
+                 - [ ] T364 excluded from the backlog <!-- gwt-task: historical -->\n\
+                 - [ ] T-600 superseded by T-L101 <!-- gwt-task: historical -->",
+            ),
         ] {
             cache
                 .write_snapshot(&structured_spec(number, "t1", "Plan", tasks))
@@ -6168,6 +6174,7 @@ pub(crate) mod tests {
                 live_issue(47, &["gwt-spec"], Some("t1")),
                 live_issue(48, &["gwt-spec"], Some("t1")),
                 live_issue(49, &["gwt-spec"], Some("t1")),
+                live_issue(50, &["gwt-spec"], Some("t1")),
             ],
             dir.path(),
             |_| panic!("matching cache must not refresh"),
@@ -6189,6 +6196,7 @@ pub(crate) mod tests {
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
+                IssueMonitorReadiness::ReadyWithCompletedTasks,
             ]
         );
     }

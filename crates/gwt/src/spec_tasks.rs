@@ -44,6 +44,9 @@ impl TasksProgress {
 ///   open — at that depth the row may be a sub-step or indented code, so its
 ///   own state cannot be trusted.
 ///
+/// A top-level unchecked task ending with `<!-- gwt-task: historical -->`
+/// is retained for reference and contributes neither open nor completed work.
+///
 /// Fenced code blocks are skipped so a Markdown example inside the section
 /// never contributes rows.
 pub fn parse_tasks_progress(tasks: &str) -> TasksProgress {
@@ -74,6 +77,9 @@ pub fn parse_tasks_progress(tasks: &str) -> TasksProgress {
         let Some(item) = markdown_list_item(content) else {
             continue;
         };
+        if item.starts_with("[ ]") && item.trim_end().ends_with("<!-- gwt-task: historical -->") {
+            continue;
+        }
         if item.starts_with("[x]") || item.starts_with("[X]") {
             progress.completed += 1;
         } else if item.starts_with('[') {
@@ -132,6 +138,19 @@ mod tests {
             }
         );
         assert_eq!(progress.total(), 2);
+    }
+
+    #[test]
+    fn historical_unchecked_tasks_are_excluded_from_progress() {
+        let tasks = "- [x] T-L101 replacement delivered\n\
+                     - [ ] T364 excluded from the backlog <!-- gwt-task: historical -->\n\
+                     - [ ] T-600 superseded by T-L101 <!-- gwt-task: historical -->\n";
+        let progress = parse_tasks_progress(tasks);
+        assert_eq!(progress.completed, 1);
+        assert_eq!(progress.open, 0);
+
+        let with_active = format!("{tasks}- [ ] T-L102 still in scope\n");
+        assert_eq!(parse_tasks_progress(&with_active).open, 1);
     }
 
     /// A numbered row without a checkbox is a prose enumeration (#3700 ends
