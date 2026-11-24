@@ -747,6 +747,63 @@ impl AppRuntime {
         Some((root, running))
     }
 
+    /// Issue #7869 AC-1: the PM settings snapshot for one hydrating client.
+    /// The snapshot takes the PM prefs and Agent registry locks, which a
+    /// daemon worker may hold, so it is read off the GUI event loop and
+    /// published under the same epoch fence as Agent roster reads. A resend
+    /// while the read runs joins it (AC-2).
+    pub(crate) fn pm_status_reply_events(
+        &self,
+        context: &super::ProjectContext,
+        client_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some((root, running)) = self.pm_status_read_capture(context) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                self.pm_status_event(context),
+            )];
+        };
+        let Some(pm_status_epoch) = self.project_state_for_tab(&context.tab_id).map(|state| {
+            (
+                state.context.clone(),
+                state.pm_status_epoch.load(Ordering::SeqCst),
+            )
+        }) else {
+            return Vec::new();
+        };
+        let key = format!("pm-status\0{client_id}\0{}", context.project_key);
+        let reads = self.coalesced_reads.clone();
+        if !reads.begin(&key) {
+            return Vec::new();
+        }
+        let worker_key = key.clone();
+        let worker_reads = reads.clone();
+        let sessions_dir = self.sessions_dir.clone();
+        let proxy = self.proxy.clone();
+        let reply_to = client_id.to_string();
+        let worker_context = context.clone();
+        let spawned = self.blocking_tasks.try_spawn(move || {
+            worker_reads.run(&worker_key, || {
+                let status = pm_status_from_launch_prefs(
+                    &sessions_dir,
+                    &root,
+                    &pm_registry::PmPrefs::default(),
+                    running.as_ref(),
+                );
+                proxy.send(UserEvent::AgentRosterDispatchPrepared {
+                    context: worker_context.clone(),
+                    pm_status_epoch: Some(pm_status_epoch.clone()),
+                    events: vec![OutboundEvent::reply(&reply_to, status)],
+                });
+            });
+        });
+        if let Err(error) = spawned {
+            reads.abandon(&key);
+            tracing::warn!(%error, "could not read the PM status for a hydrating client");
+        }
+        Vec::new()
+    }
+
     /// SPEC-3431 FR-026: the PM settings snapshot for the active project tab.
     ///
     /// A non-Git or missing active tab produces an explicit unavailable

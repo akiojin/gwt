@@ -1056,6 +1056,7 @@ mod execution_environments;
 mod issue_monitor_delivery_ack;
 mod issue_monitor_list;
 mod issue_monitor_profiles;
+mod read_coalescing;
 pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
 pub(crate) use issue_monitor_list::PreparedIssueMonitorList;
 pub(crate) use issue_monitor_profiles::{
@@ -2169,6 +2170,8 @@ pub struct AppRuntime {
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
     pub(crate) hook_doctor_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Issue #7869 AC-2: hydration reads in flight, keyed by request.
+    pub(crate) coalesced_reads: read_coalescing::CoalescedReads,
     pub(crate) agent_maintenance: agent_maintenance::AgentMaintenanceState,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
@@ -5288,6 +5291,7 @@ impl AppRuntime {
             proxy,
             blocking_tasks,
             hook_doctor_in_flight: Default::default(),
+            coalesced_reads: Default::default(),
             agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
@@ -13801,10 +13805,7 @@ impl AppRuntime {
         // SPEC-3431 FR-026: hydrate the PM settings panel on connect. Without
         // this a freshly loaded page shows the panel's built-in defaults until
         // some unrelated PM transition happens to broadcast.
-        events.push(OutboundEvent::reply(
-            client_id.to_string(),
-            self.pm_status_event(context),
-        ));
+        events.extend(self.pm_status_reply_events(context, client_id));
         if let Some(state) = self.project_aggregates.get(&context.project_key) {
             events.push(OutboundEvent::reply(
                 client_id,
