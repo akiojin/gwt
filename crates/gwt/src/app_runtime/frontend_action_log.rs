@@ -899,6 +899,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadHomeConversation { .. }
+        | FrontendEvent::LoadDecisionCounts { .. }
         | FrontendEvent::LoadThemes { .. }
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::LoadPmRequestTask { .. }

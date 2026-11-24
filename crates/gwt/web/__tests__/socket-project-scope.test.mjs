@@ -436,6 +436,7 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
     tuningController: { disconnectTuning() {} },
     handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
     executionEnvironments: { connectionLost() {}, refreshVisibleAccounts() {} },
+    requestDecisionCounts() {},
     executionEnvironmentsModel: {
       read: executionEnvironmentsModel.read,
       // The actual handlers run in the VM, but the store belongs to this realm.
