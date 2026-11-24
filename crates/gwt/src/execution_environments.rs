@@ -178,6 +178,23 @@ pub fn carries_own_account(tool: &str) -> bool {
     )
 }
 
+/// Issue #7841: whether the account's own credential home is signed in,
+/// `None` when gwt cannot tell without starting a sign-in (Antigravity's
+/// single keyring profile, an isolated Copilot account's Keychain item).
+pub fn account_signed_in(account: &Account) -> Option<bool> {
+    match gwt_agent::resolve_agent_id(&account.tool)? {
+        gwt_agent::AgentId::Antigravity => None,
+        gwt_agent::AgentId::Copilot if account.credential_home.is_some() => None,
+        _ => Some(
+            crate::account_homes::sign_in_state(
+                &account.tool,
+                account.credential_home.as_deref().map(Path::new),
+            )
+            .is_some(),
+        ),
+    }
+}
+
 impl Store {
     pub fn account(&self, id: &str) -> Option<&Account> {
         self.accounts.iter().find(|account| account.id == id)

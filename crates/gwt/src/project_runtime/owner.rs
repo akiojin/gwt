@@ -11009,6 +11009,9 @@ impl OwnerState {
             )
         });
         let detail = runtime.detail.clone();
+        if let (Some(failure), Some(agent)) = (&outcome.failure, runtime.agent.as_ref()) {
+            super::runtime_events::record_account_limit(&agent.snapshot, failure, now);
+        }
         if let Some(fingerprint) = outcome.permission_prompt {
             self.record_owner_permission_prompt(id, fingerprint);
         }
@@ -11450,6 +11453,15 @@ impl OwnerState {
                     raw_status,
                     crate::WindowProcessStatus::Error | crate::WindowProcessStatus::Stopped
                 ));
+        if let (Some(failure), Some(agent)) = (&outcome.quota_hold, runtime.agent.as_ref()) {
+            if exit_confirmed {
+                super::runtime_events::record_account_limit(
+                    &agent.snapshot,
+                    failure,
+                    gwt_core::timestamp::UtcTimestamp::now(),
+                );
+            }
+        }
         if exit_confirmed && runtime.agent.is_some() {
             let failure = outcome
                 .quota_hold
