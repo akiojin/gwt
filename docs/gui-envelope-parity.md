@@ -157,6 +157,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `DeleteExecutionEnvironment` | 対象外 | — | 実行環境を削除し、各プロジェクトのリストから外す。確認画面を経る操作に限る（Issue #7741）。 |
 | `SetProjectExecutionEnvironments` | 対象外 | — | プロジェクトの利用可能な実行環境リストを優先度順で保存する。プロジェクト設定からの操作に限る（Issue #7741）。 |
 | `SetPmExecutionEnvironments` | 対象外 | — | この端末の PM 専用の実行環境リストを優先度順で保存する。空のリストは保存側で拒否する。アプリ設定からの操作に限る（Issue #7732）。 |
+| `SetAgentExecutionEnvironments` | 対象外 | — | エージェント設定から実行環境の優先度を保存する。空のリストはプロジェクト順を使う（Issue #7846）。 |
 | `SetIssueMonitorMaxActiveAgents` | 対応 | `issue.monitor.config.set` | Issues の同時稼働エージェント上限を変更する。 |
 | `SetIssueMonitorAllowedLabels` | 対応 | `issue.monitor.config.set` | Issues の対象ラベルを変更する。 |
 | `GetRepositoryLabels` | 読み取り | — | Issues の設定候補としてリポジトリのラベルを取得する。 |
