@@ -89,14 +89,22 @@ and Agent Visual Check gates.
 For the gwt repository, register the explicit policy with:
 
 ```json
-{"schema_version":1,"operation":"verify.plan","params":{"derive":true,"mode":"pre-pr","acceptance_commands":["cargo test -p gwt --test ci_contracts ci_pre_pr_contract_test::"],"commands":[]}}
+{"schema_version":1,"operation":"verify.plan","params":{"derive":true,"mode":"pre-pr","acceptance_commands":["cargo test -p gwt --test ci_contracts ci_pre_pr_contract_test::"]}}
 ```
 
 Replace the example acceptance test with the tests that fix the current
 Issue's AC. `acceptance_commands` is mandatory for a nontrivial gwt change.
-`commands` adds checks that required CI does not cover, including nominated
-headed E2E for UI changes. Nothing in those explicit lists is discarded.
-Run the entire returned matrix through `verify.run`.
+With `mode: "pre-pr"`, optional `params.commands` adds checks that required
+CI does not cover, including nominated headed E2E for UI changes.
+
+For `mode: "full"` (also the default when `mode` is omitted), choose either
+`params.derive: true` or an explicit `params.commands` list. If you need to
+extend the full matrix, first derive it with `params.derive: true` alone.
+Append the extra checks and register the complete list with `params.commands` alone.
+Use the same two-step workflow on older runtimes that reject combining
+derivation with additional commands.
+
+Run the entire registered matrix through `verify.run`.
 
 The local subset keeps formatting, changed-crate clippy, the AC tests, and
 checks absent from required CI. Derivation reads live branch protection and
