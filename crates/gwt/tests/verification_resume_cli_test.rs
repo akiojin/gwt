@@ -445,7 +445,7 @@ fn assert_stop_gates(repo: &Path, session: &str, silent: bool) {
 }
 
 #[test]
-fn admitted_waiter_stays_silent_after_its_attempt_completes() {
+fn admitted_waiter_notifies_once_after_its_busy_pane_becomes_idle() {
     let arena = Arena::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let holder_repo = arena.repo("holder");
@@ -520,8 +520,10 @@ fn admitted_waiter_stays_silent_after_its_attempt_completes() {
     // that becomes idle afterwards is finishing its task, so the admitted
     // notice must not reopen it. Observe several 5s companion poll cycles.
     idle.store(true, Ordering::Release);
+    // test-hygiene: allow-wall-clock-deadline Absence of a pane notice has no completion event to await.
+    let silent = received.recv_timeout(Duration::from_secs(16)).is_err();
     assert!(
-        received.recv_timeout(Duration::from_secs(16)).is_err(),
+        silent,
         "a completed attempt must not send the admitted resume notice"
     );
 }
