@@ -434,7 +434,13 @@ pub(super) fn ready_verification(
                 plan.as_ref(),
                 &record,
             );
-            if status == verification::EvidenceStatus::Fresh {
+            if status == verification::EvidenceStatus::Fresh
+                || status == verification::EvidenceStatus::FreshWithQuarantine
+                    && verification::pr_create_quarantine_refusal(
+                        worktree, session_id, &record, body,
+                    )
+                    .is_none()
+            {
                 Ok(())
             } else {
                 Err(status)
@@ -640,31 +646,45 @@ pub(super) fn run_with_data<E: CliEnv>(
                 match crate::cli::verification_record::load(&worktree) {
                     Ok(Some(verification)) if !verification.quarantined_failures.is_empty() => {
                         if target_pr.is_none() {
-                            out.push_str("PR handoff refused: creating a Ready PR requires normal passing verification. Repair the failing commands and rerun verify.plan / verify.run; Draft PR creation is prohibited. Existing Draft PRs may use pr.ready with their validated quarantine references.\n");
-                            return Ok(2);
-                        }
-                        let evidence = crate::cli::verification_record::evaluate_evidence(
-                            &worktree,
-                            session_id.as_deref().unwrap_or_default(),
-                            None,
-                        );
-                        if evidence
-                            != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
-                        {
-                            out.push_str(&format!("PR handoff refused: {}\n", evidence.describe()));
-                            return Ok(2);
-                        }
-                        if let Err(refusal) =
-                            crate::cli::verification_record::validate_current_quarantine_references(
+                            // #7326: a first-PR quarantine is validated against
+                            // the submitted create body.
+                            if let Some(refusal) =
+                                crate::cli::verification_record::pr_create_quarantine_refusal(
+                                    &worktree,
+                                    session_id.as_deref().unwrap_or_default(),
+                                    &verification,
+                                    body,
+                                )
+                            {
+                                out.push_str(&refusal);
+                                out.push('\n');
+                                return Ok(2);
+                            }
+                        } else {
+                            let evidence = crate::cli::verification_record::evaluate_evidence(
+                                &worktree,
+                                session_id.as_deref().unwrap_or_default(),
+                                None,
+                            );
+                            if evidence
+                                != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+                            {
+                                out.push_str(&format!(
+                                    "PR handoff refused: {}\n",
+                                    evidence.describe()
+                                ));
+                                return Ok(2);
+                            }
+                            if let Err(refusal) = crate::cli::verification_record::validate_current_quarantine_references(
                                 env,
                                 &verification,
                                 target_pr,
-                            )
-                        {
-                            out.push_str(&format!(
-                            "PR handoff refused: typed quarantine evidence is not current: {refusal}\n"
-                        ));
-                            return Ok(2);
+                            ) {
+                                out.push_str(&format!(
+                                    "PR handoff refused: typed quarantine evidence is not current: {refusal}\n"
+                                ));
+                                return Ok(2);
+                            }
                         }
                         verification_guard.get_or_insert_with(|| VerificationMutationGuard {
                             session_id: session_id.unwrap_or_default().to_string(),

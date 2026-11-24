@@ -2429,6 +2429,33 @@ mod tests {
     }
 
     #[test]
+    fn materialized_verify_plan_guidance_separates_derivation_from_explicit_commands() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let content = std::fs::read_to_string(
+                materialized
+                    .path()
+                    .join(provider)
+                    .join("skills/gwt-verify/references/contract-modes.md"),
+            )
+            .unwrap();
+            let examples: Vec<_> = content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|example| example["operation"] == "verify.plan")
+                .collect();
+            let pre_pr = examples
+                .iter()
+                .find(|example| example["params"]["mode"] == "pre-pr")
+                .expect("expected a pre-pr verify.plan example");
+            assert_eq!(pre_pr["params"]["derive"], true);
+            assert!(pre_pr["params"].get("commands").is_none());
+            assert!(content.contains("register the complete list with `params.commands` alone"));
+        }
+    }
+
+    #[test]
     fn gwt_verify_references_are_bundled() {
         use crate::assets::CLAUDE_SKILLS;
 
