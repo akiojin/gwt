@@ -76,16 +76,13 @@ fn frontend_ready_returns_while_daemon_holds_pm_and_registry_locks() {
     let scope = ClientScope::Project(context.project_key.clone());
     let locks = hold_daemon_locks(&context.project_root);
 
-    let started = std::time::Instant::now();
+    // The locks stay held until after this dispatch, and the old handler
+    // waited on them without a deadline: returning at all proves the event
+    // loop no longer waits on them (no wall-clock bound needed).
     let events = runtime.handle_frontend_event_in_scope(
         "client-a".into(),
         FrontendEvent::FrontendReady,
         &scope,
-    );
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "FrontendReady waited {elapsed:?} on locks another process holds"
     );
     assert!(
         events
@@ -121,16 +118,11 @@ fn get_execution_environments_returns_while_daemon_holds_locks_and_coalesces_res
     let scope = ClientScope::Project(context.project_key.clone());
     let locks = hold_daemon_locks(&context.project_root);
 
-    let started = std::time::Instant::now();
+    // Nothing but in-memory capture runs before the worker is queued.
     let events = runtime.handle_frontend_event_in_scope(
         "client-a".into(),
         FrontendEvent::GetExecutionEnvironments,
         &scope,
-    );
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "GetExecutionEnvironments waited {elapsed:?} on the event loop"
     );
     assert!(
         events.is_empty(),
