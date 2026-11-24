@@ -358,7 +358,9 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
         surface_js.contains("settings:open")
             && surface_js.contains(r#"section: "issues""#)
             && settings_js.contains("set_issue_monitor_autonomous_mode")
-            && settings_js.contains("set_issue_monitor_enabled")
+            && settings_js.contains("set_project_autonomy")
+            && !surface_js.contains("set_issue_monitor_enabled")
+            && !settings_js.contains("set_issue_monitor_enabled")
             && !settings_js.contains("set_issue_monitor_max_active_agents"),
         "Issues must delegate project controls to Settings without duplicate capacity editing"
     );
