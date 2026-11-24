@@ -33,6 +33,7 @@ impl AppRuntime {
         &self,
         client_id: ClientId,
         request_id: u64,
+        history: std::collections::BTreeMap<String, String>,
     ) -> Vec<OutboundEvent> {
         let projects: Vec<_> = self
             .tabs
@@ -88,7 +89,10 @@ impl AppRuntime {
                             reader
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .read_for_session(&session),
+                                .read_home_page(
+                                    &session,
+                                    history.get(&project.project_key).map(String::as_str),
+                                ),
                         )
                     });
                     project.conversation = conversation;
