@@ -3260,7 +3260,11 @@ fn git_stdout(worktree: &Path, args: &[&str]) -> Result<String, ()> {
         .map_err(|_| ())
 }
 
-fn git_is_ancestor(worktree: &Path, ancestor: &str, descendant: &str) -> Result<bool, ()> {
+pub(crate) fn git_is_ancestor(
+    worktree: &Path,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, ()> {
     let output = gwt_core::process::hidden_command("git")
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(worktree)
