@@ -14,11 +14,11 @@ use base64::Engine;
 use gwt::account_homes;
 use gwt::execution_environments::{self as environments, Store};
 use gwt::protocol::{
-    ExecutionAccountView, ExecutionEnvironmentProjectView, ExecutionEnvironmentViaOptionView,
-    ExecutionEnvironmentView, ExecutionEnvironmentsView, PmExecutionEnvironmentsView,
-    PoolAccountDeletionImpact, PoolAccountDirection, PoolAccountProviderView,
-    PoolAccountSessionView, PoolExecutionAccountView, ProjectExecutionEnvironmentView,
-    ProjectExecutionEnvironmentsView,
+    AccountSignInView, ExecutionAccountView, ExecutionEnvironmentProjectView,
+    ExecutionEnvironmentViaOptionView, ExecutionEnvironmentView, ExecutionEnvironmentsView,
+    PmExecutionEnvironmentsView, PoolAccountDeletionImpact, PoolAccountDirection,
+    PoolAccountProviderView, PoolAccountSessionView, PoolExecutionAccountView,
+    ProjectExecutionEnvironmentView, ProjectExecutionEnvironmentsView,
 };
 use gwt::ProjectExecutionEnvironment;
 use gwt_terminal::{pty::SpawnConfig, PtyHandle};
@@ -64,6 +64,7 @@ pub(crate) fn execution_environments_view(
     current: Option<&Path>,
     installed: &dyn Fn(&str) -> bool,
     tool_settings: &dyn Fn(&str) -> environments::ToolSettings,
+    signed_in: &dyn Fn(&environments::Account) -> Option<bool>,
 ) -> ExecutionEnvironmentsView {
     let lists: Vec<_> = projects
         .iter()
@@ -178,7 +179,11 @@ pub(crate) fn execution_environments_view(
                 name: account.name.clone(),
                 tool: account.tool.clone(),
                 tool_name: tool_name(&account.tool),
-                signed_in: false,
+                sign_in: match signed_in(account) {
+                    Some(true) => AccountSignInView::SignedIn,
+                    Some(false) => AccountSignInView::SignedOut,
+                    None => AccountSignInView::Unknown,
+                },
                 sign_in_identity: None,
                 sign_in_blocked_reason: None,
                 delete_blocked_reason: None,
@@ -433,12 +438,24 @@ impl AppRuntime {
                             .any(|id| gwt_agent::resolve_agent_id(id).as_ref() == Some(&agent))
                     })
                 };
+                let sign_ins: HashMap<_, _> = store
+                    .accounts
+                    .iter()
+                    .map(|account| (account.id.as_str(), account_homes::pool_sign_in(account)))
+                    .collect();
                 let mut view = execution_environments_view(
                     &store,
                     projects,
                     project_root,
                     &is_installed,
                     &environments::tool_settings,
+                    &|account| {
+                        let signed_in = sign_ins[account.id.as_str()].is_some();
+                        match gwt_agent::resolve_agent_id(&account.tool)? {
+                            gwt_agent::AgentId::Antigravity => None,
+                            _ => Some(signed_in),
+                        }
+                    },
                 );
                 let unknown_via_sessions = |ids: &[String]| {
                     let mut titles: Vec<_> = active
@@ -495,10 +512,9 @@ impl AppRuntime {
                     })
                     .unwrap_or_default();
                 for (row, account) in view.accounts.iter_mut().zip(&store.accounts) {
-                    let sign_in = account_homes::pool_sign_in(account);
-                    row.signed_in = sign_in.is_some();
-                    row.sign_in_identity = sign_in
-                        .and_then(|state| state.identity)
+                    row.sign_in_identity = sign_ins[account.id.as_str()]
+                        .as_ref()
+                        .and_then(|state| state.identity.clone())
                         .or_else(|| account.sign_in_identity.clone());
                     row.sign_in_blocked_reason =
                         account_homes::pool_login_refusal(account).map(str::to_owned);
@@ -1152,7 +1168,37 @@ mod tests {
                     value: "glm-4.6".into(),
                 }],
             },
+            &|account| (account.tool != "grok").then_some(account.tool == "claude"),
         )
+    }
+
+    // Issue #7841 AC-1: each account says whether it is signed in, and says
+    // so when gwt cannot tell.
+    #[test]
+    fn each_account_reports_its_sign_in_state() {
+        let mut store = store();
+        store.register_account("grok");
+        let view = execution_environments_view(
+            &store,
+            &[],
+            None,
+            &|_| true,
+            &|_| environments::ToolSettings::default(),
+            &|account| (account.tool != "grok").then_some(account.tool == "claude"),
+        );
+        let states: Vec<_> = view
+            .accounts
+            .iter()
+            .map(|account| (account.id.as_str(), account.sign_in))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("claude", AccountSignInView::SignedIn),
+                ("codex", AccountSignInView::SignedOut),
+                ("grok", AccountSignInView::Unknown),
+            ]
+        );
     }
 
     #[test]
@@ -1260,6 +1306,7 @@ mod tests {
             Some(Path::new("/projects/alpha")),
             &|_| true,
             &|_| environments::ToolSettings::default(),
+            &|_| None,
         );
         assert!(saved.pm.saved);
         assert_eq!(

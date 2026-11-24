@@ -2421,6 +2421,11 @@ enum UserEvent {
         window_id: String,
         data: Vec<u8>,
     },
+    HomeAttachmentsReady {
+        operation: Box<app_runtime::AttachmentOperation>,
+        request_id: u64,
+        prompt: String,
+    },
     AttachmentPromptReady {
         operation: Box<app_runtime::AttachmentOperation>,
         prompt: String,
@@ -3118,6 +3123,7 @@ mod tests {
             project_key: "0123456789abcdef".to_string(),
             text: "Approve it".to_string(),
             request_id: 2,
+            attachments: Vec::new(),
         }));
         // Issue #7731: the first-run setup is read and saved from the Hub.
         assert!(hub_frontend_event_allowed(
@@ -11894,6 +11900,9 @@ fn main() -> std::io::Result<()> {
                         },
                     )]);
                 }
+            }
+            Event::UserEvent(UserEvent::HomeAttachmentsReady { operation, request_id, prompt }) => {
+                clients.dispatch(app.deliver_home_message(*operation, &prompt, request_id));
             }
             Event::UserEvent(UserEvent::AttachmentPromptReady { operation, prompt }) => {
                 let events = app.inject_attachment_prompt_events(*operation, prompt);

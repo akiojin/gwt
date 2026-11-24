@@ -816,6 +816,8 @@ pub enum FrontendEvent {
         project_key: String,
         text: String,
         request_id: u64,
+        #[serde(default)]
+        attachments: Vec<FileAttachment>,
     },
     /// Issue #7742: answer one waiting decision of an open project from Home.
     /// The queue belongs to the project, so no PM has to be running.
@@ -2785,14 +2787,25 @@ pub struct PoolAccountSessionView {
     pub account_switches: Vec<gwt_agent::session::AccountSwitch>,
 }
 
-/// Issue #7741: an account an execution environment belongs to.
+/// Issue #7841: whether an account's credential home is signed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSignInView {
+    SignedIn,
+    SignedOut,
+    /// gwt cannot tell without starting a sign-in.
+    Unknown,
+}
+
+/// Issue #7741: an account an execution environment belongs to. Accounts of
+/// one tool form its pool, in priority order (Issue #7841).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionAccountView {
     pub id: String,
     pub name: String,
     pub tool: String,
     pub tool_name: String,
-    pub signed_in: bool,
+    pub sign_in: AccountSignInView,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sign_in_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

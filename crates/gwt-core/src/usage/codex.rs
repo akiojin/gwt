@@ -449,6 +449,14 @@ pub(super) fn rollout_matches_session(path: &Path, session_id: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
+/// The conversation id (uuid) at the end of a rollout filename.
+pub fn rollout_session_id(path: &Path) -> Option<&str> {
+    let stem = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
+    let split = stem.len().checked_sub(36)?;
+    let (prefix, id) = (stem.get(..split)?, stem.get(split..)?);
+    prefix.ends_with('-').then_some(id)
+}
+
 /// Locate a rollout file for the exact session id (uuid).
 pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
     let sessions = home.join("sessions");
@@ -529,6 +537,8 @@ pub(super) fn read_codex_account_with(
     let fetched_at = observed_at.filter(|_| authenticated_at.is_some());
     ProviderUsage {
         provider: UsageProvider::Codex,
+        pool_account_id: None,
+        last_limit: None,
         account_id,
         account_label,
         plan: acc.plan,
@@ -555,6 +565,17 @@ pub fn read_codex_session(home: &Path, session_id: &str) -> Option<SessionUsage>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rollout_names_its_conversation() {
+        let id = "019a1b2c-3d4e-7f60-8a9b-0c1d2e3f4a5b";
+        let path = PathBuf::from(format!(
+            "/s/2026/11/24/rollout-2026-11-24T01-02-03-{id}.jsonl"
+        ));
+        assert_eq!(rollout_session_id(&path), Some(id));
+        assert_eq!(rollout_session_id(Path::new("/s/short.jsonl")), None);
+        assert_eq!(rollout_session_id(Path::new("/s/notes.txt")), None);
+    }
 
     fn now() -> UtcTimestamp {
         UtcTimestamp::from_timestamp(1_780_000_000, 0).unwrap()

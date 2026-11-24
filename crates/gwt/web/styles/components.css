@@ -6350,6 +6350,11 @@ button.workspace-board-ref:focus-visible {
 .exec-env__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
 .exec-env__card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .exec-env__card-head h2 { margin: 0; font-size: var(--type-md); }
+.exec-env__card-head h3 { margin: 0; font-size: var(--type-md); }
+.exec-env__chips { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+.exec-env__pool { display: flex; flex-direction: column; gap: var(--space-2); }
+.exec-env__pool > h2 { margin: 0; font-size: var(--type-lg); }
+.exec-env__pool > .exec-env__meta { margin: 0; }
 .exec-env__chip { flex-shrink: 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .exec-env__chip--available { color: var(--color-state-done); }
 .exec-env__chip--limit { color: var(--color-state-blocked); }

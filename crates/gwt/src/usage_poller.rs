@@ -108,8 +108,9 @@ async fn run(
         // Issue #5597: only meaningful changes need a GUI-thread update.
         // The existing terminal-convergence clock still sweeps pending quota
         // candidates even when the account observation remains unchanged.
-        if account_usage_changed(&mut observed_accounts, &snapshot.accounts) {
-            observe_accounts(snapshot.accounts.clone());
+        let monitored = monitor_rows(&snapshot.accounts);
+        if account_usage_changed(&mut observed_accounts, &monitored) {
+            observe_accounts(monitored);
         }
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
@@ -205,6 +206,30 @@ fn publish_accounts(accounts: &[ProviderUsage], now: UtcTimestamp) {
     }
 }
 
+/// Per-account fetch state: the identity last seen in the account's home, the
+/// Codex observation boundary, and the Claude cache and HTTP cadence.
+#[derive(Default)]
+struct AccountState {
+    codex_account_id: Option<String>,
+    codex_auth_observed: bool,
+    codex_authenticated_at: Option<UtcTimestamp>,
+    claude_account_id: Option<String>,
+    cached_claude: Option<ProviderUsage>,
+    last_claude_fetch: Option<UtcTimestamp>,
+}
+
+impl AccountState {
+    /// Returns whether the identity changed.
+    fn observe_claude_identity(&mut self, identity: Option<String>) -> bool {
+        if self.claude_account_id == identity {
+            return false;
+        }
+        self.claude_account_id = identity;
+        self.cached_claude = None;
+        true
+    }
+}
+
 /// Mutable state carried across polls (Claude cache + cadence + UA +
 /// consumption cache).
 #[derive(Default)]
@@ -212,15 +237,215 @@ struct Poller {
     #[cfg(test)]
     collection_thread: Option<std::thread::ThreadId>,
     transcripts: UsageCache,
-    codex_account_id: Option<String>,
-    codex_auth_observed: bool,
-    codex_authenticated_at: Option<UtcTimestamp>,
-    claude_account_id: Option<String>,
-    cached_claude: Option<ProviderUsage>,
-    last_claude_fetch: Option<UtcTimestamp>,
+    /// The default credential home of each provider (the rows Issues reads).
+    primary: AccountState,
+    /// Issue #7841: the other pool accounts, by pool account id.
+    pool: HashMap<String, AccountState>,
+    /// Codex conversation id → the pool account with its own home that ran
+    /// it. Account homes share `sessions/`, so rollouts are attributed here.
+    codex_owners: HashMap<String, String>,
     cached_user_agent: Option<String>,
     cached_consumption: Vec<ProviderConsumption>,
     last_consumption_at: Option<UtcTimestamp>,
+}
+
+/// No official usage source exists for this provider yet (Issue #7841 AC-2).
+const NO_OFFICIAL_USAGE_SOURCE: &str = "no official usage source";
+
+/// The usage provider of a pool account's tool.
+fn provider_for_tool(tool: &str) -> Option<UsageProvider> {
+    match gwt_agent::resolve_agent_id(tool)? {
+        AgentId::Codex => Some(UsageProvider::Codex),
+        AgentId::ClaudeCode => Some(UsageProvider::ClaudeCode),
+        AgentId::GrokBuild => Some(UsageProvider::GrokBuild),
+        AgentId::Copilot => Some(UsageProvider::Copilot),
+        AgentId::Antigravity => Some(UsageProvider::Antigravity),
+        _ => None,
+    }
+}
+
+/// The default-home account id of `provider` in the pool store.
+fn default_account_id(
+    store: &gwt::execution_environments::Store,
+    provider: UsageProvider,
+) -> String {
+    store
+        .accounts
+        .iter()
+        .find(|account| {
+            account.credential_home.is_none() && provider_for_tool(&account.tool) == Some(provider)
+        })
+        .map_or_else(
+            || provider.agent_command().to_string(),
+            |account| account.id.clone(),
+        )
+}
+
+/// The rows Issues' quota handling and `issue.monitor.status` read: the
+/// default home's Codex and Claude rows, as before accounts were pooled.
+fn monitor_rows(accounts: &[ProviderUsage]) -> Vec<ProviderUsage> {
+    let mut seen = HashSet::new();
+    accounts
+        .iter()
+        .filter(|account| {
+            matches!(
+                account.provider,
+                UsageProvider::Codex | UsageProvider::ClaudeCode
+            ) && seen.insert(account.provider)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Codex conversations run by pool accounts that have a home of their own.
+fn codex_owners(sessions: &[Arc<gwt_agent::Session>]) -> HashMap<String, String> {
+    let mut owners = HashMap::new();
+    for session in sessions {
+        let Some(account) = session
+            .execution_account
+            .as_ref()
+            .filter(|account| account.credential_home.is_some())
+        else {
+            continue;
+        };
+        if session_provider(&session.agent_id) != Some(UsageProvider::Codex) {
+            continue;
+        }
+        for id in session.agent_session_id.iter().chain(
+            session
+                .session_history
+                .iter()
+                .map(|entry| &entry.agent_session_id),
+        ) {
+            owners.insert(id.clone(), account.account_id.clone());
+        }
+    }
+    owners
+}
+
+/// One Codex account's row from the rollouts `include` accepts.
+fn codex_row(
+    transcripts: &mut UsageCache,
+    state: &mut AccountState,
+    home: &std::path::Path,
+    include: impl Fn(&std::path::Path) -> bool,
+    now: UtcTimestamp,
+) -> (ProviderUsage, bool) {
+    let identity = codex::read_auth_account_identity(home);
+    let changed = !state.codex_auth_observed || state.codex_account_id != identity;
+    if changed {
+        state.codex_authenticated_at = if state.codex_auth_observed {
+            Some(now)
+        } else {
+            codex::auth_modified_at(home)
+        };
+        state.codex_account_id = identity;
+        state.codex_auth_observed = true;
+    }
+    let account =
+        transcripts.codex_account_matching(home, now, state.codex_authenticated_at, include);
+    if account.account_id != state.codex_account_id {
+        // The auth file changed during collection. Publish identity only;
+        // the next tick will establish the new observation boundary.
+        return (
+            ProviderUsage {
+                account_id: account.account_id,
+                ..ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData)
+            },
+            changed,
+        );
+    }
+    (account, changed)
+}
+
+/// One Claude account's row. `resolve` reads only that account's own
+/// credentials. Returns whether the identity changed.
+async fn claude_row(
+    state: &mut AccountState,
+    cached_user_agent: &mut Option<String>,
+    home: &std::path::Path,
+    resolve: fn(&std::path::Path) -> Option<claude::ClaudeCreds>,
+    now: UtcTimestamp,
+    force: bool,
+) -> (ProviderUsage, bool) {
+    let creds = resolve(home);
+    let mut changed =
+        state.observe_claude_identity(creds.as_ref().and_then(|creds| creds.account_id.clone()));
+    let Some(creds) = creds else {
+        return (
+            ProviderUsage::degraded(
+                UsageProvider::ClaudeCode,
+                UsageState::Unavailable {
+                    reason: "no credentials".to_string(),
+                },
+            ),
+            changed,
+        );
+    };
+    if force || should_fetch_claude(state.last_claude_fetch, now) {
+        let user_agent = match cached_user_agent.clone() {
+            Some(user_agent) => user_agent,
+            None => match claude::claude_user_agent() {
+                Ok(user_agent) => {
+                    *cached_user_agent = Some(user_agent.clone());
+                    user_agent
+                }
+                Err(error) => {
+                    state.last_claude_fetch = Some(now);
+                    return (
+                        serve_stale_cached_or(
+                            &state.cached_claude,
+                            now,
+                            ProviderUsage::degraded(
+                                UsageProvider::ClaudeCode,
+                                UsageState::Unavailable {
+                                    reason: format!("Claude version probe unavailable: {error}"),
+                                },
+                            ),
+                        ),
+                        changed,
+                    );
+                }
+            },
+        };
+        let fresh = claude::fetch_claude_account(&creds, &user_agent, now).await;
+        state.last_claude_fetch = Some(now);
+        let current_identity = resolve(home).and_then(|creds| creds.account_id);
+        if current_identity != creds.account_id {
+            changed |= state.observe_claude_identity(current_identity);
+            return (
+                ProviderUsage {
+                    account_id: state.claude_account_id.clone(),
+                    ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
+                },
+                changed,
+            );
+        }
+        // Only a successful fetch (windows or credits) replaces the cache. A
+        // transient failure (429 / auth / network) keeps the last good
+        // value shown as stale instead of wiping the display.
+        if !fresh.windows.is_empty() || fresh.extra_usage.is_some() {
+            state.cached_claude = Some(fresh.clone());
+            return (fresh, changed);
+        }
+        return (
+            serve_stale_cached_or(&state.cached_claude, now, fresh),
+            changed,
+        );
+    }
+
+    // Within the cooldown window: reuse the cached value with staleness.
+    (
+        serve_cached_or(
+            &state.cached_claude,
+            now,
+            ProviderUsage {
+                account_id: state.claude_account_id.clone(),
+                ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
+            },
+        ),
+        changed,
+    )
 }
 
 impl Poller {
@@ -236,8 +461,9 @@ impl Poller {
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let snapshot = runtime.block_on(self.poll_once(now, force));
-            publish_accounts(&snapshot.accounts, now);
-            reconcile_project_accounts(&project_roots, &snapshot.accounts, now);
+            let monitored = monitor_rows(&snapshot.accounts);
+            publish_accounts(&monitored, now);
+            reconcile_project_accounts(&project_roots, &monitored, now);
             (self, snapshot)
         })
         .await
@@ -250,10 +476,25 @@ impl Poller {
         }
         self.transcripts.begin_poll();
         let config = Settings::load().unwrap_or_default().usage;
-        let accounts = vec![
+        let store = gwt::execution_environments::load().unwrap_or_default();
+        self.codex_owners = codex_owners(
+            &crate::session_ledger_cache::SessionLedgerCache::new()
+                .load_shared(&gwt_core::paths::gwt_sessions_dir()),
+        );
+        let mut accounts = vec![
             self.codex_account(&config, now),
             self.claude_account(&config, now, force).await,
         ];
+        for account in &mut accounts {
+            account.pool_account_id = Some(default_account_id(&store, account.provider));
+        }
+        accounts.extend(self.pool_accounts(&config, &store, now, force).await);
+        gwt_core::usage::account_limits::attach_account_limits(
+            &mut accounts,
+            &gwt_core::usage::account_limits::read_account_limits(
+                &gwt_core::usage::account_limits::account_limits_path(),
+            ),
+        );
         let consumption = self.consumption(&config, &accounts, now, force);
         let sessions = collect_sessions(&config, &mut self.transcripts);
         self.transcripts.end_poll();
@@ -262,6 +503,77 @@ impl Poller {
             sessions,
             consumption,
         }
+    }
+
+    /// Issue #7841: one row per pool account other than the default homes,
+    /// in pool order. Tools gwt cannot read usage for say so.
+    async fn pool_accounts(
+        &mut self,
+        config: &UsageConfig,
+        store: &gwt::execution_environments::Store,
+        now: UtcTimestamp,
+        force: bool,
+    ) -> Vec<ProviderUsage> {
+        let mut rows = Vec::new();
+        let mut kept = HashSet::new();
+        for account in &store.accounts {
+            let Some(provider) = provider_for_tool(&account.tool) else {
+                continue;
+            };
+            let home = account.credential_home.as_deref().map(PathBuf::from);
+            let mut row = match (provider, home) {
+                (UsageProvider::Codex | UsageProvider::ClaudeCode, None) => continue,
+                (UsageProvider::Codex, Some(_)) if !config.codex_enabled => {
+                    ProviderUsage::degraded(provider, UsageState::Disabled)
+                }
+                (UsageProvider::ClaudeCode, Some(_)) if !config.claude_account_enabled => {
+                    ProviderUsage::degraded(provider, UsageState::Disabled)
+                }
+                (UsageProvider::Codex, Some(home)) => {
+                    kept.insert(account.id.clone());
+                    let state = self.pool.entry(account.id.clone()).or_default();
+                    let owners = &self.codex_owners;
+                    codex_row(
+                        &mut self.transcripts,
+                        state,
+                        &home,
+                        |path| {
+                            codex::rollout_session_id(path)
+                                .and_then(|id| owners.get(id))
+                                .is_some_and(|owner| owner == &account.id)
+                        },
+                        now,
+                    )
+                    .0
+                }
+                (UsageProvider::ClaudeCode, Some(home)) => {
+                    kept.insert(account.id.clone());
+                    let mut state = self.pool.remove(&account.id).unwrap_or_default();
+                    let row = claude_row(
+                        &mut state,
+                        &mut self.cached_user_agent,
+                        &home,
+                        claude::resolve_claude_config_dir_creds,
+                        now,
+                        force,
+                    )
+                    .await
+                    .0;
+                    self.pool.insert(account.id.clone(), state);
+                    row
+                }
+                _ => ProviderUsage::degraded(
+                    provider,
+                    UsageState::Unknown {
+                        reason: NO_OFFICIAL_USAGE_SOURCE.to_string(),
+                    },
+                ),
+            };
+            row.pool_account_id = Some(account.id.clone());
+            rows.push(row);
+        }
+        self.pool.retain(|id, _| kept.contains(id));
+        rows
     }
 
     /// Daily/weekly consumption rollups. Heavy (scans many files), so it is
@@ -303,6 +615,8 @@ impl Poller {
         out
     }
 
+    /// The default Codex home's row. Conversations run by another pool
+    /// account are that account's, not this one's.
     fn codex_account(&mut self, config: &UsageConfig, now: UtcTimestamp) -> ProviderUsage {
         if !config.codex_enabled {
             return ProviderUsage::degraded(UsageProvider::Codex, UsageState::Disabled);
@@ -310,39 +624,21 @@ impl Poller {
         let Some(home) = codex::codex_home() else {
             return ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData);
         };
-        let identity = codex::read_auth_account_identity(&home);
-        if !self.codex_auth_observed || self.codex_account_id != identity {
-            self.codex_authenticated_at = if self.codex_auth_observed {
-                Some(now)
-            } else {
-                codex::auth_modified_at(&home)
-            };
-            self.codex_account_id = identity;
-            self.codex_auth_observed = true;
+        let owners = &self.codex_owners;
+        let (account, changed) = codex_row(
+            &mut self.transcripts,
+            &mut self.primary,
+            &home,
+            |path| codex::rollout_session_id(path).is_none_or(|id| !owners.contains_key(id)),
+            now,
+        );
+        if changed {
             self.last_consumption_at = None;
-        }
-        let account = self
-            .transcripts
-            .codex_account_since(&home, now, self.codex_authenticated_at);
-        if account.account_id != self.codex_account_id {
-            // The auth file changed during collection. Publish identity only;
-            // the next tick will establish the new observation boundary.
-            return ProviderUsage {
-                account_id: account.account_id,
-                ..ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData)
-            };
         }
         account
     }
 
-    fn observe_claude_identity(&mut self, identity: Option<String>) {
-        if self.claude_account_id != identity {
-            self.claude_account_id = identity;
-            self.cached_claude = None;
-            self.last_consumption_at = None;
-        }
-    }
-
+    /// The default Claude home's row.
     async fn claude_account(
         &mut self,
         config: &UsageConfig,
@@ -355,69 +651,19 @@ impl Poller {
         let Some(home) = claude::claude_home() else {
             return ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData);
         };
-
-        let creds = claude::resolve_claude_creds(&home);
-        self.observe_claude_identity(creds.as_ref().and_then(|creds| creds.account_id.clone()));
-        let Some(creds) = creds else {
-            return ProviderUsage::degraded(
-                UsageProvider::ClaudeCode,
-                UsageState::Unavailable {
-                    reason: "no credentials".to_string(),
-                },
-            );
-        };
-        if force || should_fetch_claude(self.last_claude_fetch, now) {
-            let user_agent = match self.cached_user_agent.clone() {
-                Some(user_agent) => user_agent,
-                None => match claude::claude_user_agent() {
-                    Ok(user_agent) => {
-                        self.cached_user_agent = Some(user_agent.clone());
-                        user_agent
-                    }
-                    Err(error) => {
-                        self.last_claude_fetch = Some(now);
-                        return serve_stale_cached_or(
-                            &self.cached_claude,
-                            now,
-                            ProviderUsage::degraded(
-                                UsageProvider::ClaudeCode,
-                                UsageState::Unavailable {
-                                    reason: format!("Claude version probe unavailable: {error}"),
-                                },
-                            ),
-                        );
-                    }
-                },
-            };
-            let fresh = claude::fetch_claude_account(&creds, &user_agent, now).await;
-            self.last_claude_fetch = Some(now);
-            let current_identity = claude::read_auth_account_identity(&home);
-            if current_identity != creds.account_id {
-                self.observe_claude_identity(current_identity);
-                return ProviderUsage {
-                    account_id: self.claude_account_id.clone(),
-                    ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
-                };
-            }
-            // Only a successful fetch (windows or credits) replaces the cache. A
-            // transient failure (429 / auth / network) keeps the last good
-            // value shown as stale instead of wiping the display.
-            if !fresh.windows.is_empty() || fresh.extra_usage.is_some() {
-                self.cached_claude = Some(fresh.clone());
-                return fresh;
-            }
-            return serve_stale_cached_or(&self.cached_claude, now, fresh);
-        }
-
-        // Within the cooldown window: reuse the cached value with staleness.
-        serve_cached_or(
-            &self.cached_claude,
+        let (account, changed) = claude_row(
+            &mut self.primary,
+            &mut self.cached_user_agent,
+            &home,
+            claude::resolve_claude_creds,
             now,
-            ProviderUsage {
-                account_id: self.claude_account_id.clone(),
-                ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
-            },
+            force,
         )
+        .await;
+        if changed {
+            self.last_consumption_at = None;
+        }
+        account
     }
 }
 
@@ -670,16 +916,19 @@ fn collect_sessions_with_clock(
                     .or(codex_home.as_ref())
                     .cloned(),
                 UsageProvider::ClaudeCode => claude_home.clone(),
+                _ => None,
             }
         };
         let usage = usage_home.as_deref().and_then(|home| match provider {
             UsageProvider::Codex => cache.codex_session(home, &agent_sid),
             UsageProvider::ClaudeCode => cache.claude_session(home, &agent_sid),
+            _ => None,
         });
         let telemetry_home = usage.as_ref().and(usage_home);
+        // `session_provider` maps only Codex and Claude sessions.
         let mut usage = usage.unwrap_or_else(|| match provider {
-            UsageProvider::Codex => codex::parse_codex_session(&agent_sid, ""),
             UsageProvider::ClaudeCode => claude::parse_claude_transcript(&agent_sid, ""),
+            _ => codex::parse_codex_session(&agent_sid, ""),
         });
         usage.session_id = session.id.clone();
         usage.provider_session_id = (!agent_sid.is_empty()).then_some(agent_sid.clone());
@@ -744,7 +993,7 @@ mod tests {
                     "total_token_usage": {"input_tokens": at.timestamp(), "output_tokens": 2},
                     "last_token_usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 2}
                 }}}),
-                UsageProvider::ClaudeCode => {
+                _ => {
                     serde_json::json!({"timestamp": at, "type": "assistant",
                     "message": {"usage": {"input_tokens": 10, "output_tokens": 2,
                         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}})
@@ -1185,6 +1434,8 @@ mod tests {
         let when = now();
         let good = ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
@@ -1307,9 +1558,12 @@ mod tests {
         )
         .unwrap();
         let mut poller = Poller {
-            codex_auth_observed: true,
-            codex_account_id: codex::read_auth_account_identity(home.path()),
-            codex_authenticated_at: Some(now() - SignedDuration::seconds(1)),
+            primary: AccountState {
+                codex_auth_observed: true,
+                codex_account_id: codex::read_auth_account_identity(home.path()),
+                codex_authenticated_at: Some(now() - SignedDuration::seconds(1)),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let config = UsageConfig {
@@ -1321,6 +1575,148 @@ mod tests {
         let lost = poller.codex_account(&config, now());
         assert!(lost.windows.is_empty());
         assert!(lost.account_id.is_none());
+    }
+
+    // Issue #7841 T-301: account homes share one `sessions/` directory, so
+    // each Codex pool account reads only the conversations it ran, and the
+    // default home's row no longer counts another account's conversations.
+    #[test]
+    fn each_codex_account_reads_only_its_own_conversations() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let default_home = root.path().join("codex");
+        let added_home = root.path().join("accounts/codex/codex-2");
+        let _codex = gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &default_home);
+        let sessions = default_home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&added_home).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&sessions, added_home.join("sessions")).unwrap();
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(added_home.join("sessions")).unwrap();
+        for (home, account) in [(&default_home, "account-a"), (&added_home, "account-b")] {
+            std::fs::write(
+                home.join("auth.json"),
+                format!(r#"{{"tokens":{{"account_id":"{account}"}}}}"#),
+            )
+            .unwrap();
+        }
+        let own = "019a1b2c-3d4e-7f60-8a9b-000000000001";
+        let other = "019a1b2c-3d4e-7f60-8a9b-000000000002";
+        for (id, used, dir) in [(own, 40, &sessions), (other, 90, &sessions)] {
+            let event = serde_json::json!({"timestamp":now().to_rfc3339(), "type":"event_msg",
+                "payload":{"type":"token_count", "rate_limits":{"primary":{"used_percent":used,
+                "window_minutes":300,"resets_at":1780003600}}}});
+            std::fs::write(
+                dir.join(format!("rollout-2026-11-24T01-00-00-{id}.jsonl")),
+                event.to_string(),
+            )
+            .unwrap();
+        }
+        #[cfg(not(unix))]
+        std::fs::copy(
+            sessions.join(format!("rollout-2026-11-24T01-00-00-{other}.jsonl")),
+            added_home.join(format!(
+                "sessions/rollout-2026-11-24T01-00-00-{other}.jsonl"
+            )),
+        )
+        .unwrap();
+        let mut store = gwt::execution_environments::Store::default();
+        store.register_account("codex");
+        store.accounts.push(gwt::execution_environments::Account {
+            id: "codex-2".into(),
+            tool: "codex".into(),
+            name: "Codex 2".into(),
+            credential_home: Some(added_home.display().to_string()),
+            added_at: None,
+            origin: None,
+            sign_in_identity: None,
+        });
+        let state = || AccountState {
+            codex_auth_observed: true,
+            codex_authenticated_at: Some(now() - SignedDuration::seconds(1)),
+            ..Default::default()
+        };
+        let mut poller = Poller {
+            primary: AccountState {
+                codex_account_id: codex::read_auth_account_identity(&default_home),
+                ..state()
+            },
+            pool: HashMap::from([(
+                "codex-2".to_string(),
+                AccountState {
+                    codex_account_id: codex::read_auth_account_identity(&added_home),
+                    ..state()
+                },
+            )]),
+            codex_owners: HashMap::from([(other.to_string(), "codex-2".to_string())]),
+            ..Default::default()
+        };
+        let config = UsageConfig {
+            codex_enabled: true,
+            claude_account_enabled: false,
+        };
+        let default_row = poller.codex_account(&config, now());
+        assert_eq!(default_row.windows[0].used_percent, 40.0);
+        let rows = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(poller.pool_accounts(&config, &store, now(), false));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pool_account_id.as_deref(), Some("codex-2"));
+        assert_eq!(rows[0].windows[0].used_percent, 90.0);
+        assert_ne!(rows[0].account_id, default_row.account_id);
+    }
+
+    // Issue #7841 AC-2: pool accounts of tools without an official usage
+    // source say so; the default homes stay the rows Issues reads.
+    #[tokio::test]
+    async fn tools_without_a_usage_source_report_unknown_and_issues_reads_the_default_rows() {
+        let mut store = gwt::execution_environments::Store::default();
+        for tool in ["claude", "grok", "gh", "agy"] {
+            store.register_account(tool);
+        }
+        store.accounts.push(gwt::execution_environments::Account {
+            id: "claude-2".into(),
+            tool: "claude".into(),
+            name: "Claude Code 2".into(),
+            credential_home: Some("/nonexistent/claude-2".into()),
+            added_at: None,
+            origin: None,
+            sign_in_identity: None,
+        });
+        let config = UsageConfig {
+            codex_enabled: true,
+            claude_account_enabled: false,
+        };
+        let rows = Poller::default()
+            .pool_accounts(&config, &store, now(), false)
+            .await;
+        let keys: Vec<_> = rows
+            .iter()
+            .map(|row| (row.provider, row.pool_account(), row.state.clone()))
+            .collect();
+        let unknown = || UsageState::Unknown {
+            reason: NO_OFFICIAL_USAGE_SOURCE.to_string(),
+        };
+        assert_eq!(
+            keys,
+            [
+                (UsageProvider::GrokBuild, "grok", unknown()),
+                (UsageProvider::Copilot, "gh", unknown()),
+                (UsageProvider::Antigravity, "agy", unknown()),
+                (UsageProvider::ClaudeCode, "claude-2", UsageState::Disabled),
+            ]
+        );
+
+        let mut all = vec![
+            ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData),
+            ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::Disabled),
+        ];
+        all.extend(rows);
+        let monitored = monitor_rows(&all);
+        assert_eq!(monitored, all[..2]);
     }
 
     #[test]
@@ -1346,7 +1742,7 @@ mod tests {
         assert_eq!(account.provider, UsageProvider::ClaudeCode);
         assert_eq!(account.state, UsageState::Disabled);
         // No fetch should have happened.
-        assert!(poller.last_claude_fetch.is_none());
+        assert!(poller.primary.last_claude_fetch.is_none());
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1365,8 +1761,11 @@ mod tests {
         .unwrap();
         let old = account_with_weekly_reset(UsageProvider::ClaudeCode, Some(now()));
         let mut poller = Poller {
-            cached_claude: Some(old),
-            last_claude_fetch: Some(now()),
+            primary: AccountState {
+                cached_claude: Some(old),
+                last_claude_fetch: Some(now()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let config = UsageConfig {
@@ -1379,15 +1778,15 @@ mod tests {
             "a different account must never reuse old windows"
         );
         assert_eq!(
-            poller.last_claude_fetch,
+            poller.primary.last_claude_fetch,
             Some(now()),
             "switch must respect the HTTP floor"
         );
-        assert!(poller.cached_claude.is_none());
+        assert!(poller.primary.cached_claude.is_none());
 
         let mut current = account_with_weekly_reset(UsageProvider::ClaudeCode, Some(now()));
         current.account_id = account.account_id.clone();
-        poller.cached_claude = Some(current.clone());
+        poller.primary.cached_claude = Some(current.clone());
         std::fs::write(
             home.path().join(".credentials.json"),
             r#"{"claudeAiOauth":{"accountId":"new-account","accessToken":"refreshed-token"}}"#,
@@ -1398,7 +1797,7 @@ mod tests {
         std::fs::remove_file(home.path().join(".credentials.json")).unwrap();
         let lost = poller.claude_account(&config, now(), false).await;
         assert!(lost.windows.is_empty());
-        assert!(poller.cached_claude.is_none());
+        assert!(poller.primary.cached_claude.is_none());
         assert!(lost.account_id.is_none());
     }
 
@@ -1442,7 +1841,7 @@ mod tests {
                 if reason.contains("Claude version probe unavailable")
                     && reason.contains("native-binary placeholder")
         ));
-        assert!(poller.last_claude_fetch.is_some());
+        assert!(poller.primary.last_claude_fetch.is_some());
         assert!(poller.cached_user_agent.is_none());
     }
 
@@ -1457,6 +1856,8 @@ mod tests {
         };
         ProviderUsage {
             provider,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,

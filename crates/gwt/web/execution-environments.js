@@ -7,13 +7,35 @@ import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 // the supported agent catalog (SPEC #5017); it never invents an account, a
 // sign-in state or a pool member the backend did not report.
 
-export const USAGE_PROVIDER_NAME = Object.freeze({ codex: "Codex", claude_code: "Claude Code" });
+export const USAGE_PROVIDER_NAME = Object.freeze({
+  codex: "Codex", claude_code: "Claude Code", grok_build: "Grok Build", copilot: "GitHub Copilot", antigravity: "Antigravity",
+});
 
 // The supported-agent catalog id of the tool each provider account is
-// reached through, and the vendor the account belongs to.
+// reached through, and the vendor the account belongs to. The tool id is
+// also the id of the provider's default (adopted) account (Issue #7841).
 const PROVIDER_TOOL = Object.freeze({
   codex: Object.freeze({ agentId: "codex", vendor: "OpenAI" }),
   claude_code: Object.freeze({ agentId: "claude", vendor: "Anthropic" }),
+  grok_build: Object.freeze({ agentId: "grok", vendor: "xAI" }),
+  copilot: Object.freeze({ agentId: "gh", vendor: "GitHub" }),
+  antigravity: Object.freeze({ agentId: "agy", vendor: "Google" }),
+});
+
+// The pool account a usage row belongs to (Issue #7841). A row from before
+// accounts were pooled describes the provider's default account.
+export function usagePoolAccountId(account) {
+  return account?.pool_account_id || PROVIDER_TOOL[account?.provider]?.agentId || null;
+}
+
+function toolProvider(tool) {
+  return Object.keys(PROVIDER_TOOL).find(provider => PROVIDER_TOOL[provider].agentId === tool) || null;
+}
+
+const SIGN_IN = Object.freeze({
+  signed_in: Object.freeze({ kind: "signed_in", label: "Signed in" }),
+  signed_out: Object.freeze({ kind: "signed_out", label: "Not signed in" }),
+  unknown: Object.freeze({ kind: "unknown", label: "Sign-in unknown" }),
 });
 
 function usageProviderName(provider) {
@@ -91,31 +113,42 @@ function accountStatus(account) {
       return { kind: "no_data", label: "No usage data yet" };
     case "unavailable":
       return { kind: "unavailable", label: state.reason ? `Unavailable — ${state.reason}` : "Unavailable" };
-    case "unknown":
-      return { kind: "unknown", label: state.reason ? `Usage unknown (${state.reason})` : "Usage unknown" };
     case "stale":
       return { kind: "stale", label: `Last read ${Math.round((state.age_secs || 0) / 60)} min ago` };
+    case "unknown":
+      return { kind: "unknown", label: state.reason ? `Usage unknown (${state.reason})` : "Usage unknown" };
     default:
       return { kind: "ok", label: "Up to date" };
   }
 }
 
+// A limit gwt itself saw this account hit, kept even when the provider
+// reports no usage (Issue #7841 AC-2).
+function lastLimit(account) {
+  const limit = account.last_limit;
+  if (!limit?.detected_at) return null;
+  return { detectedAt: limit.detected_at, resetsAt: limit.resets_at || null };
+}
+
 // One row per account the backend reported: its usage, reset and limit
-// state, each read from the same snapshot.
-export function accountRows(snapshot, view) {
-  const usage = (snapshot?.accounts || []).map(account => {
+// state, each read from the same snapshot. Rows are keyed by provider and
+// pool account; a row from before accounts were pooled is the default one.
+export function accountRows(snapshot, now = Date.now()) {
+  return (snapshot?.accounts || []).map(account => {
     const status = accountStatus(account);
     const credits = codexCreditStatus(account);
     const governing = readable(account) ? usageGoverningWindow(account) : null;
-    const limitReached = usageDisplayLimitReached(account);
+    const limit = lastLimit(account);
+    // A provider that reports usage decides its own limit state; without
+    // usage, a limit gwt saw counts until the reset it announced.
+    const limitPending = !readable(account) && limit?.resetsAt != null && Date.parse(limit.resetsAt) > now;
+    const limitReached = usageDisplayLimitReached(account) || limitPending;
     let usage = null;
     if (credits?.active) usage = `Using credits · ${creditBalance(account.credits)}`;
     else if (governing) usage = `${Math.round(governing.percent)}% used`;
-    const poolAccountId = account.pool_account_id || null;
     return {
-      id: poolAccountId || account.provider,
-      poolAccountId,
       provider: account.provider,
+      poolAccountId: usagePoolAccountId(account),
       name: usageProviderName(account.provider),
       accountLabel: account.account_label || null,
       plan: account.plan || null,
@@ -124,56 +157,73 @@ export function accountRows(snapshot, view) {
       usedPercent: credits?.active ? null : governing?.percent ?? null,
       resetsAt: governing?.window.resets_at || null,
       limitReached,
+      lastLimit: limit,
       usingCredits: Boolean(credits?.active),
-      severity: usageSeverity(account),
+      severity: limitPending ? "danger" : usageSeverity(account),
       collectionEnabled: status.kind !== "disabled",
-    };
-  });
-  if (!Array.isArray(view?.pool_providers)) return usage;
-  const accounts = view.accounts || [];
-  const availableTools = new Set(view.pool_providers.filter(option => !option.blocked_reason).map(option => option.tool));
-  return accounts.map(account => {
-    const pool = accounts.filter(item => item.tool === account.tool);
-    const position = pool.indexOf(account);
-    const measured = usage.find(row => row.poolAccountId === account.id)
-      || (account.id === account.tool
-        ? usage.find(row => !row.poolAccountId && PROVIDER_TOOL[row.provider]?.agentId === account.tool)
-        : null);
-    return {
-      ...measured,
-      id: account.id,
-      name: account.name,
-      toolName: account.tool_name,
-      tool: account.tool,
-      signInIdentity: account.sign_in_identity,
-      accountLabel: account.sign_in_identity || measured?.accountLabel,
-      status: measured?.status || { kind: "unknown", label: "Usage unknown" },
-      registered: true,
-      signedIn: account.signed_in,
-      first: pool.find(item => item.signed_in)?.id === account.id,
-      canUse: account.signed_in && position > 0,
-      canMoveUp: position > 0,
-      canMoveDown: position < pool.length - 1,
-      canSignIn: !account.sign_in_blocked_reason && availableTools.has(account.tool),
-      deleteBlockedReason: account.delete_blocked_reason,
-      deleteImpact: account.delete_impact,
     };
   });
 }
 
+// Issue #7841: the registered accounts, one pool per tool in priority order,
+// each joined with its own usage row. The first account is the one in use.
+export function accountPools(view, usage) {
+  const pools = [];
+  const registered = Array.isArray(view?.pool_providers);
+  const availableTools = new Set((view?.pool_providers || []).filter(option => !option.blocked_reason).map(option => option.tool));
+  for (const account of view?.accounts || []) {
+    let pool = pools.find(candidate => candidate.tool === account.tool);
+    if (!pool) {
+      pool = { tool: account.tool, toolName: account.tool_name || account.tool, accounts: [] };
+      pools.push(pool);
+    }
+    const provider = toolProvider(account.tool);
+    const signIn = SIGN_IN[account.sign_in] || SIGN_IN.unknown;
+    const signedIn = signIn.kind === "signed_in";
+    pool.accounts.push({
+      id: account.id,
+      name: account.name,
+      tool: account.tool,
+      provider,
+      signIn,
+      signInIdentity: account.sign_in_identity,
+      registered,
+      signedIn,
+      managed: account.id !== account.tool,
+      canSignIn: !account.sign_in_blocked_reason && availableTools.has(account.tool),
+      deleteBlockedReason: account.delete_blocked_reason,
+      deleteImpact: account.delete_impact,
+      usage: provider ? usage.find(row => row.provider === provider && row.poolAccountId === account.id) || null : null,
+    });
+  }
+  for (const pool of pools) {
+    const first = registered && pool.accounts.some(account => account.signIn.kind !== "unknown")
+      ? pool.accounts.find(account => account.signedIn)
+      : pool.accounts[0];
+    pool.accounts.forEach((account, index) => {
+      account.inUse = account === first;
+      account.canUse = account.signedIn && index > 0;
+      account.canMoveUp = index > 0;
+      account.canMoveDown = index < pool.accounts.length - 1;
+    });
+  }
+  return pools;
+}
+
 // One row per execution environment the backend has defined (Issue #7741).
 // Usage is the account's, so it is shown on the environment that runs the
-// account's own tool; a tool that reads its own settings reports none.
-export function environmentRows(view, snapshot, agents) {
-  const usage = accountRows(snapshot, view);
+// account's own tool; a tool that reads its own settings reports none. An
+// account's own environment runs its pool: it shows the pool's size and the
+// account in use (Issue #7841 AC-3).
+export function environmentRows(view, snapshot, agents, now = Date.now()) {
+  const usage = accountRows(snapshot, now);
+  const pools = accountPools(view, usage);
   const accounts = view?.accounts || [];
   return (view?.environments || []).map(environment => {
     const registered = accounts.find(account => account.id === environment.account_id) || null;
-    const isPool = environment.kind === "set" && Array.isArray(view?.pool_providers);
-    const pool = isPool ? accounts.filter(item => item.tool === environment.via_tool) : [];
-    const first = pool.find(item => item.signed_in);
-    const account = environment.kind === "set"
-      ? usage.find(row => isPool ? row.id === first?.id : PROVIDER_TOOL[row.provider]?.agentId === registered?.tool) || null : null;
+    const pool = environment.kind === "set" ? pools.find(candidate => candidate.tool === registered?.tool) || null : null;
+    const inUse = pool?.accounts.find(account => account.inUse) || null;
+    const account = inUse?.usage || null;
     const agent = Array.isArray(agents)
       ? agents.find(candidate => candidate.id === environment.via_tool) || null : null;
     const availability = !environment.tool_installed ? "not_installed"
@@ -183,8 +233,10 @@ export function environmentRows(view, snapshot, agents) {
       id: environment.id,
       name: environment.name,
       kind: environment.kind,
-      accountName: environment.account_name,
-      usageProvider: account?.provider ? account.id : null,
+      accountName: inUse?.name || environment.account_name,
+      poolSize: pool ? pool.accounts.length : null,
+      inUseAccountId: inUse?.id || null,
+      usageProvider: account?.provider || null,
       via: environment.via_tool_name,
       viaTool: environment.via_tool,
       toolVersion: agent?.installed_version?.trim() || null,
@@ -196,8 +248,6 @@ export function environmentRows(view, snapshot, agents) {
       readOnlyReason: environment.runtime_read_only_reason || null,
       toolSettings: environment.tool_settings || null,
       projects: environment.projects || [],
-      poolSize: pool.length,
-      firstAccount: first?.name,
       deleteImpact: environment.delete_impact,
     };
   });
@@ -220,9 +270,11 @@ export function createExecutionEnvironments({
   const derive = () => {
     const snapshot = usageModel.read();
     const agents = supportedAgentsModel?.read()?.agents ?? null;
+    const accounts = accountRows(snapshot);
     return {
       loaded: definitions != null,
-      accounts: accountRows(snapshot, definitions),
+      accounts,
+      pools: accountPools(definitions, accounts),
       poolProviders: definitions?.pool_providers,
       activeSessions: definitions?.active_sessions || [],
       environments: environmentRows(definitions, snapshot, agents),

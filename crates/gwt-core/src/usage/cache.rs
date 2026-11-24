@@ -201,6 +201,8 @@ impl UsageCache {
                     claude::transcripts_modified_since(home, SystemTime::UNIX_EPOCH, usize::MAX)
                 })
             }
+            // No local transcripts are read for the other providers.
+            _ => &[],
         }
     }
 
@@ -328,6 +330,7 @@ impl UsageCache {
                         )
                     })
             }
+            _ => None,
         };
     }
 
@@ -337,10 +340,24 @@ impl UsageCache {
         now: UtcTimestamp,
         authenticated_at: Option<UtcTimestamp>,
     ) -> ProviderUsage {
+        self.codex_account_matching(home, now, authenticated_at, |_| true)
+    }
+
+    /// Like [`Self::codex_account_since`], reading only the rollouts `include`
+    /// accepts. Account homes share one `sessions/` directory (Issue #7841),
+    /// so each pool account reads only the conversations it ran.
+    pub fn codex_account_matching(
+        &mut self,
+        home: &Path,
+        now: UtcTimestamp,
+        authenticated_at: Option<UtcTimestamp>,
+        include: impl Fn(&Path) -> bool,
+    ) -> ProviderUsage {
         codex::read_codex_account_with(home, now, authenticated_at, || {
             let paths: Vec<_> = self
                 .paths(home, UsageProvider::Codex)
                 .iter()
+                .filter(|path| include(path))
                 .take(8)
                 .cloned()
                 .collect();
@@ -413,6 +430,7 @@ impl UsageCache {
                         events.extend_from_slice(&summary.events);
                     }
                 }
+                _ => {}
             }
         }
         consumption::aggregate(provider, events, week_start, now)

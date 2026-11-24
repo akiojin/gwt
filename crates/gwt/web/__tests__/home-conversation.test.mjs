@@ -339,3 +339,12 @@ test("a project whose decisions cannot be read is named, not hidden", () => {
   load([alpha], [project(alpha, [], { pm_available: false, error: "store locked" })]);
   assert.equal(home().querySelector('.gwt-home__note[role="alert"]').textContent, "Decisions of Alpha could not be read: store locked");
 });
+
+test("Home attachment controls use Operator tokens and wrap at narrow widths", () => {
+  const css = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
+  const styles = css.split(".gwt-home__attachments {")[1].split(".gwt-home__draft {")[0];
+  assert.match(styles, /flex-wrap:\s*wrap/);
+  assert.match(styles, /var\(--color-border\)/);
+  assert.match(styles, /var\(--color-surface\)/);
+  assert.doesNotMatch(styles, /#[\da-f]{3,8}\b|rgba?\(/i);
+});

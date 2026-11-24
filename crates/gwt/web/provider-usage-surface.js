@@ -15,7 +15,7 @@
 //   window title the user knows it by (Issue #3862). Returning a falsy
 //   value falls back to a shortened session id.
 import { createUiStateStore } from "./ui-state-store.js";
-import { USAGE_PROVIDER_NAME } from "./execution-environments.js";
+import { USAGE_PROVIDER_NAME, usagePoolAccountId } from "./execution-environments.js";
 
 export function createProviderUsageSurface({
   renderWorkspaceWindows,
@@ -521,7 +521,7 @@ export function createProviderUsageSurface({
       // environments account detail, the single surface for usage and limits.
       function renderAccountUsage(container, provider, poolAccountId = null) {
         const account = (latestProviderUsage().accounts || []).find(item =>
-          item.provider === provider && (item.pool_account_id || null) === poolAccountId);
+          item.provider === provider && (poolAccountId == null || usagePoolAccountId(item) === poolAccountId));
         const defaultAccountId = { codex: "codex", claude_code: "claude" }[provider];
         const includeProviderRollups = !poolAccountId || poolAccountId === defaultAccountId;
         container.replaceChildren(...(account ? [buildUsageProviderCard(account, includeProviderRollups)] : []));
