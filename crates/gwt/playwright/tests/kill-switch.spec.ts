@@ -14,8 +14,9 @@ const errors = new WeakMap<Page, string[]>();
 // event the frontend sends. Asserts the FR-040..044 controls:
 //   - FR-041/3885: STOP is in the Issue menu; window chrome has no STOP
 //   - FR-044: a stopped window exposes RESTART -> restart_window
-//   - FR-042: palette STOP ALL confirms then sends stop_all_windows
-//   - FR-043: the palette send-input entry routes pane_send_input by session_id
+//   - FR-042: the stop-all-windows command confirms then sends stop_all_windows
+//     (its palette entry and the FR-043 send-input entry retired with the
+//     command palette, #7879)
 //   - FR-040: a needs_input transition pops an in-app attention toast that
 //     frames the window on click
 test.describe("Anshin Phase 1 kill-switch + attention", () => {
@@ -160,49 +161,17 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     });
 
     await expect(page.locator('.op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
-    await page.locator("#op-palette-button").click();
-    await page.locator("#op-palette-input").fill("Stop all agents");
+    await expect(page.locator("#op-palette-button")).toHaveCount(0);
     page.once("dialog", (dialog) => dialog.accept());
-    await page.locator("#op-palette-list .op-palette__row", { hasText: "Stop All Running Agents" }).click();
+    await page.evaluate(() => document.dispatchEvent(
+      new CustomEvent("op:command", { detail: { id: "stop-all-windows" } }),
+    ));
 
     await expect
       .poll(() => page.evaluate(() => window.__sentKinds))
       .toContain("stop_all_windows");
   });
 
-  test("the palette send-input entry routes pane_send_input by session_id", async ({ page }) => {
-    if (!liveBase) await installEmbeddedRoutes(page);
-    await installKillSwitchBackend(page);
-    await page.goto(appUrl);
-
-    const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeAttached({ timeout: 10_000 });
-    // Open the exact native work so the focused-pane helper has a target.
-    await page.getByRole("button", { name: "Works", exact: true }).click();
-    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
-    await page.locator('.works-terminal[data-window-id="agent-1"] .xterm-helper-textarea').focus();
-
-    await page.evaluate(() => {
-      window.prompt = () => "hello agent";
-    });
-    await page.keyboard.press("Meta+K");
-    const paletteInput = page.locator("#op-palette-input");
-    await expect(paletteInput).toBeVisible();
-    await paletteInput.fill("Send Input");
-    const sendInputRow = page
-      .locator("#op-palette-list .op-palette__row", { hasText: "Send Input" })
-      .first();
-    await expect(sendInputRow).toBeVisible();
-    await page.keyboard.press("Enter");
-
-    await expect
-      .poll(() => page.evaluate(() => window.__sentKinds))
-      .toContain("pane_send_input");
-    const sent = await page.evaluate(() => window.__sent);
-    const inj = sent.find((e) => e.kind === "pane_send_input");
-    expect(inj.session_id).toBe("session-agent-1");
-    expect(inj.text).toBe("hello agent");
-  });
 
   test("manual and Issues-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
     if (!liveBase) await installEmbeddedRoutes(page);

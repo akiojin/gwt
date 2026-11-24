@@ -2,8 +2,8 @@
  *
  * The PM is the one agent the user never launches through the wizard, so the
  * canonical editor lives in Settings and may be mounted in more than one
- * Settings window. The rail gear and command palette only route to that tab;
- * they do not own a second editor or state path.
+ * Settings window. The rail gear only routes to that tab; it does not own a
+ * second editor or state path.
  *
  * These are DOM-level contract assertions over the real index.html +
  * components.css plus wiring assertions over app.js / operator-shell.js — a
@@ -26,7 +26,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 const appJs = readFileSync(resolve(here, "../app.js"), "utf8");
-const operatorShellJs = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 
 const RUNNING_STATUS = {
   project_key: "project", configured_member_id: "pm-member", profile_revision: "profile-token",
@@ -711,11 +710,6 @@ test("FR-132: app owns one controller and applies pm_status to it", () => {
     /__gwtPmSettingsTestApi\s*=\s*Object\.freeze\(\{[\s\S]{0,160}pmSettingsPanel\.mount\(container\)/,
     "Playwright bridge must mount the app-owned controller, not a test-only duplicate",
   );
-});
-
-test("FR-132: command palette exposes the pm-settings command", () => {
-  assert.match(operatorShellJs, /id: "pm-settings"/);
-  assert.match(appJs, /case "pm-settings":[\s\S]{0,320}return;/);
 });
 
 

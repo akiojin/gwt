@@ -20,7 +20,7 @@ test("live wizard state and open errors retain interaction deferral and local re
   await gotoLiveGwt(page, base, { enableTestBridge: true });
   await expect(page.locator("html")).toHaveAttribute("data-theme",
     testInfo.project.name.includes("light") ? "light" : "dark");
-  const trigger = page.locator("#op-palette-button");
+  const trigger = page.locator('.op-rail__item[data-cmd="open-logs"]');
   await expect(trigger).toBeEnabled();
   await trigger.focus();
   await expect(trigger).toBeFocused();
@@ -122,7 +122,7 @@ test("live work advisory results preserve the prompt and ignore stale responses"
   await gotoLiveGwt(page, base, { enableTestBridge: true });
   const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await expect(page.locator("#op-palette-button")).toBeEnabled();
+  await expect(page.locator('.op-rail__item[data-cmd="open-logs"]')).toBeEnabled();
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
     detail: { kind: "launch_wizard_state", wizard: {
       title: "Register work", show_branch_controls: false,

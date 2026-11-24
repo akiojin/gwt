@@ -693,9 +693,11 @@ test("real PTY receives one input and converges with the visible terminal grid",
         return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows) || [];
       });
       const before = new Set((await windows()).map((entry: any) => entry.id));
-      await page.locator("#op-palette-button").click();
-      await page.locator("#op-palette-input").fill("Spawn shell window");
-      await page.getByRole("option", { name: "Spawn shell window", exact: true }).click();
+      // #7879: the command palette is retired; the op:command bus keeps the
+      // spawn-shell route (also used by Settings' sign-in shell).
+      await page.evaluate(() => document.dispatchEvent(
+        new CustomEvent("op:command", { detail: { id: "spawn-shell" } }),
+      ));
       await expect.poll(async () => (await windows()).filter((entry: any) => entry.preset === "shell" && !before.has(entry.id))).toHaveLength(1);
       id = (await windows()).find((entry: any) => entry.preset === "shell" && !before.has(entry.id)).id;
       await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages
