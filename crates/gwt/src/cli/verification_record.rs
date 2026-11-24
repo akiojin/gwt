@@ -7636,7 +7636,7 @@ pub(super) fn run_with_response<E: CliEnv>(
                     Ok(None)
                 } else {
                     attempt
-                        .set_admission_waiting(true)
+                        .set_admission_waiting(Some(command))
                         .map_err(|error| error.to_string())?;
                     let admission = crate::cli::verification_lease::admission::admit_for_attempt(
                         env,
@@ -7659,7 +7659,7 @@ pub(super) fn run_with_response<E: CliEnv>(
                         &heavy_attempt,
                     )?;
                     attempt
-                        .set_admission_waiting(false)
+                        .set_admission_waiting(None)
                         .map_err(|error| error.to_string())?;
                     if !cfg!(test) && admission.waited() >= std::time::Duration::from_secs(5) {
                         if let Some(watchdog) = attempt_watchdog.as_mut() {
