@@ -1186,10 +1186,15 @@ pub(super) fn run<E: CliEnv>(
                             .map_err(string_error)?
                         }
                         Err(error) if error.reason() == crate::daemon_runtime::AgentBridgeFailureReason::TransportFailure => {
-                            let recovered = bridge_authority.as_ref().filter(|authority| authority.local_continuation_eligible)
-                                .and_then(|authority| crate::workspace_update_receipt::inspect(
-                                    &legacy_repo_path, &session_id, &operation_id, Some((&request, &authority.identity)),
-                                ).ok()).and_then(|status| status.receipt);
+                            // #7330: the Host may still be publishing when the response is
+                            // lost, so keep re-reading (never resending) the durable receipt.
+                            let recovered = bridge_authority.as_ref()
+                                .filter(|authority| authority.local_continuation_eligible && !error.request_never_delivered())
+                                .and_then(|authority| crate::workspace_update_receipt::await_applied(|| {
+                                    crate::workspace_update_receipt::inspect(
+                                        &legacy_repo_path, &session_id, &operation_id, Some((&request, &authority.identity)),
+                                    ).ok().and_then(|status| status.receipt)
+                                }));
                             match recovered {
                                 Some(receipt) => receipt,
                                 None => return Err(SpecOpsError::from(ApiError::Network(format!(

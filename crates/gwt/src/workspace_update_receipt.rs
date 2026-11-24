@@ -172,6 +172,34 @@ impl UpdateOperation {
     }
 }
 
+/// How long a lost-response update keeps waiting for the Host to finish publishing.
+const RECOVERY_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+const RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Re-reads read-only receipt evidence until it proves publication or the window ends.
+/// A response can be lost while the Host is still publishing (#7330), so a single
+/// immediate inspection reports `unconfirmed` for an update that is applied moments later.
+pub(crate) fn await_applied<T>(probe: impl FnMut() -> Option<T>) -> Option<T> {
+    await_applied_within(RECOVERY_WINDOW, RECOVERY_INTERVAL, probe)
+}
+
+fn await_applied_within<T>(
+    window: std::time::Duration,
+    interval: std::time::Duration,
+    mut probe: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        if let Some(found) = probe() {
+            return Some(found);
+        }
+        if std::time::Instant::now() + interval > deadline {
+            return None;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
 /// Never contacts the bridge, takes a writer lock, or repairs/reconciles state.
 pub(crate) fn inspect(
     root: &Path,
