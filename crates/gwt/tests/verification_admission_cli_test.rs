@@ -686,6 +686,8 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
     let holder = CanonicalRun::start_for_session(&arena, &arena.sibling, FOREIGN_SESSION);
     let waiter = spawn_gwtd(arena.home.path(), &arena.repo, &verify_run(30), &[]);
     let waiting = wait_for_attempt(&arena, &arena.repo, None, "waiting", true);
+    assert_eq!(waiting["current_command"], "git --version");
+    let wait_elapsed = waiting["command_wait_elapsed_secs"].as_u64().unwrap();
     let id = waiting["attempt_id"].as_str().unwrap();
     assert_eq!(std::fs::read(&predecessor_path).unwrap(), predecessor);
 
@@ -707,7 +709,10 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
             !ok && output.contains("not your verification attempt"),
             "{output}"
         );
-        let unchanged = wait_for_attempt(&arena, &arena.repo, Some(id), "waiting", true);
+        let mut unchanged = wait_for_attempt(&arena, &arena.repo, Some(id), "waiting", true);
+        let elapsed = unchanged["command_wait_elapsed_secs"].as_u64().unwrap();
+        assert!(elapsed >= wait_elapsed);
+        unchanged["command_wait_elapsed_secs"] = wait_elapsed.into();
         assert_eq!(
             unchanged, waiting,
             "foreign cancellation changed the attempt"
@@ -717,6 +722,8 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
     let (ok, output) = arena.run_in(&arena.repo, &cancel_envelope(id));
     assert!(ok, "cancel own waiting attempt: {output}");
     let interrupted = wait_for_attempt(&arena, &arena.repo, Some(id), "interrupted", false);
+    assert!(interrupted.get("current_command").is_none());
+    assert!(interrupted.get("command_wait_elapsed_secs").is_none());
     assert_eq!(
         interrupted["reason"],
         "caller cancellation: superseded matrix"

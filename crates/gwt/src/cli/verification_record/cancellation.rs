@@ -29,6 +29,12 @@ pub(super) enum AttemptStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdmissionWait {
+    command: String,
+    started_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct AttemptRecord {
     pub attempt_id: String,
     pub session_id: String,
@@ -39,6 +45,8 @@ pub(super) struct AttemptRecord {
     pub status: AttemptStatus,
     pub reason: Option<String>,
     pub record_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission_wait: Option<AdmissionWait>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     external_termination: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,20 +99,20 @@ impl Attempt {
             save(&self.worktree, &mut record)
         })
     }
-    pub fn set_admission_waiting(&self, waiting: bool) -> io::Result<()> {
+    pub fn set_admission_waiting(&self, command: Option<&str>) -> io::Result<()> {
         trusted_store::with_write_lease(&self.worktree, || {
             self.ensure_active()?;
             let mut record = required(&self.worktree, &self.id)?;
-            let status = if waiting || record.record_id.is_none() {
+            record.status = if command.is_some() || record.record_id.is_none() {
                 AttemptStatus::Waiting
             } else {
                 AttemptStatus::Running
             };
-            if record.status != status {
-                record.status = status;
-                save(&self.worktree, &mut record)?;
-            }
-            Ok(())
+            record.admission_wait = command.map(|command| AdmissionWait {
+                command: command.to_owned(),
+                started_at: UtcTimestamp::now(),
+            });
+            save(&self.worktree, &mut record)
         })
     }
     pub fn mark_deferral_cleanup(&self) -> io::Result<()> {
@@ -112,6 +120,7 @@ impl Attempt {
             self.ensure_active()?;
             let mut record = required(&self.worktree, &self.id)?;
             record.status = AttemptStatus::Running;
+            record.admission_wait = None;
             record.reason = Some(DEFERRAL_CLEANUP.to_string());
             save(&self.worktree, &mut record)
         })
@@ -141,6 +150,7 @@ impl Attempt {
             }
             if error.is_some_and(|error| error.contains("verify: deferred")) {
                 record.status = AttemptStatus::Deferred;
+                record.admission_wait = None;
                 record.reason = error.map(str::to_owned);
                 save(&self.worktree, &mut record)
             } else {
@@ -301,6 +311,7 @@ pub(super) fn begin_for_caller(
             status: AttemptStatus::Waiting,
             reason: None,
             record_id: None,
+            admission_wait: None,
             external_termination: false,
             external_terminations: None,
             created_at: UtcTimestamp::now(),
@@ -338,6 +349,7 @@ fn interrupt(
     coordinator: &IndexCoordinator,
 ) -> io::Result<()> {
     record.status = AttemptStatus::Interrupted;
+    record.admission_wait = None;
     record.reason = Some(reason.to_string());
     record.external_termination = external;
     // Persist the cancellation fence before touching queue metadata. Admission
@@ -436,9 +448,22 @@ pub(super) fn status(
         .unwrap_or_else(|| read(worktree, &latest_filename(session))?.ok_or_else(not_yours))?;
     let record = required(worktree, &selected)?;
     let mut value = serde_json::to_value(&record)?;
-    // Do not expose private token or authority digests through public status.
-    for name in ["authority_hash", "watchdog_token_hash", "content_hash"] {
+    // Keep private record fields out of the public status.
+    for name in [
+        "authority_hash",
+        "watchdog_token_hash",
+        "content_hash",
+        "admission_wait",
+    ] {
         value.as_object_mut().expect("record object").remove(name);
+    }
+    if let Some(wait) = record.admission_wait.as_ref() {
+        value["current_command"] = wait.command.as_str().into();
+        value["command_wait_elapsed_secs"] = UtcTimestamp::now()
+            .signed_duration_since(wait.started_at)
+            .whole_seconds()
+            .max(0)
+            .into();
     }
     value["reservation"] = coordinator
         .heavy_lease_status()
@@ -1072,7 +1097,9 @@ mod tests {
             let record = serde_json::from_value(document).unwrap();
             attempt.mark_running("vr-test").unwrap();
             if waiting {
-                attempt.set_admission_waiting(true).unwrap();
+                attempt
+                    .set_admission_waiting(Some("git --version"))
+                    .unwrap();
             }
             let mut control = load(repo.path(), attempt.id()).unwrap().unwrap();
             let mut document = serde_json::to_value(&control).unwrap();
