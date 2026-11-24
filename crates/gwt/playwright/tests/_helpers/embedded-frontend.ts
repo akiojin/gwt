@@ -37,6 +37,7 @@ const ROOT_MODULES = new Set([
   "app-chrome.js",
   // Issue #7639 — Home conversation host imported by hub-app.js.
   "home-conversation.js",
+  "attachment-upload.js",
   // Issue #7731 — first-run setup host imported by hub-app.js and settings-surface.js.
   "first-run-setup.js",
   "project-execution-environments.js",

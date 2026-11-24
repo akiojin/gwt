@@ -800,6 +800,8 @@ pub enum FrontendEvent {
         project_key: String,
         text: String,
         request_id: u64,
+        #[serde(default)]
+        attachments: Vec<FileAttachment>,
     },
     /// Issue #7742: answer one waiting decision of an open project from Home.
     /// The queue belongs to the project, so no PM has to be running.

@@ -74,9 +74,33 @@ function Lines({ lines }) {
   return lines.map((line, index) => <p key={index}>{line}</p>);
 }
 
+const clipboardImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+const maxAttachments = 16;
+
+function Attachments({ attachments, onRemove, disabled }) {
+  if (!attachments?.length) return null;
+  return <ul className="gwt-home__attachments" aria-label={onRemove ? "Draft attachments" : "Attachments"}>
+    {attachments.map(({ name, preview, id }) => (
+      <li key={id}>
+        {preview ? <img src={preview} alt={name} /> : <span>{name}</span>}
+        {onRemove ? <button type="button" className="wizard-button" disabled={disabled}
+          aria-label={`Remove ${name}`} onClick={() => onRemove(id)}>×</button> : null}
+      </li>
+    ))}
+  </ul>;
+}
+
 export function HomeConversation({ store, actions }) {
   const view = useStoreSelector(store, selectView);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const uploadsInFlight = useRef(false);
+  const attachmentSendCount = useRef(null);
+  const nextAttachmentId = useRef(0);
+  const fileInputRef = useRef(null);
+  const [fileSelection, setFileSelection] = useState(0);
   const [chosenProject, setChosenProject] = useState("");
   const [query, setQuery] = useState("");
   const [removing, setRemoving] = useState(null);
@@ -105,7 +129,13 @@ export function HomeConversation({ store, actions }) {
 
   // A confirmed send clears exactly the draft that was sent.
   useEffect(() => {
-    if (composer.sentCount) setDraft("");
+    if (composer.sentCount) {
+      setDraft("");
+      if (composer.sentCount === attachmentSendCount.current) {
+        setAttachments([]);
+        attachmentSendCount.current = null;
+      }
+    }
   }, [composer.sentCount]);
 
   useEffect(() => {
@@ -148,10 +178,57 @@ export function HomeConversation({ store, actions }) {
     : mentioned ?? projects.find(project => project.key === chosenProject) ?? (projects.length === 1 ? projects[0] : null);
   const needsProject = !composer.replyTo && !target && projects.length > 1 && draft.trim() !== "";
   const noPm = target && !target.pmAvailable ? COPY.noPm(target.title) : "";
-  const canSend = Boolean(draft.trim()) && Boolean(target) && !view.busy && !noPm;
-  const submit = event => {
+  const canSend = Boolean(draft.trim()) && Boolean(target) && !view.busy && !noPm && !uploading;
+  const canAttach = !composer.replyTo && !view.busy && !uploading;
+  const addAttachments = files => {
+    if (!canAttach || !files.length) return;
+    if (attachments.length + files.length > maxAttachments) {
+      setAttachmentError(`Choose up to ${maxAttachments} attachments.`);
+      return;
+    }
+    setAttachmentError("");
+    const added = files.map(file => ({
+      file,
+      name: file.name,
+      id: ++nextAttachmentId.current,
+      preview: clipboardImageTypes.has(file.type) ? URL.createObjectURL(file) : null,
+    }));
+    setAttachments(current => [...current, ...added]);
+  };
+  const removeAttachment = id => {
+    const removed = attachments.find(attachment => attachment.id === id);
+    if (removed?.preview) URL.revokeObjectURL(removed.preview);
+    setAttachments(current => current.filter(attachment => attachment.id !== id));
+    setAttachmentError("");
+  };
+  const submit = async event => {
     event?.preventDefault();
-    if (canSend) actions.submit(draft, target.key);
+    if (!canSend || uploadsInFlight.current) return;
+    attachmentSendCount.current = null;
+    if (composer.replyTo || !attachments.length) {
+      actions.submit(draft, target.key);
+      return;
+    }
+    uploadsInFlight.current = true;
+    setUploading(true);
+    setAttachmentError("");
+    try {
+      const uploads = [];
+      for (const { file } of attachments) {
+        const uploaded = await actions.uploadAttachment(file);
+        uploads.push({ ...uploaded, source: "uploaded" });
+      }
+      if (actions.submit(draft, target.key, attachments, uploads)) {
+        attachmentSendCount.current = composer.sentCount + 1;
+      } else {
+        setAttachmentError("The message could not be sent. Your attachments are kept.");
+      }
+    } catch (error) {
+      setAttachmentError(`Attachment upload failed: ${error.message}`);
+    } finally {
+      uploadsInFlight.current = false;
+      setUploading(false);
+    }
   };
   const onDraftKeyDown = event => {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent?.isComposing || event.keyCode === 229) return;
@@ -288,6 +365,7 @@ export function HomeConversation({ store, actions }) {
               ))}
               <button type="button" className="text-button" data-home-defer disabled={view.busy} onClick={() => actions.defer(topic.id)}>{COPY.later}</button>
             </div>
+            <Attachments attachments={topic.attachments} />
             {topic.status ? <p className="gwt-home__status" role="status">{topic.status}</p> : null}
             {topic.error ? <p className="gwt-home__status gwt-home__status--error" role="alert">{topic.error}</p> : null}
           </article>
@@ -305,6 +383,7 @@ export function HomeConversation({ store, actions }) {
               <Time iso={topic.createdAt} />
             </p>
             <Lines lines={topic.lines} />
+            <Attachments attachments={topic.attachments} />
             {topic.status ? <p className="gwt-home__status" role="status">{topic.status}</p> : null}
           </article>
         ))}
@@ -320,7 +399,16 @@ export function HomeConversation({ store, actions }) {
             <button type="button" className="gwt-home__replychip-clear" aria-label={COPY.clearReply} title={COPY.clearReply} onClick={actions.clearReply}>×</button>
           </div>
         ) : null}
+        {!composer.replyTo ? <Attachments attachments={attachments} onRemove={removeAttachment} disabled={!canAttach} /> : null}
         <div className="gwt-home__compose-row">
+          {!composer.replyTo ? <>
+            <input key={fileSelection} type="file" ref={fileInputRef} multiple hidden onChange={event => {
+              addAttachments(Array.from(event.target.files));
+              setFileSelection(selection => selection + 1);
+            }} />
+            <button type="button" className="wizard-button" disabled={!canAttach}
+              onClick={() => fileInputRef.current.click()}>Attach files</button>
+          </> : null}
           <textarea
             className="gwt-home__draft"
             ref={draftRef}
@@ -328,7 +416,23 @@ export function HomeConversation({ store, actions }) {
             aria-label={COPY.draft}
             placeholder={composer.replyTo ? COPY.draftReply : COPY.draftNew}
             value={draft}
-            readOnly={view.busy && Boolean(composer.status)}
+            readOnly={uploading || (view.busy && Boolean(composer.status))}
+            onDragOver={event => {
+              if (canAttach && event.dataTransfer.types.includes("Files")) event.preventDefault();
+            }}
+            onDrop={event => {
+              const files = Array.from(event.dataTransfer.files);
+              if (!files.length) return;
+              event.preventDefault();
+              addAttachments(files);
+            }}
+            onPaste={event => {
+              if (!canAttach) return;
+              const images = Array.from(event.clipboardData.files).filter(file => clipboardImageTypes.has(file.type));
+              if (!images.length) return;
+              event.preventDefault();
+              addAttachments(images);
+            }}
             onChange={event => setDraft(event.target.value)}
             onKeyDown={onDraftKeyDown}
           />
@@ -350,7 +454,7 @@ export function HomeConversation({ store, actions }) {
           </button>
         </div>
         <p className="gwt-home__composer-status" aria-live="polite">
-          {composer.status || (composer.error ? `Not sent: ${composer.error} Your message is kept.` : needsProject ? COPY.needProject : noPm)}
+          {(uploading ? "Uploading attachments…" : attachmentError) || composer.status || (composer.error ? `Not sent: ${composer.error} Your message is kept.` : needsProject ? COPY.needProject : noPm)}
         </p>
       </form>
 
