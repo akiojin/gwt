@@ -780,6 +780,7 @@ fn dependency_completion_fixture() -> (
         live_error: None,
         readiness_failures: Vec::new(),
         urgent_assignments: Default::default(),
+        issue_parents: Default::default(),
     };
     (monitor, loaded)
 }
