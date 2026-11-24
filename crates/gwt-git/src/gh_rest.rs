@@ -371,6 +371,8 @@ pub struct RestIssueRow {
     pub body: Option<String>,
     pub url: String,
     pub updated_at: Option<String>,
+    /// GitHub's sub-issue parent, from `parent_issue_url` (Issue #7845).
+    pub parent_number: Option<u64>,
 }
 
 /// Reduce REST issue rows. Pull requests (the endpoint returns them too) and
@@ -412,6 +414,11 @@ pub fn parse_issue_rows(rows: &[Value]) -> Vec<RestIssueRow> {
                 body: row.get("body").and_then(Value::as_str).map(String::from),
                 url: text(row, &["html_url", "url"]).unwrap_or_default(),
                 updated_at: text(row, &["updated_at", "updatedAt"]),
+                parent_number: row
+                    .get("parent_issue_url")
+                    .and_then(Value::as_str)
+                    .and_then(|url| url.rsplit('/').next())
+                    .and_then(|number| number.parse().ok()),
             })
         })
         .collect()
@@ -883,7 +890,8 @@ mod tests {
             r#"[
               {"number": 1, "title": "Bug", "state": "open", "labels": [{"name": "bug"}],
                "assignees": [{"login": "alice"}], "user": {"login": "OriginalCreator"}, "body": "b", "html_url": "https://github.com/o/r/issues/1",
-               "url": "https://api.github.com/repos/o/r/issues/1", "updated_at": "2026-09-01T00:00:00Z"},
+               "url": "https://api.github.com/repos/o/r/issues/1", "updated_at": "2026-09-01T00:00:00Z",
+               "parent_issue_url": "https://api.github.com/repos/o/r/issues/7007"},
               {"number": 2, "title": "PR", "state": "open", "pull_request": {"url": "x"}},
               {"number": 3, "title": "Legacy", "state": "CLOSED", "url": "https://github.com/o/r/issues/3",
                "updatedAt": "2026-09-02T00:00:00Z", "author": {"login": ""}},
@@ -912,6 +920,9 @@ mod tests {
         );
         assert!(parsed[1].body.is_none());
         assert!(parsed[1].author_login.is_none());
+        // Issue #7845: the sub-issue parent the Monitor admits through.
+        assert_eq!(parsed[0].parent_number, Some(7007));
+        assert_eq!(parsed[1].parent_number, None);
     }
 }
 

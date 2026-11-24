@@ -1831,6 +1831,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
         live_error: None,
         readiness_failures: Vec::new(),
         urgent_assignments: Default::default(),
+        issue_parents: Default::default(),
     };
     let now = "2026-07-28T00:00:00Z";
     let mut stale = test_monitor(gwt::IssueMonitorConfig::default());
@@ -1987,6 +1988,7 @@ fn app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposa
         live_error: None,
         readiness_failures: Vec::new(),
         urgent_assignments: Default::default(),
+        issue_parents: Default::default(),
     };
     let now = "2026-07-28T00:00:00Z";
     let mut stale = test_monitor(gwt::IssueMonitorConfig::default());
