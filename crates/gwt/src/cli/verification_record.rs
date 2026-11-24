@@ -209,6 +209,10 @@ pub struct VerificationQuarantineRequest {
     pub test_identity: String,
     pub baseline_command: String,
     pub owner_issue: u64,
+    /// PR that carries the typed marker. Omitted (zero) before the first PR
+    /// exists (#7326): the marker is then bound to the `pr.create` body and
+    /// every later gate re-reads it from the created PR.
+    #[serde(default)]
     pub pr_number: u64,
 }
 
@@ -225,9 +229,6 @@ impl VerificationQuarantineRequest {
         }
         if self.owner_issue == 0 {
             return Err("verify quarantine owner_issue must be greater than zero".to_string());
-        }
-        if self.pr_number == 0 {
-            return Err("verify quarantine pr_number must be greater than zero".to_string());
         }
         let failed_args = split_command_line(&self.failed_command)?;
         if failed_args.first().map(String::as_str) != Some("cargo")
@@ -369,6 +370,9 @@ impl VerificationQuarantineRequest {
 pub enum PrQuarantineReferenceKind {
     Body,
     Comment,
+    /// First-PR quarantine (#7326): the marker must appear in the body
+    /// submitted to `pr.create`, then in the created PR for later gates.
+    CreateBody,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4736,6 +4740,17 @@ fn prepare_quarantine_requests<E: CliEnv>(
             ));
             continue;
         }
+        if request.pr_number == 0 {
+            prepared.push(PreparedQuarantineRequest {
+                request: request.clone(),
+                pr_reference: PrQuarantineReference {
+                    kind: PrQuarantineReferenceKind::CreateBody,
+                    comment_id: None,
+                    marker: quarantine_marker(&request.test_identity, request.owner_issue),
+                },
+            });
+            continue;
+        }
         let context = match env.fetch_pr_quarantine_context(request.pr_number) {
             Ok(context) if context.number == request.pr_number => context,
             Ok(_) | Err(_) => {
@@ -5569,9 +5584,14 @@ where
                 match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host, options.command_progress, options.attempt.map(|_| &check as &CancellationCheck<'_>))
                 {
                     Ok((baseline_exit_code, baseline_result_line)) => {
+                        let pr = if prepared.request.pr_number == 0 {
+                            "the PR create body".to_string()
+                        } else {
+                            format!("PR #{}", prepared.request.pr_number)
+                        };
                         transcript.push_str(&format!(
-                            "quarantine: {test_identity} is typed non-blocking via owner #{} and PR #{}; merge-base {merge_base_sha} reported exact PASS\n",
-                            prepared.request.owner_issue, prepared.request.pr_number
+                            "quarantine: {test_identity} is typed non-blocking via owner #{} and {pr}; merge-base {merge_base_sha} reported exact PASS\n",
+                            prepared.request.owner_issue
                         ));
                         quarantined_failures.push(TypedQuarantinedFailure {
                             failed_command: prepared.request.failed_command.clone(),
@@ -5936,6 +5956,40 @@ pub(crate) fn validate_current_quarantine_references<E: CliEnv>(
     }
     let mut contexts = std::collections::HashMap::new();
     for quarantine in &record.quarantined_failures {
+        if quarantine.pr_reference.kind == PrQuarantineReferenceKind::CreateBody {
+            // First-PR quarantine binds to whichever PR this gate delivers.
+            let Some(number) = expected_pr_number else {
+                return Err(format!(
+                    "typed quarantine for {} is bound to a PR create body; validate it against the created PR",
+                    quarantine.test_identity
+                ));
+            };
+            if let std::collections::hash_map::Entry::Vacant(entry) = contexts.entry(number) {
+                let context = env.fetch_pr_quarantine_context(number).map_err(|error| {
+                    format!("could not read current quarantine evidence from PR #{number}: {error}")
+                })?;
+                if context.number != number {
+                    return Err(format!(
+                        "PR quarantine response #{} does not match requested #{number}",
+                        context.number
+                    ));
+                }
+                entry.insert(context);
+            }
+            if find_pr_quarantine_reference(
+                &contexts[&number],
+                &quarantine.test_identity,
+                quarantine.owner_issue,
+            )
+            .is_none()
+            {
+                return Err(format!(
+                    "current PR #{number} does not contain the typed quarantine marker for {}",
+                    quarantine.test_identity
+                ));
+            }
+            continue;
+        }
         if expected_pr_number.is_some_and(|number| number != quarantine.pr_number) {
             return Err(format!(
                 "typed quarantine belongs to PR #{} instead of PR #{}",
@@ -5964,6 +6018,8 @@ pub(crate) fn validate_current_quarantine_references<E: CliEnv>(
         }
         let context = &contexts[&quarantine.pr_number];
         let marker_exists = match quarantine.pr_reference.kind {
+            // Handled above; unreachable for a PR-bound reference.
+            PrQuarantineReferenceKind::CreateBody => false,
             PrQuarantineReferenceKind::Body => context
                 .body
                 .lines()
@@ -5988,6 +6044,39 @@ pub(crate) fn validate_current_quarantine_references<E: CliEnv>(
         }
     }
     Ok(())
+}
+
+/// `pr.create` gate for typed quarantine (#7326). A Ready PR may be created
+/// from fresh quarantined evidence only when every quarantine was declared
+/// for the first PR and the submitted body carries each exact marker.
+pub(crate) fn pr_create_quarantine_refusal(
+    worktree: &Path,
+    session_id: &str,
+    record: &VerificationRunRecord,
+    body: &str,
+) -> Option<String> {
+    let status = evaluate_evidence(worktree, session_id, record.owner_number);
+    if status != EvidenceStatus::FreshWithQuarantine {
+        return Some(format!("PR handoff refused: {}", status.describe()));
+    }
+    for quarantine in &record.quarantined_failures {
+        if quarantine.pr_reference.kind != PrQuarantineReferenceKind::CreateBody {
+            return Some(format!(
+                "PR handoff refused: typed quarantine for {} is bound to PR #{}; creating a Ready PR requires a first-PR quarantine (omit pr_number in verify.plan) or normal passing verification",
+                quarantine.test_identity, quarantine.pr_number
+            ));
+        }
+        let marker = quarantine_marker(&quarantine.test_identity, quarantine.owner_issue);
+        if !body
+            .lines()
+            .any(|line| line_is_quarantine_marker(line, &marker))
+        {
+            return Some(format!(
+                "PR handoff refused: the PR body must contain the typed quarantine marker line `{marker}` (plain or as an HTML comment)"
+            ));
+        }
+    }
+    None
 }
 
 pub(crate) fn validate_completion_evidence<E: CliEnv>(
@@ -6106,7 +6195,8 @@ fn typed_quarantines_cover_all_failures(
             || quarantine.baseline_exit_code != 0
             || quarantine.baseline_result_line
                 != format!("test {} ... ok", quarantine.test_identity)
-            || quarantine.pr_number == 0
+            || (quarantine.pr_number == 0)
+                != (quarantine.pr_reference.kind == PrQuarantineReferenceKind::CreateBody)
             || quarantine.pr_reference.marker
                 != quarantine_marker(&quarantine.test_identity, quarantine.owner_issue)
             || matches!(
@@ -6115,7 +6205,7 @@ fn typed_quarantines_cover_all_failures(
             ) && quarantine.pr_reference.comment_id.is_none()
             || matches!(
                 quarantine.pr_reference.kind,
-                PrQuarantineReferenceKind::Body
+                PrQuarantineReferenceKind::Body | PrQuarantineReferenceKind::CreateBody
             ) && quarantine.pr_reference.comment_id.is_some()
             || !seen.insert((
                 quarantine.failed_command.as_str(),
@@ -11316,6 +11406,124 @@ fn default_integration_test_builds_a_guarded_binary() {
             evaluate_evidence_snapshot(dir.path(), "sess-quarantine", None, Some(&plan), &hashless,),
             EvidenceStatus::Tampered,
             "typed quarantine must never inherit the legacy hashless compatibility path"
+        );
+    }
+
+    /// Issue #7326 (#6210): a known flake must be quarantinable before the
+    /// first Ready PR exists. The request omits `pr_number`, the marker is
+    /// bound to the PR create body, and every later gate re-reads the real PR.
+    #[test]
+    fn first_pr_typed_quarantine_binds_to_the_create_body_then_the_created_pr() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='quarantine-target-fixture'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
+        let test_identity = "app_runtime::tests::bounded_sync";
+        let command = "cargo test -p definitely-missing-package --lib".to_string();
+        let baseline_command = format!("{command} {test_identity} -- --exact");
+        let request: VerificationQuarantineRequest = serde_json::from_value(serde_json::json!({
+            "failed_command": command,
+            "test_identity": test_identity,
+            "baseline_command": baseline_command,
+            "owner_issue": 3755,
+        }))
+        .expect("pr_number may be omitted before the first PR exists");
+        assert_eq!(request.pr_number, 0);
+        assert!(request.validate().is_ok());
+
+        // Preparation needs only the owner Issue; no PR context is fetched.
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
+            number: IssueNumber(3755),
+            title: "Flaky bounded sync".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::client::UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: Vec::new(),
+        });
+        let (mut plan_record, _) =
+            plan_and_run(dir.path(), "sess-first-pr", std::slice::from_ref(&command));
+        let mut plan = load_plan(dir.path()).unwrap().unwrap();
+        plan.quarantines = vec![request.clone()];
+        save_plan(dir.path(), &plan).unwrap();
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        let (prepared, diagnostics) = prepare_quarantine_requests(&mut env, Some(&plan));
+        assert_eq!(prepared.len(), 1, "{diagnostics}");
+        let marker = quarantine_marker(test_identity, 3755);
+        assert_eq!(
+            prepared[0].pr_reference,
+            PrQuarantineReference {
+                kind: PrQuarantineReferenceKind::CreateBody,
+                comment_id: None,
+                marker: marker.clone(),
+            }
+        );
+
+        plan_record.commands[0].output_tail =
+            format!("failures:\n    {test_identity}\n\ntest result: FAILED. 0 passed; 1 failed");
+        plan_record.quarantined_failures = vec![TypedQuarantinedFailure {
+            failed_command: command.clone(),
+            test_identity: test_identity.to_string(),
+            owner_issue: 3755,
+            head_sha: "head-sha".to_string(),
+            merge_base_sha: "base-sha".to_string(),
+            baseline_command,
+            baseline_exit_code: 0,
+            baseline_result_line: format!("test {test_identity} ... ok"),
+            pr_number: 0,
+            pr_reference: prepared[0].pr_reference.clone(),
+        }];
+        plan_record.verification_plan_hash = plan.content_hash.clone();
+        plan_record.verification_plan_snapshot = Some(plan);
+        save(dir.path(), &plan_record).unwrap();
+        let record = load(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-first-pr", None),
+            EvidenceStatus::FreshWithQuarantine
+        );
+
+        // pr.create: the submitted body must carry the exact typed marker.
+        let refusal = pr_create_quarantine_refusal(
+            dir.path(),
+            "sess-first-pr",
+            &record,
+            "User Verification Result: n/a (autonomous)\n",
+        )
+        .expect("a create body without the marker must refuse");
+        assert!(refusal.contains(&marker), "{refusal}");
+        assert_eq!(
+            pr_create_quarantine_refusal(
+                dir.path(),
+                "sess-first-pr",
+                &record,
+                &format!("## Verification\n<!-- {marker} -->\n"),
+            ),
+            None
+        );
+
+        // After creation the marker is re-read from the real PR.
+        assert!(validate_current_quarantine_references(&mut env, &record, None).is_err());
+        env.pr_quarantine_contexts.insert(
+            7,
+            crate::cli::pr::PrQuarantineContext {
+                number: 7,
+                body: "edited away".to_string(),
+                comments: Vec::new(),
+            },
+        );
+        assert!(validate_current_quarantine_references(&mut env, &record, Some(7)).is_err());
+        env.pr_quarantine_contexts.get_mut(&7).unwrap().body = format!("<!-- {marker} -->");
+        assert_eq!(
+            validate_current_quarantine_references(&mut env, &record, Some(7)),
+            Ok(())
         );
     }
 
