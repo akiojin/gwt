@@ -1271,13 +1271,33 @@ fn missing_session_is_absent(sessions: &Path, id: &str) -> std::io::Result<bool>
     };
     for namespace in namespaces {
         let namespace = namespace?;
+        let sidecar = namespace.path().join(format!("{id}.json"));
         if namespace.file_type()?.is_dir()
-            && !path_is_absent(&namespace.path().join(format!("{id}.json")))?
+            && !path_is_absent(&sidecar)?
+            && !runtime_sidecar_proves_exit(&sidecar)
         {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+// Issue #7351: a vanished window can leave its runtime sidecar behind. Only a
+// readable, published sidecar whose exact PTY child has exited stops fencing
+// the reservation; unreadable, legacy or still-live evidence keeps it busy.
+fn runtime_sidecar_proves_exit(path: &Path) -> bool {
+    let Ok(runtime) = gwt_agent::SessionRuntimeState::load(path) else {
+        return false;
+    };
+    runtime.runtime_incarnation.is_some_and(|value| value > 0)
+        && runtime
+            .child_pid
+            .filter(|pid| *pid > 0)
+            .zip(runtime.child_started_at.filter(|started| *started > 0))
+            .is_some_and(|(pid, started)| {
+                !crate::process::exact_pty_process_tree_is_alive(pid, started)
+                    && !crate::process::is_host_process_alive(pid)
+            })
 }
 
 fn dead_project_assignments(
