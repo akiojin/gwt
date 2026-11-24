@@ -79,6 +79,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `TerminalInput` | 一部対応 | `pane.send` | 自分のペインに一行を送信できる。GUI の対話的な端末入力はキー入力や改行をそのまま扱う。 |
 | `LoadPmConversation` | 読み取り | — | 正規 PM ペインに結び付く会話の履歴を表示用に読む。 |
 | `LoadHomeConversation` | 読み取り | — | ホームの会話に出す、開いている各プロジェクトの判断キューを読む。 |
+| `LoadDecisionCounts` | 読み取り | — | プロジェクト画面のヘッダーとステータスバーに出す、開いている各プロジェクトの判断キューの待ち件数を読む。 |
 | `HomePmSend` | 対象外 | — | ホームからプロジェクトを指定して、そのプロジェクトの登録済み PM ペインへ文を送る。宛先のセッションはホストが解決する。 |
 | `GetFirstRunSetup` | 読み取り | — | 初回セットアップに出す、登録済みのツール、台帳のエージェント、PM の指名、セットアップの要否を読む。`refresh` は導入済みツールを検出し直す。 |
 | `SaveFirstRunSetup` | 対象外 | — | この端末の PM の指名（台帳のエージェント、または新しいエージェントの名前）を保存する。初回セットアップの画面からの操作に限る（Issue #7731）。 |
