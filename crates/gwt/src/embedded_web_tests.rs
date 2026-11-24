@@ -204,6 +204,8 @@ fn frontend_bundle_source() -> &'static str {
         // against the shipped module set.
         include_str!("../web/terminal-attachments.js"),
         "\n",
+        include_str!("../web/attachment-upload.js"),
+        "\n",
         // SPEC-3064 Phase 3 (E3) — Project Index window surface moved out
         // of app.js.
         include_str!("../web/project-index-search-surface.js"),

@@ -11898,7 +11898,8 @@ impl AppRuntime {
                 project_key,
                 text,
                 request_id,
-            } => self.home_pm_send_events(client_id, &project_key, &text, request_id),
+                attachments,
+            } => self.home_pm_send_events(client_id, &project_key, &text, request_id, attachments),
             FrontendEvent::HomeAnswerDecision {
                 project_key,
                 decision_id,

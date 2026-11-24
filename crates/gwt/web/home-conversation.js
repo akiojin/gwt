@@ -1,3 +1,4 @@
+import { uploadAttachmentFile } from "./attachment-upload.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 import { decisionItemFromQueue, decisionMessageLines } from "./pm-chat.js";
@@ -117,7 +118,7 @@ function reconcileSent(sent, projects) {
     const project = projects.find(candidate => candidate.key === receipt.projectKey);
     const messages = project?.conversation?.messages || [];
     const native = receipt.nativeId ? null : messages.find(item =>
-      item.role === "user" && item.text === receipt.text
+      item.role === "user" && matchesSentText(item.text, receipt.text, receipt.attachments)
       && !receipt.previousIds.includes(item.id) && !claimed.includes(topicId(receipt.projectKey, item.id)));
     if (native) claimed.push(topicId(receipt.projectKey, native.id));
     const nativeId = receipt.nativeId ?? native?.id;
@@ -131,6 +132,14 @@ function reconcileSent(sent, projects) {
   });
 }
 
+function matchesSentText(nativeText, text, attachments) {
+  if (!attachments?.length) return nativeText === text;
+  if (!nativeText.startsWith(`${text}\n\n`)) return false;
+  const suffix = nativeText.slice(text.length + 2);
+  if (!/^Files?: (?:\[)?"/.test(suffix)) return false;
+  return attachments.every(({ uploadId }) => suffix.includes(`".gwt/drop-files/${uploadId.replaceAll("-", "")}-`));
+}
+
 // What the outcome of the message to a PM changes: a refusal says why.
 function withSendResult(state, requestId, ok, error) {
   const pending = state.pending;
@@ -140,7 +149,7 @@ function withSendResult(state, requestId, ok, error) {
   }
   const receipt = {
     id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project,
-    text: pending.answer, at: Date.now(), previousIds: pending.previousIds, waitingForReply: true,
+    text: pending.answer, attachments: pending.attachments, at: Date.now(), previousIds: pending.previousIds, waitingForReply: true,
   };
   return {
     ...state, pending: null, failure: null, sentCount: state.sentCount + 1,
@@ -184,7 +193,7 @@ function homeConversationView(state, route) {
     });
   const messages = state.sent.filter(message => !message.nativeId).map(message => ({
     id: message.id, kind: "message", projectKey: message.projectKey, project: message.project,
-    createdAt: isoTime(message.at), lines: [message.text], status: COPY.delivered(message.project),
+    createdAt: isoTime(message.at), lines: [message.text], attachments: message.attachments, status: COPY.delivered(message.project),
   }));
   const replyWaiting = [
     ...state.sent.filter(message => message.waitingForReply).map(message => `reply-${message.id}`),
@@ -199,8 +208,9 @@ function homeConversationView(state, route) {
     for (const message of project.conversation?.messages || []) {
       const id = topicId(project.key, message.id);
       if (message.role === "user") sentAt = sentByNativeId.get(id)?.at;
+      const receipt = sentByNativeId.get(id);
       const topic = { id, kind: message.role === "assistant" ? "pm-message" : "message",
-        project: project.title, lines: [message.text] };
+        project: project.title, lines: [receipt?.text ?? message.text], attachments: receipt?.attachments };
       // Keep a submitted turn at its delivery position when native history
       // replaces the optimistic user message and the reply starts.
       if (sentAt === undefined) history.push(topic);
@@ -271,7 +281,8 @@ export function createHomeConversation({
   // pastes the body and submits it on its own carriage return.
   function sendToPm(pending) {
     return issue(pending, requestId => ({ kind: "home_pm_send", project_key: pending.projectKey,
-      text: `${pending.answer}\r`, request_id: requestId }));
+      text: `${pending.answer}\r`, request_id: requestId,
+      ...(pending.uploads?.length ? { attachments: pending.uploads } : {}) }));
   }
 
   // The one queue operation of a decision: an answer, or "decide later".
@@ -328,18 +339,25 @@ export function createHomeConversation({
     },
     // From the composer: an answer to the reply target, or a new message to
     // the PM of the chosen project.
-    submit(text, projectKey) {
+    uploadAttachment: uploadAttachmentFile,
+    submit(text, projectKey, attachments = [], uploads = []) {
       const body = String(text ?? "").trim();
       const current = state.read();
       if (!body || current.pending) return false;
-      if (current.replyTo && decision(current.replyTo)) return answer(current.replyTo, body, null, true);
+      if (current.replyTo && decision(current.replyTo)) {
+        if (attachments.length) return false;
+        return answer(current.replyTo, body, null, true);
+      }
       const project = current.projects.find(candidate => candidate.key === projectKey);
       if (!project) return false;
+      const sentAttachments = attachments.map(({ file, id, preview }, index) => ({
+        name: file.name, id, preview, uploadId: uploads[index].upload_id,
+      }));
       const previousIds = (project.conversation?.messages || [])
-        .filter(message => message.role === "user" && message.text === body).map(message => message.id);
+        .filter(message => message.role === "user" && matchesSentText(message.text, body, sentAttachments)).map(message => message.id);
       return sendToPm({
         topicId: null, projectKey: project.key, project: project.title,
-        answer: body, fromComposer: true, previousIds,
+        answer: body, fromComposer: true, previousIds, attachments: sentAttachments, uploads,
       });
     },
     deleteTopic(id) {

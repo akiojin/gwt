@@ -171,15 +171,11 @@ impl AppRuntime {
         )
     }
 
-    /// Send one Home message to the PM pane of an open project.
-    pub(super) fn home_pm_send_events(
-        &mut self,
-        client_id: ClientId,
+    fn home_pm_target(
+        &self,
         project_key: &str,
-        text: &str,
-        request_id: u64,
-    ) -> Vec<OutboundEvent> {
-        let target = self.tabs.iter().find_map(|tab| {
+    ) -> Option<(gwt_core::repo_hash::ProjectKey, Option<String>)> {
+        self.tabs.iter().find_map(|tab| {
             let key = self.project_key_for_tab(&tab.id)?;
             (key.as_str() == project_key).then(|| {
                 (
@@ -187,28 +183,207 @@ impl AppRuntime {
                     self.pm_session_for_root(&tab.project_root).cloned(),
                 )
             })
-        });
-        let refuse = |error: &str| {
-            vec![OutboundEvent::reply(
-                &client_id,
-                BackendEvent::PaneSendResult {
-                    ok: false,
-                    window_id: None,
-                    error: Some(error.to_string()),
-                    request_id: Some(request_id),
-                },
-            )]
+        })
+    }
+
+    /// Send one Home message to the PM pane of an open project.
+    pub(super) fn home_pm_send_events(
+        &mut self,
+        client_id: ClientId,
+        project_key: &str,
+        text: &str,
+        request_id: u64,
+        attachments: Vec<gwt::FileAttachment>,
+    ) -> Vec<OutboundEvent> {
+        let Some((key, session_id)) = self.home_pm_target(project_key) else {
+            return home_send_refusal(&client_id, request_id, NOT_OPEN);
         };
-        match target {
-            None => refuse(NOT_OPEN),
-            Some((_, None)) => refuse(NO_PM),
-            Some((key, Some(session_id))) => self.pane_send_input_for_project_events(
+        let Some(session_id) = session_id else {
+            return home_send_refusal(&client_id, request_id, NO_PM);
+        };
+        if attachments.is_empty() {
+            return self.pane_send_input_for_project_events(
                 client_id,
                 &key,
                 &session_id,
                 text,
                 Some(request_id),
-            ),
+            );
         }
+        let Some(session) = self
+            .active_agent_sessions
+            .values()
+            .find(|session| session.session_id == session_id)
+        else {
+            return home_send_refusal(&client_id, request_id, NO_PM);
+        };
+        let Some(runtime) = self.runtimes.get(&session.window_id) else {
+            return home_send_refusal(&client_id, request_id, NO_PM);
+        };
+        let target = gwt::protocol::AttachmentExpectedTarget {
+            project_key: project_key.to_owned(),
+            session_id,
+            host_id: format!(
+                "{}:{}",
+                runtime.owner_identity.pid, runtime.owner_identity.host_started_at
+            ),
+            runtime_incarnation: runtime.incarnation,
+        };
+        let Ok(operation) = self.capture_attachment_operation(
+            client_id.clone(),
+            session.window_id.clone(),
+            Some(format!("home-{request_id}")),
+            Some(target),
+            attachments.len(),
+            None,
+        ) else {
+            return home_send_refusal(&client_id, request_id, NO_PM);
+        };
+        let worktree = session.worktree_path.clone();
+        let uploads = self.attachment_uploads.clone();
+        let proxy = self.proxy.clone();
+        let text = text.to_owned();
+        match self.blocking_tasks.try_spawn(move || {
+            match stage_home_attachments(&worktree, &uploads, &text, &attachments) {
+                Ok(prompt) => proxy.send(UserEvent::HomeAttachmentsReady {
+                    operation: Box::new(operation),
+                    request_id,
+                    prompt,
+                }),
+                Err(error) => proxy.send(UserEvent::Dispatch(home_send_refusal(
+                    &operation.client_id,
+                    request_id,
+                    &error,
+                ))),
+            };
+        }) {
+            Ok(()) => Vec::new(),
+            Err(error) => home_send_refusal(&client_id, request_id, &error),
+        }
+    }
+
+    pub(crate) fn deliver_home_message(
+        &mut self,
+        operation: super::AttachmentOperation,
+        prompt: &str,
+        request_id: u64,
+    ) -> Vec<OutboundEvent> {
+        let target = &operation.expected_target;
+        if !self.attachment_operation_is_current(&operation)
+            || !self
+                .home_pm_target(&target.project_key)
+                .is_some_and(|(_, current)| current.as_deref() == Some(target.session_id.as_str()))
+        {
+            return home_send_refusal(
+                &operation.client_id,
+                request_id,
+                "Project Manager changed while preparing attachments.",
+            );
+        }
+        self.pane_send_input_to_window_events(
+            operation.client_id,
+            &operation.id,
+            prompt,
+            Some(request_id),
+        )
+    }
+}
+
+fn home_send_refusal(client_id: &ClientId, request_id: u64, error: &str) -> Vec<OutboundEvent> {
+    vec![OutboundEvent::reply(
+        client_id,
+        BackendEvent::PaneSendResult {
+            ok: false,
+            window_id: None,
+            error: Some(error.to_owned()),
+            request_id: Some(request_id),
+        },
+    )]
+}
+
+fn stage_home_attachments(
+    worktree: &Path,
+    uploads: &crate::attachment_upload::AttachmentUploadStore,
+    text: &str,
+    files: &[gwt::FileAttachment],
+) -> Result<String, String> {
+    use super::attachments::{
+        format_file_attachment_prompt, prepare_file_attachment, save_file_attachment_with_progress,
+    };
+    if files.len() > 16 {
+        return Err("Choose up to 16 uploaded attachments.".into());
+    }
+    let tokens = files
+        .iter()
+        .map(|file| {
+            let gwt::FileAttachment::Uploaded { upload_id, .. } = file else {
+                return Err("Home attachments must be uploaded first.".to_string());
+            };
+            uuid::Uuid::parse_str(upload_id)
+                .map(|id| id.simple().to_string())
+                .map_err(|_| "Invalid attachment upload ID.".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut paths = Vec::with_capacity(files.len());
+    for (file, token) in files.iter().zip(tokens) {
+        let prepared = prepare_file_attachment(
+            worktree,
+            "",
+            gwt_agent::LaunchRuntimeTarget::Host,
+            file,
+            &token,
+            gwt::protocol::ContentLimits::default(),
+            uploads,
+        )
+        .map_err(|error| error.to_string())?;
+        save_file_attachment_with_progress(&prepared, |_, _| {})
+            .map_err(|error| error.to_string())?;
+        paths.push(prepared.agent_path);
+    }
+    Ok(format!(
+        "{}\n\n{}\r",
+        text.trim_end_matches('\r'),
+        format_file_attachment_prompt(&paths)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_attachments_stage_uploaded_bytes_in_the_pm_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let uploads = crate::attachment_upload::AttachmentUploadStore::new(temp.path().into());
+        let (upload_id, path) = uploads.allocate_path();
+        std::fs::write(&path, b"PM evidence").unwrap();
+        uploads
+            .insert(
+                upload_id.clone(),
+                crate::attachment_upload::UploadedAttachment {
+                    path,
+                    filename: "evidence.txt".into(),
+                    mime_type: None,
+                    size: 11,
+                },
+            )
+            .unwrap();
+        let file = gwt::FileAttachment::Uploaded {
+            upload_id,
+            filename: "evidence.txt".into(),
+            mime_type: None,
+            size: 11,
+        };
+        let prompt =
+            stage_home_attachments(temp.path(), &uploads, "Please review\r", &[file]).unwrap();
+        let path = prompt
+            .strip_prefix("Please review\n\nFile: ")
+            .unwrap()
+            .trim_end_matches('\r')
+            .trim_matches('"');
+        assert_eq!(
+            std::fs::read(temp.path().join(path)).unwrap(),
+            b"PM evidence"
+        );
     }
 }
