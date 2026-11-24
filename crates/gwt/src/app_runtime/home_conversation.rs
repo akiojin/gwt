@@ -15,16 +15,16 @@ const NO_PM: &str =
 const NOT_OPEN: &str = "This project is not open. Open it from Projects, then try again.";
 const QUEUE_UNREADABLE: &str = "The decision queue could not be read.";
 
-fn home_pm() -> Option<HomePmView> {
-    let designation = gwt::first_run_setup::load_designation().ok().flatten()?;
-    let roster = gwt::agent_registry::SessionMemberSnapshot::load().ok();
-    let member = roster
-        .as_ref()
-        .and_then(|roster| roster.designated_pm(&designation));
-    Some(HomePmView {
+fn home_pm() -> std::io::Result<Option<HomePmView>> {
+    let Some(designation) = gwt::first_run_setup::load_designation()? else {
+        return Ok(None);
+    };
+    let roster = gwt::agent_registry::SessionMemberSnapshot::load()?;
+    let member = roster.designated_pm(&designation);
+    Ok(Some(HomePmView {
         name: member.map_or_else(|| designation.name, |member| member.name.clone()),
         avatar: member.map_or_else(Default::default, |member| member.avatar.clone()),
-    })
+    }))
 }
 
 impl AppRuntime {
@@ -65,7 +65,7 @@ impl AppRuntime {
                 &reply_client,
                 BackendEvent::HomeConversation {
                     request_id,
-                    pm: Some(home_pm()),
+                    pm: home_pm().ok(),
                     projects,
                 },
             )]));
