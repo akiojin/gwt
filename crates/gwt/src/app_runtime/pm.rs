@@ -287,6 +287,17 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
 /// would otherwise never be woken again.
 const PM_WAKE_BUSY_DEFER_MAX_INTERVALS: u64 = 3;
 
+/// Issue #7664: machine capacity refusals that clear without the operator.
+/// The same set the Issues launch path requeues on (`owner.rs`).
+fn pm_launch_refusal_is_transient(detail: &str) -> bool {
+    [
+        "Machine Agent capacity observation is unavailable;",
+        "Machine Agent census is uncertain;",
+    ]
+    .iter()
+    .any(|refusal| detail.contains(refusal))
+}
+
 /// Who asked for the PM.
 ///
 /// SPEC-3431 FR-002's `auto_start` opt-out scopes to "opening a project starts
@@ -631,11 +642,20 @@ impl AppRuntime {
     /// as a PM failure in the log, the error ledger notification, and the PM
     /// settings panel, with the operation that recovers it. Always `true`.
     pub(super) fn record_pm_launch_failure(
-        &self,
+        &mut self,
         context: &super::ProjectContext,
         window_id: &str,
         detail: &str,
     ) -> bool {
+        // Issue #7664: right after an update the machine Agent capacity
+        // observation is briefly unavailable. That refusal clears by itself,
+        // so retry the PM on the scheduled tick instead of giving up.
+        if pm_launch_refusal_is_transient(detail)
+            && !self.pending_pm_launch_retry_tabs.contains(&context.tab_id)
+        {
+            self.pending_pm_launch_retry_tabs
+                .push(context.tab_id.to_string());
+        }
         let detail = Self::user_facing_launch_error_detail(detail);
         tracing::error!(
             project_root = %context.project_root.display(),
@@ -661,6 +681,48 @@ impl AppRuntime {
             },
         );
         true
+    }
+
+    /// Issue #7664: queue the automatic PM ensure again for every tab whose
+    /// PM launch was refused for a transient capacity reason. Each refusal
+    /// earns one retry; a new transient refusal queues the next one. A closed
+    /// tab or an already-live PM is dropped, and a PM launch still in flight
+    /// keeps its tab for the next tick.
+    pub(crate) fn retry_transient_pm_launch_failures(&mut self) {
+        let tabs = std::mem::take(&mut self.pending_pm_launch_retry_tabs);
+        let mut queued = false;
+        for tab_id in tabs {
+            let Some(root) = self.tab(&tab_id).map(|tab| tab.project_root.clone()) else {
+                continue;
+            };
+            if self.project_state_for_root(&root).is_some_and(|state| {
+                state
+                    .pending_pm_launches
+                    .values()
+                    .any(|pending| pending == &root)
+            }) {
+                self.pending_pm_launch_retry_tabs.push(tab_id);
+                continue;
+            }
+            let live = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(&root))
+                .ok()
+                .and_then(|prefs| prefs.registration)
+                .is_some_and(|registration| {
+                    self.live_pm_window_id(&registration.session_id).is_some()
+                });
+            if live || self.pending_startup_pm_tabs.contains(&tab_id) {
+                continue;
+            }
+            tracing::info!(
+                project_root = %root.display(),
+                "PM ensure: retrying after a transient machine capacity refusal"
+            );
+            self.pending_startup_pm_tabs.push(tab_id);
+            queued = true;
+        }
+        if queued {
+            self.queue_gui_slice_continue();
+        }
     }
 
     /// Drop a recorded block once the gate reaches a live, resumed, or
