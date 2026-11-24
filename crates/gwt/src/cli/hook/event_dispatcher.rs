@@ -1517,9 +1517,50 @@ mod tests {
         }
     }
 
+    /// A Codex session for `work/issue-<issue>` that holds the current
+    /// execution generation of its owner Issue, saved under the test HOME.
+    fn bound_issue_session(worktree: &Path, issue: u64) -> Session {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        let mut session = Session::new(worktree, format!("work/issue-{issue}"), AgentId::Codex);
+        session.linked_issue_number = Some(issue);
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: issue,
+        };
+        execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            &session.id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: "issue".into(),
+                owner_number: issue,
+                identity: execution_state::current_execution_binding(worktree, owner)
+                    .unwrap()
+                    .unwrap(),
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        session
+    }
+
     #[test]
     fn issue_5248_hook_delivers_gate_reason_and_current_criteria_only_to_its_owner() {
-        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
         use crate::issue_monitor::{AutonomousIssueRecord, AutonomousPhase, IssueMonitorPrefs};
         use crate::issue_monitor_gate::AcceptanceSnapshot;
         let _env_lock = crate::env_test_lock()
@@ -1544,41 +1585,7 @@ mod tests {
         let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
         let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
         let _forward = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
-        let mut session = Session::new(&worktree, "work/issue-5248", AgentId::Codex);
-        session.linked_issue_number = Some(5248);
-        let owner = ExecutionOwnerKey {
-            kind: ExecutionOwnerKind::Issue,
-            number: 5248,
-        };
-        execution_state::materialize_at_launch(
-            &worktree,
-            owner.kind,
-            owner.number,
-            &session.id,
-            "gwt-execute",
-            false,
-        )
-        .unwrap();
-        execution_state::ensure_generation_ledger(
-            &worktree,
-            owner,
-            execution_state::LegacyActiveDisposition::Live,
-        )
-        .unwrap();
-        session
-            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
-                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-                session_id: session.id.clone(),
-                repo_hash: session.repo_hash.clone().unwrap(),
-                owner_kind: "issue".into(),
-                owner_number: 5248,
-                identity: execution_state::current_execution_binding(&worktree, owner)
-                    .unwrap()
-                    .unwrap(),
-                capability_generation: 1,
-            }))
-            .unwrap();
-        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut session = bound_issue_session(&worktree, 5248);
         let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
         let mut record = AutonomousIssueRecord::new(5248);
         record.phase = AutonomousPhase::Implementing;
@@ -1691,6 +1698,117 @@ mod tests {
             gate_remediation_context(&worktree).is_none(),
             "another owner gets no remediation"
         );
+    }
+
+    /// Issue #7312 (#5978): a stale reviewed-SHA remediation reaches the
+    /// implementation window once. While the corrected head is still being
+    /// verified, every Monitor scan re-persists the record with its review
+    /// dispatch held, and every tool call runs the hook again; none of that is
+    /// a new remediation. A failed review of the corrected head is.
+    #[test]
+    fn issue_7312_stale_reviewed_sha_remediation_is_not_reinjected_during_verification() {
+        use crate::issue_monitor::{
+            AutonomousIssueRecord, AutonomousPhase, AutonomousReviewDispatchHold, IssueMonitorPrefs,
+        };
+        use crate::issue_monitor_gate::AcceptanceSnapshot;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/issue-7312.git"
+            ])
+            .current_dir(&worktree)
+            .status()
+            .unwrap()
+            .success());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+        let session = bound_issue_session(&worktree, 7312);
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let ids: Vec<String> = (1..=22).map(|n| format!("AC-{n}")).collect();
+        // The record `remediate_autonomous_gate` leaves for a live window.
+        let mut record = AutonomousIssueRecord::new(7312);
+        record.phase = AutonomousPhase::Implementing;
+        record.active_launch_id = Some("tab::agent-1".into());
+        record.pr_number = Some(5972);
+        record.reviewed_sha = Some("883aabe8859ea4445272e814b767b52197b17cf2".into());
+        record.review_passed = Some(true);
+        record.attempts = 1;
+        record.last_failure_message =
+            Some("HEAD advanced past the reviewed SHA — re-review".into());
+        record.acceptance_snapshot = Some(AcceptanceSnapshot {
+            ids: ids.clone(),
+            visual_surface: false,
+            criterion_texts: None,
+        });
+        let prefs_path = crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+        let mut prefs = IssueMonitorPrefs {
+            autonomous_records: vec![record],
+            ..IssueMonitorPrefs::default()
+        };
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let tool_call = || {
+            handle_with_input(
+                "PreToolUse",
+                r#"{"tool_name":"Bash","tool_input":{"command":"cargo test"}}"#,
+                &worktree,
+                Some(&session.id),
+            )
+            .unwrap()
+        };
+
+        let HookOutput::PreToolUseAdditionalContext(context) = tool_call() else {
+            panic!("the stale reviewed-SHA remediation must be delivered once");
+        };
+        assert!(
+            context.contains("HEAD advanced past the reviewed SHA"),
+            "{context}"
+        );
+        assert!(
+            context.contains(&ids.join(", ")),
+            "current criteria: {context}"
+        );
+
+        for scan in 0..11 {
+            prefs.autonomous_records[0].review_dispatch_hold = Some(AutonomousReviewDispatchHold {
+                reason: "max_active reached (3/3: 3 implementation launches + 0 review windows)"
+                    .into(),
+                since: "2026-10-22T03:35:00Z".into(),
+            });
+            prefs.autonomous_records[0].last_heartbeat =
+                Some(format!("2026-10-22T03:35:{scan:02}Z"));
+            crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+            let output = tool_call();
+            assert!(
+                !matches!(&output, HookOutput::PreToolUseAdditionalContext(text)
+                    if text.contains("requests remediation")),
+                "scan {scan} re-injected an unchanged remediation: {output:?}"
+            );
+        }
+
+        // The corrected head was reviewed and rejected: a new remediation.
+        let record = &mut prefs.autonomous_records[0];
+        record.review_dispatch_hold = None;
+        record.reviewed_sha = Some("34476902268ce816df3311d9e596eb263e0a3868".into());
+        record.review_passed = Some(false);
+        record.attempts = 2;
+        record.last_failure_message =
+            Some("CI failed or independent review rejected — remediate".into());
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(gate_remediation_context(&worktree)
+            .unwrap()
+            .contains("independent review rejected"));
+        assert!(gate_remediation_context(&worktree).is_none());
     }
 
     #[test]
