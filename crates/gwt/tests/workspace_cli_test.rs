@@ -497,6 +497,16 @@ impl DisconnectServer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseLoss {
+    /// The Host applies, then drops the connection without a response.
+    AfterApply,
+    /// The Host applies, then breaks the response body.
+    PartialBody,
+    /// #7330: the response is lost while the Host is still publishing.
+    BeforeApply,
+}
+
 #[derive(Debug)]
 struct AppliedDisconnectObservation {
     accepted: usize,
@@ -518,7 +528,7 @@ impl ApplyThenDisconnectServer {
         project_root: &Path,
         session_id: &str,
         bearer_token: &str,
-        partial_body: bool,
+        loss: ResponseLoss,
     ) -> Self {
         let listener =
             StdTcpListener::bind(("127.0.0.1", 0)).expect("bind apply-then-disconnect server");
@@ -554,6 +564,13 @@ impl ApplyThenDisconnectServer {
                             let (authorization, operation_id, body) =
                                 read_http_json_request(&mut stream);
                             assert_eq!(authorization, format!("Bearer {bearer_token}"));
+                            let stream = if loss == ResponseLoss::BeforeApply {
+                                drop(stream);
+                                std::thread::sleep(Duration::from_millis(1500));
+                                None
+                            } else {
+                                Some(stream)
+                            };
                             let request =
                                 serde_json::from_slice::<gwt::AgentWorkspaceUpdateRequest>(&body)
                                     .expect("parse apply-then-disconnect Host request");
@@ -578,7 +595,7 @@ impl ApplyThenDisconnectServer {
                                 .expect("apply Host update before dropping response");
                             applied_receipt =
                                 Some((operation_id, receipt.work_id, receipt.journal_entry_id));
-                            if partial_body {
+                            if let (ResponseLoss::PartialBody, Some(mut stream)) = (loss, stream) {
                                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{").unwrap();
                                 stream.flush().unwrap();
                             }
@@ -2611,15 +2628,22 @@ fn workspace_receipt_missing_is_read_only_and_unconfirmed() {
 
 #[test]
 fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
-    assert_applied_response_loss_delivers_once(false);
+    assert_applied_response_loss_delivers_once(ResponseLoss::AfterApply);
 }
 
 #[test]
 fn workspace_update_proxy_body_loss_after_host_apply_delivers_once() {
-    assert_applied_response_loss_delivers_once(true);
+    assert_applied_response_loss_delivers_once(ResponseLoss::PartialBody);
 }
 
-fn assert_applied_response_loss_delivers_once(partial_body: bool) {
+/// #7330 / #6241: the response is lost before the Host finishes publishing, so
+/// the receipt is absent at the first inspection but applied moments later.
+#[test]
+fn workspace_update_proxy_response_loss_before_host_publication_delivers_once() {
+    assert_applied_response_loss_delivers_once(ResponseLoss::BeforeApply);
+}
+
+fn assert_applied_response_loss_delivers_once(loss: ResponseLoss) {
     let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
@@ -2628,7 +2652,7 @@ fn assert_applied_response_loss_delivers_once(partial_body: bool) {
         fixture.project.path(),
         SESSION,
         FORWARD_TOKEN,
-        partial_body,
+        loss,
     );
     let output = run_ws_raw_with_forward_env(
         &fixture,
