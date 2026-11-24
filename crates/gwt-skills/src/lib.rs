@@ -1865,7 +1865,9 @@ mod tests {
                     && content.contains("autonomous_mode=true")
                     && content.contains("including the registered PM")
                     && content.contains("next scan")
-                    && content.contains("params.targets")
+                    && content.contains("params.mentions")
+                    && content.contains("params.broadcast:true")
+                    && !content.contains("params.targets")
                     && content.contains("handoff")
                     && content.contains("request"),
                 "expected agent Board coordination and JSON pane contract in {relative}"
