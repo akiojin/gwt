@@ -1227,6 +1227,14 @@ pub enum FrontendEvent {
     SetIssueMonitorEnabled {
         enabled: bool,
     },
+    /// Issue #7728: the one project stop/start. Stopping halts Issue Monitor
+    /// new assignments and the PM patrol together; running sessions drain.
+    /// The Hub names its Project; a Project connection may omit the key.
+    SetProjectAutonomy {
+        #[serde(default)]
+        project_key: Option<String>,
+        running: bool,
+    },
     /// SPEC #3200 T-047/FR-024: arm/disarm unattended autonomous mode.
     SetIssueMonitorAutonomousMode {
         enabled: bool,
@@ -1887,6 +1895,16 @@ pub enum ProjectOwnerHealthState {
     Wedged,
 }
 
+/// Issue #7728: what the one project stop/start controls. The frontend
+/// derives Running / Stop pending / Stopped from these inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ProjectAutonomyView {
+    pub monitor_enabled: bool,
+    pub pm_paused: bool,
+    /// Agents Issue Monitor launched that are still finishing their work.
+    pub active_agents: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectOwnerHealthView {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1947,6 +1965,8 @@ impl HomeProjectConversationView {
 #[derive(Debug, Clone, Serialize)]
 pub struct HubProjectView {
     pub execution: Option<ProjectExecutionStatusView>,
+    /// Issue #7728: the inputs of the project's autonomy state.
+    pub autonomy: Option<ProjectAutonomyView>,
     pub owner_health: Option<ProjectOwnerHealthView>,
     pub id: String,
     pub project_key: String,

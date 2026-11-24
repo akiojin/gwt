@@ -768,6 +768,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
+        FrontendEvent::SetProjectAutonomy { running, .. } => {
+            FrontendUserActionLog::new("set_project_autonomy", "project").mode(if *running {
+                "start"
+            } else {
+                "stop"
+            })
+        }
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
