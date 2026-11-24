@@ -1911,10 +1911,22 @@ const at = new Date().toISOString();`);
       }
       if (missed) {
         phase = 'pending-proof';
+        // Issue #7270: a deadline-degraded prompt published no Running, so it
+        // has no delivery to miss. The next real tool hook publishes Running
+        // and must leave that event pending when its delivery is rejected.
+        let pendingEvent = event;
+        if (degraded) {
+          pendingEvent = 'PostToolUse';
+          const rejected = invoke(['hook','event',pendingEvent],
+            {...process.env,GWT_HOOK_FORWARD_TOKEN:'works-fixture-rejected-token'},
+            JSON.stringify({session_id:native,hook_event_name:pendingEvent,cwd:process.cwd(),
+              tool_name:'Read',tool_input:{file_path:runtimePath}}));
+          if (rejected.error || rejected.status !== 0) throw new Error('rejected tool hook failed');
+        }
         const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
         if (!journal.health.pending_runtime_state || journal.health.consecutive_failures < 1
           || journal.pending?.gwt_session_id !== process.env.GWT_SESSION_ID
-          || journal.pending?.source_event !== event || journal.pending?.status !== 'Running')
+          || journal.pending?.source_event !== pendingEvent || journal.pending?.status !== 'Running')
           throw new Error('missing real pending Running event');
         receipt('pending');
       }
