@@ -1924,6 +1924,9 @@ pub struct HomeProjectConversationView {
     pub title: String,
     /// Whether a PM session is registered for this project and can be sent to.
     pub pm_available: bool,
+    /// The registered PM session stopped or was interrupted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pm_interrupted: bool,
     /// The queue's own waiting count; Home never recounts the items.
     pub waiting_count: usize,
     pub decisions: Vec<gwt_core::decision_queue::DecisionItem>,
@@ -1956,6 +1959,7 @@ impl HomeProjectConversationView {
             project_key,
             title,
             pm_available,
+            pm_interrupted: false,
             waiting_count: queue.waiting_count,
             decisions: queue.items,
             conversation: None,
