@@ -1264,6 +1264,38 @@ test.describe("Works and Agents approved baseline", () => {
     expect(box!.height).toBeGreaterThanOrEqual(44);
   });
 
+  test("Issue #7846 an agent can order environments and sees when deletion restores the project order", async ({ page }) => {
+    await page.locator('.project-bar [data-destination="agents"]').click();
+    const row = roster(page).locator('.roster-row[data-member-id="m-idle"]');
+    await row.click();
+    const panel = roster(page).getByRole("group", { name: "Execution environment priority" });
+    const priority = panel.getByRole("list", { name: "Execution environments in priority order" });
+    const picker = panel.getByLabel("Add an execution environment");
+    const add = panel.getByRole("button", { name: "Add to the end" });
+
+    await expect(panel).toContainText("Using the project's order");
+    await picker.selectOption("codex");
+    await add.click();
+    await expect(priority.getByRole("listitem")).toHaveCount(1);
+    await picker.selectOption("claude");
+    await add.click();
+    await panel.getByRole("button", { name: "Move up Claude pool" }).click();
+    await expect(priority.locator(".project-environments__name")).toHaveText(["Claude pool", "Codex pool"]);
+    await panel.getByRole("button", { name: "Remove Codex pool" }).click();
+    await expect(priority.locator(".project-environments__name")).toHaveText(["Claude pool"]);
+    expect((await sent(page)).filter(message => message.kind === "set_agent_execution_environments")).toEqual(
+      [["codex"], ["codex", "claude"], ["claude", "codex"], ["claude"]].map(environment_ids => ({
+        kind: "set_agent_execution_environments", member_id: "m-idle", environment_ids,
+      })),
+    );
+
+    await page.evaluate(() => (window as any).__worksAgentsFixture.deleteEnvironment("claude"));
+    await expect(priority.getByRole("listitem")).toHaveCount(0);
+    await expect(row).toContainText("Returned to the project's order");
+    await expect(panel).toContainText("Returned to the project's order");
+    await expect(picker.locator("option")).toHaveText(["Codex pool"]);
+  });
+
   test("Issue #7635 the ledger draws each agent's avatar and saves a chosen preset", async ({ page }, info) => {
     await page.locator('.project-bar [data-destination="agents"]').click();
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
@@ -1441,6 +1473,9 @@ async function installWorksAgentsBackend(page: Page) {
       member.saved_implementation_core ||= { agent_id: member.agent_id, model: member.saved_manual_profile?.model || null, reasoning: null, version: null, fast_mode: false };
       member.saved_implementation_core_revision ||= `core-${member.agent_member_id}-1`;
     }
+    let environments = [{ id: "codex", name: "Codex pool" }, { id: "claude", name: "Claude pool" }];
+    const agentPriorities: Record<string, { environment_ids: string[]; reverted_to_project: boolean }> = {};
+    const executionEnvironments = () => ({ kind: "execution_environments", view: { environments, agent_priorities: agentPriorities } });
     let pmMemberId: string | null = null, pmProfileRevision = 1;
     let pmProfile = { agent_id: "claude", model: null as string | null, reasoning: null as string | null };
     const pmStatus = () => ({ kind: "pm_status", project_key: projectKey, configured_member_id: pmMemberId,
@@ -1541,6 +1576,11 @@ async function installWorksAgentsBackend(page: Page) {
           { id: "codex", name: "Codex", installed: true }, { id: "claude", name: "Claude Code", installed: true },
         ] });
         if (message.kind === "list_custom_agents" && !holdCatalogs) this.emit({ kind: "custom_agent_list", agents: [] });
+        if (message.kind === "get_execution_environments") this.emit(executionEnvironments());
+        if (message.kind === "set_agent_execution_environments") {
+          agentPriorities[message.member_id] = { environment_ids: message.environment_ids, reverted_to_project: false };
+          this.emit(executionEnvironments());
+        }
         if (message.kind === "set_pm_launch_profile") {
           const success = message.project_key === projectKey && message.member_id === pmMemberId && message.expected_profile_revision === `pm-${pmProfileRevision}`;
           if (success) { pmProfile = { agent_id: message.agent_id, model: message.model, reasoning: message.reasoning }; pmProfileRevision++; }
@@ -1641,6 +1681,15 @@ async function installWorksAgentsBackend(page: Page) {
       releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
       replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },
       renameElsewhere(name: string) { members[0].name = name; revision++; socket.emit(rosterSnapshot()); },
+      deleteEnvironment(id: string) {
+        environments = environments.filter(environment => environment.id !== id);
+        for (const priority of Object.values(agentPriorities)) {
+          if (!priority.environment_ids.includes(id)) continue;
+          priority.environment_ids = priority.environment_ids.filter(environmentId => environmentId !== id);
+          priority.reverted_to_project = priority.environment_ids.length === 0;
+        }
+        socket.emit(executionEnvironments());
+      },
       activityForWorks(session_id: string, runtime_incarnation: number) {
         agents = [{ window_id: "agent-one", session_id, runtime_incarnation, issue_number: 4777,
           is_pm: false, current_task: `Live ${session_id}` }];

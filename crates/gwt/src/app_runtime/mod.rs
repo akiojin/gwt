@@ -12007,7 +12007,8 @@ impl AppRuntime {
             | FrontendEvent::UpdateExecutionEnvironment { .. }
             | FrontendEvent::DeleteExecutionEnvironment { .. }
             | FrontendEvent::SetProjectExecutionEnvironments { .. }
-            | FrontendEvent::SetPmExecutionEnvironments { .. }) => {
+            | FrontendEvent::SetPmExecutionEnvironments { .. }
+            | FrontendEvent::SetAgentExecutionEnvironments { .. }) => {
                 self.execution_environment_events(&client_id, None, event)
             }
             FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
@@ -13437,7 +13438,8 @@ impl AppRuntime {
             | FrontendEvent::UpdateExecutionEnvironment { .. }
             | FrontendEvent::DeleteExecutionEnvironment { .. }
             | FrontendEvent::SetProjectExecutionEnvironments { .. }
-            | FrontendEvent::SetPmExecutionEnvironments { .. }) => {
+            | FrontendEvent::SetPmExecutionEnvironments { .. }
+            | FrontendEvent::SetAgentExecutionEnvironments { .. }) => {
                 self.execution_environment_events(&client_id, Some(context), event)
             }
             FrontendEvent::LoadThemes { request_id } => {

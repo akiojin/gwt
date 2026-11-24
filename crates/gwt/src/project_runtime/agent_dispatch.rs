@@ -1335,7 +1335,10 @@ fn prepare_pane_name_for_window(
                 crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
                     &pane.project_root,
                 ))
-                .is_ok_and(|prefs| prefs.environment_lists_tool(tool))
+                .is_ok_and(|prefs| {
+                    prefs.environment_lists_tool(tool)
+                        || prefs.member_environment_overrides_tool(member_id, tool)
+                })
             })
         {
             return Err("Registered Agent has a different fixed tool".into());

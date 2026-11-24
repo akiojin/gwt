@@ -6,10 +6,11 @@
 //!
 //! Which environments a project may use, and in what priority order, is
 //! saved with that project's Issues settings
-//! ([`crate::issue_monitor::ProjectExecutionEnvironment`]). This module owns
-//! only the definitions.
+//! ([`crate::issue_monitor::ProjectExecutionEnvironment`]). Agent priorities
+//! are machine-wide and are saved with the definitions they reference.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -82,6 +83,12 @@ pub enum EnvironmentKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEnvironmentPriority {
+    pub environment_ids: Vec<String>,
+    pub reverted_to_project: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default = "schema_version")]
     pub schema_version: u32,
@@ -93,6 +100,10 @@ pub struct Store {
     /// environment ids, in priority order. Empty while it was never saved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pm_environment_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_priorities: BTreeMap<String, AgentEnvironmentPriority>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    deleted_environment_ids: BTreeSet<String>,
 }
 
 fn schema_version() -> u32 {
@@ -106,6 +117,8 @@ impl Default for Store {
             accounts: Vec::new(),
             environments: Vec::new(),
             pm_environment_ids: Vec::new(),
+            agent_priorities: BTreeMap::new(),
+            deleted_environment_ids: BTreeSet::new(),
         }
     }
 }
@@ -174,6 +187,15 @@ impl Store {
         self.environments
             .iter()
             .find(|environment| environment.id == id)
+    }
+
+    pub(crate) fn environment_was_deleted(&self, id: &str) -> bool {
+        self.deleted_environment_ids.contains(id) && self.environment(id).is_none()
+    }
+
+    pub(crate) fn agent_priority_ids(&self, member_id: &str) -> Option<&[String]> {
+        let ids = &self.agent_priorities.get(member_id)?.environment_ids;
+        (!ids.is_empty()).then_some(ids)
     }
 
     pub fn kind(&self, environment: &ExecutionEnvironment) -> EnvironmentKind {
@@ -268,6 +290,19 @@ impl Store {
             .find_map(|&account| usable(account).map(|launch| (account, launch)))
     }
 
+    /// A managed account can provide credentials even when the CLI's default
+    /// account is signed out.
+    pub fn has_signed_in_managed_account(&self, tool: &str) -> bool {
+        self.select_pool_account(tool, None, |account| {
+            let home = Path::new(account.credential_home.as_deref()?);
+            if !crate::account_homes::is_managed_home(tool, &account.id, home) {
+                return None;
+            }
+            crate::account_homes::sign_in_state(tool, Some(home))
+        })
+        .is_some()
+    }
+
     /// Keep a pool's own environment while it still has an account. Returns
     /// the ids of the deleted environments for removal from project lists.
     pub fn delete_account(&mut self, account_id: &str) -> Vec<String> {
@@ -299,6 +334,7 @@ impl Store {
             .map(|environment: ExecutionEnvironment| environment.id)
             .collect();
         self.pm_environment_ids.retain(|id| !deleted.contains(id));
+        self.record_environment_deletions(&deleted);
         deleted
     }
 
@@ -385,7 +421,39 @@ impl Store {
             ));
         }
         self.pm_environment_ids.retain(|id| id != environment_id);
+        self.record_environment_deletions(&[environment_id.to_owned()]);
         Ok(())
+    }
+
+    pub fn set_agent_list(
+        &mut self,
+        member_id: &str,
+        environment_ids: &[String],
+    ) -> Result<(), Refusal> {
+        self.validate_priority_ids(environment_ids)?;
+        if environment_ids.is_empty() {
+            self.agent_priorities.remove(member_id);
+        } else {
+            self.agent_priorities.insert(
+                member_id.to_owned(),
+                AgentEnvironmentPriority {
+                    environment_ids: environment_ids.to_vec(),
+                    reverted_to_project: false,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn record_environment_deletions(&mut self, deleted: &[String]) {
+        self.deleted_environment_ids.extend(deleted.iter().cloned());
+        for priority in self.agent_priorities.values_mut() {
+            let before = priority.environment_ids.len();
+            priority.environment_ids.retain(|id| !deleted.contains(id));
+            if before > 0 && priority.environment_ids.is_empty() {
+                priority.reverted_to_project = true;
+            }
+        }
     }
 
     /// The Project Manager's execution environments in priority order, and
@@ -418,6 +486,12 @@ impl Store {
                     .into(),
             ));
         }
+        self.validate_priority_ids(environment_ids)?;
+        self.pm_environment_ids = environment_ids.to_vec();
+        Ok(())
+    }
+
+    fn validate_priority_ids(&self, environment_ids: &[String]) -> Result<(), Refusal> {
         for (index, id) in environment_ids.iter().enumerate() {
             if self.environment(id).is_none() {
                 return Err(Refusal(
@@ -432,7 +506,6 @@ impl Store {
                 ));
             }
         }
-        self.pm_environment_ids = environment_ids.to_vec();
         Ok(())
     }
 
@@ -664,7 +737,13 @@ pub fn project_list(
         prefs.execution_environments.clone(),
     );
     if !saved.is_empty() {
-        return (true, saved);
+        return (
+            true,
+            saved
+                .into_iter()
+                .filter(|entry| !store.environment_was_deleted(&entry.environment_id))
+                .collect(),
+        );
     }
     let derived = prefs
         .current_launch_tools()
@@ -675,6 +754,7 @@ pub fn project_list(
                 .map_or_else(|| tool.clone(), |environment| environment.id.clone()),
             tool,
         })
+        .filter(|entry| !store.environment_was_deleted(&entry.environment_id))
         .collect();
     (false, derived)
 }
@@ -864,6 +944,31 @@ mod tests {
         store.delete_account("codex");
         assert!(store.pm_environment_ids.is_empty());
         assert_eq!(pm_ids(&store), (false, vec!["claude"]));
+    }
+
+    #[test]
+    fn deleting_an_environment_updates_every_agent_and_marks_only_newly_empty_lists() {
+        let mut store = store_with(&["claude", "codex"]);
+        let via = store
+            .register_via("claude", "hermes", None)
+            .unwrap()
+            .id
+            .clone();
+        store.set_agent_list("one", &ids(&[&via])).unwrap();
+        store.set_agent_list("two", &ids(&["codex", &via])).unwrap();
+        store.delete_environment(&via).unwrap();
+        assert!(store.agent_priorities["one"].environment_ids.is_empty());
+        assert!(store.agent_priorities["one"].reverted_to_project);
+        assert_eq!(store.agent_priorities["two"].environment_ids, ["codex"]);
+        assert!(!store.agent_priorities["two"].reverted_to_project);
+        assert!(store.set_agent_list("one", &ids(&[&via])).is_err());
+
+        store.delete_account("codex");
+        assert!(store.agent_priorities["two"].environment_ids.is_empty());
+        assert!(store.agent_priorities["two"].reverted_to_project);
+        assert!(store.agent_priorities["one"].reverted_to_project);
+        store.set_agent_list("one", &[]).unwrap();
+        assert!(!store.agent_priorities.contains_key("one"));
     }
 
     #[test]

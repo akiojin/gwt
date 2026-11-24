@@ -1305,6 +1305,11 @@ pub enum FrontendEvent {
     SetPmExecutionEnvironments {
         environment_ids: Vec<String>,
     },
+    /// Replace a registered agent's priority list. Empty inherits the project.
+    SetAgentExecutionEnvironments {
+        member_id: String,
+        environment_ids: Vec<String>,
+    },
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         /// Legacy clients may still send this retired setting; ignore it.
@@ -2762,6 +2767,8 @@ pub struct ExecutionEnvironmentsView {
     pub environments: Vec<ExecutionEnvironmentView>,
     pub via_options: Vec<ExecutionEnvironmentViaOptionView>,
     pub pm: PmExecutionEnvironmentsView,
+    pub agent_priorities:
+        std::collections::BTreeMap<String, crate::execution_environments::AgentEnvironmentPriority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectExecutionEnvironmentsView>,
 }
