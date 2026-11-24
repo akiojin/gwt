@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { readLatestOwnActivity, readProcessState, startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 type RosterMember = { agent_member_id: string; agent_id: string; name: string;
@@ -183,7 +184,7 @@ test("Issue #7440 publishes Work and launches Codex on an existing branch linked
       })]),
       agents: expect.arrayContaining([expect.objectContaining({ session_id: pane.session_id, attached_by: "start" })]),
     })]));
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await expect(page.locator(`.work-row[data-window-id="${pane.id}"]`)).toBeVisible();
     await attachScreenshot(page, info, `existing-issue-work-${theme}`);
     expect(errors, "console and page errors during linked launch").toEqual([]);
@@ -214,7 +215,7 @@ test.describe("Issue #6767 final quota output (isolated checkout)", () => {
       const pane = await liveCodexWindow(page, sessionId);
       await expect.poll(async () => tomlString(await sessionRecord(fixture.home, sessionId), "agent_session_id"),
         { timeout: 60_000 }).toBe(launch.provider_session_id);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
       await expect(page.locator(".xterm-screen:visible")).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
@@ -268,7 +269,7 @@ test.describe("Issue #3340 explicit STOP retention (isolated checkout)", () => {
       const launch = (await fixture.launches())[0];
       const sessionId = launch.gwt_session_id!;
       const pane = await liveCodexWindow(page, sessionId);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
       const transcript = page.locator(".xterm-screen:visible");
       await expect(transcript).toBeVisible();
@@ -309,7 +310,7 @@ test.describe("Issue #3340 explicit STOP retention (isolated checkout)", () => {
       await expect.poll(() => codexWindows(page)).toEqual([]);
       expect(await fixture.launches()).toHaveLength(1);
       expect(await sessionRecord(fixture.home, sessionId)).not.toBe("");
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await attachScreenshot(page, info, `stopped-not-restored-${theme}`);
       expect(errors, "console/page errors across STOP retention and cold restart").toEqual([]);
     } finally {
@@ -1725,7 +1726,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
     };
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(surface).toHaveCSS("--works-preview-lines", "3");
       await page.locator('.op-rail__surface[data-surface="settings"]').click();
       const setting = page.getByRole("spinbutton", { name: "Works output lines", exact: true });
@@ -1734,7 +1735,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await expect(page.locator('[data-role="system-settings-status"]')).toContainText("Saved system settings");
       expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
       await page.screenshot({ path: info.outputPath("settings-native-works-output-lines.png") });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(surface).toHaveCSS("--works-preview-lines", "10");
       await launchCodex(page, fixture.branch);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
@@ -1744,7 +1745,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(session).toBeTruthy();
       const checkOutput = async (stage: string, observedSession = session) => {
         const window = await liveCodexWindow(page, observedSession);
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         if (await surface.locator(".works-full").isVisible()) await surface.locator('[data-action="back"]').click();
         const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
         await expect(row).toBeVisible({ timeout: 60_000 });
@@ -1797,7 +1798,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(fixture.ownedPid).not.toBe(oldPid);
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await snapshot("after-restart");
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(surface).toHaveCSS("--works-preview-lines", "10");
       expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
@@ -2110,7 +2111,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       for (const [index, worker] of live.filter((window: any) => !window.is_pm).entries())
         await input(worker.id, index === 0 ? "GWT_FIXTURE_BEGIN_MISSED" : "GWT_FIXTURE_BEGIN");
       await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(rows).toHaveCount(5, { timeout: 60_000 });
       await expect(rows.last()).toBeInViewport({ ratio: 1 });
       expect(await rows.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.windowId)))
@@ -2172,7 +2173,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
         exit_code: 0, signal: null, shutdown_requested: true, cleanup_completed: true, backstop: false,
       });
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
       await expect(rows.first().locator(".work-name")).toHaveText(pmName);
       await expect(rows.first().locator(".work-name-host .window-role-badge")).toHaveText("PM");
@@ -2193,6 +2194,8 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
         if (surface === "pm") {
           await page.locator("#op-pm-entry").click();
           await page.getByRole("button", { name: "Open PM terminal" }).click();
+        } else if (surface === "works") {
+          await openWorks(page);
         } else {
           await page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
         }
@@ -2343,7 +2346,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await page.getByRole("button", { name: "Works", exact: true }).click();
+      await openWorks(page);
       if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       await launchCodex(page, fixture.branch);
@@ -2435,7 +2438,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       await page.locator(`.roster-row[data-member-id="${addedMember.agent_member_id}"]`).click();
       await expect(page.locator(`[data-member-id="${addedMember.agent_member_id}"] .roster-state`)).toHaveText("Waiting");
       const savedRosterIdentities = identities(added);
-      await page.getByRole("button", { name: "Works", exact: true }).click();
+      await openWorks(page);
       if (!await page.locator(".works-full:not([hidden])").isVisible()) await row.locator(".work-open").click();
 
       // Window restart: the provider exits, then an explicit runtime restart
@@ -2497,7 +2500,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       errors = capture(restored);
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
       await expect(restored.locator("html")).toHaveAttribute("data-theme", theme);
-      await restored.getByRole("button", { name: "Works", exact: true }).click();
+      await openWorks(restored);
       const third = await launchAt(3);
       expect(third.argv.slice(third.argv.indexOf("resume"))).toContain(native);
       expect(third.resume_session_id).toBe(native);
@@ -2592,7 +2595,7 @@ fs.writeFileSync(path.join(process.env.HOME, 'attachment-raw-ready.json'), JSON.
       await expect.poll(async () => JSON.parse(await readFile(readyPath, "utf8").catch(() => "{}")), { timeout: 30_000 })
         .toMatchObject({ pid: launch.pid, session, raw: true });
       const window = await liveCodexWindow(page, session);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
       await expect(row).toBeVisible();
       await row.getByRole("button", { name: "Open terminal" }).click();
@@ -2647,7 +2650,7 @@ fs.writeFileSync(path.join(process.env.HOME, 'attachment-raw-ready.json'), JSON.
       expect(afterRaw.subarray(beforeRaw.length)).toEqual(Buffer.from(`File: "${match![1]}"`, "utf8"));
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       expect((await liveCodexWindow(page, session)).id).toBe(window.id);
       await page.reload();
       expect((await liveCodexWindow(page, session)).id).toBe(window.id);

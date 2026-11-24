@@ -6583,6 +6583,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         });
       }
 
+      // Issue #7880 (design item 137): Works has no rail entry; a person opens
+      // the terminal host from the Issue detail or the Agents screen. Specs of
+      // the host itself, including native and managed browsers that cannot
+      // install the test bridge before load, open it through the same
+      // openSurface the split view selector reaches.
+      window.__gwtSurfaceTestApi = Object.freeze({ open: surface => openSurface(surface) });
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       installPlaywrightTestBridge();
       frontendUnits.socketTransport.connect();

@@ -1,6 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -310,7 +311,7 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
       await page.screenshot({ path: info.outputPath(`mobile-rail-${width}.png`) });
     }
     await page.getByRole("button", { name: "Logs", exact: true }).tap();
-    await page.getByRole("button", { name: "Works", exact: true }).tap();
+    await openWorks(page);
     await expect(agentTile(page, "agent-1")).toBeVisible();
     await page.setViewportSize({ width: 1360, height: 900 });
     const desktop = (await page.locator(".op-rail").boundingBox())!;
@@ -420,7 +421,7 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     const explanation = page.locator("#rail-control-explanation");
     // The shared header also has an Agents entry (Issue #7740); this is the rail's.
     const rail = page.locator(".op-rail");
-    for (const name of ["Agents", "Board", "Works"]) {
+    for (const name of ["Agents", "Board"]) {
       await rail.getByRole("button", { name, exact: true }).tap();
       await expect(rail.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
       await page.waitForTimeout(300);
@@ -609,7 +610,7 @@ async function openAgentsFixture(page: Page, projectName: string): Promise<strin
   if (!liveBase) await installEmbeddedRoutes(page);
   await installAgentScrollBackend(page);
   await page.goto(appUrl);
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   await setActiveAgentTab(page, "agent-1");
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   return errors;
@@ -773,7 +774,7 @@ async function setActiveAgentTab(page: Page, windowId: string): Promise<void> {
     await expect(agentTile(page, windowId)).toBeVisible();
     return;
   }
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   const back = page.locator('.works-surface:not(.works-surface--preview) .works-full:not([hidden]) [data-action="back"]');
   if (await back.isVisible()) await back.click();
   await page.locator(`.works-surface:not(.works-surface--preview) .work-row[data-window-id="${windowId}"] .work-open`).click();

@@ -133,7 +133,9 @@
           <!-- Issue #4777 T-1: the rail picks a fixed workspace surface. Every
                window preset folds into Issues / Agents / Board / Settings
                (surface-rail.js), and the entry for the focused window's
-               surface is pressed. The PM sits above them, cut off by the
+               surface is pressed. Issue #7880 (design item 137): Works has
+               no rail entry; a terminal opens from the Issue detail or the
+               Agents screen. The PM sits above them, cut off by the
                rule, because it is the user's own window and not one of the
                agents. SPEC-3885: Issues keeps the ⌘G entry id. -->
           <div class="op-rail__group op-rail__group--surfaces" role="group" aria-label="Surfaces">
@@ -152,10 +154,6 @@
             >
               <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h5v16H3z"/><path d="M9.5 4h5v11h-5z"/><path d="M16 4h5v8h-5z"/></svg>
               <span class="op-rail__surface-label">Issues</span>
-            </button>
-            <button class="op-rail__item op-rail__surface" type="button" data-surface="works" aria-pressed="false" title="Works: live agent output and native terminals">
-              <span class="op-rail__surface-icon" aria-hidden="true">▤</span>
-              <span class="op-rail__surface-label">Works</span>
             </button>
             <button
               class="op-rail__item op-rail__surface"

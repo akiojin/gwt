@@ -26,6 +26,7 @@ import {
   sendLiveGwtEvent,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 useManagedBrowserSource(test);
 
@@ -177,7 +178,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         // Hub links open Projects in new browser tabs.
         // Park each A client's auxiliary Shell before removing it; an empty
         // Settings host otherwise requests a replacement Settings window.
-        for (const current of [page, mirror]) await current.locator('.op-rail__surface[data-surface="works"]').click();
+        for (const current of [page, mirror]) await openWorks(current);
         await sendLiveGwtEvent(page, { kind: "close_window", id: aWindow });
         created.shift();
         await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
@@ -195,7 +196,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
       } finally {
         for (const current of pages) if (!current.isClosed())
-          await current.locator('.op-rail__surface[data-surface="works"]').click().catch(() => {});
+          await openWorks(current).catch(() => {});
         for (const window of created) {
           await sendLiveGwtEvent(window.page, { kind: "close_window", id: window.id }).catch(() => {});
         }

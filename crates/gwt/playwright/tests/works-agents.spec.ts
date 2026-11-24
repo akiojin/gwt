@@ -6,6 +6,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_PROJECT_KEY, APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { startWorksManagedSource } from "./_helpers/works-managed-source";
+import { openWorks } from "./_helpers/works-entry";
 
 const appUrl = process.env.GWT_PLAYWRIGHT_BASE_URL
   ? new URL(new URL(APP_URL).pathname, process.env.GWT_PLAYWRIGHT_BASE_URL).href
@@ -16,7 +17,9 @@ const works = (page: Page) => main(page).locator(".works-surface:not(.works-surf
 const roster = (page: Page) => main(page).locator(".agents-surface:not(.agents-surface--preview)");
 const workRow = (page: Page, id: string) => works(page).locator(`.work-row[data-window-id="${id}"]`);
 const full = (page: Page) => works(page).locator(".works-full");
-const openRail = (page: Page, surface: string) => page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
+// Issue #7880 (design item 137): Works has no rail entry.
+const openRail = (page: Page, surface: string) => surface === "works" ? openWorks(page)
+  : page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
 const sent = (page: Page) => page.evaluate(() => [...(window as any).__worksAgentsFixture.sent]);
 
 async function expectNoHorizontalOverflow(page: Page, selector: string) {
@@ -295,7 +298,7 @@ test.describe("Works and Agents approved baseline", () => {
   test("workspace snapshots refresh Works and Agents while preserving native controls", async ({ page }, info) => {
     const terminal = works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm');
     await terminal.evaluate(node => { (window as any).__workspaceTerminal = node; });
-    const rail = page.locator('.op-rail__surface[data-surface="works"]');
+    const rail = page.locator('.op-rail__surface[data-surface="issues"]');
     await rail.focus();
     for (const title of ['First workspace snapshot', '<img src=x> latest workspace']) {
       await page.evaluate(title => (window as any).__worksAgentsFixture.workspaceTitle(title), title);

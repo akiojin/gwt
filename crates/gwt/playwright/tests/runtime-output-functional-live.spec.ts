@@ -4,6 +4,7 @@ import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { clearLiveLaunchWizard, gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || "";
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME || "";
@@ -36,7 +37,7 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
       const id = pane.id;
       await expect.poll(async () => (await receipts()).some(receipt => receipt.session === pane!.session_id),
         { timeout: 60_000 }).toBe(true);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       const row = page.locator('.work-row[data-window-id="' + id + '"]');
@@ -71,7 +72,7 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
 
       // A new WebSocket must receive a fresh authoritative PTY snapshot, not the old browser buffer.
       await page.reload();
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       await row.getByRole("button", { name: "Open terminal", exact: true }).click();

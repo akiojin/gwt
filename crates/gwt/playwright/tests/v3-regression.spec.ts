@@ -155,6 +155,10 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
         await expect(project.locator('.surface-area'), selector).toContainText(content);
       }
 
+      // The Works screen (design item 137) is folded into Issues: the rail
+      // carries no entry to it (Issue #7880).
+      await expect(project.locator('.op-rail [data-surface="works"]')).toHaveCount(0);
+
       // The PM view (design decision 29) is retired: no PM chat window, no
       // tab of it, and the rail's PM entry opens the Agents ledger.
       await project.locator('#op-pm-entry').click();

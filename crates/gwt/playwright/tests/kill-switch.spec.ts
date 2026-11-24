@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes, APP_PROJECT_KEY } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -68,7 +69,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await page.goto(appUrl);
     const win = page.locator('.workspace-window[data-id="agent-1"]');
     await expect(win).toBeAttached();
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
     await expect(page.locator('.works-terminal[data-window-id="agent-1"]')).toBeVisible();
     for (const [wire, state, label] of [
@@ -178,7 +179,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     const win = page.locator('.workspace-window[data-id="agent-1"]');
     await expect(win).toBeAttached({ timeout: 10_000 });
     // Open the exact native work so the focused-pane helper has a target.
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
     await page.locator('.works-terminal[data-window-id="agent-1"] .xterm-helper-textarea').focus();
 
@@ -227,7 +228,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     };
     const manual = uiFor("agent-2");
     const monitor = uiFor("agent-3");
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(manual.tile).toBeVisible({ timeout: 10_000 });
     await expect(monitor.tile).toBeHidden();

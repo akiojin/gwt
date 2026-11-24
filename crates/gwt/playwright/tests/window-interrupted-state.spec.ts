@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 const interruptedBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const interruptedAppUrl = interruptedBase ? new URL(new URL(APP_URL).pathname, interruptedBase).href : APP_URL;
@@ -71,7 +72,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   });
   if (!interruptedBase) await installEmbeddedRoutes(page);
   await page.goto(interruptedAppUrl);
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 });

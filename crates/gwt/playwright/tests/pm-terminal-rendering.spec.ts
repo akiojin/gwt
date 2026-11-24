@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { withNativeHiddenPage } from "./_helpers/native-chromium";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
@@ -49,7 +50,7 @@ test("Issue #7492 PM execution log starts when its delayed layout becomes availa
   await expect(pm.locator(".xterm-rows")).toContainText("PM queued output");
 
   // Preserve the reported recovery route as well as uninterrupted live output.
-  await page.locator('[data-surface="works"]').click();
+  await openWorks(page);
   await openPmTerminal(page);
   await emit(page, "terminal_output", "\r\nPM after Works return");
   await expect.poll(() => text(page)).toContain("PM after Works return");
@@ -84,7 +85,7 @@ test("Issue #7558 PM execution log stays in its window when the transport is rep
   await emit(page, "terminal_snapshot", "\x1b[H\x1b[2JPM initial snapshot");
   await activity();
   await expect(log).toContainText("PM initial snapshot");
-  await page.locator('[data-surface="works"]').click();
+  await openWorks(page);
   await expect(page.locator(`.work-row[data-window-id="${PM}"]`)).toBeVisible();
   await openPmTerminal(page);
   await expect(log).toContainText("PM initial snapshot");
@@ -140,7 +141,7 @@ test("Issue #7558 PM execution log survives a native page hide and return after 
     await nativePage.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "terminal_snapshot", id: "pm-terminal", data_base64: btoa("\x1b[H\x1b[2JPM initial snapshot") }));
     await nativePage.evaluate(activity);
     await expect.poll(async () => (await nativePage.evaluate(state)).log).toContain("PM initial snapshot");
-    await nativePage.evaluate(click, '[data-surface="works"]');
+    await openWorks(nativePage);
     await expect.poll(() => nativePage.evaluate(() => !!document.querySelector('.work-row[data-window-id="pm-terminal"]'))).toBe(true);
     await nativePage.evaluate(click, "#op-pm-entry");
     await expect.poll(() => nativePage.evaluate(openTerminal)).toBe(true);
@@ -477,7 +478,7 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   });
   await expect.poll(() => page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(coldConnections + 1);
   await expect.poll(async () => (await text(page)).trim()).toBe("Reconnected status\nCOLD RECOVERY");
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   await page.locator('.work-row[data-window-id="cold-retention"] .work-open').click();
   await expect(page.locator('.works-surface:not(.works-surface--preview) .works-terminal[data-window-id="cold-retention"]')).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("cold-retention").isReady)).toBe(true);
@@ -767,7 +768,7 @@ test("real PTY receives one input and converges with the visible terminal grid",
     } finally {
       if (id) {
         await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x03" });
-        await page.getByRole("button", { name: "Works", exact: true }).click();
+        await openWorks(page);
         if (await page.locator("#split-surfaces").getAttribute("data-split") === "true") await page.locator("#split-view-button").click();
         await sendLiveGwtEvent(page, { kind: "close_window", id });
       }
@@ -1142,9 +1143,9 @@ exit 67
       const textarea = document.querySelector(`.workspace-window[data-id="${id}"] .xterm-helper-textarea:focus`) as HTMLTextAreaElement;
       if (!textarea) throw new Error("owned PM composer is not focused");
       textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      const works = document.querySelector('[data-surface="works"].op-rail__surface') as HTMLElement;
+      const works = (window as any).__gwtSurfaceTestApi;
       if (!works) throw new Error("Works entry missing");
-      works.click();
+      works.open("works");
     }, id);
     diagnosticPhase = "hidden";
     await expect(page.locator('.works-surface:not(.works-surface--preview)')).toBeVisible();
@@ -1290,7 +1291,7 @@ exit 67
     expect({ cols: reentryMetrics.cols, rows: reentryMetrics.rows }).toEqual({ cols: reading.cols, rows: reading.rows });
     expect(reentryMetrics.viewportY).toBe(reading.viewportY);
     expect((await logicalBuffer()).lines.slice(0, history.length)).toEqual(history);
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     const row = page.locator('.works-surface:not(.works-surface--preview) .work-row').filter({ hasText: "Owned Codex PM" });
     await row.getByRole("button", { name: "Open terminal" }).click();
     await expect(page.locator(".works-full")).toBeVisible();
@@ -1298,7 +1299,7 @@ exit 67
     // decorations. Its complete response must remain in scrollback exactly once.
     await expect.poll(responseState).toEqual(expectedResponseState);
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await expect(page.locator(".works-full")).toBeVisible();
     await expect.poll(responseState).toEqual(expectedResponseState);
     const sequence = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
@@ -1432,7 +1433,7 @@ test("ready Works terminal follows model header layout while native hidden", asy
     await expect.poll(() => nativePage.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
     await expect.poll(() => nativePage.evaluate(() => !!(window as any).__pmTerminalFixture)).toBe(true);
     await nativePage.evaluate(() => { const fixture = (window as any).__pmTerminalFixture; fixture.addColdWindow(); fixture.reconnect(); });
-    await nativePage.evaluate(() => (document.querySelector('[data-surface="works"]') as HTMLElement).click());
+    await openWorks(nativePage);
     await expect.poll(() => nativePage.evaluate(() => !!document.querySelector('.work-row[data-window-id="cold-retention"] .work-open'))).toBe(true);
     await nativePage.evaluate(() => (document.querySelector('.work-row[data-window-id="cold-retention"] .work-open') as HTMLElement).click());
     await expect.poll(() => nativePage.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("cold-retention").isReady)).toBe(true);

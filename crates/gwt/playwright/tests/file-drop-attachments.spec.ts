@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { startWorksManagedSource } from "./_helpers/works-managed-source";
+import { openWorks } from "./_helpers/works-entry";
 
 let fileDropBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 let fileDropAppUrl = fileDropBase ? new URL(new URL(APP_URL).pathname, fileDropBase).href : APP_URL;
@@ -617,7 +618,7 @@ test.describe("Browser file drop attachments", () => {
 });
 
 async function openAgentWork(page: Page) {
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   const terminal = page.locator('.works-full .works-terminal[data-window-id="agent-1"]');
   if (!await terminal.isVisible()) await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   await expect(terminal).toBeVisible();

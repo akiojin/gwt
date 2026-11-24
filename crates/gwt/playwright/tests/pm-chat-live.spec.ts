@@ -8,6 +8,7 @@ import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
 import { gotoLiveGwt, installLiveGwtInitScript, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 import { startManagedBrowserSource, useManagedBrowserSource } from './_helpers/managed-browser-source';
 import { withNativeHiddenPage } from './_helpers/native-chromium';
+import { openWorks } from './_helpers/works-entry';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
@@ -85,7 +86,7 @@ test.describe('PM reports', () => {
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
 
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         await expect(body).toBeHidden();
         appendFileSync(history, report(37) + '\n');
         await refreshPmReports(page);
@@ -94,7 +95,7 @@ test.describe('PM reports', () => {
         await expect(body).toBeVisible();
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
         await body.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         appendFileSync(history, report(38) + '\n');
         await refreshPmReports(page);
         await expect(messages).toHaveCount(39);
@@ -334,7 +335,7 @@ test.describe('PM reports', () => {
         await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
         await expect(draft).toHaveValue('Keep this unsent PM draft');
         await info.attach(`Chat terminal action ${theme}`, { body: await pane.screenshot(), contentType: 'image/png' });
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         await full.getByRole('button', { name: 'Back to Works' }).click();
         const row = works.locator(`.work-row[data-window-id="${id}"]`);
         await expect(row.locator('.window-role-badge')).toHaveText('PM');
@@ -465,7 +466,7 @@ test.describe('PM reports', () => {
       await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
       await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 220');
       await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
-      await page.getByRole('button', { name: 'Works', exact: true }).click();
+      await openWorks(page);
       await emit('terminal_snapshot', 240);
       await page.locator('#op-pm-entry').click();
       await expect(pane.locator('.pm-conversation-log')).toBeVisible();

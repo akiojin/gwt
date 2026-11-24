@@ -10,6 +10,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 async function openTerminal(page: Page, theme: string) {
   await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
@@ -80,7 +81,7 @@ async function openTerminal(page: Page, theme: string) {
     };
   });
   await page.goto(APP_URL);
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   const tile = page.locator(".works-surface:not(.works-surface--preview) .works-terminal[data-window-id='agent-1']");
   await expect(tile.locator(".xterm-rows")).toBeAttached();
