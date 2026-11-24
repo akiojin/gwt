@@ -65,7 +65,7 @@ impl AppRuntime {
                         gwt::pm_current::load_decisions(&root)
                             .ok_or_else(|| QUEUE_UNREADABLE.to_string()),
                     );
-                    project.conversation = reader.and_then(|reader| {
+                    let conversation = reader.and_then(|reader| {
                         // The registration also identifies stopped sessions whose
                         // saved output is still part of the Home conversation.
                         let registration = pm_registry::load_pm_prefs(
@@ -77,13 +77,21 @@ impl AppRuntime {
                         let session =
                             gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
                                 .ok()?;
-                        (session.id == id).then(|| {
+                        if session.id != id {
+                            return None;
+                        }
+                        project.pm_interrupted = matches!(
+                            session.status,
+                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                        );
+                        Some(
                             reader
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .read_for_session(&session)
-                        })
+                                .read_for_session(&session),
+                        )
                     });
+                    project.conversation = conversation;
                     project
                 })
                 .collect();

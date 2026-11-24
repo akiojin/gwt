@@ -20,6 +20,7 @@ const selectView = state => state;
 const COPY = {
   conversation: "Conversation with the Project Manager",
   you: "You",
+  replyWaiting: "Project Manager is replying",
   to: project => `to ${project}`,
   decisionWaiting: "Decision waiting",
   waitingFor: label => `waiting since ${label}`,
@@ -247,7 +248,11 @@ export function HomeConversation({ store, actions }) {
 
         {view.notices.map(notice => <p className="gwt-home__note gwt-home__note--error" role="alert" key={notice}>{notice}</p>)}
 
-        {view.topics.map(topic => topic.kind === "decision" ? (
+        {view.topics.map(topic => topic.kind === "reply-waiting" ? (
+          <article className="gwt-home__msg gwt-home__msg--pm" key={topic.id} role="status" aria-label={COPY.replyWaiting}>
+            …
+          </article>
+        ) : topic.kind === "decision" ? (
           <article
             className={`gwt-home__msg gwt-home__msg--pm${highlight === topic.id ? " is-highlighted" : ""}`}
             key={topic.id}
