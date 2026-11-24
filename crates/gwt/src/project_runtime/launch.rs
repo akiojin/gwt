@@ -964,20 +964,19 @@ pub fn prepare_agent_launch(
         let expected_execution_identity =
             gwt_agent::SessionExecutionIdentity::from_session(&session)?;
 
-        let mut process_launch = ProcessLaunch {
+        let mut spawn_env = config.env_vars.clone();
+        if let Some(token) = copilot_token {
+            spawn_env.insert(gwt::account_homes::COPILOT_TOKEN_ENV.into(), token);
+        }
+        let process_launch = ProcessLaunch {
             initial_prompt_file,
             command: config.command.clone(),
             args: config.args.clone(),
-            env: config.env_vars.clone(),
+            env: spawn_env,
             remove_env: config.remove_env.clone(),
             cwd: pm_provider_runtime_dir(&config).or_else(|| config.working_dir.clone()),
             resource_policy,
         };
-        if let Some(token) = copilot_token {
-            process_launch
-                .env
-                .insert(gwt::account_homes::COPILOT_TOKEN_ENV.into(), token);
-        }
         // Issue #3490 AC-1: without a Backend Override profile every Codex
         // process shares the user's `~/.codex`, and two of them
         // initializing its SQLite state together lose the race with
