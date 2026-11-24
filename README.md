@@ -49,6 +49,21 @@ Issues, SPECs, search, and Board context rather than from branch management.
   skipping one that is held by a limit or signed out. Once a project has saved
   the list, a registered agent also starts on the environment chosen this way,
   whatever tool it was registered with.
+  Accounts imports signed-in default accounts. Use **Add account** to open a
+  sign-in terminal for a separate Claude Code, Codex, or Grok Build account.
+  On macOS, add a GitHub Copilot account with its GitHub login and a
+  fine-grained personal access token with the Copilot Requests permission.
+  gwt verifies the login and stores the token in macOS Keychain.
+  The new account stays unavailable to sessions until sign-in succeeds. You
+  can reopen its sign-in terminal, change its priority, or remove it from the
+  pool. **Use this account** puts it first for future starts and resumes.
+  To move a running session, including the PM, choose **Resume with the next
+  account**. gwt waits for the current turn to finish before resuming the
+  conversation. On a provider rate limit, gwt tries the next signed-in account
+  and resubmits the rejected turn after resuming. If removing an active
+  account leaves only other tools, the session waits and lists the configured
+  alternatives. Starting a conversation with a different tool is a separate
+  action.
 
 ## Install
 

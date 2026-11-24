@@ -522,6 +522,8 @@ pub struct LaunchConfig {
     /// Account to try for an explicit provider switch on Resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_account_switch_reason: Option<crate::AccountSwitchReason>,
     pub skip_permissions: bool,
     pub fast_mode: bool,
     /// Legacy Codex-only compatibility field. Explicit Codex selections use
@@ -1197,6 +1199,7 @@ impl AgentLaunchBuilder {
             resume_session_id,
             predecessor_session_id,
             execution_account_id: None,
+            execution_account_switch_reason: None,
             skip_permissions,
             fast_mode,
             codex_fast_mode,

@@ -21,6 +21,7 @@ function fixture() {
   }
   symlinkSync(join(repo, "crates/gwt/web-react/node_modules"), join(pkg, "node_modules"), "dir");
   mkdirSync(join(root, "crates/gwt/web/react"), { recursive: true });
+  cpSync(join(repo, "crates/gwt/web/focus-trap.js"), join(root, "crates/gwt/web/focus-trap.js"));
   cpSync(join(repo, "crates/gwt/web/react/islands.js"), join(root, "crates/gwt/web/react/islands.js"));
   return root;
 }

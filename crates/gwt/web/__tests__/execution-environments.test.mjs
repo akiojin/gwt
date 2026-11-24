@@ -55,10 +55,12 @@ test("a degraded account names its state instead of showing zero usage", () => {
     codex({ state: { kind: "no_data" }, windows: [] }),
     codex({ state: { kind: "unavailable", reason: "token expired" }, windows: [] }),
     codex({ state: { kind: "stale", age_secs: 600 } }),
+    codex({ state: { kind: "unknown", reason: "No official usage source" }, windows: [] }),
   ] });
-  assert.deepEqual(rows.map(row => row.usage), [null, null, null, "90% used"]);
+  assert.deepEqual(rows.map(row => row.usage), [null, null, null, "90% used", null]);
   assert.deepEqual(rows.map(row => row.status.label), [
     "Usage collection is off", "No usage data yet", "Unavailable — token expired", "Last read 10 min ago",
+    "Usage unknown (No official usage source)",
   ]);
   assert.equal(rows[0].collectionEnabled, false);
 });

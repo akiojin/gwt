@@ -822,6 +822,7 @@ pub(crate) enum RemoteRuntimeCommandKind {
     },
     Resize,
     Stop,
+    SwitchExecutionAccount,
     AttachmentInput(Box<attachments::AttachmentOperation>),
 }
 
@@ -2297,6 +2298,8 @@ pub struct AppRuntime {
     /// The startup restore drain phase, closed by the drain's tail.
     pub(crate) startup_restore_drain_phase: Option<gwt::perf::startup::PhaseTimer>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    pub(crate) pool_account_logins:
+        HashMap<String, execution_environments::PoolAccountLoginTerminal>,
     /// Issue #7742: decision answers whose pane write this process confirmed,
     /// so a tick racing the durable receipt never submits one twice.
     pub(crate) decision_answers_sent: HashSet<String>,
@@ -5328,6 +5331,7 @@ impl AppRuntime {
             startup_auto_resume_ready_pending: false,
             startup_restore_drain_phase: None,
             active_agent_sessions: HashMap::new(),
+            pool_account_logins: HashMap::new(),
             decision_answers_sent: HashSet::new(),
             decision_answers_in_flight: HashMap::new(),
             decision_answer_sequence: 0,
@@ -11732,6 +11736,7 @@ impl AppRuntime {
             | FrontendEvent::RecoverRestoredWindow { id, .. }
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
+            | FrontendEvent::ResumeNextPoolAccount { id }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::LoadPmReports { id, .. }
@@ -12030,6 +12035,15 @@ impl AppRuntime {
                 Vec::new()
             }
             event @ (FrontendEvent::GetExecutionEnvironments
+            | FrontendEvent::AddPoolAccount { .. }
+            | FrontendEvent::SignInPoolAccount { .. }
+            | FrontendEvent::SaveCopilotAccount { .. }
+            | FrontendEvent::MovePoolAccount { .. }
+            | FrontendEvent::UsePoolAccount { .. }
+            | FrontendEvent::DeletePoolAccount { .. }
+            | FrontendEvent::ResumeNextPoolAccount { .. }
+            | FrontendEvent::PoolAccountLoginInput { .. }
+            | FrontendEvent::ClosePoolAccountLogin { .. }
             | FrontendEvent::AddExecutionEnvironment { .. }
             | FrontendEvent::UpdateExecutionEnvironment { .. }
             | FrontendEvent::DeleteExecutionEnvironment { .. }
@@ -12190,6 +12204,7 @@ impl AppRuntime {
             | FrontendEvent::RecoverRestoredWindow { id, .. }
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
+            | FrontendEvent::ResumeNextPoolAccount { id }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
             | FrontendEvent::LoadPmReports { id, .. }
@@ -13459,6 +13474,15 @@ impl AppRuntime {
                 Vec::new()
             }
             event @ (FrontendEvent::GetExecutionEnvironments
+            | FrontendEvent::AddPoolAccount { .. }
+            | FrontendEvent::SignInPoolAccount { .. }
+            | FrontendEvent::SaveCopilotAccount { .. }
+            | FrontendEvent::MovePoolAccount { .. }
+            | FrontendEvent::UsePoolAccount { .. }
+            | FrontendEvent::DeletePoolAccount { .. }
+            | FrontendEvent::ResumeNextPoolAccount { .. }
+            | FrontendEvent::PoolAccountLoginInput { .. }
+            | FrontendEvent::ClosePoolAccountLogin { .. }
             | FrontendEvent::AddExecutionEnvironment { .. }
             | FrontendEvent::UpdateExecutionEnvironment { .. }
             | FrontendEvent::DeleteExecutionEnvironment { .. }
