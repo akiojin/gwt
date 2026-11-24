@@ -1297,9 +1297,11 @@ test.describe("Works and Agents approved baseline", () => {
   });
 
   test("Issue #7636 the ledger uploads an avatar image, refuses a bad file and returns to a preset", async ({ page }, info) => {
+    await page.evaluate(() => (window as any).__worksAgentsFixture.setRunningPmName("Cedar"));
     await page.locator('.project-bar [data-destination="agents"]').click();
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
     const row = roster(page).locator('.roster-row[data-member-id="m-idle"]');
+    const headerAvatar = page.locator('.project-bar [data-destination="pm"] .app-head__avatar');
     const saved = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_avatar").map(message => message.action);
     await row.click();
     const picker = roster(page).locator(".roster-detail [data-member-avatar]");
@@ -1313,6 +1315,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(error).toContainText("PNG, JPEG, WebP or GIF");
     expect(await saved()).toEqual([]);
     await expect(row.locator(".roster-avatar")).toHaveText("C");
+    await expect(headerAvatar).toHaveText("C");
 
     // A wide image is cropped to a small square PNG and drawn everywhere.
     const wide = await page.evaluate(() => {
@@ -1330,22 +1333,37 @@ test.describe("Works and Agents approved baseline", () => {
     const size = await page.evaluate(src => new Promise<number[]>(resolve => { const img = new Image(); img.onload = () => resolve([img.naturalWidth, img.naturalHeight]); img.src = src; }), upload.avatar.image);
     expect(size).toEqual([128, 128]);
     await expect(error).toBeHidden();
-    for (const node of [row.locator(".roster-avatar img"), heading.locator("img"), picker.getByRole("radio", { name: "Upload image" }).locator("img")]) {
+    for (const node of [row.locator(".roster-avatar img"), heading.locator("img"), picker.getByRole("radio", { name: "Upload image" }).locator("img"), headerAvatar.locator("img")]) {
       await expect(node).toHaveAttribute("src", upload.avatar.image);
+      await expect(node).toBeVisible();
+      await expect(node).toHaveJSProperty("naturalWidth", 128);
     }
     await expect(picker.getByRole("radio", { name: "Upload image" })).toHaveAttribute("aria-checked", "true");
     await expect(row.locator(".roster-avatar img")).toHaveJSProperty("complete", true);
     await page.screenshot({ path: info.outputPath("agent-ledger-avatar-upload.png") });
 
+    await openRail(page, "agents");
+    await expect(roster(page)).toHaveAttribute("data-view", "project");
+    await expect(row.locator(".roster-avatar img")).toBeVisible();
+    await expect(row.locator(".roster-avatar img")).toHaveAttribute("src", upload.avatar.image);
+    await page.locator('.project-bar [data-destination="agents"]').click();
+    await expect(roster(page)).toHaveAttribute("data-view", "ledger");
+    if (!(await picker.isVisible())) await row.click();
+
     // A preset can be chosen again at any time.
     await picker.getByRole("radio", { name: "Owl" }).click();
     await expect(row.locator(".roster-avatar")).toHaveText("🦉");
     await expect(row.locator(".roster-avatar img")).toHaveCount(0);
+    await expect(headerAvatar).toHaveText("🦉");
     expect((await saved())[1]).toEqual({ kind: "set_avatar", member_id: "m-idle", avatar: { kind: "preset", preset_id: "owl" } });
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
 
     await page.setViewportSize({ width: 400, height: 900 });
     await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+    await openRail(page, "agents");
+    await expect(roster(page)).toHaveAttribute("data-view", "project");
+    await expect(row.locator(".roster-avatar")).toHaveText("🦉");
+    await expect(row.locator(".roster-avatar")).toBeVisible();
   });
 
   test("shared member and PM tuning retain identity, history and narrow layout", async ({ page }, info) => {
@@ -1583,6 +1601,10 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      setRunningPmName(name: string) {
+        windows.find(data => data.id === "pm-window").agent_name = name;
+        socket.emit(workspace());
+      },
       echoInputForWorks() { echoInput = true; },
       rebindForWorks() {
         windows.find(data => data.id === "agent-one").session_id = "rebound-session";

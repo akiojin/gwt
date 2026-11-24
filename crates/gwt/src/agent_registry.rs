@@ -3560,6 +3560,22 @@ impl SessionMemberSnapshot {
             .unwrap_or_default()
     }
 
+    pub fn designated_pm(
+        &self,
+        designation: &crate::first_run_setup::PmDesignation,
+    ) -> Option<&AgentMember> {
+        let registry = self.registry.as_ref()?;
+        if registry.phase != RegistryPhase::Active {
+            return None;
+        }
+        registry
+            .roster
+            .as_ref()?
+            .members
+            .iter()
+            .find(|member| designation.names(&member.agent_member_id, &member.name))
+    }
+
     pub fn project_snapshot(&self, key: &ProjectKey) -> io::Result<IssueMonitorPrefs> {
         let registry = self
             .registry
@@ -8273,6 +8289,14 @@ mod tests {
             .unwrap()
             .name = "Aoi Renamed".into();
         save(&registry).unwrap();
+        let designation = crate::first_run_setup::load_designation().unwrap().unwrap();
+        let snapshot = SessionMemberSnapshot::load().unwrap();
+        assert_eq!(
+            snapshot
+                .designated_pm(&designation)
+                .map(|member| member.name.as_str()),
+            Some("Aoi Renamed")
+        );
         let (root, worktree) = fresh_pm_project("designated-two");
         let second = reserve_new_pm_member(&root, &sessions, &worktree, "two").unwrap();
         assert_eq!(second.member.agent_member_id, member_id);

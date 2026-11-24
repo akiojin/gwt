@@ -61,8 +61,12 @@ function Time({ iso }) {
   return <time dateTime={iso} title={localTimeLabel(iso) ?? undefined}>{label}</time>;
 }
 
-function PmFace() {
-  return <span className="gwt-home__face" aria-hidden="true">P</span>;
+function PmFace({ avatar }) {
+  return (
+    <span className="gwt-home__face" aria-hidden="true">
+      {avatar.imageUrl ? <img className="agent-avatar-image" src={avatar.imageUrl} alt="" /> : avatar.glyph}
+    </span>
+  );
 }
 
 function Lines({ lines }) {
@@ -147,7 +151,7 @@ export function HomeConversation({ store, actions }) {
   return (
     <section className="gwt-home" data-home aria-label={COPY.conversation}>
       <header className="gwt-home__head">
-        <PmFace />
+        <PmFace avatar={view.pm.avatar} />
         <div className="gwt-home__who">
           <h1 className="gwt-home__name">{view.pm.name}</h1>
           <p className="gwt-home__sub">
@@ -186,7 +190,7 @@ export function HomeConversation({ store, actions }) {
                 </summary>
                 <div className="gwt-home__settled-body">
                   <article className="gwt-home__msg gwt-home__msg--pm">
-                    <p className="gwt-home__meta"><PmFace /><span className="gwt-home__meta-name">{view.pm.name}</span><span>{entry.project}</span></p>
+                    <p className="gwt-home__meta"><PmFace avatar={view.pm.avatar} /><span className="gwt-home__meta-name">{view.pm.name}</span><span>{entry.project}</span></p>
                     <Lines lines={entry.lines} />
                   </article>
                   <article className="gwt-home__msg gwt-home__msg--me" aria-label={COPY.yourAnswer}>
@@ -208,7 +212,7 @@ export function HomeConversation({ store, actions }) {
         ) : null}
 
         <article className="gwt-home__msg gwt-home__msg--pm" data-home-greeting>
-          <p className="gwt-home__meta"><PmFace /><span className="gwt-home__meta-name">{view.pm.name}</span></p>
+          <p className="gwt-home__meta"><PmFace avatar={view.pm.avatar} /><span className="gwt-home__meta-name">{view.pm.name}</span></p>
           <p>{view.greeting}</p>
           {view.guide ? (
             <div className="gwt-home__guide">
@@ -238,7 +242,7 @@ export function HomeConversation({ store, actions }) {
             ref={node => { if (node) messageRefs.current.set(topic.id, node); else messageRefs.current.delete(topic.id); }}
           >
             <p className="gwt-home__meta">
-              <PmFace />
+              <PmFace avatar={view.pm.avatar} />
               <span className="gwt-home__meta-name">{view.pm.name}</span>
               <span>{topic.project}</span>
               <span className="gwt-home__chip gwt-home__chip--waiting">{COPY.decisionWaiting}</span>

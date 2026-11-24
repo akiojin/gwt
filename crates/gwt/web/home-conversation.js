@@ -1,6 +1,7 @@
 import { createUiStateStore } from "./ui-state-store.js";
 import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 import { decisionItemFromQueue, decisionMessageLines } from "./pm-chat.js";
+import { agentAvatar } from "./agent-avatar.js";
 
 // Home is the conversation with the Project Manager (Issue #7639, SPEC #7007
 // T-021). Rendered by the React surface `HomeConversation`
@@ -54,6 +55,7 @@ const topicId = (projectKey, decisionId) => `${projectKey}:${decisionId}`;
 const isoTime = ms => new Date(ms).toISOString();
 
 const EMPTY_STATE = Object.freeze({
+  pm: null,
   catalogLoaded: false, hasProjects: false, loaded: false, appliedRequest: 0, projects: [],
   settled: [], hidden: [], sent: [], sentCount: 0,
   pending: null, failure: null, replyTo: null,
@@ -68,7 +70,9 @@ function withDecisions(state, event) {
     pmAvailable: Boolean(project.pm_available), error: project.error || null,
     decisions: project.decisions || [], waitingCount: project.waiting_count ?? 0,
   }));
-  return withProjects({ ...state, loaded: true, appliedRequest: event.request_id }, projects);
+  // A rejected worker reply has queues with errors but no fresh PM view.
+  const pm = event.pm === undefined ? state.pm : event.pm;
+  return withProjects({ ...state, pm, loaded: true, appliedRequest: event.request_id }, projects);
 }
 
 function withProjects(state, projects) {
@@ -163,7 +167,8 @@ function homeConversationView(state) {
         : count ? COPY.greeting.waiting(count) : COPY.greeting.clear;
   const replyTo = waiting.find(topic => topic.id === state.replyTo) ?? null;
   return {
-    pm: { name: COPY.pmName, role: COPY.pmRole },
+    pm: { name: state.pm?.name || COPY.pmName, role: COPY.pmRole,
+      avatar: agentAvatar(state.pm || { name: COPY.pmName }) },
     // The entries that add a project are offered while there is none.
     guide: state.catalogLoaded && !state.hasProjects,
     noneOpen: state.catalogLoaded && state.loaded && state.hasProjects && !projects.length,
@@ -192,7 +197,7 @@ function homeConversationView(state) {
 }
 
 export function createHomeConversation({
-  document, window: win, send, onWaitingChange = () => {}, onOpenFolder = () => {}, onClone = () => {},
+  document, window: win, send, onPmChange = () => {}, onOpenFolder = () => {}, onClone = () => {},
   onOpenProjects = () => {}, scheduleFrame,
 }) {
   const state = createUiStateStore(EMPTY_STATE);
@@ -200,6 +205,7 @@ export function createHomeConversation({
   let requestSequence = 0;
   let sendTimer = null;
   let refreshTimer = null;
+  let lastPm = null;
 
   // The one read of the decisions Home shows.
   function requestDecisions() {
@@ -302,8 +308,15 @@ export function createHomeConversation({
     return false;
   }
 
-  state.subscribe(current => current, current => model.update(() => homeConversationView(current)));
-  model.subscribe(view => view.waiting, waiting => onWaitingChange(waiting));
+  state.subscribe(current => current, current => {
+    const view = homeConversationView(current);
+    const waitingChanged = view.waiting !== model.read().waiting;
+    model.update(() => view);
+    if (waitingChanged || current.pm !== lastPm) {
+      lastPm = current.pm;
+      onPmChange({ name: current.pm?.name, avatar: current.pm?.avatar, decisions: view.waiting ?? 0 });
+    }
+  });
   // A message in flight is given a bounded time to be confirmed; once it is
   // settled either way, the decisions are read again.
   state.subscribe(current => current.pending?.requestId ?? null, requestId => {
