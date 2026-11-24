@@ -9,7 +9,7 @@
 //! marked fail — is a FAIL. Absence of a structured PASS is never a PASS
 //! (fail-closed).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Check CI immediately before the ordinary verdict producer publishes. This
 /// does not judge the verdict or change Monitor state: unavailable evidence is
@@ -167,6 +167,31 @@ pub struct IndependentReviewVerdict {
     pub schema: String,
     pub criteria: Vec<CriterionVerdict>,
     pub overall: CriterionOutcome,
+}
+
+/// Reviewer-supplied diagnostic data for an explicitly failed criterion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedReviewCriterion {
+    pub id: String,
+    pub evidence: String,
+}
+
+pub(crate) fn failed_review_criteria(raw: &str) -> Vec<FailedReviewCriterion> {
+    let Ok(verdict) = serde_json::from_str::<IndependentReviewVerdict>(raw.trim()) else {
+        return Vec::new();
+    };
+    if verdict.schema != REVIEW_VERDICT_SCHEMA {
+        return Vec::new();
+    }
+    verdict
+        .criteria
+        .into_iter()
+        .filter(|criterion| criterion.verdict == CriterionOutcome::Fail)
+        .map(|criterion| FailedReviewCriterion {
+            id: criterion.id,
+            evidence: criterion.evidence,
+        })
+        .collect()
 }
 
 /// Result of strictly evaluating a review agent's raw output.
