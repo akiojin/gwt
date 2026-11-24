@@ -2128,6 +2128,7 @@ fn sample_runtime_with_events(
         initial_launch_workers: HashMap::new(),
         project_open_started: None,
         pending_startup_pm_tabs: Vec::new(),
+        pending_pm_launch_retry_tabs: Vec::new(),
         pending_frontend_ready_snapshots: Vec::new(),
         gui_slice_continue_queued: false,
         deferred_issue_monitor_launches: None,
