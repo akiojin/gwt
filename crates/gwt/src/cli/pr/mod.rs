@@ -937,30 +937,29 @@ pub(super) fn run_with_data<E: CliEnv>(
                 .fetch_pr_quarantine_context(number)
                 .ok()
                 .and_then(|context| head_check::from_body(&context.body));
-            let verified = retained
-                .as_ref()
-                .map(|check| check.verified_head.clone())
-                .or_else(|| {
-                    if current_branch_name(env.repo_path()).as_deref()
-                        != Some(pr.head_ref_name.as_str())
-                    {
-                        return None;
-                    }
-                    crate::cli::verification_record::load(env.repo_path())
-                        .ok()
-                        .flatten()
-                        .filter(|record| {
-                            record.all_passed
-                                && crate::cli::verification_record::integrity_ok(record)
-                        })
-                        .filter(|_| {
-                            env.fetch_current_pr()
-                                .ok()
-                                .flatten()
-                                .is_some_and(|current| current.number == number)
-                        })
-                        .and_then(|record| record.verified_head.clone())
-                });
+            // A passing canonical run on this PR's branch is newer than the
+            // marker retained in the PR body at creation, so it wins
+            // (Issue #7356); the body marker covers other checkouts.
+            let local = (current_branch_name(env.repo_path()).as_deref()
+                == Some(pr.head_ref_name.as_str()))
+            .then(|| {
+                crate::cli::verification_record::load(env.repo_path())
+                    .ok()
+                    .flatten()
+            })
+            .flatten()
+            .filter(|record| {
+                record.all_passed && crate::cli::verification_record::integrity_ok(record)
+            })
+            .filter(|_| {
+                env.fetch_current_pr()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|current| current.number == number)
+            })
+            .and_then(|record| record.verified_head.clone());
+            let verified =
+                local.or_else(|| retained.as_ref().map(|check| check.verified_head.clone()));
             if let Some(verified) = verified {
                 match env.fetch_pr_head_sha(number) {
                     Ok(Some(remote)) => {
