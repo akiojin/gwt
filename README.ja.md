@@ -1711,7 +1711,10 @@ PM に Board Discussion 共有の有効化や単独 Discussion の作成、`deve
 今回だけ許可するか、同じリポジトリ・操作種別の許可を記憶できます。保存した許可の確認・
 取り消しは PM に `pm.approval.status` / `pm.approval.revoke` で依頼できます。
 必須チェックの変更には `repository.required_checks.update` を使い、ブランチの strict
-設定と、残すチェックの app との関連付けを維持します。
+設定と、残すチェックの app との関連付けを維持します。`develop` / `main` の branch
+protection の切り替え（`allow_force_pushes`、`required_conversation_resolution`、
+`enforce_admins`、`strict`）には `repository.branch_protection.update` を使い、
+それ以外の保護設定は変更しません。
 
 同じ範囲付き許可で、`pr.reopen` による指定 PR の再開、`pr.review.submit` による
 GitHub review、`release.metadata.set` による既存 release の名前・説明・prerelease の変更、

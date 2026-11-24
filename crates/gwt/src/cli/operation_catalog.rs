@@ -883,6 +883,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "repository.branch_protection.update",
+        aliases: &[],
+    },
+    Operation {
         name: "repository.required_checks.update",
         aliases: &[],
     },
