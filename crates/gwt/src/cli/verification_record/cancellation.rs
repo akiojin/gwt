@@ -444,10 +444,20 @@ pub(super) fn status(
     id: Option<&str>,
     coordinator: &IndexCoordinator,
 ) -> io::Result<serde_json::Value> {
-    let selected = id
-        .map(str::to_owned)
-        .map(Ok)
-        .unwrap_or_else(|| read(worktree, &latest_filename(session))?.ok_or_else(not_yours))?;
+    let selected = id.map(str::to_owned).map(Ok).unwrap_or_else(|| {
+        // The default selects only this session's own latest attempt, so
+        // its absence is never a foreign attempt (#7323): verify.run may
+        // not have registered one yet.
+        read(worktree, &latest_filename(session))?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "no verification attempt has been registered by this session in this \
+                     worktree yet; verify.run registers it after preparing its driver and \
+                     plan. Retry verify.status shortly, or pass the attempt_id that verify.run \
+                     reported",
+            )
+        })
+    })?;
     let record = required(worktree, &selected)?;
     let mut value = serde_json::to_value(&record)?;
     // Keep private record fields out of the public status.
@@ -1278,5 +1288,36 @@ mod tests {
         assert_eq!(interrupted.status, AttemptStatus::Interrupted);
         assert!(interrupted.reason.unwrap().contains("external termination"));
         assert!(!coordinator.heavy_reservation_path(&key).exists());
+    }
+
+    /// Issue #7323 / #6146: before this session's verify.run registers its
+    /// attempt, the default status has nothing of this caller's to show. It
+    /// must say so instead of refusing the caller's own run as foreign, and
+    /// once registered it selects that attempt without an explicit id.
+    #[test]
+    fn default_status_reports_missing_own_attempt_instead_of_foreign_refusal() {
+        let repo = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open(runtime.path()).unwrap();
+        let key = TargetKey::verification("mine", "worktree");
+
+        let error = status(repo.path(), "mine", None, &coordinator).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        assert!(
+            !error.to_string().contains("not your verification attempt"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("no verification attempt"),
+            "{error}"
+        );
+
+        let attempt =
+            begin_for_caller(repo.path(), "mine", &authority(), &key, &[], "token").unwrap();
+        let own = status(repo.path(), "mine", None, &coordinator).unwrap();
+        assert_eq!(own["attempt_id"], attempt.id());
+
+        let error = status(repo.path(), "another-session", None, &coordinator).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
     }
 }
