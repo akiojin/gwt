@@ -9,6 +9,11 @@ const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
 const PM = "pm-terminal";
 
+async function openPmTerminal(page: Page): Promise<void> {
+  await page.locator("#op-pm-entry").click();
+  await page.getByRole("button", { name: "Open PM terminal", exact: true }).click();
+}
+
 test("Issue #7492 PM execution log starts when its delayed layout becomes available", async ({ page }, info) => {
   const errors: string[] = [];
   const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -22,10 +27,9 @@ test("Issue #7492 PM execution log starts when its delayed layout becomes availa
   // Hold only layout, leaving the real reveal, ResizeObserver, initial-fit
   // handshake and terminal receive path intact. No activation is called by the test.
   const delayedLayout = await page.addStyleTag({ content:
-    '.pm-conversation-log .terminal-root { width: 0 !important; height: 0 !important; }' });
-  await page.locator("#op-pm-entry").click();
+    '.workspace-window[data-id="pm-terminal"] .terminal-root { width: 0 !important; height: 0 !important; }' });
+  await openPmTerminal(page);
   const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
   await settle(page);
   await emit(page, "terminal_snapshot", "\x1b[H\x1b[2JPM initial snapshot");
   await emit(page, "terminal_output", "\r\nPM queued output");
@@ -46,7 +50,7 @@ test("Issue #7492 PM execution log starts when its delayed layout becomes availa
 
   // Preserve the reported recovery route as well as uninterrupted live output.
   await page.locator('[data-surface="works"]').click();
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   await emit(page, "terminal_output", "\r\nPM after Works return");
   await expect.poll(() => text(page)).toContain("PM after Works return");
   await expect(pm.locator(".xterm-rows")).toContainText("PM after Works return");
@@ -57,30 +61,6 @@ test("Issue #7492 PM execution log starts when its delayed layout becomes availa
 
 // Issue #7650 (SPEC #7007 T-032): the structured Logs window is the only log
 // surface, so the PM view carries no Log tab re-rendering notifications.
-test("Issue #7650 PM view has no Log tab and keeps its execution log terminal", async ({ page }, info) => {
-  const errors: string[] = [];
-  const theme = info.project.name.includes("light") ? "light" : "dark";
-  page.on("pageerror", error => errors.push(error.message));
-  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
-  if (!liveBase) await installEmbeddedRoutes(page);
-  await installPmBackend(page);
-  await page.setViewportSize({ width: 1920, height: 1080 });
-  await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
-  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  const toolbar = pm.getByRole("group", { name: "PM view" });
-  await expect(toolbar.getByRole("button", { name: "Execution log", exact: true })).toBeVisible();
-  await expect(toolbar.getByRole("button", { name: "Log", exact: true })).toHaveCount(0);
-  await expect(pm.locator(".task-log")).toHaveCount(0);
-  await toolbar.getByRole("button", { name: "Execution log", exact: true }).click();
-  await expect(toolbar.getByRole("button", { name: "Execution log", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(pm.locator(".pm-conversation-log")).toBeVisible();
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await info.attach(`no-log-tab-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
-  expect(errors, "console and page errors").toEqual([]);
-});
-
 // Returning to the page replaces the transport, which clears agent activity.
 // A PM terminal that Works showed earlier must stay in the PM window.
 test("Issue #7558 PM execution log stays in its window when the transport is replaced after a Works visit", async ({ page }, info) => {
@@ -98,16 +78,15 @@ test("Issue #7558 PM execution log stays in its window when the transport is rep
       project_key: location.pathname.split("/").at(-1), host_id: "pm-fixture", observed_at: new Date().toISOString(),
       agents: [{ window_id: "pm-terminal", session_id: "pm-terminal-session", runtime_incarnation: 1, is_pm: true, issue_number: null }],
     } } }));
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  const log = pm.locator(".pm-conversation-log .xterm-rows");
-  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  const log = pm.locator(".terminal-root .xterm-rows");
   await emit(page, "terminal_snapshot", "\x1b[H\x1b[2JPM initial snapshot");
   await activity();
   await expect(log).toContainText("PM initial snapshot");
   await page.locator('[data-surface="works"]').click();
   await expect(page.locator(`.work-row[data-window-id="${PM}"]`)).toBeVisible();
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   await expect(log).toContainText("PM initial snapshot");
 
   for (const flowing of [false, true]) {
@@ -122,7 +101,6 @@ test("Issue #7558 PM execution log stays in its window when the transport is rep
     await expect(log).toContainText(`PM after return ${flowing}`);
     expect(await metrics(page)).toMatchObject({ isReady: true, readOnly: false, snapshotPending: false });
   }
-  await expect(pm.getByRole("button", { name: "Execution log", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await info.attach(`transport-replaced-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
   expect(errors, "console and page errors").toEqual([]);
@@ -137,7 +115,7 @@ test("Issue #7558 PM execution log survives a native page hide and return after 
   const theme = info.project.name.includes("light") ? "light" : "dark";
   const state = () => ({ ...(window as any).__gwtTerminalTestApi.metrics("pm-terminal"),
     connections: (window as any).__pmTerminalFixture.connections(), theme: document.documentElement.dataset.theme,
-    log: document.querySelector('.workspace-window[data-id="pm-terminal"] .pm-conversation-log .xterm-rows')?.textContent ?? null });
+    log: document.querySelector('.workspace-window[data-id="pm-terminal"] .terminal-root .xterm-rows')?.textContent ?? null });
   const activity = () => (window as any).__pmTerminalFixture.emit({ kind: "active_work_projection", projection: {
     id: "pm-live", active_works: [], local_agent_activity: {
       project_key: location.pathname.split("/").at(-1), host_id: "pm-fixture", observed_at: new Date().toISOString(),
@@ -152,18 +130,20 @@ test("Issue #7558 PM execution log survives a native page hide and return after 
     await nativePage.goto(appUrl);
     await expect.poll(() => nativePage.evaluate(() => !!(window as any).__pmTerminalFixture && !!document.querySelector("#op-pm-entry"))).toBe(true);
     await nativePage.evaluate(click, "#op-pm-entry");
-    const openLog = () => {
-      const button = [...document.querySelectorAll('.workspace-window[data-id="pm-terminal"] button')].find(button => button.textContent === "Execution log") as HTMLElement | undefined;
-      button?.click();
-      return !!button;
+    const openTerminal = () => {
+      const button = document.querySelector<HTMLButtonElement>('[data-action="pm-terminal"]');
+      if (!button || !button.getClientRects().length) return false;
+      button.click();
+      return true;
     };
-    await expect.poll(() => nativePage.evaluate(openLog)).toBe(true);
+    await expect.poll(() => nativePage.evaluate(openTerminal)).toBe(true);
     await nativePage.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "terminal_snapshot", id: "pm-terminal", data_base64: btoa("\x1b[H\x1b[2JPM initial snapshot") }));
     await nativePage.evaluate(activity);
     await expect.poll(async () => (await nativePage.evaluate(state)).log).toContain("PM initial snapshot");
     await nativePage.evaluate(click, '[data-surface="works"]');
     await expect.poll(() => nativePage.evaluate(() => !!document.querySelector('.work-row[data-window-id="pm-terminal"]'))).toBe(true);
     await nativePage.evaluate(click, "#op-pm-entry");
+    await expect.poll(() => nativePage.evaluate(openTerminal)).toBe(true);
     await expect.poll(async () => (await nativePage.evaluate(state)).log).toContain("PM initial snapshot");
     // Output is still flowing when the page returns.
     await nativePage.evaluate(() => { (window as any).__pmTerminalFixture.recoveryTail = "\r\nPM output during return"; });
@@ -192,9 +172,8 @@ test("Issue #7030 Ultrafast downgrade warning remains visible", async ({ page },
   await installPmBackend(page);
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
   await expectGridConverged(page);
   const warning = "Configured service tier `ultrafast` is not advertised as supported for model `gpt-6-astra` and will be omitted from requests.";
   await emit(page, "terminal_output", warning + "\r\n");
@@ -215,9 +194,8 @@ test("PM spinner redraw queued before resize keeps its original wrap grid", asyn
   await installPmBackend(page);
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
   await expectGridConverged(page);
   await emit(page, "terminal_output", Array.from({ length: 400 }, (_, i) => `Tool output ${i}\r\n`).join(""));
   await expect.poll(() => text(page)).toContain("Tool output 399");
@@ -247,160 +225,6 @@ test("PM spinner redraw queued before resize keeps its original wrap grid", asyn
 
 // SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once.
 // After a decision is answered in Decide, Home asks for the remaining one only.
-test("Home and Decide read one waiting-decision count after an answer", async ({ page }, info) => {
-  const errors: string[] = [];
-  const theme = info.project.name.includes("light") ? "light" : "dark";
-  page.on("pageerror", error => errors.push(error.message));
-  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
-  await page.addInitScript(() => {
-    const decision = (id: string, question: string) => ({ id, issue: null, kind: "pm_decision", target: `pm-report:${id}`,
-      question, materials: question, options: ["Retry", "Wait"], recommendation: "Retry", reason: "fixture", impact: null,
-      owner: "PM", detail_text: null, source_report_id: id, deferred_seq: null, created_at: "2026-11-12T00:00:00Z", status: "open", waiters: [{ role: "pm" }] });
-    // The gwtd decision queue, newest first (Issue #7742).
-    (window as any).__pmFixtureDecisions = [decision("hs1-b", "Ship the fix now?"), decision("hs1-a", "Retry the launch?")];
-    (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
-  });
-  if (!liveBase) await installEmbeddedRoutes(page);
-  await installPmBackend(page);
-  await page.setViewportSize({ width: 1920, height: 1080 });
-  await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
-  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  await pm.getByRole("button", { name: "Home", exact: true }).click();
-  await expect(pm.locator(".task-home")).toContainText("2 decisions need your attention");
-  // SPEC #5016 HSK: the status strip reads the same waiting set from the shared model.
-  const strip = page.locator("#op-strip-issue-monitor");
-  await expect(strip).toHaveAttribute("title", /Awaiting attention 2 \| PM decisions 2/);
-  await pm.getByRole("button", { name: "Decide", exact: true }).click();
-  await pm.locator(".task-decisions__card").first().getByRole("button", { name: "1. Retry" }).click();
-  const sent = await page.evaluate(() => (window as any).__pmTerminalFixture.sent
-    .filter((packet: any) => ["answer_decision", "pane_send_input"].includes(packet.kind)));
-  expect(sent.map((packet: any) => [packet.kind, packet.decision_id, packet.answer]),
-    "the answer goes to the gwtd decision queue, never through the PM pane").toEqual([["answer_decision", "hs1-b", "1. Retry"]]);
-  await expect(pm.locator(".task-decisions__card")).toHaveCount(1);
-  await expect(pm.locator(".task-decisions__notice")).toHaveText("Answer sent. The waiting session continues with it.");
-  await expect(pm.locator(".task-decisions__count")).toHaveText("1 decision waiting");
-  await info.attach(`hs1-decide-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
-  await pm.getByRole("button", { name: "Home", exact: true }).click();
-  await expect(pm.locator(".task-home")).toContainText("1 decision needs your attention");
-  await expect(strip).toHaveAttribute("title", /Awaiting attention 1 \| PM decisions 1/);
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await info.attach(`hs1-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
-  expect(errors, "console and page errors").toEqual([]);
-});
-
-// SPEC #7007 T-023: a waiting decision is drawn only by Decide and by the PM
-// conversation; either one settles the same decision; "Decide later" keeps it
-// waiting; and the status strip count follows what is actually waiting.
-test("T-023 decisions appear only in Decide and the PM conversation and settle together", async ({ page }, info) => {
-  const errors: string[] = [];
-  const theme = info.project.name.includes("light") ? "light" : "dark";
-  page.on("pageerror", error => errors.push(error.message));
-  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
-  await page.addInitScript(() => {
-    const decision = (id: string, question: string) => ({ id, issue: null, kind: "pm_decision", target: `pm-report:${id}`,
-      question, materials: `${question} is blocked.`, options: ["Retry", "Wait"], recommendation: "Retry", reason: "The work is saved.", impact: "The task stays stopped until you choose.",
-      owner: "PM", detail_text: null, source_report_id: id, deferred_seq: null, created_at: "2026-11-12T00:00:00Z", status: "open", waiters: [{ role: "pm" }] });
-    // A decision report alone is not a waiting decision: gwtd bridges PM
-    // decisions into the queue, and the queue is all the surfaces read.
-    (window as any).__pmFixtureReports = [
-      { id: "t023-progress", kind: "progress", created_at: "2026-11-12T00:00:00Z", body: "Progress note", body_html: "<p>Progress note</p>" },
-      { id: "t023-report-only", kind: "decision", created_at: "2026-11-12T00:00:00Z", body: "Report-only decision", body_html: "<p>Report-only decision</p>" }];
-    (window as any).__pmFixtureDecisions = [decision("t023-b", "Ship the fix now?"), decision("t023-a", "Retry the launch?")];
-    (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
-  });
-  if (!liveBase) await installEmbeddedRoutes(page);
-  await installPmBackend(page);
-  await page.setViewportSize({ width: 1920, height: 1080 });
-  await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
-  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  const view = (name: string) => pm.getByRole("button", { name, exact: true });
-  const strip = page.locator("#op-strip-issue-monitor");
-  // Every packet a decision could travel on: queue requests and PM pane sends.
-  const sends = () => page.evaluate(() => (window as any).__pmTerminalFixture.sent
-    .filter((packet: any) => ["answer_decision", "defer_decision", "pane_send_input"].includes(packet.kind))
-    .map((packet: any) => ({ kind: packet.kind, decision_id: packet.decision_id ?? null, answer: packet.answer ?? null })));
-  const cards = pm.locator(".task-decisions__card");
-  const messages = pm.getByRole("log", { name: "PM conversation messages" }).locator(".pm-chat__decision");
-  const ids = (locator: typeof cards) => locator.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.decisionId));
-
-  // AC-1: Reports draws no decision; Decide and the conversation each draw both.
-  await view("Reports").click();
-  const reports = pm.getByRole("log", { name: "PM reports" });
-  await expect(reports.locator("article")).toHaveCount(1);
-  await expect(reports.locator("article")).toContainText("Progress note");
-  await expect(pm.locator(".pm-chat__transcript .pm-chat__decision-controls")).toHaveCount(0);
-  await expect(pm.getByLabel("Report kind").locator("option")).toHaveText(["All reports", "Q&A", "Progress", "Blocker"]);
-  await view("Chat").click();
-  await expect(pm.getByRole("region", { name: "Decision reports" })).toHaveCount(0);
-  await expect(messages).toHaveCount(2);
-  expect(await ids(messages)).toEqual(["t023-b", "t023-a"]);
-  await expect(messages.first()).toContainText("Ship the fix now?");
-  await expect(messages.first()).toContainText("I recommend: Retry. The work is saved.");
-  await expect(messages.first()).toContainText("The task stays stopped until you choose.");
-  await info.attach(`t023-conversation-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
-  await expect(strip).toHaveAttribute("title", /PM decisions 2/);
-
-  // "Decide later" keeps the decision waiting at the end of the queue.
-  await view("Decide").click();
-  await expect(pm.locator(".task-decisions__count")).toHaveText("2 decisions waiting");
-  expect(await ids(cards)).toEqual(["t023-b", "t023-a"]);
-  await expect(cards.first().getByRole("button", { name: "Later", exact: true })).toHaveCount(0);
-  await cards.first().getByRole("button", { name: "Decide later", exact: true }).click();
-  await expect.poll(() => ids(cards)).toEqual(["t023-a", "t023-b"]);
-  await expect(pm.locator(".task-decisions__notice")).toHaveText("Kept waiting and moved to the end of the queue.");
-  await expect(cards.nth(1).locator(".task-decisions__chip")).toContainText("Deferred");
-  await expect(cards.first().getByRole("button", { name: "1. Retry" })).toBeFocused();
-  await expect(pm.locator(".task-decisions__count")).toHaveText("2 decisions waiting");
-  await expect(strip).toHaveAttribute("title", /PM decisions 2/);
-  expect(await sends(), "deferring is one queue request and sends nothing to the PM")
-    .toEqual([{ kind: "defer_decision", decision_id: "t023-b", answer: null }]);
-  await info.attach(`t023-decide-deferred-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
-
-  // AC-2: an answer given in the conversation settles the Decide card too.
-  await view("Chat").click();
-  expect(await ids(messages)).toEqual(["t023-a", "t023-b"]);
-  await expect(messages.nth(1).locator(".pm-chat__decision-meta")).toContainText("Deferred");
-  await messages.first().getByRole("button", { name: "1. Retry" }).click();
-  await expect.poll(async () => (await sends()).length).toBe(2);
-  expect((await sends())[1]).toEqual({ kind: "answer_decision", decision_id: "t023-a", answer: "1. Retry" });
-  await expect(messages).toHaveCount(1);
-  expect(await ids(messages)).toEqual(["t023-b"]);
-  await view("Decide").click();
-  expect(await ids(cards), "the answered decision left Decide too").toEqual(["t023-b"]);
-  await expect(pm.locator(".task-decisions__notice")).toHaveText("Answer sent. The waiting session continues with it.");
-  await expect(pm.locator(".task-decisions__count")).toHaveText("1 decision waiting");
-  await expect(strip).toHaveAttribute("title", /PM decisions 1/);
-
-  // AC-2 / AC-3: a free-form reply started from Decide settles the same
-  // decision in the conversation, and nothing is left waiting.
-  await cards.first().getByRole("button", { name: "Reply in chat", exact: true }).click();
-  const draft = pm.getByRole("textbox", { name: "Message to PM" });
-  await expect(draft).toBeFocused();
-  await expect(pm.locator(".pm-chat__reply-target")).toContainText("Replying to: Ship the fix now?");
-  await draft.fill("Ship it after the release note is fixed");
-  await info.attach(`t023-reply-target-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
-  await draft.press("Enter");
-  await expect.poll(async () => (await sends()).length).toBe(3);
-  expect((await sends())[2]).toEqual({ kind: "answer_decision", decision_id: "t023-b",
-    answer: "Ship it after the release note is fixed" });
-  await expect(messages).toHaveCount(0);
-  await expect(pm.locator(".pm-chat__reply-target")).toBeHidden();
-  await expect(draft).toHaveValue("");
-  await view("Decide").click();
-  await expect(cards).toHaveCount(0);
-  await expect(pm.locator(".task-decisions")).toContainText("No decisions waiting");
-  await view("Home").click();
-  await expect(pm.locator(".task-home")).toContainText("No decisions waiting");
-  await expect(strip).toHaveAttribute("title", /PM decisions 0/);
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await info.attach(`t023-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
-  expect(errors, "console and page errors").toEqual([]);
-});
-
 // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
 // same awaiting-attention value the status strip reads.
 test("status strip counts unresolved reviews from the PM current facts", async ({ page }, info) => {
@@ -422,7 +246,7 @@ test("status strip counts unresolved reviews from the PM current facts", async (
   await installPmBackend(page);
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
   await expect(pm).toBeVisible();
   const strip = page.locator("#op-strip-issue-monitor");
@@ -430,132 +254,6 @@ test("status strip counts unresolved reviews from the PM current facts", async (
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await info.attach(`hsv-strip-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
   expect(errors, "console and page errors").toEqual([]);
-});
-
-// SPEC #5016 HSF: the PM Live facts needs_human line shows the shared value
-// the status strip reads. A stopped (Held) Issue is not a pending decision,
-// even though the raw facts list still names it.
-test("PM Live facts and the status strip read one needs_human value", async ({ page }, info) => {
-  const errors: string[] = [];
-  const theme = info.project.name.includes("light") ? "light" : "dark";
-  page.on("pageerror", error => errors.push(error.message));
-  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
-  await page.addInitScript(() => {
-    (window as any).__pmFixtureCurrent = {
-      facts: { source: "daemon", active_windows: [], needs_human_count: 2 },
-      request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] },
-    };
-  });
-  if (!liveBase) await installEmbeddedRoutes(page);
-  await installPmBackend(page);
-  await page.setViewportSize({ width: 1920, height: 1080 });
-  await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
-  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  await expect(pm).toBeVisible();
-  await page.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "issue_monitor_inbox", items: [
-    { issue: { number: 91, title: "Decide the scope", state: "open", labels: [] }, state: "needs_human", error_message: "Scope decision" },
-    { issue: { number: 92, title: "Held work", state: "open", labels: [] }, state: "needs_human", error_message: "stopped: held by PM" },
-  ] }));
-  await expect(page.locator("#op-strip-issue-monitor")).toHaveAttribute("title", /Needs human 1/);
-  await expect(pm.locator('[aria-label="Live facts"]')).toContainText("needs_human: 1");
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await info.attach(`hsf-live-facts-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-  expect(errors, "console and page errors").toEqual([]);
-});
-
-// SPEC #6476 T-005pm (AC-1): on a phone the PM view toolbar stayed one 625px
-// row in a 380px window, so Log / Reports / Execution log sat off screen, and
-// the PM buttons, the report filter and the expanders were 18-31px tall.
-test.describe("PM touch targets", () => {
-  test.use({ hasTouch: true });
-  test("PM views and their controls are reachable 44px tap targets on a phone", async ({ page }, info) => {
-    const errors: string[] = [];
-    const theme = info.project.name.includes("light") ? "light" : "dark";
-    page.on("pageerror", error => errors.push(error.message));
-    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
-    await page.addInitScript(() => {
-      // The waiting decision comes from the gwtd decision queue (Issue #7742).
-      (window as any).__pmFixtureDecisions = [{ id: "t005pm-a", issue: null, kind: "pm_decision", target: "pm-report:t005pm-a",
-        question: "Retry the launch?", materials: "Retry the launch?", options: ["Retry", "Wait"], recommendation: "Retry",
-        reason: "fixture", impact: null, owner: "PM", detail_text: null, source_report_id: "t005pm-a", deferred_seq: null,
-        created_at: "2026-11-14T00:00:00Z", status: "open", waiters: [{ role: "pm" }] }];
-      // Reports lists no decision (T-023), so its disclosure comes from a progress report.
-      (window as any).__pmFixtureReports = [{ id: "t005pm-b", kind: "progress", created_at: "2026-11-14T00:00:00Z", body: "Launch retried",
-        structured: { summary: { result: "Launch retried" }, details: "The last launch timed out.", refs: [] } }];
-      (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 1, pending_intake: 0, tasks: [{
-        key: "t005pm-task", title: "Ship the fix", status: "in_progress", assignee: "agent-one", next_action: "Review the PR",
-        criteria_preview: { purpose: "Fix the launch", completion_conditions: ["Tests pass"], completion_condition_total: 1 } }] } };
-    });
-    if (!liveBase) await installEmbeddedRoutes(page);
-    await installPmBackend(page);
-    await page.setViewportSize({ width: 1920, height: 1080 });
-    await page.goto(appUrl);
-    await page.locator("#op-pm-entry").click();
-    const pm = page.locator(`.workspace-window[data-id="${PM}"] .pm-chat`);
-    const views = pm.locator(".pm-chat__toolbar[role='group'] button");
-    await expect(views).toHaveCount(7);
-    const names = await views.allTextContents();
-    const view = (name: string) => views.filter({ hasText: new RegExp(`^${name}$`) });
-    const controls = () => pm.evaluate(root => [...root.querySelectorAll("button, select, summary")]
-      .filter(node => (node as HTMLElement).offsetParent !== null)
-      .map(node => {
-        const box = node.getBoundingClientRect();
-        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30), left: box.left, right: box.right,
-          width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
-      }));
-    // The fixture data renders the controls that only exist with PM data.
-    await view("Decide").click();
-    await expect(pm.getByRole("button", { name: "1. Retry" })).toBeVisible();
-    await view("Tasks").click();
-    await expect(pm.locator(".pm-chat__task-criteria > summary")).toBeVisible();
-    await expect(pm.getByRole("button", { name: "View task details" })).toBeVisible();
-    await view("Reports").click();
-    await expect(pm.locator(".pm-chat__transcript summary").first()).toBeVisible();
-    const minHeights = async () => {
-      const seen: string[] = [];
-      for (const name of names) {
-        await view(name).click();
-        seen.push(...(await controls()).map(control => `${name}:${control.name}:${control.minHeight}`));
-      }
-      return seen;
-    };
-    const desktop = await minHeights();
-    expect(desktop.join("\n")).not.toContain(":44px");
-    await page.setViewportSize({ width: 601, height: 900 });
-    await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
-    for (const width of [320, 390]) {
-      await page.setViewportSize({ width, height: 844 });
-      const viewport = await page.evaluate(() => document.documentElement.clientWidth);
-      for (const name of names) {
-        await view(name).tap();
-        await expect(view(name), `${name} opens at ${width}px`).toHaveAttribute("aria-pressed", "true");
-        for (const control of await controls()) {
-          expect(control.height, `${name} ${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
-          expect(control.width, `${name} ${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
-          expect(control.left, `${name} ${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
-          expect(control.right, `${name} ${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
-        }
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
-          `${name} does not scroll sideways at ${width}px`).toBe(true);
-      }
-      await view("Tasks").tap();
-      const criteria = pm.locator(".pm-chat__task-criteria");
-      const before = await criteria.evaluate(node => (node as HTMLDetailsElement).open);
-      const summary = (await criteria.locator("> summary").boundingBox())!;
-      await criteria.locator("> summary").tap({ position: { x: summary.width / 2, y: summary.height - 4 } });
-      await expect.poll(() => criteria.evaluate(node => (node as HTMLDetailsElement).open), "the enlarged summary area toggles").toBe(!before);
-      await view("Home").tap();
-      await pm.locator(".task-home__primary", { hasText: "Create task" }).tap();
-      await expect(view("Chat"), "Create task opens the PM chat").toHaveAttribute("aria-pressed", "true");
-      await expect(pm.locator(".pm-chat__draft")).toBeFocused();
-      await info.attach(`t005pm-${width}-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-    }
-    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    expect(errors, "console and page errors").toEqual([]);
-  });
 });
 
 // A deterministic PTY-protocol fixture isolates browser parsing, layout and input
@@ -615,10 +313,8 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   });
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto(appUrl);
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
-  await expect(pm.getByRole("button", { name: "Execution log", exact: true })).toBeVisible();
-  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
   await expect(pm.locator(".xterm-helper-textarea")).toBeVisible();
   await expect.poll(() => metrics(page)).toMatchObject({ isReady: true });
 
@@ -657,8 +353,8 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
     await pm.screenshot({ path: after });
     await info.attach(`after redraw ${width}`, { path: after, contentType: "image/png" });
 
-    await pm.getByRole("button", { name: "Reports", exact: true }).click();
-    await expect(pm.locator(".pm-conversation-log")).toBeHidden();
+    await page.getByRole("button", { name: "Board", exact: true }).click();
+    await expect(pm).toBeHidden();
     await settle(page);
     const oldCols = (await metrics(page)).cols;
     // Codex repaints with wrap-relative cursor movements at the PTY's current
@@ -674,7 +370,7 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
     await settle(page);
     expect(await page.evaluate(() => (window as any).__pmTerminalFixture.sent.filter((entry: any) => entry.kind === "update_terminal_grid" && entry.id === "pm-terminal")))
       .toEqual([]);
-    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+    await openPmTerminal(page);
     await expectGridConverged(page);
     const reveal = info.outputPath(`pm-hidden-reveal-${width}-${theme}.png`);
     await pm.screenshot({ path: reveal });
@@ -689,7 +385,7 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   await page.getByRole("button", { name: "Board", exact: true }).click();
   await page.locator("#split-view-button").click();
   await expect(page.locator("#split-surfaces")).toHaveAttribute("data-split", "true");
-  await page.locator("#op-pm-entry").click();
+  await openPmTerminal(page);
   await expect(page.locator("#split-surfaces")).toHaveAttribute("data-split", "false");
   await expectGridConverged(page);
   await expect.poll(async () => (await text(page)).trim()).toBe("HEADER\nCURRENT");
@@ -788,8 +484,7 @@ test("PM terminal keeps redraw, grid and input consistent across view changes", 
   await expect.poll(async () => (await text(page, "cold-retention")).trim()).toBe("Cold snapshot");
   await page.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "terminal_output", id: "cold-retention", data_base64: btoa("\r\nCOLD LIVE") }));
   await expect.poll(async () => (await text(page, "cold-retention")).trim()).toBe("Cold snapshot\nCOLD LIVE");
-  await page.locator("#op-pm-entry").click();
-  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  await openPmTerminal(page);
   await emit(page, "terminal_output", "\r\nLive after cold recovery");
   await expect.poll(() => text(page)).toContain("Live after cold recovery");
   expect(await page.evaluate(() => (window as any).__pmTerminalFixture.connections())).toBe(coldConnections + 1);
@@ -896,6 +591,12 @@ async function installPmBackend(page: Pick<Page, "addInitScript">): Promise<void
           this.readyState = 1;
           this.dispatchEvent(new Event("open"));
           this.emit(workspace());
+          this.emit({ kind: "active_work_projection", projection: {
+            id: "pm-terminal-live", active_works: [], local_agent_activity: {
+              project_key: location.pathname.split("/").at(-1), host_id: "pm-fixture", observed_at: new Date().toISOString(),
+              agents: [{ window_id: "pm-terminal", session_id: "pm-terminal-session", runtime_incarnation: 1, is_pm: true, issue_number: null }],
+            },
+          } });
           if (connections > 1) {
             this.emit({ kind: "terminal_snapshot", id: "pm-terminal", data_base64: btoa("\x1b[H\x1b[2JReconnected status") });
             if (fixture.recoveryTail) this.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa(fixture.recoveryTail) });
@@ -903,7 +604,10 @@ async function installPmBackend(page: Pick<Page, "addInitScript">): Promise<void
             if (windows.some(entry => entry.id === "cold-retention")) this.emit({ kind: "active_work_projection", projection: {
               id: "cold-retention-live", active_works: [], local_agent_activity: {
                 project_key: location.pathname.split("/").at(-1), host_id: "raw-cap-fixture", observed_at: new Date().toISOString(),
-                agents: [{ window_id: "cold-retention", session_id: "cold-retention-session", runtime_incarnation: 1, is_pm: false, issue_number: null }],
+                agents: [
+                  { window_id: "pm-terminal", session_id: "pm-terminal-session", runtime_incarnation: 1, is_pm: true, issue_number: null },
+                  { window_id: "cold-retention", session_id: "cold-retention-session", runtime_incarnation: 1, is_pm: false, issue_number: null },
+                ],
               },
             } });
           }
@@ -1277,7 +981,7 @@ exit 67
     expect(selectedPmSettings)
       .toMatchObject({ auto_start: false, paused: true, launch_profile: { agent_id: "codex" } });
     gateRequested = true;
-    await page.locator("#op-pm-entry").click();
+    await openPmTerminal(page);
     await expect.poll(async () => (await readFile(join(home, "native-owner"), "utf8").catch(() => "")).split("\n").length,
       { timeout: 60_000 }).toBeGreaterThanOrEqual(8);
     const [pidText, ownerSession, cwd, birth, deadlineText, providerHome, ...ancestors] = (await readFile(join(home, "native-owner"), "utf8")).trim().split("\n");
@@ -1401,10 +1105,9 @@ exit 67
       const pane = state?.tabs.flatMap((tab: any) => tab.workspace.windows).find((row: any) => row.session_id === sessionId && row.id === id);
       return !!pane?.is_pm && pane.agent_id === "codex";
     }, { sessionId: session, id }, { timeout: 60_000 });
-    await page.locator("#op-pm-entry").click();
+    await openPmTerminal(page);
     const pm = page.locator(`.workspace-window[data-id="${id}"]`);
-    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
-    const buffer = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id), id);
+      const buffer = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id), id);
     const logicalBuffer = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.logicalBufferLines(id) as {
       lines: string[]; scrollbackLineCount: number;
     }, id);
@@ -1498,7 +1201,7 @@ exit 67
     reentryGrid = undefined;
     recordReentryGrid = true;
     diagnosticPhase = "reentry";
-    await page.locator("#op-pm-entry").click();
+    await openPmTerminal(page);
     // The owner transport can replace streamed bytes with a snapshot. A fresh
     // applied snapshot or complete paint establishes the baseline; later
     // destructive or unfinished output must not be hidden by an older one.
@@ -1581,8 +1284,8 @@ exit 67
       return { history: responseHistory(state), numbers: numberedLines(state.lines) };
     };
     const expectedResponseState = { history: capturedResponseHistory, numbers: expectedNumbers };
-    await pm.getByRole("button", { name: "Reports", exact: true }).click();
-    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+    await page.getByRole("button", { name: "Board", exact: true }).click();
+    await openPmTerminal(page);
     const reentryMetrics = await metrics();
     expect({ cols: reentryMetrics.cols, rows: reentryMetrics.rows }).toEqual({ cols: reading.cols, rows: reading.rows });
     expect(reentryMetrics.viewportY).toBe(reading.viewportY);
@@ -1612,7 +1315,7 @@ exit 67
     await expect(page.locator(".works-full")).toBeVisible();
     await expect.poll(responseState).toEqual(expectedResponseState);
     expect(await page.locator(`.works-terminal[data-window-id="${id}"] .xterm`).evaluate(node => node === (window as any).__ownedPmNative)).toBe(true);
-    await page.locator("#op-pm-entry").click();
+    await openPmTerminal(page);
     await page.evaluate(id => (window as any).__gwtTerminalTestApi.scrollToBottom(id), id);
     await expect.poll(buffer).toContain("Ask Codex");
     const canary = `UNSENT${theme.toUpperCase()}4777`;

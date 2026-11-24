@@ -519,6 +519,9 @@ pub struct LaunchConfig {
     /// (SPEC-3393 FR-012): lets the launch path recover producing authority
     /// through the continuation coordinator before spawn.
     pub predecessor_session_id: Option<String>,
+    /// Account to try for an explicit provider switch on Resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_account_id: Option<String>,
     pub skip_permissions: bool,
     pub fast_mode: bool,
     /// Legacy Codex-only compatibility field. Explicit Codex selections use
@@ -1193,6 +1196,7 @@ impl AgentLaunchBuilder {
             session_mode,
             resume_session_id,
             predecessor_session_id,
+            execution_account_id: None,
             skip_permissions,
             fast_mode,
             codex_fast_mode,

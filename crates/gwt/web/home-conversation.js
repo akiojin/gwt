@@ -69,10 +69,14 @@ function withDecisions(state, event) {
     key: project.project_key, title: project.title || project.project_key,
     pmAvailable: Boolean(project.pm_available), error: project.error || null,
     decisions: project.decisions || [], waitingCount: project.waiting_count ?? 0,
+    conversation: project.conversation,
   }));
   // A rejected worker reply has queues with errors but no fresh PM view.
   const pm = event.pm === undefined ? state.pm : event.pm;
-  return withProjects({ ...state, pm, loaded: true, appliedRequest: event.request_id }, projects);
+  return withProjects({
+    ...state, pm, loaded: true, appliedRequest: event.request_id,
+    sent: reconcileSent(state.sent, projects),
+  }, projects);
 }
 
 function withProjects(state, projects) {
@@ -104,6 +108,21 @@ function withDecisionResult(state, event) {
   };
 }
 
+function reconcileSent(sent, projects) {
+  const claimed = sent.filter(receipt => receipt.nativeId)
+    .map(receipt => topicId(receipt.projectKey, receipt.nativeId));
+  return sent.map(receipt => {
+    if (receipt.nativeId) return receipt;
+    const project = projects.find(candidate => candidate.key === receipt.projectKey);
+    const message = project?.conversation?.messages?.find(item =>
+      item.role === "user" && item.text === receipt.text
+      && !receipt.previousIds.includes(item.id) && !claimed.includes(topicId(receipt.projectKey, item.id)));
+    if (!message) return receipt;
+    claimed.push(topicId(receipt.projectKey, message.id));
+    return { ...receipt, nativeId: message.id };
+  });
+}
+
 // What the outcome of the message to a PM changes: a refusal says why.
 function withSendResult(state, requestId, ok, error) {
   const pending = state.pending;
@@ -111,9 +130,13 @@ function withSendResult(state, requestId, ok, error) {
   if (!ok) {
     return { ...state, pending: null, failure: { topicId: null, message: error || COPY.refused } };
   }
+  const receipt = {
+    id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project,
+    text: pending.answer, at: Date.now(), previousIds: pending.previousIds,
+  };
   return {
     ...state, pending: null, failure: null, sentCount: state.sentCount + 1,
-    sent: [...state.sent, { id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project, text: pending.answer, at: Date.now() }],
+    sent: reconcileSent([...state.sent, receipt], state.projects),
   };
 }
 
@@ -132,7 +155,7 @@ function decisionsOf(state) {
 }
 
 // The model the React surface renders, derived from the conversation state.
-function homeConversationView(state) {
+function homeConversationView(state, route) {
   const settled = new Set(state.settled.map(entry => entry.id));
   const projects = state.projects.map(project => ({
     key: project.key, title: project.title, pmAvailable: project.pmAvailable,
@@ -151,13 +174,17 @@ function homeConversationView(state) {
         error: state.failure?.topicId === id ? state.failure.message : "",
       };
     });
-  const messages = state.sent.map(message => ({
+  const messages = state.sent.filter(message => !message.nativeId).map(message => ({
     id: message.id, kind: "message", projectKey: message.projectKey, project: message.project,
     createdAt: isoTime(message.at), lines: [message.text], status: COPY.delivered(message.project),
   }));
   // Oldest at the top, newest at the bottom (design item 230).
-  const topics = [...waiting, ...messages]
-    .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
+  const history = state.projects.flatMap(project => (project.conversation?.messages || []).map(message => ({
+    id: topicId(project.key, message.id), kind: message.role === "assistant" ? "pm-message" : "message",
+    project: project.title, lines: [message.text],
+  })));
+  const topics = route.decisions ? waiting : [...history, ...[...waiting, ...messages]
+    .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))];
   // Issue #7742 AC-4: the queues' own waiting counts, never a recount of the
   // topics drawn here.
   const count = state.loaded ? state.projects.reduce((sum, project) => sum + project.waitingCount, 0) : null;
@@ -183,6 +210,8 @@ function homeConversationView(state) {
     resolved: state.settled.filter(entry => !state.hidden.includes(entry.id))
       .map(entry => ({ ...entry, answeredAt: isoTime(entry.answeredAt) })),
     topics,
+    decisionsOnly: route.decisions,
+    initialMessage: route.project && route.message ? topicId(route.project, route.message) : null,
     busy: Boolean(pending),
     composer: {
       replyTo: replyTo && { id: replyTo.id, subject: replyTo.subject, projectKey: replyTo.projectKey, project: replyTo.project },
@@ -201,7 +230,9 @@ export function createHomeConversation({
   onOpenProjects = () => {}, scheduleFrame,
 }) {
   const state = createUiStateStore(EMPTY_STATE);
-  const model = createUiStateStore(homeConversationView(EMPTY_STATE), { scheduleFrame });
+  const query = new URL(win.location.href).searchParams;
+  const route = { decisions: query.get("view") === "decisions", project: query.get("project"), message: query.get("message") };
+  const model = createUiStateStore(homeConversationView(EMPTY_STATE, route), { scheduleFrame });
   let requestSequence = 0;
   let sendTimer = null;
   let refreshTimer = null;
@@ -280,7 +311,12 @@ export function createHomeConversation({
       if (current.replyTo && decision(current.replyTo)) return answer(current.replyTo, body, null, true);
       const project = current.projects.find(candidate => candidate.key === projectKey);
       if (!project) return false;
-      return sendToPm({ topicId: null, projectKey: project.key, project: project.title, answer: body, fromComposer: true });
+      const previousIds = (project.conversation?.messages || [])
+        .filter(message => message.role === "user" && message.text === body).map(message => message.id);
+      return sendToPm({
+        topicId: null, projectKey: project.key, project: project.title,
+        answer: body, fromComposer: true, previousIds,
+      });
     },
     deleteTopic(id) {
       state.update(current => ({ ...current, hidden: [...current.hidden.filter(other => other !== id), id] }));
@@ -309,7 +345,7 @@ export function createHomeConversation({
   }
 
   state.subscribe(current => current, current => {
-    const view = homeConversationView(current);
+    const view = homeConversationView(current, route);
     const waitingChanged = view.waiting !== model.read().waiting;
     model.update(() => view);
     if (waitingChanged || current.pm !== lastPm) {

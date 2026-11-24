@@ -86,12 +86,21 @@ export function HomeConversation({ store, actions }) {
   const removeTriggerRef = useRef(null);
   const messageRefs = useRef(new Map());
   const { composer } = view;
+  const initialMessage = useRef(null);
 
   // The newest message is at the bottom: start there, and follow new messages.
   const timelineKey = view.topics.map(topic => topic.id).join("\n");
   useEffect(() => {
-    scrollToEnd(logRef.current);
-  }, [timelineKey]);
+    const target = messageRefs.current.get(view.initialMessage);
+    if (target && initialMessage.current !== view.initialMessage) {
+      initialMessage.current = view.initialMessage;
+      scrollIntoCenter(target);
+      focusElement(target);
+      setHighlight(view.initialMessage);
+    } else if (!view.initialMessage) {
+      scrollToEnd(logRef.current);
+    }
+  }, [timelineKey, view.initialMessage]);
 
   // A confirmed send clears exactly the draft that was sent.
   useEffect(() => {
@@ -116,9 +125,13 @@ export function HomeConversation({ store, actions }) {
     focusElement(node);
     setHighlight(id);
   };
+  useEffect(() => {
+    if (composer.replyTo?.id) focusElement(draftRef.current);
+  }, [composer.replyTo?.id]);
+
   const reply = id => {
     actions.reply(id);
-    focusElement(draftRef.current);
+    if (!view.decisionsOnly) focusElement(draftRef.current);
   };
   const closeRemove = () => {
     setRemoving(null);
@@ -153,7 +166,7 @@ export function HomeConversation({ store, actions }) {
       <header className="gwt-home__head">
         <PmFace avatar={view.pm.avatar} />
         <div className="gwt-home__who">
-          <h1 className="gwt-home__name">{view.pm.name}</h1>
+          <h1 className="gwt-home__name">{view.decisionsOnly ? "Decisions" : view.pm.name}</h1>
           <p className="gwt-home__sub">
             {view.pm.role}
             {" · "}
@@ -168,10 +181,11 @@ export function HomeConversation({ store, actions }) {
             </button>
           </p>
         </div>
+        {view.decisionsOnly ? <a className="text-button" href="/">Back to Home</a> : null}
       </header>
 
       <div className="gwt-home__timeline" role="log" aria-label={COPY.conversation} ref={logRef} tabIndex={0}>
-        {view.resolved.length ? (
+        {!view.decisionsOnly && view.resolved.length ? (
           <div className="gwt-home__resolved" data-home-resolved>
             <input
               type="search"
@@ -211,7 +225,7 @@ export function HomeConversation({ store, actions }) {
           </div>
         ) : null}
 
-        <article className="gwt-home__msg gwt-home__msg--pm" data-home-greeting>
+        {!view.decisionsOnly ? <article className="gwt-home__msg gwt-home__msg--pm" data-home-greeting>
           <p className="gwt-home__meta"><PmFace avatar={view.pm.avatar} /><span className="gwt-home__meta-name">{view.pm.name}</span></p>
           <p>{view.greeting}</p>
           {view.guide ? (
@@ -229,7 +243,7 @@ export function HomeConversation({ store, actions }) {
               <button type="button" className="wizard-button" data-home-entry="projects" onClick={actions.openProjects}>{COPY.projects}</button>
             </div>
           ) : null}
-        </article>
+        </article> : null}
 
         {view.notices.map(notice => <p className="gwt-home__note gwt-home__note--error" role="alert" key={notice}>{notice}</p>)}
 
@@ -273,19 +287,25 @@ export function HomeConversation({ store, actions }) {
             {topic.error ? <p className="gwt-home__status gwt-home__status--error" role="alert">{topic.error}</p> : null}
           </article>
         ) : (
-          <article className="gwt-home__msg gwt-home__msg--me" key={topic.id} data-home-sent={topic.id}>
+          <article
+            className={`gwt-home__msg gwt-home__msg--${topic.kind === "pm-message" ? "pm" : "me"}${highlight === topic.id ? " is-highlighted" : ""}`}
+            key={topic.id}
+            data-home-sent={topic.status ? topic.id : undefined}
+            tabIndex={-1}
+            ref={node => { if (node) messageRefs.current.set(topic.id, node); else messageRefs.current.delete(topic.id); }}
+          >
             <p className="gwt-home__meta">
-              <span className="gwt-home__meta-name">{COPY.you}</span>
-              <span>{COPY.to(topic.project)}</span>
+              <span className="gwt-home__meta-name">{topic.kind === "pm-message" ? view.pm.name : COPY.you}</span>
+              <span>{topic.kind === "pm-message" ? topic.project : COPY.to(topic.project)}</span>
               <Time iso={topic.createdAt} />
             </p>
             <Lines lines={topic.lines} />
-            <p className="gwt-home__status" role="status">{topic.status}</p>
+            {topic.status ? <p className="gwt-home__status" role="status">{topic.status}</p> : null}
           </article>
         ))}
       </div>
 
-      <form className="gwt-home__composer" aria-label={COPY.draft} onSubmit={submit}>
+      <form className="gwt-home__composer" hidden={view.decisionsOnly && !composer.replyTo} aria-label={COPY.draft} onSubmit={submit}>
         {composer.replyTo ? (
           <div className="gwt-home__replychip" data-home-replychip>
             <button type="button" className="gwt-home__replychip-target" onClick={() => jumpTo(composer.replyTo.id)}>

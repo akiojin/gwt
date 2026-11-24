@@ -8,7 +8,7 @@
 //! a window: the host resolves the rest from the project.
 
 use super::*;
-use gwt::protocol::HomePmView;
+use gwt::{pm_registry, protocol::HomePmView};
 
 const NO_PM: &str =
     "No Project Manager is running for this project. Open the project, then try again.";
@@ -34,31 +34,57 @@ impl AppRuntime {
         client_id: ClientId,
         request_id: u64,
     ) -> Vec<OutboundEvent> {
-        let projects: Vec<(String, String, PathBuf, bool)> = self
+        let projects: Vec<_> = self
             .tabs
             .iter()
             .filter_map(|tab| {
+                let pm_available = self.pm_session_for_root(&tab.project_root).is_some();
+                let reader = self
+                    .project_state_for_root(&tab.project_root)
+                    .map(|state| std::sync::Arc::clone(&state.pm_conversation_reader));
                 Some((
                     self.project_key_for_tab(&tab.id)?.to_string(),
                     tab.title.clone(),
                     tab.project_root.clone(),
-                    self.pm_session_for_root(&tab.project_root).is_some(),
+                    pm_available,
+                    reader,
                 ))
             })
             .collect();
+        let sessions_dir = self.sessions_dir.clone();
         let proxy = self.proxy.clone();
         let reply_client = client_id.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
             let projects = projects
                 .into_iter()
-                .map(|(project_key, title, root, pm_available)| {
-                    gwt::HomeProjectConversationView::from_queue(
+                .map(|(project_key, title, root, pm_available, reader)| {
+                    let mut project = gwt::HomeProjectConversationView::from_queue(
                         project_key,
                         title,
                         pm_available,
                         gwt::pm_current::load_decisions(&root)
                             .ok_or_else(|| QUEUE_UNREADABLE.to_string()),
-                    )
+                    );
+                    project.conversation = reader.and_then(|reader| {
+                        // The registration also identifies stopped sessions whose
+                        // saved output is still part of the Home conversation.
+                        let registration = pm_registry::load_pm_prefs(
+                            &pm_registry::pm_prefs_path_for_repo_path(&root),
+                        )
+                        .ok()?
+                        .registration?;
+                        let id = registration.session_id;
+                        let session =
+                            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
+                                .ok()?;
+                        (session.id == id).then(|| {
+                            reader
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .read_for_session(&session)
+                        })
+                    });
+                    project
                 })
                 .collect();
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(

@@ -599,10 +599,6 @@ test.describe("shared header and footer", () => {
     await expect(entry(page, "environments")).toHaveAttribute("aria-current", "page");
     await expect(entry(page, "agents")).not.toHaveAttribute("aria-current", "page");
 
-    // AC-1: the PM entry leads to the waiting decisions; with no PM it starts one.
-    await entry(page, "pm").click();
-    expect(await sentKinds(page)).toContain("open_pm_agent:");
-
     // AC-1: Settings is an item of the header menu, not of the tab row.
     await expect(entry(page, "settings")).toHaveCount(0);
     await entry(page, "menu").click();
@@ -629,6 +625,9 @@ test.describe("shared header and footer", () => {
     // page at `/` below.
     for (const id of destinations) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
     await page.screenshot({ path: testInfo.outputPath("shared-header-project.png") });
+    await entry(page, "pm").click();
+    await expect(page).toHaveURL(/\?view=decisions$/);
+    await expect(page.getByRole("heading", { name: "Decisions" })).toBeVisible();
     expect(errors).toEqual([]);
   });
 

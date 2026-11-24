@@ -582,7 +582,7 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
-  test("Index window Health shows Work and Reports status and Search opens Reports", async ({ page }, testInfo) => {
+  test("Index window Health shows Work and Reports status and Search opens Board", async ({ page }, testInfo) => {
     const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
     const errors: string[] = [];
     page.on("console", (message) => {
@@ -598,16 +598,13 @@ test.describe("Project Index status surface", () => {
         works: { healthy: true, repair_required: false, document_count: 7, reason: "ready" },
         reports: { healthy: true, repair_required: false, document_count: 3, reason: "ready" },
       },
-    }, { includePm: true });
+    }, { includeBoard: true });
 
     const url = configuredUrl
       ? new URL(new URL(APP_URL).pathname, configuredUrl).toString()
       : APP_URL;
     await page.goto(url);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    const pm = page.locator(".workspace-window[data-id='pm-fixture']");
-    await page.locator("#op-pm-entry").click();
-    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
     const { root, table } = await openIndexHealthPanel(page);
     const worksRow = table.locator("tr[data-scope='works']");
     await expect(worksRow.locator(".settings-index-cell.ready")).toContainText("7 docs");
@@ -647,9 +644,9 @@ test.describe("Project Index status surface", () => {
     await expect(root.locator(".index-detail-preview")).toContainText("Can we release?");
     await expect(root.locator(".index-detail-preview")).toContainText("Required checks pass.");
     await root.locator("[data-action='open-index-result']").click();
-    await expect(pm).toHaveClass(/focused/);
-    await expect(pm.getByRole("button", { name: "Reports", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(pm.getByRole("log", { name: "PM reports" })).toBeVisible();
+    const board = page.locator(".workspace-window[data-id='board-fixture']");
+    await expect(board).toBeVisible();
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "board");
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
@@ -1067,9 +1064,9 @@ async function installIndexStatusBackend(page, indexStatus, options = {}) {
       kind: "git",
       workspace: {
         viewport: { x: 0, y: 0, zoom: 1 },
-        windows: optionsPayload.includePm ? [{
-          id: "pm-fixture", title: "Project Manager", preset: "agent", is_pm: true,
-          session_id: "pm-session", status: "running", persist: true, z_index: 1,
+        windows: optionsPayload.includeBoard ? [{
+          id: "board-fixture", title: "Board", preset: "board",
+          status: "running", persist: true, z_index: 1,
           geometry: { x: 20, y: 20, width: 760, height: 620 },
         }, {
           id: "index-fixture", title: "Index", preset: "index", status: "running", persist: true, z_index: 2,

@@ -214,7 +214,10 @@ test.describe("Surface rail", () => {
     await installSurfaceRailBackend(page, false, true);
     await page.goto(surfaceAppUrl);
     const main = page.getByRole("region", { name: "Main pane", exact: true });
-    const openPm = () => page.locator("#op-pm-entry").click();
+    const openPm = async () => {
+      await page.locator("#op-pm-entry").click();
+      await page.getByRole("button", { name: "Open PM terminal" }).click();
+    };
     const expectPm = async () => {
       await expect(main).toHaveAttribute("data-surface", "pm");
       await expect(main.locator('[data-id="pm-window"]')).toBeVisible();
@@ -605,7 +608,7 @@ test.describe("Surface rail", () => {
     await expect(windowById(page, "settings-window")).toHaveCount(0);
     await expect(pm).toBeVisible();
     await expect(page.locator(`#${popupId}`)).toBeVisible();
-    await page.locator("#op-pm-entry").click();
+    await page.getByRole("button", { name: "Board", exact: true }).click();
     await expect(pm).toBeHidden();
     await expect(page.locator(`#${popupId}`)).toBeHidden();
     expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toEqual([]);
@@ -805,10 +808,10 @@ test.describe("Surface rail", () => {
     await expect(windowById(page, "pm-window")).toBeHidden();
     await expect(page.locator(".work-row[data-window-id=pm-window]")).toHaveCount(1);
 
-    // The PM entry lands on the PM and presses itself, independently of Works: the role
-    // marker (is_pm), not the claude preset, decides where it belongs.
+    // The PM entry leads to Agents. The registered PM's identity selects its terminal.
     await clearMessages(page);
     await entry("pm").click();
+    await page.getByRole("button", { name: "Open PM terminal" }).click();
     await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="pm-window"]')).toBeVisible();
     await windowById(page, "pm-window").locator(".titlebar").click();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["pm"]);

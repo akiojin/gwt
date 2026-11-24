@@ -11,6 +11,7 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::asset_io::{ensure_safe_mutation, AssetRoute};
 use crate::settings_local::{
     codex_event_hook_commands, codex_event_hook_commands_with_bin,
     codex_hooks_paths_for_codex_discovery, codex_self_improvement_stop_hook_commands,
@@ -488,8 +489,8 @@ fn register_codex_managed_hook_trust_with_writer(
     // Issue #4071: read, mutate and publish as one critical section. A
     // concurrent launch that reads between our read and our write would
     // otherwise write back a copy without our entries.
-    with_codex_config_lock(config_path, || {
-        let mut root = read_codex_config(config_path)?;
+    with_codex_config_lock(config_path, |resolved| {
+        let mut root = read_codex_config(resolved)?;
         // Codex's existing review is authority for this exact handler identity.
         // Do not make a new trust decision for an unrecognized command.
         let trusted_entries: Vec<_> = scan
@@ -527,11 +528,11 @@ fn register_codex_managed_hook_trust_with_writer(
         let rendered = toml::to_string_pretty(&root).map_err(|err| {
             io::Error::other(format!("Codex config TOML serialize failed: {err}"))
         })?;
-        write_config(config_path, &rendered)?;
+        write_config(resolved, &rendered)?;
         // The shared lock prevents gwt writers from losing each other's rows.
         // A successful writer alone still does not prove what Codex will read.
         let recovery = codex_hook_trust_recovery(config_path);
-        let persisted = read_codex_config(config_path).map_err(|error| {
+        let persisted = read_codex_config(resolved).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!(
@@ -588,8 +589,8 @@ fn garbage_collect_codex_managed_hook_trust_with_writer(
         Err(error) => return Err(error),
         Ok(_) => {}
     }
-    with_codex_config_lock(config_path, || {
-        let mut root = read_codex_config(config_path)?;
+    with_codex_config_lock(config_path, |resolved| {
+        let mut root = read_codex_config(resolved)?;
         let removed = collect_missing_codex_managed_hook_state(
             root.as_table_mut().ok_or_else(|| {
                 io::Error::new(
@@ -601,7 +602,7 @@ fn garbage_collect_codex_managed_hook_trust_with_writer(
         )?;
         if removed > 0 {
             let rendered = toml::to_string_pretty(&root).map_err(io::Error::other)?;
-            write_config(config_path, &rendered)?;
+            write_config(resolved, &rendered)?;
         }
         Ok(removed)
     })
@@ -772,12 +773,12 @@ pub fn revoke_codex_managed_project_trust_with_cleanup<T>(
     config_path: &Path,
     cleanup: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    with_codex_config_lock(config_path, || {
+    with_codex_config_lock(config_path, |resolved| {
         let project_path = codex_project_path_for_revocation(worktree)?;
         revoke_codex_managed_project_trust_under_lock(
             &project_path,
             worktree,
-            config_path,
+            resolved,
             write_text_atomically,
         )?;
         cleanup()
@@ -789,12 +790,12 @@ fn revoke_codex_managed_project_trust_with_writer(
     config_path: &Path,
     write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
 ) -> io::Result<CodexProjectTrustReport> {
-    with_codex_config_lock(config_path, || {
+    with_codex_config_lock(config_path, |resolved| {
         let project_path = codex_project_path_for_revocation(worktree)?;
         revoke_codex_managed_project_trust_under_lock(
             &project_path,
             worktree,
-            config_path,
+            resolved,
             write_config,
         )?;
         Ok(CodexProjectTrustReport {
@@ -1203,8 +1204,8 @@ fn update_codex_config_with_writer<T>(
     update: impl FnOnce(&mut toml::Table) -> io::Result<T>,
     write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
 ) -> io::Result<T> {
-    with_codex_config_lock(config_path, || {
-        let mut root = read_codex_config(config_path)?;
+    with_codex_config_lock(config_path, |resolved| {
+        let mut root = read_codex_config(resolved)?;
         let root_table = root.as_table_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1216,7 +1217,7 @@ fn update_codex_config_with_writer<T>(
         let rendered = toml::to_string_pretty(&root).map_err(|err| {
             io::Error::other(format!("Codex config TOML serialize failed: {err}"))
         })?;
-        write_config(config_path, &rendered)?;
+        write_config(resolved, &rendered)?;
         Ok(result)
     })
 }
@@ -1249,9 +1250,12 @@ fn command_hook_trusted_hash_for_test(
 /// from ever seeing a half-written file.
 pub(crate) fn with_codex_config_lock<T>(
     config_path: &Path,
-    body: impl FnOnce() -> io::Result<T>,
+    body: impl FnOnce(&Path) -> io::Result<T>,
 ) -> io::Result<T> {
     // Paths come from CODEX_HOME / OS home, not gwt_home, so tests need their own guard.
+    gwt_config::home::assert_test_path(config_path);
+    let shared_path = managed_shared_codex_config(config_path)?;
+    let config_path = shared_path.as_deref().unwrap_or(config_path);
     gwt_config::home::assert_test_path(config_path);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
@@ -1282,9 +1286,38 @@ pub(crate) fn with_codex_config_lock<T>(
         }
     }
 
-    let result = body();
+    let result = body(config_path);
     let _ = FileExt::unlock(&lock);
     result
+}
+
+/// Resolve only the sharing link created for a gwt-managed Codex account.
+/// Other symlinks remain subject to the normal managed-asset write guard.
+fn managed_shared_codex_config(config_path: &Path) -> io::Result<Option<PathBuf>> {
+    let Some(account) = config_path
+        .parent()
+        .filter(|_| config_path.ends_with("config.toml"))
+    else {
+        return Ok(None);
+    };
+    let Ok(link_target) = fs::read_link(config_path) else {
+        return Ok(None);
+    };
+    let Some(home) = gwt_config::home::user_home().and_then(|path| dunce::canonicalize(path).ok())
+    else {
+        return Ok(None);
+    };
+    let default = home.join(".codex/config.toml");
+    let accounts = home.join(".gwt/accounts/codex");
+    if dunce::simplified(&link_target) != default
+        || !dunce::canonicalize(account)
+            .is_ok_and(|account| account.parent() == Some(accounts.as_path()))
+    {
+        return Ok(None);
+    }
+    ensure_safe_mutation(account, AssetRoute::Write)?;
+    ensure_safe_mutation(&default, AssetRoute::Write)?;
+    Ok(Some(default))
 }
 
 fn codex_config_lock_path(config_path: &Path) -> PathBuf {
@@ -1781,7 +1814,7 @@ mod tests {
         let config = Path::new("/__gwt_protected_test_home__/.codex/config.toml");
         let worktree = tempfile::tempdir().unwrap();
         assert!(std::panic::catch_unwind(|| {
-            let _ = with_codex_config_lock(config, || -> io::Result<()> {
+            let _ = with_codex_config_lock(config, |_| -> io::Result<()> {
                 panic!("body must not run for an unisolated config")
             });
         })
@@ -4635,7 +4668,7 @@ trusted_hash = "sha256:08adeab2"
         let holder_has_lock = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                with_codex_config_lock(&config_path, || {
+                with_codex_config_lock(&config_path, |_| {
                     holder_has_lock.wait();
                     // Long enough for an unserialized registration to read the
                     // pre-write file and publish over this entry.

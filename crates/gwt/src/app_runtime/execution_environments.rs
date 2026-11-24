@@ -321,29 +321,13 @@ impl AppRuntime {
             .collect()
     }
 
-    /// Carry an existing setup over: every tool that signs in to its own
-    /// account and is installed here, or that a known project already
-    /// launches, has its account and environment afterwards.
-    pub(super) fn ensure_execution_environments(
-        &self,
+    fn execution_environments_event(
+        store: std::io::Result<Store>,
         projects: &[KnownProject],
         installed: &[String],
-    ) -> std::io::Result<Store> {
-        let mut tools = installed.to_vec();
-        for project in projects {
-            tools.extend(project.prefs.current_launch_tools());
-        }
-        environments::ensure_accounts(&tools)
-    }
-
-    fn execution_environments_reply(
-        &self,
-        client_id: &str,
-        context: Option<&ProjectContext>,
-    ) -> Vec<OutboundEvent> {
-        let projects = self.known_projects();
-        let installed = self.installed_tools();
-        let event = match self.ensure_execution_environments(&projects, &installed) {
+        project_root: Option<&Path>,
+    ) -> BackendEvent {
+        match store {
             Ok(store) => {
                 let is_installed = |tool: &str| {
                     gwt_agent::resolve_agent_id(tool).is_some_and(|agent| {
@@ -355,8 +339,8 @@ impl AppRuntime {
                 BackendEvent::ExecutionEnvironments {
                     view: Box::new(execution_environments_view(
                         &store,
-                        &projects,
-                        context.map(|context| context.project_root.as_path()),
+                        projects,
+                        project_root,
                         &is_installed,
                         &environments::tool_settings,
                     )),
@@ -364,10 +348,35 @@ impl AppRuntime {
             }
             Err(error) => BackendEvent::ExecutionEnvironmentError {
                 message: format!("Could not read the execution environments: {error}"),
-                project_root: project_root(context),
+                project_root: project_root.map(|path| path.display().to_string()),
             },
-        };
-        vec![OutboundEvent::reply(client_id, event)]
+        }
+    }
+
+    fn refresh_execution_environments(
+        &self,
+        client_id: &str,
+        context: Option<&ProjectContext>,
+    ) -> Vec<OutboundEvent> {
+        let projects = self.known_projects();
+        let installed = self.installed_tools();
+        let root = context.map(|context| context.project_root.clone());
+        let proxy = self.proxy.clone();
+        let reply_to = client_id.to_owned();
+        match self.blocking_tasks.try_spawn(move || {
+            let event = Self::execution_environments_event(
+                environments::adopt_signed_in_accounts(),
+                &projects,
+                &installed,
+                root.as_deref(),
+            );
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                reply_to, event,
+            )]));
+        }) {
+            Ok(_) => Vec::new(),
+            Err(error) => Self::execution_environment_error(client_id, context, error.to_string()),
+        }
     }
 
     fn execution_environment_error(
@@ -414,7 +423,9 @@ impl AppRuntime {
         event: FrontendEvent,
     ) -> Vec<OutboundEvent> {
         let outcome: Result<(), String> = match event {
-            FrontendEvent::GetExecutionEnvironments => Ok(()),
+            FrontendEvent::GetExecutionEnvironments => {
+                return self.refresh_execution_environments(client_id, context);
+            }
             FrontendEvent::AddExecutionEnvironment {
                 account_id,
                 via_tool,
@@ -452,7 +463,15 @@ impl AppRuntime {
             _ => return Vec::new(),
         };
         match outcome {
-            Ok(()) => self.execution_environments_reply(client_id, context),
+            Ok(()) => vec![OutboundEvent::reply(
+                client_id,
+                Self::execution_environments_event(
+                    environments::load(),
+                    &self.known_projects(),
+                    &self.installed_tools(),
+                    context.map(|context| context.project_root.as_path()),
+                ),
+            )],
             Err(message) => Self::execution_environment_error(client_id, context, message),
         }
     }
