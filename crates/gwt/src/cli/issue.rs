@@ -6668,16 +6668,8 @@ fn run_monitor_review_verdict<E: CliEnv>(
     });
     let payload =
         crate::runtime_daemon_events::issue_monitor_payload("control", payload, std::process::id());
-    let result = if evidence_review_token.is_some() {
-        crate::daemon_publisher::publish_durable_issue_monitor_control(env.repo_path(), payload)
-            .map_err(|error| error.to_string())
-    } else {
-        crate::daemon_publisher::publish_event(
-            env.repo_path(),
-            crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
-            payload,
-        )
-    };
+    let result =
+        crate::daemon_publisher::publish_durable_issue_monitor_control(env.repo_path(), payload);
     match result {
         Ok(()) => {
             out.push_str(&format!(

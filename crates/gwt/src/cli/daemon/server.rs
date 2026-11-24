@@ -6484,10 +6484,15 @@ async fn wait_control_receipt_reports_refusals_and_accepts_a_live_wait() {
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
             .expect("claim control receiver");
+        let receipt_id = uuid::Uuid::new_v4().to_string();
         let receipt = hub
-            .enqueue_issue_monitor_control(DaemonFrame::Ack)
+            .enqueue_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: serde_json::json!({ "ack_receipt_id": receipt_id }),
+            })
             .await
             .expect("admit control");
+        assert!(!hub.has_issue_monitor_control_receipt(&receipt_id));
         let (_, completion) = receiver.recv().await.expect("receive control").into_parts();
         let mut pending = None;
         assert!(!apply_or_queue_issue_monitor_control(
@@ -6512,6 +6517,10 @@ async fn wait_control_receipt_reports_refusals_and_accepts_a_live_wait() {
         assert!(pending.is_none(), "a settled wait is not a retry barrier");
         let completion = receipt.await.expect("completion is settled");
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert_eq!(
+            hub.has_issue_monitor_control_receipt(&receipt_id),
+            launched && !expired
+        );
         if expired {
             let message = completion
                 .expect_err("expired cap must reject renewal")
@@ -10270,6 +10279,9 @@ fn commit_issue_monitor_control_completion(
     monitor: &crate::IssueMonitorState,
     completion: IssueMonitorControlCompletion,
 ) {
+    // Publish proof as soon as the writer confirms the durable commit.
+    // The normal ACK still follows the agent status projection update.
+    completion.record_durable_commit();
     refresh_issue_monitor_agent_status(hub, monitor);
     completion.commit();
 }
@@ -10558,6 +10570,18 @@ async fn handle_connection(
                     issue_monitor: hub.wait_for_issue_monitor_status().await,
                 };
                 if out_tx.send(DaemonFrame::Status(snapshot)).is_err() {
+                    break;
+                }
+            }
+            Ok(ClientFrame::IssueMonitorControlReceipt { id }) => {
+                let response = if hub.has_issue_monitor_control_receipt(&id) {
+                    DaemonFrame::Ack
+                } else {
+                    DaemonFrame::Error {
+                        message: "Issues control commit receipt unavailable".into(),
+                    }
+                };
+                if out_tx.send(response).is_err() {
                     break;
                 }
             }
@@ -14751,6 +14775,7 @@ exit 0
         monitor: &mut crate::IssueMonitorState,
         payload: serde_json::Value,
     ) -> bool {
+        let receipt_id = payload["ack_receipt_id"].as_str().map(str::to_owned);
         let hub = BroadcastHub::new();
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
@@ -14796,6 +14821,10 @@ exit 0
             Ok(()),
             "successful receipt is the daemon ACK boundary after durable commit"
         );
+        if let Some(id) = receipt_id {
+            assert!(hub.has_issue_monitor_control_receipt(&id));
+            assert!(!hub.has_issue_monitor_control_receipt(&uuid::Uuid::new_v4().to_string()));
+        }
         should_scan
     }
 
@@ -16835,7 +16864,7 @@ exit 0
         let mut monitor =
             test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         let verdict = r#"{"schema":"gwt-autonomous-review/v1","overall":"pass","criteria":[]}"#;
-        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        let mut payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
                 "review_verdict": {
@@ -16846,6 +16875,7 @@ exit 0
             }),
             std::process::id() + 1,
         );
+        payload["ack_receipt_id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
 
         assert!(
             commit_issue_monitor_control_with_ack_for_test(&prefs_path, &mut monitor, payload)
