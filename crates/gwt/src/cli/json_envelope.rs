@@ -848,6 +848,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 branches: optional_string_vec(params, "branches")?,
             })
         }
+        "worktree.remove_merged" | "worktree.remove-merged" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "branches"],
+                "worktree.remove_merged",
+            )?;
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::RemoveMerged {
+                // Removing a worktree drops its directory and local branch, so
+                // an unqualified call only reports candidates (Issue #7324).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                branches: optional_string_vec(params, "branches")?,
+            })
+        }
         "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
             reject_unknown_params(
                 params,
@@ -5573,6 +5587,25 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    /// Issue #7324: an unqualified `worktree.remove_merged` is a dry run.
+    #[test]
+    fn worktree_remove_merged_defaults_to_a_dry_run() {
+        match ok("worktree.remove_merged", json!({})) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::RemoveMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(branches.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let error = err("worktree.remove_merged", json!({ "force": true }));
+        assert!(format!("{error}").contains("force"), "{error}");
     }
 
     #[test]

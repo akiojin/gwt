@@ -1022,6 +1022,10 @@ pub const OPERATIONS: &[Operation] = &[
         name: "worktree.gc_build_artifacts",
         aliases: &["worktree.gc-build-artifacts"],
     },
+    Operation {
+        name: "worktree.remove_merged",
+        aliases: &["worktree.remove-merged"],
+    },
 ];
 
 /// Canonical spellings only — the names worth suggesting.
@@ -1358,7 +1362,7 @@ mod tests {
             );
         }
         assert!(
-            index.contains("  worktree    1 operation(s); see gwtd --help worktree\n"),
+            index.contains("  worktree    2 operation(s); see gwtd --help worktree\n"),
             "{index}"
         );
     }

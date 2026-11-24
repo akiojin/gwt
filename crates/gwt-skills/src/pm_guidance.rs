@@ -2185,6 +2185,11 @@ quota:
   enough that the rebuild the next opener pays is worth it. Running
   worktrees are excluded by the operation itself, so it is safe to run
   while agents are active.
+- When the user asks to clean up worktrees that are no longer needed, use JSON
+  operation `worktree.remove_merged` instead of `git worktree remove`: the
+  default call is a dry run listing merged, idle, clean `work/*` worktrees and
+  every kept worktree with its reason; rerun with `dry_run:false` (optionally
+  `branches:[...]`) to remove them with their local branches.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -4731,6 +4736,7 @@ mod tests {
             "`dry_run:false`",
             "`include_unmerged:true`",
             "`include_protected_workspaces:true`",
+            "`worktree.remove_merged`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
