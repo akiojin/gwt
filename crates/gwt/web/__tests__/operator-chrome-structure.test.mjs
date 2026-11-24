@@ -241,11 +241,7 @@ test("index.html declares Operator chrome scaffold", () => {
     "#op-strip-waiting",
     "#op-strip-error",
     "#op-briefing",
-    "#op-palette-backdrop",
-    "#op-palette-input",
-    "#op-palette-list",
     "#op-hotkey-overlay",
-    "#op-palette-button",
   ]) {
     assert.ok(document.querySelector(sel), `missing chrome element: ${sel}`);
   }
@@ -278,21 +274,11 @@ test("SPEC-3038 Command Rail retires the legacy sidebar entirely", () => {
 
 // SPEC-3245 Stage E: the deprecated Intake launch entry is removed while the
 // normal Workspace route stays available.
-test("command rail and palette omit deprecated launch entries while preserving Open Issues", () => {
+test("command rail omits deprecated launch entries while preserving Open Issues", () => {
   assert.equal(
     document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]'),
     null,
     "the Command Rail must not expose a Start Work action",
-  );
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"start-work"/,
-    "Command Palette registry must not include start-work",
-  );
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"spawn-agent"/,
-    "Command Palette registry must not include the spawn-agent alias of Start Work",
   );
   assert.doesNotMatch(
     appSource,
@@ -304,24 +290,14 @@ test("command rail and palette omit deprecated launch entries while preserving O
     null,
     "the Command Rail must not expose the deprecated Intake action",
   );
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"intake-session"/,
-    "Command Palette registry must not include the deprecated Intake action",
-  );
   assert.match(
-    operatorShellSource,
-    /id:\s*"open-branches"/,
-    "Open Issues entry must remain available",
+    appSource,
+    /case "open-branches":/,
+    "Open Issues command route must remain available",
   );
 });
 
 test("deprecated Intake command route emits no open_intake_session wire", () => {
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
-    "Command Palette registry must not include the deprecated Intake entry",
-  );
   assert.doesNotMatch(
     appSource,
     /case\s+"intake-session":[\s\S]+kind:\s*"open_intake_session"/,
@@ -464,7 +440,7 @@ test("Command Rail retains navigation and direct surface entries without retired
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
+  assert.deepEqual(groups, ["Navigate", "Surfaces"]);
   for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
     assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
   }
@@ -477,12 +453,24 @@ test("Command Rail retains navigation and direct surface entries without retired
   assert.match(componentsStyle, /\.op-rail\s*\{[^}]*overflow-y:\s*auto/s);
 });
 
-test("Command Rail System group hosts the Command Palette trigger (SPEC-3038 US-1)", () => {
-  const systemGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="System"]');
-  assert.ok(systemGroup, "expected a System group in the rail");
-  const trigger = document.getElementById("op-palette-button");
-  assert.ok(trigger, "expected op-palette-button");
-  assert.ok(systemGroup.contains(trigger), "Command Palette trigger must live in the rail");
+// #7879 / SPEC #7007 item 36: the command palette is abolished. No rail
+// trigger, palette DOM, ⌘K / ⌘P shortcut, or palette wiring may remain.
+test("command palette is removed from the rail, DOM, and shortcuts (#7879)", () => {
+  for (const sel of [
+    "#op-palette-button",
+    "#op-palette-backdrop",
+    "#op-palette-input",
+    "#op-palette-list",
+    ".op-palette",
+    ".op-rail__icon--palette",
+  ]) {
+    assert.equal(document.querySelector(sel), null, `${sel} must be removed`);
+  }
+  assert.doesNotMatch(html, /⌘K|Command palette/i);
+  assert.doesNotMatch(operatorShellSource, /wireCommandPalette|createActionRegistry/);
+  assert.doesNotMatch(operatorShellSource, /"cmd\+k"|"cmd\+p"/);
+  assert.doesNotMatch(appSource, /__operatorShell\??\.palette|palette:\s*__op/);
+  assert.doesNotMatch(componentsStyle, /\.op-palette/);
 });
 
 test("Right-bottom floating controls are removed; the canvas corner is empty (SPEC-2356)", () => {
@@ -1218,12 +1206,16 @@ test("Branches detail-check checking state uses motion without animating static 
   );
 });
 
-test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
+test("hotkey overlay lists ⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
   const text = overlay.textContent.replace(/\s+/g, " ");
-  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "Esc"]) {
+  for (const phrase of ["⌘ B", "⌘ G", "⌘ L", "⌘ ?", "Esc"]) {
     assert.ok(text.includes(phrase), `expected ${phrase} in hotkey overlay`);
+  }
+  // #7879: ⌘K / ⌘P opened the retired command palette.
+  for (const phrase of ["⌘ K", "⌘ P"]) {
+    assert.ok(!text.includes(phrase), `${phrase} must not appear in the hotkey overlay`);
   }
   // SPEC-2356 Phase 9 (FR-021/FR-032): the Layout group + "Toggle sidebar / ⌘\\"
   // row are removed in favor of the hover-reveal peek 帯.
@@ -1417,11 +1409,9 @@ test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1
   assert.match(workspace.getAttribute("title") ?? "", /⌘G/);
 });
 
-test("Board and Logs retain their rail, palette and hotkey access paths (#4777)", () => {
+test("Board and Logs retain their rail and hotkey access paths (#4777)", () => {
   assert.ok(document.querySelector('.op-rail__surface[data-surface="board"]'));
   assert.ok(document.querySelector('.op-rail__item[data-cmd="open-logs"]'));
-  assert.match(operatorShellSource, /id:\s*"open-board"/);
-  assert.match(operatorShellSource, /id:\s*"open-logs"/);
   assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/);
   assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/);
 });
@@ -1435,49 +1425,6 @@ test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
   for (const fake of ["GO", "INFO"]) {
     assert.ok(!kbdTexts.includes(fake), `pseudo kbd badge ${fake} must be removed`);
   }
-});
-
-test("Command Rail items are icon buttons with accessible names and flyout labels (SPEC-3038 AS-1.2/AS-1.3)", () => {
-  // Issue #4777 T-1: the PM and the surface entries are labelled buttons,
-  // not icon-only ones; surface-rail.test.mjs owns their contract.
-  const items = Array.from(
-    document.querySelectorAll(".op-rail .op-rail__item:not([data-surface]):not(.op-rail__surface)"),
-  );
-  // System keeps its palette control; the bell moved to the shared header
-  // (Issue #7740).
-  assert.equal(items.length, 1);
-  for (const item of items) {
-    assert.ok(
-      item.getAttribute("aria-label"),
-      "every rail item must carry an aria-label (icon-only button)",
-    );
-    const icon = item.querySelector(".op-rail__icon");
-    assert.ok(icon, "every rail item must render a Unicode symbol icon");
-    assert.equal(
-      icon.getAttribute("aria-hidden"),
-      "true",
-      "rail icons are decorative — aria-hidden",
-    );
-    const flyout = item.querySelector(".op-rail__flyout");
-    assert.ok(flyout, "every rail item must provide a hover flyout label");
-    assert.equal(
-      flyout.getAttribute("aria-hidden"),
-      "true",
-      "flyout labels duplicate the aria-label — keep them aria-hidden",
-    );
-    assert.ok(
-      flyout.querySelector(".op-rail__flyout-label")?.textContent?.trim(),
-      "flyout must carry a readable label",
-    );
-  }
-});
-
-test("Command Palette trigger button declares aria-keyshortcuts", () => {
-  const trigger = document.getElementById("op-palette-button");
-  assert.ok(trigger, "palette trigger exists");
-  const shortcut = trigger.getAttribute("aria-keyshortcuts") ?? "";
-  assert.ok(shortcut.includes("Meta+K"), "trigger must declare Meta+K");
-  assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
 test("Command Rail is always visible — hover-reveal chrome is fully retired (SPEC-3038 AS-1.1/AS-1.6)", () => {
@@ -1913,7 +1860,7 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
   );
   assert.ok(
     overlay < modal,
-    "shared dialogs must stay above command palette overlays",
+    "shared dialogs must stay above blocking overlays",
   );
   assert.ok(modal < systemDegradation);
   assert.ok(systemDegradation < systemConnection);
@@ -1933,11 +1880,6 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
       name: "project picker and onboarding overlay",
       rule: inlineStyle.match(/\.project-picker,\s*\.project-onboarding\s*\{[^}]*\}/)?.[0],
       token: "--z-project-overlay",
-    },
-    {
-      name: "command palette overlay",
-      rule: componentsStyle.match(/\.op-palette-backdrop\s*\{[^}]*\}/)?.[0],
-      token: "--z-overlay",
     },
     {
       name: "runtime health popover",
@@ -2929,7 +2871,7 @@ test("Wizard modal manages focus on open and restores on close", () => {
 });
 
 test("Drawer modals close on Escape — keyboard parity with backdrop click", () => {
-  // The Hotkey overlay and Command Palette already had Esc-close (PR #2440).
+  // The Hotkey overlay already had Esc-close (PR #2440).
   // branch-cleanup and migration modals previously closed only on backdrop
   // click — keyboard users were trapped. app.js must wire a global keydown
   // that maps Escape to the same close path for both modals.
@@ -3016,27 +2958,6 @@ test("Hotkey overlay manages focus on open / close (modal dialog a11y)", () => {
   assert.match(operatorShellSource, /returnFocusTo\s*=\s*doc\.activeElement/);
   assert.match(operatorShellSource, /card\.focus\(\{\s*preventScroll:\s*true\s*\}\)/);
   assert.match(operatorShellSource, /returnFocusTo\.focus/);
-});
-
-test("Command Palette implements the WAI-ARIA combobox/listbox pattern", () => {
-  // The input must be a combobox that controls the list and announces the
-  // active option via aria-activedescendant. Without these the listbox role
-  // already on the <ul> is meaningless to screen readers.
-  const paletteInput = document.querySelector("#op-palette-input");
-  assert.ok(paletteInput, "expected palette input");
-  assert.equal(paletteInput.getAttribute("role"), "combobox");
-  assert.equal(paletteInput.getAttribute("aria-controls"), "op-palette-list");
-  assert.equal(paletteInput.getAttribute("aria-autocomplete"), "list");
-  // aria-expanded starts false; operator-shell flips it on open/close.
-  assert.equal(paletteInput.getAttribute("aria-expanded"), "false");
-  assert.match(paletteInput.getAttribute("aria-label") ?? "", /command/i);
-  // operator-shell.js must wire the dynamic pieces.
-  assert.match(operatorShellSource, /input\.setAttribute\("aria-expanded",\s*"true"\)/);
-  assert.match(operatorShellSource, /input\.setAttribute\("aria-activedescendant"/);
-  assert.match(operatorShellSource, /input\.removeAttribute\("aria-activedescendant"\)/);
-  assert.match(operatorShellSource, /li\.setAttribute\("role",\s*"option"\)/);
-  assert.match(operatorShellSource, /li\.setAttribute\("aria-selected"/);
-  assert.match(operatorShellSource, /li\.id\s*=\s*`op-palette-row-\$\{idx\}`/);
 });
 
 test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-drawer modal)", () => {
@@ -3175,24 +3096,15 @@ test("FR-044 (安心) / SPEC #3885 FR-015: fixed surface controls retain agent R
   assert.match(appSource, /updateWindowKillSwitchControls/);
 });
 
-test("#4777: STOP ALL is absent from the rail and remains in the palette with a confirm", () => {
+test("#4777: STOP ALL is absent from the rail and keeps its confirmed command route", () => {
   const railItem = document.querySelector('.op-rail__item[data-cmd="stop-all-windows"]');
   assert.equal(Boolean(railItem), false, "Stop all agents must be absent from the rail");
   assert.equal(Boolean(document.querySelector(".op-rail__item--stop-all")), false);
-  // op:command + palette both route to requestStopAllWindows, which confirms
-  // and emits stop_all_windows.
+  // op:command routes to requestStopAllWindows, which confirms and emits
+  // stop_all_windows. The palette entry retired with the palette (#7879).
   assert.match(appSource, /case "stop-all-windows":/);
-  assert.match(appSource, /id:\s*"stop-all-agents"/);
   assert.match(appSource, /kind:\s*"stop_all_windows"/);
   assert.match(appSource, /function requestStopAllWindows\(\)/);
-});
-
-test("FR-043 (安心): send-input routes to the focused agent pane via session_id", () => {
-  // The palette entry + helper inject one line into the focused agent pane
-  // using pane_send_input scoped to the window's session_id.
-  assert.match(appSource, /id:\s*"send-input-focused-agent"/);
-  assert.match(appSource, /kind:\s*"pane_send_input",\s*session_id:/);
-  assert.match(appSource, /function sendFocusedPaneInput\(/);
 });
 
 test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", () => {
@@ -4839,7 +4751,7 @@ test("SPEC #3206 v2: the notification bell lives in the shared header, not the r
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
+  assert.deepEqual(groups, ["Navigate", "Surfaces"]);
 });
 
 test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle, Esc closes, badge is wired (FR-009 / FR-014)", () => {

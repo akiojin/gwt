@@ -198,23 +198,6 @@
               <span class="op-rail__surface-label">Env vars</span>
             </button>
           </div>
-          <div class="op-rail__spacer" aria-hidden="true"></div>
-          <div class="op-rail__divider" aria-hidden="true"></div>
-          <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
-            <button
-              class="op-rail__item"
-              id="op-palette-button"
-              aria-label="Command palette"
-              title="Command palette (⌘K / ⌘P)"
-              aria-keyshortcuts="Meta+K Meta+P"
-            >
-              <span class="op-rail__icon op-rail__icon--palette" aria-hidden="true">⌘K</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Palette</span>
-                <kbd class="op-rail__kbd">⌘ K</kbd>
-              </span>
-            </button>
-          </div>
         </aside>
         <div class="surface-area">
           <div class="split-surfaces" id="split-surfaces" hidden></div>
@@ -363,29 +346,6 @@
         <div class="op-briefing__progress" aria-hidden="true"></div>
         <div class="op-briefing__online">— OPERATOR ONLINE —</div>
       </div>
-      <div class="op-palette-backdrop" id="op-palette-backdrop" aria-hidden="true">
-        <div
-          class="op-palette"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Command palette"
-        >
-          <input
-            type="text"
-            class="op-palette__input"
-            id="op-palette-input"
-            placeholder="Run a command…"
-            autocomplete="off"
-            data-hotkey-override="true"
-            role="combobox"
-            aria-controls="op-palette-list"
-            aria-autocomplete="list"
-            aria-expanded="false"
-            aria-label="Search commands"
-          />
-          <ul class="op-palette__list" id="op-palette-list" role="listbox"></ul>
-        </div>
-      </div>
       <div class="op-hotkey-overlay" id="op-hotkey-overlay" aria-hidden="true">
         <div
           class="op-hotkey-card"
@@ -397,14 +357,6 @@
           <h2 class="op-hotkey-card__title">Operator Hotkeys</h2>
           <div class="op-hotkey-card__group">
             <h3 class="op-hotkey-card__group-title">Navigation</h3>
-            <div class="op-hotkey-card__row">
-              <span>Command palette</span>
-              <kbd class="op-kbd">⌘ K</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Project switcher</span>
-              <kbd class="op-kbd">⌘ P</kbd>
-            </div>
             <div class="op-hotkey-card__row">
               <span>Board surface</span>
               <kbd class="op-kbd">⌘ B</kbd>

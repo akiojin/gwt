@@ -42,7 +42,7 @@ test.describe.serial("Recovery Center live backend", () => {
   });
 
   test("three real Store states filter independently and open the exact acknowledged Board article", async ({ page }, testInfo) => {
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
 
     const modal = page.locator("#recovery-center-modal");
     await expect(modal.getByRole("dialog", { name: "Recovery Center" })).toBeVisible();
@@ -152,8 +152,6 @@ test.describe.serial("Recovery Center live backend", () => {
     // Pause the reconnect timer, close the native socket, then open while offline.
     await page.clock.install();
     await page.clock.pauseAt(new Date(Date.now() + 1000));
-    await page.locator("#op-palette-button").click();
-    await page.locator("#op-palette-input").fill("Open Recovery Center");
     await page.evaluate(() => {
       const socket = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
         socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
@@ -163,7 +161,7 @@ test.describe.serial("Recovery Center live backend", () => {
     });
     await expect.poll(() => page.evaluate(() =>
       (window as any).__recoveryCenterClosedSocket.readyState)).toBe(3);
-    await page.keyboard.press("Enter");
+    await openRecoveryCenter(page);
     const modal = page.locator("#recovery-center-modal");
     await expect(modal).toHaveClass(/\bopen\b/);
     await expect(modal.locator(".recovery-center-status")).toContainText("Loading");
@@ -202,12 +200,12 @@ test.describe.serial("Recovery Center live backend", () => {
   });
 });
 
-async function runPaletteCommand(page: any, query: string): Promise<void> {
-  await page.locator("#op-palette-button").click();
-  const input = page.locator("#op-palette-input");
-  await expect(input).toBeVisible();
-  await input.fill(query);
-  await page.keyboard.press("Enter");
+async function openRecoveryCenter(page: any): Promise<void> {
+  // #7879: the command palette is retired; the op:command bus keeps the
+  // open-recovery-center route the palette used to dispatch.
+  await page.evaluate(() => document.dispatchEvent(
+    new CustomEvent("op:command", { detail: { id: "open-recovery-center" } }),
+  ));
 }
 
 async function installRecoveryCenterWireCapture(page: any): Promise<void> {

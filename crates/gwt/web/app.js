@@ -190,7 +190,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       } from "/window-worktree-form.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
-      // module loads so the theme toggle, command palette, hotkey overlay,
+      // module loads so the theme toggle, hotkey overlay,
       // status strip clock, and Mission Briefing intro are wired before the
       // rest of app.js continues bootstrapping the legacy surfaces.
       let __op;
@@ -202,7 +202,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         __op = {
           themeManager: null,
           hotkey: null,
-          palette: null,
         };
       }
       const projectOwnerHealthModel = createUiStateStore(null);
@@ -214,7 +213,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
-        palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyIssueMonitorStatus: (status) => applyKnowledgeIssueMonitorStatus(status),
         applyRuntimeHealth: (snapshot) => runtimeHealthModel.update(() => snapshot || {}),
@@ -1039,109 +1037,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const traceUi = uiTraceWiring.traceUi;
       const traceMeasure = uiTraceWiring.traceMeasure;
 
-      // SPEC-2359 US-41 Phase 8b: surface Workspace projection prune through
-      // the Command Palette. The dry-run entry previews the plan; the apply
-      // entry confirms before mutating projection files on disk.
-      if (window.__operatorShell?.palette) {
-        uiTraceWiring.registerPalette(window.__operatorShell.palette);
-        window.__operatorShell.palette.register({
-          id: "workspace-projection-prune-dry-run",
-          label: "Work: Prune Stale Projections (dry-run)",
-          group: "Work",
-          handler: () => {
-            send({
-              kind: "workspace_projection_prune",
-              dry_run: true,
-              ids: [],
-            });
-          },
-        });
-        window.__operatorShell.palette.register({
-          id: "workspace-projection-prune-apply",
-          label: "Work: Prune Stale Projections (apply)",
-          group: "Work",
-          handler: () => {
-            if (
-              window.confirm(
-                "Apply Work projection prune now? Archived entries past their grace period will be physically removed.",
-              )
-            ) {
-              send({
-                kind: "workspace_projection_prune",
-                dry_run: false,
-                ids: [],
-              });
-            }
-          },
-        });
-        // #4777: all-agent stop remains in the palette after its rail entry retires.
-        window.__operatorShell.palette.register({
-          id: "stop-all-agents",
-          label: "Agents: Stop All Running Agents",
-          group: "Agents",
-          handler: () => {
-            requestStopAllWindows();
-          },
-        });
-        // SPEC-2356 Anshin Addendum (FR-043): send a line of input to the focused
-        // agent pane from the palette.
-        window.__operatorShell.palette.register({
-          id: "send-input-focused-agent",
-          label: "Agent: Send Input to Focused Agent",
-          group: "Agents",
-          handler: () => {
-            promptSendFocusedPaneInput();
-          },
-        });
-      }
-
-      // SPEC-2356 Anshin Addendum (FR-043): inject one line of input into the
-      // focused agent pane. Targets the window's session_id (not its window id)
-      // so the backend can scope the injection to the caller's own pane. Returns
-      // true when a line was actually dispatched.
-      function focusedAgentWindowData() {
-        if (!focusedId) return null;
-        const windowData = workspaceWindowById(focusedId);
-        if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) {
-          return null;
-        }
-        return windowData;
-      }
-
-      function sendPaneInput(sessionId, text) {
-        const session = String(sessionId || "").trim();
-        const line = String(text ?? "");
-        if (!session || line.length === 0) {
-          return false;
-        }
-        return send({ kind: "pane_send_input", session_id: session, text: line }) !== "unavailable";
-      }
-
-      function sendFocusedPaneInput(text) {
-        const windowData = focusedAgentWindowData();
-        const sessionId = windowData?.session_id;
-        return sendPaneInput(sessionId, text);
-      }
-
-      // SPEC-2356 Anshin Addendum (FR-043): the Command Palette entry prompts for
-      // a single line and routes it to the focused agent pane.
-      function promptSendFocusedPaneInput() {
-        const windowData = focusedAgentWindowData();
-        if (!windowData) {
-          window.alert("Focus an agent window first to send it input.");
-          return;
-        }
-        if (!String(windowData.session_id || "").trim()) {
-          window.alert("This agent has no active session to send input to.");
-          return;
-        }
-        const label = windowDisplayTitle(windowData);
-        const text = window.prompt(`Send a line of input to ${label}:`);
-        if (text === null) {
-          return;
-        }
-        sendFocusedPaneInput(text);
-      }
+      // #7879: the command palette is abolished (SPEC #7007 item 36). UI trace
+      // stays a developer diagnostic reachable from the devtools console.
+      window.__operatorShell.uiTrace = {
+        start: uiTraceWiring.start,
+        stop: uiTraceWiring.stop,
+      };
 
       const { handlePayload: applyReleaseNotesPayload, handleError: applyReleaseNotesError, ...releaseNotesWindow } = createReleaseNotesWindow({
         document,
@@ -6276,8 +6177,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
       });
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
-      // Without this, Esc only worked for the Hotkey overlay and Command
-      // Palette; users were trapped in branch-cleanup / migration / wizard
+      // Without this, Esc only worked for the Hotkey overlay; users were trapped in branch-cleanup / migration / wizard
       // with pointer escape only. The window list dropdown also gets Esc
       // close so the operator chrome offers consistent keyboard escape.
       document.addEventListener("keydown", (event) => {
@@ -6362,7 +6262,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         refreshVisibleKnowledgeWindows();
       });
       window.addEventListener("pageshow", () => requestVisiblePmReports(true));
-      // SPEC-2356 — bridge Command Palette + hotkey commands into existing
+      // SPEC-2356 — bridge rail + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the existing socket transport.
 

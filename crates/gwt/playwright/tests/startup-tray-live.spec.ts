@@ -120,10 +120,11 @@ test("startup tray browser front door accepts input without page errors", async 
   await page.evaluate(theme => { document.documentElement.dataset.theme = theme; },
     info.project.name.includes("light") ? "light" : "dark");
   await expect(page.locator(".op-rail")).toBeVisible();
-  await page.locator("#op-palette-button").click();
-  await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute("data-open", "true");
+  // #7879: the retired command palette leaves no rail entry; hover a rail
+  // control instead to prove the startup chrome is interactive.
+  await expect(page.locator("#op-palette-button")).toHaveCount(0);
+  await page.locator('.op-rail__item[data-cmd="open-logs"]').hover();
+  await expect(page.locator("#rail-control-explanation")).toContainText("Logs");
   expect(errors).toEqual([]);
   const screenshot = info.outputPath("startup-browser.png");
   await page.screenshot({ path: screenshot });
