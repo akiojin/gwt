@@ -26,6 +26,7 @@ type Backend = {
   projects: unknown[];
   recent?: unknown[];
   conversation: Array<{ project_key: string; title: string; pm_available: boolean; decisions: unknown[]; error?: string }>;
+  pm?: { name: string; avatar: { kind: "preset"; preset_id: string } | { kind: "upload"; image: string } };
   // Project keys whose PM refuses a message.
   refuse?: string[];
 };
@@ -44,13 +45,17 @@ function collectBrowserErrors(page: Page): string[] {
 // "decide later" moves it to the tail, and the waiting count is the queue's.
 async function installHomeBackend(page: Page, backend: Backend) {
   await page.addInitScript(backend => {
-    const state = { sent: [] as any[], seq: 0 };
+    const state = { sent: [] as any[], seq: 0, rejectHomeRead: false };
     const queues = new Map<string, any[]>(backend.conversation.map(project => [project.project_key, [...project.decisions]]));
     const queueOf = (projectKey: string) => {
       const items = queues.get(projectKey) || [];
       return { waiting_count: items.length, items };
     };
     (window as any).__homeSent = state.sent;
+    (window as any).__setHomePm = (pm: Backend["pm"]) => {
+      backend.pm = pm;
+      state.rejectHomeRead = pm === undefined;
+    };
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -72,8 +77,10 @@ async function installHomeBackend(page: Page, backend: Backend) {
         if (message.kind === "frontend_ready") {
           this.reply({ kind: "hub_state", hub: { app_version: "9.9.9", projects: backend.projects, recent_projects: backend.recent || [] } });
         } else if (message.kind === "load_home_conversation") {
-          this.reply({ kind: "home_conversation", request_id: message.request_id, projects: backend.conversation.map(project => ({
-            ...project, decisions: queueOf(project.project_key).items, waiting_count: queueOf(project.project_key).waiting_count,
+          this.reply({ kind: "home_conversation", request_id: message.request_id, pm: backend.pm, projects: backend.conversation.map(project => ({
+            ...project,
+            ...(state.rejectHomeRead ? { error: "Home read deferred", decisions: [], waiting_count: 0 }
+              : { decisions: queueOf(project.project_key).items, waiting_count: queueOf(project.project_key).waiting_count }),
           })) });
         } else if (message.kind === "home_answer_decision" || message.kind === "home_defer_decision") {
           state.sent.push(message);
@@ -103,9 +110,10 @@ async function installHomeBackend(page: Page, backend: Backend) {
 
 async function openHome(page: Page, theme: string, backend: Backend) {
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
-  await installEmbeddedRoutes(page);
+  const baseUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!baseUrl) await installEmbeddedRoutes(page);
   await installHomeBackend(page, backend);
-  await page.goto(HUB_URL);
+  await page.goto(baseUrl ? new URL(new URL(HUB_URL).pathname, baseUrl).href : HUB_URL);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await expect(page.locator("[data-home]")).toBeVisible();
 }
@@ -126,6 +134,44 @@ const twoProjects: Backend = {
 };
 
 test.describe("Home conversation with the Project Manager", () => {
+  test("Issue #7638 Home and the shared header refresh the designated PM avatar", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    await page.clock.install();
+    await openHome(page, themeOf(testInfo.project.name), {
+      ...twoProjects,
+      pm: { name: "Cedar", avatar: { kind: "preset", preset_id: "fox" } },
+    });
+    const faces = page.locator("[data-home] .gwt-home__face, .app-head [data-destination=pm] .app-head__avatar");
+    await expect(page.locator(".gwt-home__head").getByRole("heading", { name: "Cedar" })).toBeVisible();
+    await expect(faces.first()).toBeVisible();
+    await expect(faces.last()).toBeVisible();
+    await expect.poll(() => faces.allTextContents()).toEqual(["🦊", "🦊", "🦊", "🦊", "🦊", "🦊"]);
+
+    const image = await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 128;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#2980b9";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/png");
+    });
+    await page.evaluate(image => (window as any).__setHomePm({ name: "Cedar", avatar: { kind: "upload", image } }), image);
+    await page.clock.runFor(5_100);
+    await expect(faces.locator("img")).toHaveCount(6);
+    for (const avatar of await faces.locator("img").all()) {
+      await expect(avatar).toHaveAttribute("src", image);
+      await expect(avatar).toHaveJSProperty("naturalWidth", 128);
+      const box = await avatar.boundingBox();
+      expect(box?.width).toBeGreaterThan(0);
+      expect(box?.width).toBe(box?.height);
+    }
+    await page.evaluate(() => (window as any).__setHomePm(undefined));
+    await page.clock.runFor(5_100);
+    await expect(page.locator("[data-home]").getByRole("alert")).toHaveCount(2);
+    await expect(faces.locator("img")).toHaveCount(3);
+    expect(errors).toEqual([]);
+  });
+
   test("AC-1: Home is the conversation and carries no project status or count", async ({ page }, testInfo) => {
     const errors = collectBrowserErrors(page);
     await openHome(page, themeOf(testInfo.project.name), twoProjects);

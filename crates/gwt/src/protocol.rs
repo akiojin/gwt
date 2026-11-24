@@ -1897,7 +1897,7 @@ pub struct ProjectOwnerHealthView {
 }
 
 /// Issue #7639: what one open project contributes to the Home conversation.
-/// Only decisions: project work status and counts stay on the project's own
+/// Project work status and counts stay on the project's own
 /// page (design item 5). Issue #7742: they are the project's gwtd decision
 /// queue, so Home, the header and the Decide screen show the same decisions.
 #[derive(Debug, Clone, Serialize)]
@@ -1911,6 +1911,14 @@ pub struct HomeProjectConversationView {
     pub decisions: Vec<gwt_core::decision_queue::DecisionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// The machine's designated PM, shown in the Home conversation and header.
+#[derive(Debug, Clone, Serialize)]
+pub struct HomePmView {
+    pub name: String,
+    #[serde(skip_serializing_if = "crate::agent_names::AgentAvatar::is_unset")]
+    pub avatar: crate::agent_names::AgentAvatar,
 }
 
 impl HomeProjectConversationView {
@@ -2913,6 +2921,9 @@ pub enum BackendEvent {
     /// Issue #7639: client-scoped reply to [`FrontendEvent::LoadHomeConversation`].
     HomeConversation {
         request_id: u64,
+        /// Omitted when the worker never started, null when no PM is designated.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pm: Option<Option<HomePmView>>,
         projects: Vec<HomeProjectConversationView>,
     },
     PmReports {
@@ -6132,7 +6143,8 @@ mod tests {
     }
 
     #[test]
-    fn home_conversation_carries_decisions_only() {
+    fn home_conversation_carries_pm_identity_and_decisions() {
+        use super::HomePmView;
         use crate::HomeProjectConversationView;
         let item: gwt_core::decision_queue::DecisionItem =
             serde_json::from_value(serde_json::json!({
@@ -6152,6 +6164,14 @@ mod tests {
         );
         let event = BackendEvent::HomeConversation {
             request_id: 3,
+            pm: Some(Some(HomePmView {
+                name: "Cedar".into(),
+                avatar: crate::agent_names::AgentAvatar {
+                    kind: crate::agent_names::AgentAvatarKind::Preset,
+                    preset_id: Some("fox".into()),
+                    image: None,
+                },
+            })),
             projects: vec![
                 view,
                 HomeProjectConversationView::from_queue(
@@ -6166,6 +6186,8 @@ mod tests {
         let value = serde_json::to_value(event).expect("serialize");
         assert_eq!(value["kind"], "home_conversation");
         assert_eq!(value["request_id"], 3);
+        assert_eq!(value["pm"]["name"], "Cedar");
+        assert_eq!(value["pm"]["avatar"]["preset_id"], "fox");
         let alpha = &value["projects"][0];
         assert_eq!(alpha["title"], "Alpha");
         assert_eq!(alpha["pm_available"], true);

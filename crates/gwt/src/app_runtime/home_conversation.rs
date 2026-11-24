@@ -8,11 +8,24 @@
 //! a window: the host resolves the rest from the project.
 
 use super::*;
+use gwt::protocol::HomePmView;
 
 const NO_PM: &str =
     "No Project Manager is running for this project. Open the project, then try again.";
 const NOT_OPEN: &str = "This project is not open. Open it from Projects, then try again.";
 const QUEUE_UNREADABLE: &str = "The decision queue could not be read.";
+
+fn home_pm() -> Option<HomePmView> {
+    let designation = gwt::first_run_setup::load_designation().ok().flatten()?;
+    let roster = gwt::agent_registry::SessionMemberSnapshot::load().ok();
+    let member = roster
+        .as_ref()
+        .and_then(|roster| roster.designated_pm(&designation));
+    Some(HomePmView {
+        name: member.map_or_else(|| designation.name, |member| member.name.clone()),
+        avatar: member.map_or_else(Default::default, |member| member.avatar.clone()),
+    })
+}
 
 impl AppRuntime {
     /// Read the decisions every open project's PM is waiting on.
@@ -52,6 +65,7 @@ impl AppRuntime {
                 &reply_client,
                 BackendEvent::HomeConversation {
                     request_id,
+                    pm: Some(home_pm()),
                     projects,
                 },
             )]));
@@ -64,6 +78,7 @@ impl AppRuntime {
                 &client_id,
                 BackendEvent::HomeConversation {
                     request_id,
+                    pm: None,
                     projects: self
                         .tabs
                         .iter()

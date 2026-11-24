@@ -171,7 +171,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
 
   const home = createHomeConversation({
     document: doc, window: win, send,
-    onWaitingChange: waiting => setPm({ decisions: waiting ?? 0 }),
+    onPmChange: setPm,
     onOpenFolder: () => openFolderDialog(),
     onClone: mode => openCloneDialog(mode),
     onOpenProjects: () => showView("projects"),
