@@ -73,7 +73,10 @@ function withDecisions(state, event) {
   }));
   // A rejected worker reply has queues with errors but no fresh PM view.
   const pm = event.pm === undefined ? state.pm : event.pm;
-  return withProjects({ ...state, pm, loaded: true, appliedRequest: event.request_id }, projects);
+  return withProjects({
+    ...state, pm, loaded: true, appliedRequest: event.request_id,
+    sent: reconcileSent(state.sent, projects),
+  }, projects);
 }
 
 function withProjects(state, projects) {
@@ -105,6 +108,21 @@ function withDecisionResult(state, event) {
   };
 }
 
+function reconcileSent(sent, projects) {
+  const claimed = sent.filter(receipt => receipt.nativeId)
+    .map(receipt => topicId(receipt.projectKey, receipt.nativeId));
+  return sent.map(receipt => {
+    if (receipt.nativeId) return receipt;
+    const project = projects.find(candidate => candidate.key === receipt.projectKey);
+    const message = project?.conversation?.messages?.find(item =>
+      item.role === "user" && item.text === receipt.text
+      && !receipt.previousIds.includes(item.id) && !claimed.includes(topicId(receipt.projectKey, item.id)));
+    if (!message) return receipt;
+    claimed.push(topicId(receipt.projectKey, message.id));
+    return { ...receipt, nativeId: message.id };
+  });
+}
+
 // What the outcome of the message to a PM changes: a refusal says why.
 function withSendResult(state, requestId, ok, error) {
   const pending = state.pending;
@@ -112,9 +130,13 @@ function withSendResult(state, requestId, ok, error) {
   if (!ok) {
     return { ...state, pending: null, failure: { topicId: null, message: error || COPY.refused } };
   }
+  const receipt = {
+    id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project,
+    text: pending.answer, at: Date.now(), previousIds: pending.previousIds,
+  };
   return {
     ...state, pending: null, failure: null, sentCount: state.sentCount + 1,
-    sent: [...state.sent, { id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project, text: pending.answer, at: Date.now() }],
+    sent: reconcileSent([...state.sent, receipt], state.projects),
   };
 }
 
@@ -152,7 +174,7 @@ function homeConversationView(state, route) {
         error: state.failure?.topicId === id ? state.failure.message : "",
       };
     });
-  const messages = state.sent.map(message => ({
+  const messages = state.sent.filter(message => !message.nativeId).map(message => ({
     id: message.id, kind: "message", projectKey: message.projectKey, project: message.project,
     createdAt: isoTime(message.at), lines: [message.text], status: COPY.delivered(message.project),
   }));
@@ -289,7 +311,12 @@ export function createHomeConversation({
       if (current.replyTo && decision(current.replyTo)) return answer(current.replyTo, body, null, true);
       const project = current.projects.find(candidate => candidate.key === projectKey);
       if (!project) return false;
-      return sendToPm({ topicId: null, projectKey: project.key, project: project.title, answer: body, fromComposer: true });
+      const previousIds = (project.conversation?.messages || [])
+        .filter(message => message.role === "user" && message.text === body).map(message => message.id);
+      return sendToPm({
+        topicId: null, projectKey: project.key, project: project.title,
+        answer: body, fromComposer: true, previousIds,
+      });
     },
     deleteTopic(id) {
       state.update(current => ({ ...current, hidden: [...current.hidden.filter(other => other !== id), id] }));

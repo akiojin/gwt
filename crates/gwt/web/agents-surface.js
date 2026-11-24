@@ -680,7 +680,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
       || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
     const pm = windows.find(window => window.is_pm && window.session_id && (
-      window.status === "stopped" || (activity.agents || []).some(assignment => assignment.is_pm
+      ["stopped", "error"].includes(window.status) || (activity.agents || []).some(assignment => assignment.is_pm
         && assignment.window_id === window.id && assignment.session_id === window.session_id)
     ));
     const identity = element.querySelector(".roster-pm-identity");

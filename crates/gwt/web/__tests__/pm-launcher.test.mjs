@@ -210,7 +210,10 @@ test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
   const end = appJs.indexOf("      function openHomeDecisions()", start);
   assert.ok(start >= 0 && end > start);
   const { update, setPaused } = new Function("document", "createUiStateStore", "isWindowWithinViewport", `
-    let pmWindowId;
+    let pmWindowId = null;
+    const readPmWindowState = () => ({ windows: {} });
+    const applyPmDecisions = () => {};
+    const applyPmReviewAttention = () => {};
     ${appJs.slice(start, end)}
     return {
       update: updatePmLauncher,

@@ -2585,9 +2585,16 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
         const previousPmId = pmWindowId;
         pmWindowId = pmWindow?.id ?? null;
-        if (previousPmId && previousPmId !== pmWindowId) {
-          applyPmDecisions(previousPmId, null);
-          applyPmReviewAttention(previousPmId, null);
+        if (previousPmId !== pmWindowId) {
+          if (previousPmId) {
+            applyPmDecisions(previousPmId, null);
+            applyPmReviewAttention(previousPmId, null);
+          }
+          if (pmWindowId) {
+            const current = readPmWindowState().windows[pmWindowId];
+            applyPmDecisions(pmWindowId, { waiting: current?.decisions?.waiting_count });
+            applyPmReviewAttention(pmWindowId, current?.current?.facts?.review_attention);
+          }
         }
 
         const railEntry = document.getElementById("op-pm-entry");
@@ -4431,7 +4438,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         return parts.join("");
       }
 
-      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
