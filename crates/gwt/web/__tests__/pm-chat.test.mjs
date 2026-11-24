@@ -1698,6 +1698,27 @@ const untypedItem = (id = 'untyped') => queueItem(id, { question: 'Approve the r
 const chatDecision = (root, id = 'decision-1') =>
   root.querySelector(`.pm-chat__conversation .pm-chat__decision[data-decision-id="${id}"]`);
 
+// SPEC #7007 T-016 (Issue #7634): a decision answered elsewhere first is
+// refused by the queue. The result carries the current queue, so the stale
+// decision leaves both surfaces at once, and the notice says it was already
+// settled instead of showing the queue's internal error and identifier.
+test('a decision answered elsewhere first leaves both surfaces with a plain notice', () => {
+  const { root, view, queue, settle, sent } = fixture();
+  queue([queueItem('decision-1'), queueItem('decision-2', { question: 'Which colour marks a waiting decision?' })]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__card[data-decision-id="decision-1"] .task-decisions__option').click();
+  assert.equal(sent.at(-1).decision_id, 'decision-1');
+  settle(false, [queueItem('decision-2', { question: 'Which colour marks a waiting decision?' })],
+    'Config error: decision decision-1 is no longer open (answered)');
+  assert.equal(root.querySelectorAll('[data-decision-id="decision-1"]').length, 0,
+    'the settled decision leaves Decide and the conversation');
+  assert.equal(root.querySelectorAll('.task-decisions__card').length, 1);
+  assert.equal(root.querySelector('.task-decisions__notice').textContent,
+    'This decision was already settled elsewhere. Your answer was not recorded.');
+  assert.equal(root.querySelector('.task-decisions__send-error'), null);
+  assert.doesNotMatch(root.textContent, /Config error|no longer open|decision-1/);
+});
+
 // SPEC #7007 T-023 AC-1 / AC-2, Issue #7742: a waiting decision is drawn by
 // Decide and by the PM conversation only, both read the gwtd queue, and an
 // answer is a queue request that both settle on together.
@@ -1740,12 +1761,16 @@ test('Decide and the PM conversation share answer pending, failure, retry and co
   assert.match(chatControls().querySelector('[role="status"]').textContent, /Sending/);
   root.querySelector('.task-decisions__option').click();
   assert.equal(sent.length, 1, 'switching surfaces cannot duplicate an in-flight answer');
-  settle(false, null, 'Decision decision-1 is no longer open.');
-  assert.match(chatControls().querySelector('[role="alert"]').textContent, /no longer open/);
+  // SPEC #7007 T-014 / T-016: the queue's own wording and identifiers stay
+  // off the surfaces; the refusal says what happened and the next step.
+  settle(false, null, 'Config error: decision decision-1 is unavailable');
+  const refusal = 'The answer was not recorded. Reload this window, then try again.';
+  assert.equal(chatControls().querySelector('[role="alert"]').textContent, refusal);
   assert.equal(chatControls().querySelector('.pm-chat__decision-option').disabled, false);
   assert.ok(chatControls().querySelectorAll('.pm-chat__decision-option')[1] === option,
     'a failed answer leaves the original option available for keyboard retry');
-  assert.match(root.querySelector('.task-decisions__card').textContent, /no longer open/);
+  assert.equal(root.querySelector('.task-decisions__send-error').textContent, refusal);
+  assert.doesNotMatch(root.textContent, /Config error|decision-1 is/);
   chatControls().querySelector('.pm-chat__decision-option').click();
   assert.equal(sent.length, 2, 'an explicit choice retries the failed answer');
   assert.equal(sent[1].answer, '1. Use <short> wording');
@@ -1924,7 +1949,7 @@ test('Decide keeps a decision actionable and shows the error when the answer is 
   assert.equal(sent.length, 1);
   settle(false, null, 'The decision queue is unreadable.');
   const card = root.querySelector('.task-decisions__card');
-  assert.match(card.textContent, /The decision queue is unreadable\./);
+  assert.match(card.textContent, /The answer was not recorded\. Reload this window, then try again\./);
   const options = card.querySelectorAll('.task-decisions__option');
   assert.equal(options.length, 2, 'the decision stays actionable after a refused answer');
   assert.equal(options[0].disabled, false);
