@@ -220,7 +220,7 @@ function scopeSettingsControlIds(panel) {
 
 
 function renderIssuesSettingsPanel(panel, options) {
-  const { project, status, send, launchControls = [], catalog = {} } = options;
+  const { project, status, send, launchControls = [], catalog = {}, autonomyControl = null } = options;
   const document = panel.ownerDocument;
   const labelsScrollTop = panel.querySelector(".settings-label-options")?.scrollTop ?? 0;
   const focusedLabel = panel.dataset.pendingLabelFocus ?? (panel.contains(document.activeElement) ? document.activeElement?.dataset.repositoryLabel : undefined);
@@ -266,9 +266,20 @@ function renderIssuesSettingsPanel(panel, options) {
     return input;
   };
   const launch = group("Launch control");
+  // Issue #7728: monitoring has no switch of its own. It follows the one
+  // project stop/start, shared with the Hub project list.
+  if (autonomyControl) {
+    const field = document.createElement("div");
+    field.className = "settings-field";
+    field.dataset.settingsLaunchAction = "project-autonomy";
+    const caption = document.createElement("span");
+    caption.textContent = "Project";
+    field.append(caption, autonomyControl.element);
+    setControlExplanation(autonomyControl.element, "Stop or start this project. Stopping halts new Issue assignments and the Project Manager patrol together; agents already working finish first.", "settings-project-autonomy");
+    launch.appendChild(field);
+  }
   for (const [action, name, key, kind] of [
     ["monitor-autonomous", "Autonomous", "autonomous_mode", "set_issue_monitor_autonomous_mode"],
-    ["monitor-toggle", "Monitoring", "enabled", "set_issue_monitor_enabled"],
   ]) {
     const slot = document.createElement("span");
     let control = launchControls.find(control => control.dataset.action === action);
@@ -287,9 +298,7 @@ function renderIssuesSettingsPanel(panel, options) {
     control.checked = status?.[key] === true;
     control.dataset.confirmed = String(control.checked);
     control.disabled = !status;
-    setControlExplanation(control, action === "monitor-autonomous"
-      ? "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent."
-      : "Start or pause monitoring for queued issues.", `settings-${action}`);
+    setControlExplanation(control, "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent.", `settings-${action}`);
     slot.appendChild(control);
     row(launch, name, slot).dataset.settingsLaunchAction = action;
   }
@@ -989,6 +998,9 @@ export function createSettingsSurface({
   renderProjectEnvironments = null,
   renderPmEnvironments = null,
   projectEnvironmentSetsModel = createUiStateStore({}),
+  // Issue #7728: the PM half of the project stop/start state.
+  projectAutonomyPmModel = createUiStateStore({ paused: null }),
+  createProjectAutonomyControl = null,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1314,13 +1326,31 @@ export function createSettingsSurface({
         const root = body.dataset.settingsProjectRoot || "";
         return issueSettingsModel.read()[root] || {};
       }
+      // Issue #7728: one control per Settings window, re-rendered in place.
+      function projectAutonomyControl(body, status, dispatch) {
+        if (!createProjectAutonomyControl) return null;
+        body.projectAutonomyControl ??= createProjectAutonomyControl({
+          projectTitle: () => body.dataset.settingsProjectName || "",
+          send: running => body.projectAutonomyDispatch?.({ kind: "set_project_autonomy", running }),
+        });
+        body.projectAutonomyDispatch = dispatch;
+        const pmPaused = projectAutonomyPmModel.read().paused;
+        body.projectAutonomyControl.update(status ? {
+          monitor_enabled: status.enabled === true, pm_paused: pmPaused, active_agents: status.active_count ?? 0,
+        } : null);
+        return body.projectAutonomyControl;
+      }
+      projectAutonomyPmModel.subscribe(state => state.paused, () => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
       function renderProjectSettings(body) {
         const root = body.dataset.settingsProjectRoot || "";
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
-        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"]')];
         for (const control of launchControls) {
-          control.checked = current.status?.[control.dataset.action === "monitor-autonomous" ? "autonomous_mode" : "enabled"] === true;
+          control.checked = current.status?.autonomous_mode === true;
           control.dataset.confirmed = String(control.checked);
           control.disabled = !current.status;
         }
@@ -1370,6 +1400,7 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, catalog: current.catalog, labelsPending: Array.isArray(current.labelsExpected), profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
+            autonomyControl: section === "issues" ? projectAutonomyControl(body, current.status, dispatch) : null,
             availableMembers, tuningController, onReloadProfile,
           });
         }
@@ -1643,6 +1674,8 @@ export function createSettingsSurface({
       function disposeSettingsBody(body) {
         if (!body) return;
         body.settingsExplanations?.dispose();
+        body.projectAutonomyControl?.unmount?.();
+        body.projectAutonomyControl = null;
         for (const panel of body.querySelectorAll("[data-settings-candidates]")) {
           for (const unsubscribe of panel.candidateTuningUnsubscribers || []) unsubscribe();
           panel.candidateTuningUnsubscribers = [];

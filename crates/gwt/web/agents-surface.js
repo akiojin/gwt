@@ -129,19 +129,37 @@ export function createAgentsSurface({ document, storage, executionModel, project
   // Issue #7035 AC-1: review windows hold max_active slots without a roster
   // member, so they are listed from the same child census Busy reads.
   const liveReviews = () => (activityModel.read().agents || []).filter(assignment => !assignment.is_pm && assignment.review_dispatch);
+  const exactReview = target => !disposed && finite(activityModel.read().count) && liveReviews().find(review =>
+    review.window_id === target?.window_id && review.session_id === target?.session_id && review.runtime_incarnation === target?.runtime_incarnation);
+  function selectReview(target) {
+    if (!exactReview(target)) return false;
+    if (tab !== "team") { tab = "team"; sync(); }
+    const row = [...element.querySelectorAll(".roster-review")].find(row => row.dataset.reviewSessionId === target.session_id);
+    row?.querySelector("button")?.focus(); row?.scrollIntoView?.({ block: "nearest" });
+    return !!row;
+  }
   function renderReviews() {
     const host = element.querySelector(".roster-reviews"), reviews = liveReviews();
+    const focused = host.contains(document.activeElement) ? document.activeElement.closest(".roster-review")?.dataset : null;
+    let focusTarget = null;
     host.replaceChildren(...reviews.map(review => {
       const row = document.createElement("article"); row.className = "roster-row roster-review"; row.setAttribute("role", "listitem");
       row.dataset.reviewSessionId = review.session_id;
-      const who = document.createElement("div"), name = document.createElement("h3"), purpose = document.createElement("span"), state = document.createElement("span");
+      row.dataset.windowId = review.window_id; row.dataset.runtimeIncarnation = String(review.runtime_incarnation);
+      const who = document.createElement("div"), name = document.createElement("h3"), purpose = document.createElement("button"), state = document.createElement("span");
       who.className = "roster-who"; purpose.className = "roster-purpose"; state.className = "roster-state";
       name.textContent = review.agent_name || "Reviewer";
       purpose.textContent = review.issue_number ? `Review · Issue #${review.issue_number}` : "Review"; purpose.title = purpose.textContent;
+      purpose.type = "button"; purpose.setAttribute("aria-label", `Open ${name.textContent} review terminal`);
+      purpose.disabled = !finite(activityModel.read().count);
+      purpose.addEventListener("click", () => { const current = exactReview(review); if (current) onOpenWork(current); });
+      if (focused?.windowId === review.window_id && focused.reviewSessionId === review.session_id
+        && focused.runtimeIncarnation === String(review.runtime_incarnation) && exactReview(review)) focusTarget = purpose;
       state.textContent = `Reviewing${review.issue_number ? ` #${review.issue_number}` : ""}`;
       who.append(name, purpose); row.append(avatar({ name: name.textContent }), who, state);
       return row;
     }));
+    focusTarget?.focus({ preventScroll: true });
     host.hidden = reviews.length === 0;
     return reviews.length;
   }
@@ -760,5 +778,5 @@ export function createAgentsSurface({ document, storage, executionModel, project
   if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
-  return { element, sync, syncPreview, selectMember, openPmSettings, setPreviewHost, setView, get view() { return view; }, dispose() { if (disposed) return; historyPlans.unmount(); releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); closeRemoval(); document.removeEventListener("keydown", removalEscape); removal.remove(); disposed = true; } };
+  return { element, sync, syncPreview, selectMember, selectReview, openPmSettings, setPreviewHost, setView, get view() { return view; }, dispose() { if (disposed) return; historyPlans.unmount(); releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); closeRemoval(); document.removeEventListener("keydown", removalEscape); removal.remove(); disposed = true; } };
 }

@@ -399,6 +399,29 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(row.locator(".roster-purpose")).toHaveText("Review · Issue #2970");
     await expect(row.locator(".roster-state")).toHaveText("Reviewing #2970");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 3 / Team 3");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.echoInputForWorks());
+    for (const width of [1440, 400]) {
+      await page.setViewportSize({ width, height: 1000 });
+      const open = row.getByRole("button", { name: "Open Uta review terminal" });
+      await open.focus(); await open.press("Enter");
+      await expect(main(page)).toHaveAttribute("data-surface", "works");
+      await expect(full(page).locator(".works-full-name")).toHaveText("Uta");
+      const native = full(page).locator(".xterm");
+      await expect(native).toHaveCount(1);
+      if (width === 1440) await native.evaluate(node => { (window as any).__reviewNative = node; });
+      expect(await native.evaluate(node => node === (window as any).__reviewNative)).toBe(true);
+      await page.evaluate(() => (window as any).__worksAgentsFixture.output("review-window", "Review output\r\n"));
+      await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("review-window"))).toContain("Review output");
+      await full(page).locator(".xterm-helper-textarea").press("r");
+      expect((await sent(page)).some(message => message.kind === "terminal_input" && message.id === "review-window" && message.data === "r")).toBe(true);
+      const name = full(page).getByRole("button", { name: "View Uta in Agents" });
+      await name.focus(); await name.press("Space");
+      await expect(main(page)).toHaveAttribute("data-surface", "agents");
+      await expect(roster(page).getByRole("tab", { name: "Team", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(open).toBeFocused();
+      await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+      await page.screenshot({ path: info.outputPath(`review-navigation-${width}.png`) });
+    }
     await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
     await page.screenshot({ path: info.outputPath("issue-7035-review-windows.png") });
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(["pm-window", "agent-one"]));
@@ -1689,8 +1712,10 @@ async function installWorksAgentsBackend(page: Page) {
       releaseSchedule() { if (!pendingSchedule) throw new Error("no schedule mutation is pending"); const action = pendingSchedule; pendingSchedule = null; applySchedule(action); },
       output(id: string, text: string) { socket.emit({ kind: "terminal_output", id, data_base64: btoa(text) }); },
       reviewWindow(issue_number: number) {
+        windows.push(baseWindow("review-window", { preset: "codex", agent_id: "codex", session_id: "s-review", agent_name: "Uta", dynamic_title: `Review · Issue #${issue_number}`, linked_issue_number: issue_number }));
         agents = [...agents, { window_id: "review-window", session_id: "s-review", runtime_incarnation: 1, issue_number,
           is_pm: false, review_dispatch: true, agent_name: "Uta" }];
+        socket.emit(workspace());
         socket.emit(activity());
       },
       census(ids: string[] | null) {

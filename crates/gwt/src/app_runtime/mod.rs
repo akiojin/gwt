@@ -1081,6 +1081,13 @@ pub(crate) mod pm;
 mod pm_chat;
 mod profile;
 pub(crate) mod project_execution_policy;
+
+/// Issues can assign work only with a saved launch profile.
+fn issue_monitor_has_launch_profile(project_root: &Path) -> bool {
+    gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+        .ok()
+        .is_some_and(|prefs| prefs.launch_auto || !prefs.launch_profile_pool().is_empty())
+}
 mod project_notifications;
 mod project_route;
 mod project_tabs;
@@ -11870,6 +11877,19 @@ impl AppRuntime {
         });
         log_frontend_user_action(&client_id, &event);
         match event {
+            FrontendEvent::SetProjectAutonomy {
+                project_key: Some(key),
+                running,
+            } => {
+                let Some(context) = self
+                    .project_contexts()
+                    .into_iter()
+                    .find(|context| context.project_key.as_str() == key)
+                else {
+                    return Vec::new();
+                };
+                self.set_project_autonomy_events(&context, client_id, running)
+            }
             FrontendEvent::RefreshOrphanDaemons => self.start_orphan_observation(client_id, None),
             FrontendEvent::LoadHomeConversation { request_id } => {
                 self.load_home_conversation_events(client_id, request_id)
@@ -13076,52 +13096,37 @@ impl AppRuntime {
                 self.handle_launch_wizard_action_for_client(context, Some(&client_id), action)
             }
             FrontendEvent::SetIssueMonitorEnabled { enabled } => {
-                if enabled {
-                    let has_launch_profile = Some(context.project_root.as_path())
-                        .map(|project_root| {
-                            let prefs_path =
-                                gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-                            gwt::load_issue_monitor_prefs(&prefs_path)
-                                .ok()
-                                .is_some_and(|prefs| {
-                                    prefs.launch_auto || !prefs.launch_profile_pool().is_empty()
-                                })
-                        })
-                        .unwrap_or(false);
-                    if !has_launch_profile {
-                        let project_root = Some(context.project_root.clone());
-                        let mut events = self.open_issue_monitor_configure_profile_wizard_events(
-                            context, &client_id,
+                if enabled && !issue_monitor_has_launch_profile(&context.project_root) {
+                    let project_root = Some(context.project_root.clone());
+                    let mut events = self
+                        .open_issue_monitor_configure_profile_wizard_events(context, &client_id);
+                    if let Some(project_root) = project_root {
+                        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+                        let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+                            .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
+                        let mut monitor = gwt::IssueMonitorState::with_prefs(
+                            gwt::IssueMonitorConfig::default(),
+                            prefs,
                         );
-                        if let Some(project_root) = project_root {
-                            let prefs_path =
-                                gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-                            let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
-                                .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
-                            let mut monitor = gwt::IssueMonitorState::with_prefs(
-                                gwt::IssueMonitorConfig::default(),
-                                prefs,
-                            );
-                            gwt::issue_monitor_worker::bind_issue_monitor_source_repository(
-                                &mut monitor,
-                                &project_root,
-                            );
-                            let mut status = monitor.status_view();
-                            self.apply_issue_monitor_launch_profile_status(
-                                &mut status,
-                                Some(project_root.as_path()),
-                            );
-                            self.fill_update_drain_blocking(&mut status, &monitor);
-                            self.remember_issue_monitor_status(Some(&project_root), &status);
-                            events.push(OutboundEvent::reply(
-                                client_id.clone(),
-                                BackendEvent::IssueMonitorStatus {
-                                    status: Box::new(status),
-                                },
-                            ));
-                        }
-                        return events;
+                        gwt::issue_monitor_worker::bind_issue_monitor_source_repository(
+                            &mut monitor,
+                            &project_root,
+                        );
+                        let mut status = monitor.status_view();
+                        self.apply_issue_monitor_launch_profile_status(
+                            &mut status,
+                            Some(project_root.as_path()),
+                        );
+                        self.fill_update_drain_blocking(&mut status, &monitor);
+                        self.remember_issue_monitor_status(Some(&project_root), &status);
+                        events.push(OutboundEvent::reply(
+                            client_id.clone(),
+                            BackendEvent::IssueMonitorStatus {
+                                status: Box::new(status),
+                            },
+                        ));
                     }
+                    return events;
                 }
                 let publication = self.publish_project_issue_monitor_control(
                     context,
@@ -13139,6 +13144,19 @@ impl AppRuntime {
                         Ok(())
                     },
                 )
+            }
+            FrontendEvent::SetProjectAutonomy {
+                project_key,
+                running,
+            } => {
+                if project_key
+                    .as_deref()
+                    .is_some_and(|key| key != context.project_key.as_str())
+                {
+                    tracing::warn!(project_key = %context.project_key, "rejected project stop/start for another project");
+                    return Vec::new();
+                }
+                self.set_project_autonomy_events(context, client_id, running)
             }
             FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
                 let publication = self.publish_project_issue_monitor_control(
@@ -14051,6 +14069,62 @@ impl AppRuntime {
         ]
     }
 
+    /// Issue #7728: the one project stop/start. Stop pauses the PM patrol and
+    /// Issues assignment together; running sessions finish their work.
+    /// Start resumes the PM only once assignment can start (fail closed).
+    pub(crate) fn set_project_autonomy_events(
+        &mut self,
+        context: &ProjectContext,
+        client_id: ClientId,
+        running: bool,
+    ) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        let assignment_ready = !running || issue_monitor_has_launch_profile(&context.project_root);
+        if assignment_ready {
+            events.extend(self.set_pm_paused_events(context, !running));
+        }
+        events.extend(self.handle_frontend_event_for_project(
+            context,
+            client_id,
+            FrontendEvent::SetIssueMonitorEnabled { enabled: running },
+        ));
+        events.push(self.hub_state_broadcast());
+        events
+    }
+
+    fn project_autonomy_view(&self, context: &ProjectContext) -> Option<gwt::ProjectAutonomyView> {
+        let state = self.project_state(context)?;
+        let cached = state
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .map(|status| (status.enabled, status.active_count));
+        let (monitor_enabled, active_agents) = match cached {
+            Some(observed) => observed,
+            None => {
+                let prefs = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+                )
+                .ok()?;
+                let enabled = prefs.enabled;
+                let monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                (enabled, monitor.active_issue_numbers().len())
+            }
+        };
+        let pm_paused = gwt::pm_registry::load_pm_prefs(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+        )
+        .ok()?
+        .settings
+        .paused;
+        Some(gwt::ProjectAutonomyView {
+            monitor_enabled,
+            pm_paused,
+            active_agents: u32::try_from(active_agents).unwrap_or(u32::MAX),
+        })
+    }
+
     pub(crate) fn hub_state_view(&self) -> gwt::HubStateView {
         self.sync_orphan_context();
         gwt::HubStateView {
@@ -14064,6 +14138,9 @@ impl AppRuntime {
                         execution: self
                             .project_context(&tab.id)
                             .map(|context| self.project_execution_status(&context, None)),
+                        autonomy: self
+                            .project_context(&tab.id)
+                            .and_then(|context| self.project_autonomy_view(&context)),
                         owner_health: self
                             .project_state_for_tab(&tab.id)
                             .and_then(|state| state.project_owner_health.clone()),

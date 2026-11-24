@@ -188,7 +188,7 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
     await page.evaluate(enabled => (window as any).__operatorShell.applyIssueMonitorStatus({
       enabled, autonomous_mode: enabled, state: "idle", queue_len: 0, active_count: 0, max_active_agents: 2,
     }), enabled);
-    await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText(enabled ? "Stop" : "Start");
+    await expect(page.locator('[data-role="monitor-state"]')).toHaveText(enabled ? "Assigning" : "Not assigning");
     await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", String(enabled));
     await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle · 0 queued · 0 of 2 active" : "Off");
     await expect(search).toBeFocused();
@@ -198,7 +198,7 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
   await page.evaluate(() => (window as any).__otherEmit({ kind: "issue_monitor_status", status: {
     enabled: true, autonomous_mode: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
   } }));
-  await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
+  await expect(page.locator('[data-role="monitor-state"]')).toHaveText("Assigning");
   await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Running · 3 queued · 1 of 2 active");
   await expect(page.locator('[data-metric="queue"]')).toHaveText("Queue 3");

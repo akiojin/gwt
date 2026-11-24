@@ -155,8 +155,7 @@ test("AC-6: PM Settings explains existing controls on focus and hover without ac
   panel.applyStatus(RUNNING_STATUS);
   const view = views[0];
   for (const [role, meaning] of [
-    ["pm-autonomy-status", /coordination.*Issues/i],
-    ["pm-pause-toggle", /keeping the Project Manager available/i],
+    ["pm-autonomy-status", /follows the project stop\/start/i],
     ["pm-loop-interval", /Minimum: 10 seconds/i],
     ["pm-auto-start", /automatically.*opens/i], ["pm-restart", /new conversation/i],
   ]) {
@@ -245,7 +244,7 @@ test("own operations retain drafts and refuse writes on incomplete or foreign st
   panel.applyStatus({ ...RUNNING_STATUS, auto_start: undefined, loop_interval_secs: 90 });
   assert.equal(interval.value, "77"); assert.equal(auto.checked, false); assert.equal(interval.disabled, true);
   interval.dispatchEvent(changeEvent(document)); auto.dispatchEvent(changeEvent(document));
-  document.querySelector('[data-role="pm-pause-toggle"]').click(); assert.deepEqual(sent, []);
+  assert.deepEqual(sent, []);
   panel.applyStatus({ ...RUNNING_STATUS, project_key: "foreign", auto_start: true, loop_interval_secs: 99 });
   assert.equal(interval.value, "77"); assert.equal(auto.checked, false); assert.equal(interval.disabled, true);
   panel.applyStatus({ ...RUNNING_STATUS, configured_member_id: null, profile_revision: null, configured_agent_id: null, loop_interval_secs: 80 });
@@ -289,7 +288,7 @@ test("FR-132: late and existing mounts share the latest frame snapshot while act
   }
 
   applyStatus({ available: false });
-  required(views[0], '[data-role="pm-pause-toggle"]').click();
+  required(views[0], '[data-role="pm-restart"]').click();
   assert.deepEqual(sent, [], "an action rejects unavailable state before its frame renders");
   panel.unmount(views[0]);
   lateView.remove();
@@ -448,52 +447,30 @@ test("FR-026: Auto start トグルは set_pm_auto_start を送る", () => {
   assert.deepEqual(sent.at(-1), { kind: "set_pm_auto_start", enabled: true });
 });
 
-test("#3812 AC-5: Pause/Resume is unavailable before project hydration", () => {
-  const { views, sent } = fixture();
-  const toggle = required(views[0], '[data-role="pm-pause-toggle"]');
-  assert.ok(toggle.classList.contains("wizard-button"));
-  assert.equal(toggle.disabled, true);
-  toggle.click();
-  assert.deepEqual(sent, []);
-});
-
-test("#3812 AC-5: Pause/Resume shares backend state without changing PM residency or Issues", () => {
+// Issue #7728 AC-2: the patrol has no Pause/Resume of its own. It follows
+// the one project stop/start and only reports the state it is in.
+test("#7728 AC-2: the PM patrol follows the project stop/start without its own switch", () => {
   const { document, views, sent, panel } = fixture({ mounts: 2 });
-  panel.applyStatus({ ...RUNNING_STATUS, is_running: false, paused: false });
-  const toggle = required(views[0], '[data-role="pm-pause-toggle"]');
-  assert.equal(toggle.disabled, false, "pause is independent of PM registration");
-  assert.equal(toggle.textContent, "Pause");
-  toggle.click();
-  assert.deepEqual(sent, [{ kind: "set_pm_paused", paused: true }]);
-
   panel.applyStatus({ ...RUNNING_STATUS, paused: true });
   const lateView = document.createElement("section");
   document.body.appendChild(lateView);
   panel.mount(lateView);
   views.push(lateView);
   for (const view of views) {
-    const pausedToggle = required(view, '[data-role="pm-pause-toggle"]');
-    assert.equal(pausedToggle.textContent, "Resume");
-    assert.equal(pausedToggle.getAttribute("aria-pressed"), "true");
+    assert.equal(view.querySelector('[data-role="pm-pause-toggle"]'), null, "no independent pause control");
+    assert.equal([...view.querySelectorAll("button")].some(button => /^(Pause|Resume)$/.test(button.textContent)), false);
     const status = required(view, '[data-role="pm-autonomy-status"]');
     assert.ok(status.classList.contains("settings-status"));
-    assert.equal(status.textContent, "Autonomous loop paused");
+    assert.equal(status.textContent, "Autonomous loop stopped with the project");
     assert.equal(status.getAttribute("role"), "status");
     assert.equal(status.getAttribute("aria-live"), "polite");
-    assert.match(required(view, '[data-role="pm-running-as"]').textContent, /Running as:/);
+    assert.match(view.textContent, /follows the project stop\/start/);
   }
-
-  required(lateView, '[data-role="pm-pause-toggle"]').click();
-  assert.deepEqual(sent, [
-    { kind: "set_pm_paused", paused: true },
-    { kind: "set_pm_paused", paused: false },
-  ]);
   panel.applyStatus({ ...RUNNING_STATUS, paused: false });
   for (const view of views) {
-    assert.equal(required(view, '[data-role="pm-pause-toggle"]').textContent, "Pause");
-    assert.equal(required(view, '[data-role="pm-pause-toggle"]').getAttribute("aria-pressed"), "false");
     assert.equal(required(view, '[data-role="pm-autonomy-status"]').textContent, "Autonomous loop active");
   }
+  assert.equal(sent.some(message => message.kind === "set_pm_paused"), false);
 });
 
 test("FR-132: missing loop interval remains unknown and disabled", () => {
@@ -752,7 +729,6 @@ test("foreign PM status routes to its project before editing and cannot send thr
   const { document, sent, panel } = fixture(); panel.applyStatus({ ...RUNNING_STATUS, project_key: 'foreign' });
   assert.equal(document.querySelector('[data-role="pm-open-member"]').disabled, true);
   document.querySelector('[data-role="pm-auto-start"]').dispatchEvent(changeEvent(document));
-  document.querySelector('[data-role="pm-pause-toggle"]').click();
   assert.equal(sent.length, 0);
 });
 
@@ -776,7 +752,7 @@ test("PM Settings keeps operational controls and routes profile editing to Agent
   const { document, panel } = fixture(); panel.applyStatus(RUNNING_STATUS);
   assert.equal(Boolean(document.querySelector('[data-member-tuning-field]')), false);
   assert.ok(document.querySelector('[data-role="pm-open-member"]'));
-  for (const role of ['pm-running-as', 'pm-pending-chip', 'pm-auto-start', 'pm-pause-toggle', 'pm-loop-interval', 'pm-restart']) assert.ok(document.querySelector(`[data-role="${role}"]`));
+  for (const role of ['pm-running-as', 'pm-pending-chip', 'pm-auto-start', 'pm-loop-interval', 'pm-restart']) assert.ok(document.querySelector(`[data-role="${role}"]`));
 });
 
 test("PM tuning rejects missing project authority and incomplete own identity without overwriting its retained profile", () => {

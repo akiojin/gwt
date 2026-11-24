@@ -29,6 +29,9 @@ pub struct Issue {
     pub url: String,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// GitHub's sub-issue parent (Issue #7845). Absent in cached snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_number: Option<u64>,
 }
 
 /// Issue rows together with the completeness of the underlying REST read.
@@ -297,6 +300,7 @@ impl From<crate::gh_rest::RestIssueRow> for Issue {
             body: row.body,
             url: row.url,
             updated_at: row.updated_at,
+            parent_number: row.parent_number,
         }
     }
 }
@@ -414,6 +418,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
             body,
             url,
             updated_at,
+            parent_number: None,
         });
     }
 
@@ -725,6 +730,7 @@ mod tests {
             body: Some("body".into()),
             url: "https://example.com".into(),
             updated_at: None,
+            parent_number: None,
         }];
         cache.write("owner", "repo", &issues).unwrap();
 
@@ -773,6 +779,7 @@ mod tests {
             body: None,
             url: "https://example.com".into(),
             updated_at: None,
+            parent_number: None,
         }];
 
         // Malicious owner/repo should not escape cache directory

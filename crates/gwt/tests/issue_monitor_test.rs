@@ -3073,6 +3073,7 @@ fn a_readiness_refresh_failure_lands_on_its_own_row_not_on_the_whole_scan() {
             number: 4388,
             reason: "targeted refresh parse failed: broken index map".to_string(),
         }],
+        issue_parents: Default::default(),
     };
 
     admit_test_candidates(&mut monitor, &loaded.issues, "2026-08-01T00:00:00Z");
@@ -3126,6 +3127,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
         source: IssueMonitorCandidateSource::Live,
         live_error: None,
         readiness_failures: Vec::new(),
+        issue_parents: Default::default(),
     };
     admit_test_candidates(&mut monitor, &loaded.issues, "2026-08-01T00:00:00Z");
     scan_loaded_issue_monitor_candidates(

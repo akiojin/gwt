@@ -140,6 +140,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `OpenActiveWorkLaunchWizard` | GUI 内部 | — | 現在の Work を再利用するウィザードの起動入力を初期化する。 |
 | `LaunchWizardAction` | 対象外 | — | 画面遷移、下書き編集、セットアップ、起動の確定は状態を持つ GUI ウィザードに紐づく。 |
 | `SetIssueMonitorEnabled` | 対応 | `issue.monitor.config.set` | Issues モニターの有効状態を切り替える。GUI は起動設定が不足している場合にウィザードを開く。 |
+| `SetProjectAutonomy` | 一部対応 | `issue.monitor.config.set`, `pm.pause`, `pm.resume` | プロジェクトの停止・開始（Issue #7728）。GUI は Issues の割り当てと PM 巡回を 1 操作で切り替える。CLI は `issue.monitor.config.set` の `enabled` と `pm.pause` / `pm.resume` を組み合わせる。 |
 | `SetIssueMonitorAutonomousMode` | 対応 | `issue.monitor.config.set` | プロジェクトの自動実行モードを切り替える。 |
 | `GetUpdateSettings` | 対応 | `update.settings.status` | 更新の適用設定と現在の状態を取得する。 |
 | `GetHookDoctor` | 対応 | `hook.doctor` | プロジェクトの hook を診断し、明示された場合に修復する。 |

@@ -201,7 +201,13 @@ async function editNumber(control: Locator, value: string): Promise<void> {
 
 async function toggleMonitor(page: Page, enabled: boolean): Promise<void> {
   const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
-  await panel(page, "issues").locator('[data-action="monitor-toggle"]').click();
+  // Issue #7728: the one project stop/start drives Issues assignment.
+  const project = panel(page, "issues").locator('[data-settings-launch-action="project-autonomy"]');
+  if (enabled) await project.locator('[data-project-autonomy-action="start"]').click();
+  else {
+    await project.locator('[data-project-autonomy-action="stop"]').click();
+    await page.locator("[data-project-stop-dialog] [data-project-stop-confirm]").click();
+  }
   // Daemon authorizing controls publish asynchronously; wait for this
   // project's new authoritative response before asserting its durable write.
   await page.waitForFunction(({ before, enabled }) => ((window as any).__gwtPlaywrightMessages ?? [])
@@ -277,12 +283,13 @@ async function assertIssuesLayout(page: Page): Promise<void> {
     expect(row.top).toBeGreaterThanOrEqual(visible!.y);
     expect(row.bottom).toBeLessThanOrEqual(visible!.y + visible!.height);
   }
-  for (const name of ["Autonomous", "Monitoring", "Auto-refill", "Refill limit", "Allowed labels"]) {
+  for (const name of ["Autonomous", "Auto-refill", "Refill limit", "Allowed labels"]) {
     if (narrow) await controls.getByLabel(name, { exact: true }).evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
     await expect(controls.getByLabel(name, { exact: true })).toBeInViewport({ ratio: 1 });
   }
-  if (narrow) await controls.locator('[data-action="monitor-toggle"]').evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
-  await expect(controls.locator('[data-action="monitor-toggle"]')).toBeInViewport({ ratio: 1 });
+  const project = controls.locator('[data-settings-launch-action="project-autonomy"]');
+  if (narrow) await project.evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
+  await expect(project).toBeInViewport({ ratio: 1 });
 }
 
 test.describe("Issue #5322 Settings", () => {
@@ -401,15 +408,15 @@ test.describe("Issue #5322 Settings", () => {
 
         // AC-1/5: a no-remote project with Autonomous and PM disabled can
         // persist Start/Stop without dispatching implementation work.
-        await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
-        await expect(issues.locator('[data-action="monitor-toggle"]')).toBeEnabled();
+        const projectState = issues.locator('[data-settings-launch-action="project-autonomy"] [data-project-autonomy-state]');
+        await expect(issues.getByRole("checkbox", { name: "Monitoring", exact: true })).toHaveCount(0);
+        await expect(projectState).not.toHaveText("Running");
         await toggleMonitor(page, true);
-        await expect(issues.locator('[data-action="monitor-toggle"]')).toBeFocused();
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(true);
-        await expect(issues.locator('[data-action="monitor-toggle"]')).toBeChecked();
+        await expect(projectState).toHaveText("Running");
         await toggleMonitor(page, false);
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(false);
-        await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
+        await expect(projectState).toHaveText("Stopped");
 
         // Edit the remaining project-local controls while Issues is stopped.
         await autonomous(page).click();
@@ -582,7 +589,7 @@ test.describe("Issue #5322 Settings", () => {
         await expect(issues.getByLabel("Refill limit", { exact: true })).toHaveValue("5");
         await expect(labels.getByRole("checkbox", { name: "auto-merge", exact: true })).toBeChecked();
         await expect(labels.getByRole("checkbox", { name: "bug", exact: true })).toBeChecked();
-        await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
+        await expect(issues.locator('[data-settings-launch-action="project-autonomy"] [data-project-autonomy-state]')).toHaveText("Stopped");
         await openSettings(page, "agents");
         await expect(agents.locator("fieldset[data-agent-id]").first()).toHaveAttribute("data-agent-id", "claude");
         await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="model"]')).toHaveValue("gpt-6-sol");

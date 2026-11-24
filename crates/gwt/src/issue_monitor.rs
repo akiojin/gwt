@@ -4426,6 +4426,9 @@ pub struct IssueMonitorAgentStatus {
     pub label_excluded_count: usize,
     #[serde(default)]
     pub label_excluded_issues: Vec<u64>,
+    /// Issue #7845 AC-3: open sub-issues the inbox did not admit, and why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_issue_exclusions: Vec<IssueMonitorSubIssueExclusion>,
     /// Issue #4413 AC-1: where these numbers came from. See
     /// [`IssueMonitorStatusSource`]; absent in pre-#4413 publications, which
     /// only a live monitor could have written.
@@ -4722,6 +4725,15 @@ pub enum IssueMonitorRefillHold {
     /// Issue #7813: the last Issues scan left capacity but found no eligible
     /// Backlog issue to add.
     NoCandidates,
+}
+
+/// Issue #7845 AC-3: an open sub-issue without the queue label that the
+/// inbox did not admit through its parent, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorSubIssueExclusion {
+    pub issue_number: u64,
+    pub parent_number: u64,
+    pub reason: String,
 }
 
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
@@ -5581,6 +5593,13 @@ pub struct IssueMonitorState {
     allowed_labels: Vec<String>,
     #[serde(default)]
     label_excluded_issues: BTreeSet<u64>,
+    /// Issue #7845: GitHub's sub-issue parent of each Issue in the last live
+    /// list. A scan observation, never stored in prefs.
+    #[serde(skip)]
+    issue_parents: BTreeMap<u64, u64>,
+    /// Issue #7845 AC-3: open sub-issues the last scan left out of the inbox.
+    #[serde(skip)]
+    sub_issue_exclusions: Vec<IssueMonitorSubIssueExclusion>,
     pub config: IssueMonitorConfig,
     #[serde(default)]
     max_active_agents_mode: IssueMonitorMaxActiveMode,
@@ -9042,6 +9061,8 @@ impl IssueMonitorState {
             active_launches: Vec::new(),
             allowed_labels: Vec::new(),
             label_excluded_issues: BTreeSet::new(),
+            issue_parents: BTreeMap::new(),
+            sub_issue_exclusions: Vec::new(),
             priority_order: Vec::new(),
             priority_launch_now: None,
             priority_reason_note: None,
@@ -12804,7 +12825,13 @@ impl IssueMonitorState {
     /// Refresh the user-configured fields from the latest committed snapshot.
     /// Explicit GUI/control mutations run after rebase, so they still win their
     /// transaction while stale scan writers cannot roll a newer config back.
-    fn refresh_disk_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
+    /// Returns the Auto-refill proposals to re-apply once the caller has
+    /// restored every inbox wait (Issue #7845): before that, a waiting member
+    /// still counts against the limit and would discard the proposal.
+    fn refresh_disk_owned_prefs(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+    ) -> Vec<IssueMonitorTerminalQueueEntry> {
         let urgent_proposals = self
             .terminal_queues
             .get(&crate::process::current_hostname())
@@ -12858,9 +12885,6 @@ impl IssueMonitorState {
         self.apply_terminal_queue_retirements();
         for entry in urgent_proposals {
             self.admit_observed_urgent(entry.number, &entry.queued_at);
-        }
-        for entry in refill_proposals {
-            self.auto_refill_terminal_queue(&[entry.number], &entry.queued_at);
         }
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
@@ -12924,6 +12948,7 @@ impl IssueMonitorState {
         // Issue #3478: the hook (and the answer operation) write handoffs from
         // outside this process, so disk is the inbound source for them.
         self.absorb_autonomous_handoffs(disk.autonomous_handoffs.iter().cloned());
+        refill_proposals
     }
 
     fn merge_provider_quota_holds_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
@@ -14251,7 +14276,7 @@ impl IssueMonitorState {
         // evidence, so join it before refreshing disk-owned replacement fields.
         self.merge_provider_quota_holds_from_prefs(disk);
         self.adopt_compensated_launch_deliveries(disk);
-        self.refresh_disk_owned_prefs(disk);
+        let refill_proposals = self.refresh_disk_owned_prefs(disk);
         self.enforce_provider_quota_hold_releases();
         for issue_number in restarted {
             if !self.merged_issues.contains(&issue_number) && !self.issue_is_closed(issue_number) {
@@ -14357,6 +14382,12 @@ impl IssueMonitorState {
         }
         self.reconcile_delivered_failures();
         self.enforce_measurement_waits();
+        // Issue #7845: re-apply the scan's Auto-refill proposals only now that
+        // every waiting member is exempt from the limit again.
+        for entry in refill_proposals {
+            self.auto_refill_terminal_queue(&[entry.number], &entry.queued_at);
+        }
+        self.apply_priority_order_to_queue();
         self.reconcile_terminal_queue();
     }
 
@@ -16454,6 +16485,7 @@ impl IssueMonitorState {
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
             label_excluded_issues: self.label_excluded_issues.iter().copied().collect(),
+            sub_issue_exclusions: self.sub_issue_exclusions.clone(),
             // Issue #4413: this is the live driver talking about itself. Only
             // a reader that failed to reach one may downgrade the provenance.
             source: IssueMonitorStatusSource::Daemon,
@@ -20269,6 +20301,63 @@ impl IssueMonitorState {
             })
     }
 
+    /// Issue #7845: replace the sub-issue parents with the last live list's.
+    pub fn observe_issue_parents(&mut self, parents: &BTreeMap<u64, u64>) {
+        self.issue_parents = parents.clone();
+    }
+
+    /// Issue #7845: the parent an unlabeled sub-issue is admitted through.
+    /// A parent is an autonomous target when the owner queued it (the queue
+    /// label) or ranked it in the priority order.
+    fn sub_issue_admission(
+        &self,
+        issue: &IssueMonitorIssue,
+        open_issues: &BTreeMap<u64, &IssueMonitorIssue>,
+    ) -> Option<Result<u64, IssueMonitorSubIssueExclusion>> {
+        if issue.state != IssueMonitorIssueState::Open || has_queue_label(issue) {
+            return None;
+        }
+        let parent_number = *self.issue_parents.get(&issue.number)?;
+        let exclude = |reason: String| {
+            Some(Err(IssueMonitorSubIssueExclusion {
+                issue_number: issue.number,
+                parent_number,
+                reason,
+            }))
+        };
+        let Some(parent) = open_issues.get(&parent_number) else {
+            return exclude(format!(
+                "parent #{parent_number} is not an open Issue in this scan"
+            ));
+        };
+        if !has_queue_label(parent) && !self.priority_order.contains(&parent_number) {
+            return exclude(format!(
+                "parent #{parent_number} is not an autonomous target (no gwt-queued label and not in the priority order)"
+            ));
+        }
+        if !self.allows_issue_labels(issue) {
+            return exclude("labels are outside the Issues label allowlist".to_string());
+        }
+        Some(Ok(parent_number))
+    }
+
+    /// Issue #7845: an unranked sub-issue takes its parent's place in the
+    /// owner's priority order.
+    fn refill_rank(&self, number: u64) -> usize {
+        let position = |number: u64| {
+            self.priority_order
+                .iter()
+                .position(|priority| *priority == number)
+        };
+        position(number)
+            .or_else(|| {
+                self.issue_parents
+                    .get(&number)
+                    .and_then(|parent| position(*parent))
+            })
+            .unwrap_or(usize::MAX)
+    }
+
     pub fn set_terminal_queue_auto_refill(&mut self, enabled: bool, limit: usize) {
         self.terminal_queue_auto_refill = enabled;
         self.terminal_queue_auto_refill_limit = if enabled && limit == 0 { 3 } else { limit };
@@ -20669,12 +20758,17 @@ impl IssueMonitorState {
                     && !self.open_pr_launch_held(*number)
             })
             .collect::<Vec<_>>();
-        let rank = |number: &u64| {
-            self.priority_order
-                .iter()
-                .position(|priority| priority == number)
-                .unwrap_or(usize::MAX)
-        };
+        let ranks = candidates
+            .iter()
+            .chain(
+                self.terminal_queues
+                    .get(&crate::process::current_hostname())
+                    .into_iter()
+                    .flat_map(|queue| queue.entries.iter().map(|entry| &entry.number)),
+            )
+            .map(|number| (*number, self.refill_rank(*number)))
+            .collect::<BTreeMap<_, _>>();
+        let rank = |number: &u64| ranks.get(number).copied().unwrap_or(usize::MAX);
         candidates.sort_by_key(rank);
         let host = crate::process::current_hostname();
         // Reordering may replace only an unstarted automatic selection. A
@@ -28284,15 +28378,37 @@ pub fn scan_issue_monitor_candidates(
         );
     }
     monitor.retire_completed_terminal_queue();
+    // Issue #7845 AC-2: a blocked Issue cannot launch, so it takes no slot.
     let refill = issues
         .iter()
         .filter(|issue| {
             issue.state == IssueMonitorIssueState::Open
                 && monitor.allows_issue_labels(issue)
                 && issue_monitor_candidate_exclusion(issue, monitor.source_repository).is_none()
+                && monitor.scan_dependency_exclusion(issue.number).is_none()
         })
         .map(|issue| issue.number)
         .collect::<Vec<_>>();
+    // Issue #7845 AC-1/AC-3: an unlabeled sub-issue is admitted through an
+    // autonomous parent; every other sub-issue is reported with its reason.
+    let open_issues = issues
+        .iter()
+        .filter(|issue| issue.state == IssueMonitorIssueState::Open)
+        .map(|issue| (issue.number, issue))
+        .collect::<BTreeMap<_, _>>();
+    let mut admitted_sub_issues = BTreeSet::new();
+    let mut sub_issue_exclusions = Vec::new();
+    for issue in issues {
+        match monitor.sub_issue_admission(issue, &open_issues) {
+            Some(Ok(_)) => {
+                admitted_sub_issues.insert(issue.number);
+            }
+            Some(Err(exclusion)) => sub_issue_exclusions.push(exclusion),
+            None => {}
+        }
+    }
+    sub_issue_exclusions.sort_by_key(|exclusion| exclusion.issue_number);
+    monitor.sub_issue_exclusions = sub_issue_exclusions;
     monitor.admit_urgent_candidates(issues, now);
     monitor.auto_refill_terminal_queue(&refill, now);
     monitor.reconcile_terminal_queue();
@@ -28339,6 +28455,7 @@ pub fn scan_issue_monitor_candidates(
         if !is_auto_improve_candidate(issue, membership.contains(&issue.number))
             && !observed_lifecycle
             && !has_queue_label(issue)
+            && !admitted_sub_issues.contains(&issue.number)
         {
             // A present payload can retire an observation-only row. Missing
             // entries in a partial/cache list are never delabel evidence.
@@ -29964,6 +30081,7 @@ mod tests {
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,
                 label_excluded_issues: Vec::new(),
+                sub_issue_exclusions: Vec::new(),
                 source: IssueMonitorStatusSource::Daemon,
                 active_launches_incomplete: false,
                 queue: Vec::new(),
@@ -52259,6 +52377,160 @@ mod tests {
                 .hold,
             Some(IssueMonitorRefillHold::LimitReached)
         );
+    }
+
+    fn issue_7845_sub_issue(number: u64, parent: u64) -> (IssueMonitorIssue, (u64, u64)) {
+        let mut candidate = issue(number);
+        candidate.body = Some(format!("Parent: #{parent}\n"));
+        (candidate, (number, parent))
+    }
+
+    #[test]
+    fn issue_7845_commit_rebase_keeps_refill_proposals_beside_waiting_members() {
+        let now = "2026-11-24T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        let waiting = |number| {
+            let mut candidate = issue(number);
+            candidate.body = Some(
+                "## Acceptance Criteria\n- [ ] AC-1: verify release [release-verification]\n"
+                    .into(),
+            );
+            candidate
+        };
+        monitor.terminal_queue_push(&[1, 2, 3], "launch_now", now);
+        scan_issue_monitor_candidates(&mut monitor, &[waiting(1), waiting(2), waiting(3)], now);
+        for number in [1, 2, 3] {
+            monitor.record_merged_issue_settlement(
+                number,
+                number + 100,
+                Some("aaa".into()),
+                MergedIssueSettlementAction::AwaitVerification {
+                    unmet: vec!["AC-1".into()],
+                },
+                now,
+            );
+        }
+        // The daemon commits each scan by rebasing onto the prefs on disk,
+        // which still hold only the waiting members.
+        let disk = monitor.prefs();
+        let candidates = [waiting(1), waiting(2), waiting(3), issue(4), issue(5)];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4, 5]);
+
+        monitor.rebase_daemon_driver_prefs(&disk);
+
+        assert_eq!(
+            monitor.local_terminal_queue_numbers(),
+            vec![1, 2, 3, 4, 5],
+            "waiting members must not spend the refill capacity the scan proposed into"
+        );
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![4, 5]);
+    }
+
+    #[test]
+    fn issue_7845_unlabeled_sub_issue_of_an_autonomous_parent_enters_the_inbox() {
+        let now = "2026-11-24T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        let mut queued_parent = issue(10);
+        queued_parent.labels = vec!["gwt-spec".into(), "gwt-queued".into()];
+        queued_parent.readiness = IssueMonitorReadiness::Ready;
+        let mut ranked_parent = issue(20);
+        ranked_parent.labels = vec!["gwt-spec".into()];
+        let mut idle_parent = issue(30);
+        idle_parent.labels = vec!["gwt-spec".into()];
+        monitor.set_priority_order(vec![20]);
+        let (child_of_queued, a) = issue_7845_sub_issue(11, 10);
+        let (child_of_ranked, b) = issue_7845_sub_issue(21, 20);
+        let (child_of_idle, c) = issue_7845_sub_issue(31, 30);
+        let (orphan, d) = issue_7845_sub_issue(41, 40);
+        monitor.observe_issue_parents(&BTreeMap::from([a, b, c, d]));
+
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[
+                queued_parent,
+                ranked_parent,
+                idle_parent,
+                child_of_queued,
+                child_of_ranked,
+                child_of_idle,
+                orphan,
+            ],
+            now,
+        );
+
+        // AC-1: no label on the sub-issue, but its parent is an autonomous target.
+        for admitted in [11, 21] {
+            assert_eq!(
+                monitor.inbox_item(admitted).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "sub-issue #{admitted}"
+            );
+        }
+        assert!(monitor.inbox_item(31).is_none());
+        assert!(monitor.inbox_item(41).is_none());
+
+        // AC-3: every sub-issue left out says why.
+        let status = monitor.agent_status_at(now);
+        assert_eq!(
+            status
+                .sub_issue_exclusions
+                .iter()
+                .map(|entry| (entry.issue_number, entry.parent_number, entry.reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    31,
+                    30,
+                    "parent #30 is not an autonomous target (no gwt-queued label and not in the priority order)"
+                ),
+                (41, 40, "parent #40 is not an open Issue in this scan"),
+            ]
+        );
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["sub_issue_exclusions"][0]["issue_number"], 31);
+    }
+
+    #[test]
+    fn issue_7845_auto_refill_launches_a_ready_sub_issue_without_the_pm() {
+        let now = "2026-11-24T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 1);
+        let mut parent = issue(7007);
+        parent.labels = vec!["gwt-spec".into()];
+        monitor.set_priority_order(vec![7007]);
+        let (blocked, a) = issue_7845_sub_issue(7654, 7007);
+        let mut blocked = blocked;
+        blocked.body = Some("Parent: #7007\nBlocked-by: #7653\n".into());
+        let blocker = issue(7653);
+        let (ready, b) = issue_7845_sub_issue(7655, 7007);
+        // A newer backlog Issue the owner never ranked.
+        let unrelated = issue(7846);
+        monitor.observe_issue_parents(&BTreeMap::from([a, b]));
+
+        // Nobody pushes or calls launch_now: the scan alone fills the slot.
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[unrelated, parent, blocker, blocked, ready],
+            now,
+        );
+
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![7655]);
+        assert_eq!(monitor.queue, VecDeque::from([7655]));
+        assert_eq!(monitor.claim_probe_plan(usize::MAX).1, vec![7655]);
     }
 
     #[test]

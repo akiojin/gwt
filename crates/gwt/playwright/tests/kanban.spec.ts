@@ -158,7 +158,7 @@ test("Issue #3165: Open Issues is pointer and keyboard navigation only", async (
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
-test("Issue #3165: Start explains missing settings and waits for confirmed enable", async ({ page }, info) => {
+test("Issue #3165: missing settings are explained and Issues follows the project start", async ({ page }, info) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -184,32 +184,20 @@ test("Issue #3165: Start explains missing settings and waits for confirmed enabl
     await expect(guidance).toHaveText(
       "Agent not started: no saved Agent settings. Save Agent settings, then select Start.");
   }
-  const cursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
-  await start.click();
-  await expect(start).toBeVisible();
-  await expect(guidance).toBeVisible();
-  await expect(surface.locator('[data-metric="capacity"]')).toHaveText("0 of 2");
-  const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
-    .filter(message => /^(set_issue_monitor_|issue_monitor_)/.test(message.kind)), cursor);
-  expect(controls).toEqual([{ kind: "set_issue_monitor_enabled", enabled: true }]);
+  // Issue #7728 AC-2: Issues has no own Start; the project stop/start in
+  // Settings and the project list starts it. This surface only reports state.
+  await expect(start).toHaveCount(0);
+  const assignment = surface.locator('[data-role="monitor-state"]');
+  await expect(assignment).toHaveText("Not assigning");
   await info.attach(`monitor-setup-${theme}`, { body: await surface.screenshot(), contentType: "image/png" });
   await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
     { ...status, launch_profile_source: "saved" });
   await expect(guidance).toBeHidden();
-  await expect(start).toBeVisible();
-  const savedCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
-  await start.click();
-  const savedControls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
-    .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), savedCursor);
-  expect(savedControls, "saved-profile Start must only request monitoring enable").toEqual([
-    { kind: "set_issue_monitor_enabled", enabled: true },
-  ]);
-  await expect(start).toBeVisible();
-  await expect(guidance).toBeHidden();
   await expect(surface.locator(".knowledge-monitor-pill")).toHaveText("Stopped");
   await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
     { ...status, launch_profile_source: "saved", enabled: true, state: "idle" });
-  await expect(surface.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
+  await expect(assignment).toHaveText("Assigning");
+  await expect(surface.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);
   await expect(guidance).toBeHidden();
   await expect(surface.locator(".knowledge-monitor-pill")).toHaveAttribute("data-state", "idle");
   await expect(surface.locator(".knowledge-monitor-pill")).toHaveText("Running");
@@ -1163,7 +1151,8 @@ test.describe("Issue Bridge load recovery", () => {
       '[data-action="monitor-capacity-auto"]',
     ]) await expect(issueSurface.locator(selector)).toHaveCount(0);
     await expect(issueSurface.getByRole("switch", { name: "Auto-refill", exact: true })).toBeVisible();
-    await issueSurface.locator('[data-action="monitor-toggle"]').click();
+    // Issue #7728 AC-2: Issues has no own Start/Stop; it follows the project stop/start.
+    await expect(issueSurface.locator('[data-action="monitor-toggle"]')).toHaveCount(0);
     // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
     // server state only. A click sends the request and nothing moves until an
     // issue_monitor_status confirms it; the fixture stays silent on purpose.
@@ -1234,10 +1223,7 @@ test.describe("Issue Bridge load recovery", () => {
       issue_number: 3095,
       position: 0,
     });
-    expect(messages).toContainEqual({
-      kind: "set_issue_monitor_enabled",
-      enabled: true,
-    });
+    expect(messages.some(message => message.kind === "set_issue_monitor_enabled")).toBe(false);
     expect(messages).toContainEqual({
       kind: "set_issue_monitor_autonomous_mode",
       enabled: true,
