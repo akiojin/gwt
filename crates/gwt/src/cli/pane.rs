@@ -841,9 +841,15 @@ pub(super) fn fleet_windows(project_root: &str) -> Result<Vec<Value>, String> {
                         .ok_or_else(|| {
                             "fleet pane snapshot omitted its project scope".to_string()
                         })?;
+                    // Issue #7350: the backend reports its principal root (a
+                    // workspace home) while the caller resolves the bare main
+                    // root; both are one project when their scope hashes match.
                     let expected_root =
                         gwt_core::paths::resolve_main_worktree_root(Path::new(project_root));
-                    if !same_pane_scope_path(Path::new(observed_root), &expected_root) {
+                    if !same_pane_scope_path(Path::new(observed_root), &expected_root)
+                        && gwt_core::paths::project_scope_hash(Path::new(observed_root))
+                            != gwt_core::paths::project_scope_hash(&expected_root)
+                    {
                         return Err("fleet pane snapshot belongs to a different project".into());
                     }
                     return value["panes"]
@@ -4595,28 +4601,10 @@ mod tests {
             .is_ok());
     }
 
-    #[test]
-    fn fleet_windows_rejects_foreign_empty_snapshot() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let _runtime = ScopedEnvVar::set(
-            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
-            persist_runtime_evidence(home.path()),
-        );
-        let _token = ScopedEnvVar::set(
-            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
-            "fleet-scope-capability",
-        );
-        let project = tempfile::tempdir().unwrap();
-        let foreign = tempfile::tempdir().unwrap();
-        let snapshots = [
-            json!({"kind":"fleet_pane_list","project_root":foreign.path(),"panes":[]}),
-            json!({"kind":"fleet_pane_list","project_root":project.path(),"panes":[]}),
-        ];
+    /// Serve one scripted `fleet_pane_list` reply per connection.
+    fn serve_fleet_snapshots(
+        snapshots: Vec<Value>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -4643,6 +4631,37 @@ mod tests {
                 }
             });
         });
+        (address, server)
+    }
+
+    fn fleet_scope_env(home: &Path) -> Vec<ScopedEnvVar> {
+        vec![
+            ScopedEnvVar::set("HOME", home),
+            ScopedEnvVar::set("USERPROFILE", home),
+            ScopedEnvVar::set(
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+                persist_runtime_evidence(home),
+            ),
+            ScopedEnvVar::set(
+                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+                "fleet-scope-capability",
+            ),
+        ]
+    }
+
+    #[test]
+    fn fleet_windows_rejects_foreign_empty_snapshot() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _env = fleet_scope_env(home.path());
+        let project = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let (address, server) = serve_fleet_snapshots(vec![
+            json!({"kind":"fleet_pane_list","project_root":foreign.path(),"panes":[]}),
+            json!({"kind":"fleet_pane_list","project_root":project.path(),"panes":[]}),
+        ]);
         let _url = ScopedEnvVar::set(
             GWT_PANE_WS_URL_ENV,
             format!("ws://{address}/internal/pane-ws"),
@@ -4655,6 +4674,72 @@ mod tests {
             "an unrelated empty inventory is not a complete pane observation"
         );
         assert!(own_project.unwrap().is_empty());
+    }
+
+    /// Issue #7350: in the workspace-home layout (`<home>/<repo>.git` bare plus
+    /// worktrees), the caller resolves the bare repository as its main root
+    /// while the backend principal reports the workspace home. Both name the
+    /// same project, so the snapshot must be accepted.
+    #[test]
+    fn fleet_windows_accepts_workspace_home_snapshot_for_bare_main_root() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _env = fleet_scope_env(home.path());
+        let workspace = tempfile::tempdir().unwrap();
+        let seed = workspace.path().join("seed");
+        let bare = workspace.path().join("repo.git");
+        let worktree = workspace.path().join("work/issue-1");
+        let git = |args: &[&str]| {
+            let args = [
+                &["-c", "user.name=t", "-c", "user.email=t@example.com"],
+                args,
+            ]
+            .concat();
+            let output = gwt_core::process::run_git_logged(&args, None).expect("git");
+            assert!(output.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", seed.to_str().unwrap()]);
+        git(&[
+            "-C",
+            seed.to_str().unwrap(),
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        git(&[
+            "clone",
+            "-q",
+            "--bare",
+            seed.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ]);
+        std::fs::remove_dir_all(&seed).unwrap();
+        git(&[
+            "-C",
+            bare.to_str().unwrap(),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/issue-1",
+            worktree.to_str().unwrap(),
+        ]);
+        let (address, server) = serve_fleet_snapshots(vec![json!({
+            "kind":"fleet_pane_list",
+            "project_root":workspace.path(),
+            "panes":[],
+        })]);
+        let _url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let observed = fleet_windows(&worktree.to_string_lossy());
+        server.join().unwrap();
+        assert_eq!(observed, Ok(Vec::new()));
     }
 
     #[test]
