@@ -854,17 +854,16 @@ test.describe("Surface rail", () => {
     await page.setViewportSize({ width: 1440, height: 400 });
     await expect(rail).toHaveCSS("overflow-y", "auto");
     expect(await rail.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
-    await rail.locator("#op-palette-button").scrollIntoViewIfNeeded();
-    await rail.locator("#op-palette-button").hover();
+    // #7879: the retired command palette leaves no rail entry; the last
+    // entry (Env vars) stays reachable by scrolling the short rail.
+    await expect(rail.locator("#op-palette-button")).toHaveCount(0);
+    const lastEntry = rail.locator('.op-rail__item[data-cmd="open-profile"]');
+    await lastEntry.scrollIntoViewIfNeeded();
+    await lastEntry.hover();
     await expect(page.locator("#rail-control-explanation")).toBeVisible();
-    await expect(page.locator("#rail-control-explanation")).toContainText("Command palette");
-    await rail.locator("#op-palette-button").focus();
+    await expect(page.locator("#rail-control-explanation")).toContainText("environment variable");
+    await lastEntry.focus();
     await expect(page.locator("#rail-control-explanation")).toBeVisible();
-    await rail.locator("#op-palette-button").click();
-    await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
-    await page.locator("#op-palette-input").fill("Stop All");
-    await expect(page.locator("#op-palette-list")).toContainText("Stop All Running Agents");
-    await page.keyboard.press("Escape");
     await entry("issues").click();
     await page.screenshot({ path: testInfo.outputPath("sidebar-short-scroll.png") });
 

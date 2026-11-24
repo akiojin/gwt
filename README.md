@@ -2590,7 +2590,7 @@ an entry removes its copied policy on the next refresh.
 
 - Select **Themes**, **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
 - **Themes** lists the themes of the project: GitHub Issues that have sub-issues, and the themes the PM records from your conversation on Home. When you ask for something or decide something, the PM records it as a theme (a GitHub Issue labelled `gwt-theme`) or adds it to an existing one, with no extra step from you; tell the PM when something should not become a theme. A recorded theme shows **Source of this theme**, and **Show in conversation** opens the PM on that message. Each row shows how many issues are under the theme and how many are completed, as GitHub reports them. Select a theme to see its issues, and select an issue to open it in Issues. **Issues completed today** counts the closes gwt took in today. **Delete theme** asks for confirmation, then closes the theme's GitHub Issue as not planned. The issues under it are kept, and reopening the Issue on GitHub brings the theme back.
-- Open **Logs**, **Index**, and **Env vars** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Use the Command Palette for all-stop; individual agent stop/restart remain available through the existing controls.
+- Open **Logs**, **Index**, and **Env vars** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Individual agent stop/restart remain available through the existing controls.
 - Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
 - **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
 - **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal. Review windows appear in their own list: select a review task to open its terminal, or select its name in Works to return to that review row.
@@ -2661,7 +2661,7 @@ counters). The default type scale is tuned for developer readability, so
 terminal text, IDs, paths, counters, and dense work surfaces stay legible during
 long sessions while display typography remains reserved for headings and chrome
 labels. Every chrome surface — Project Bar, Command Rail, Status Strip,
-Command Palette, Hotkey Overlay, Drawer modals, surface panels — shares a
+Hotkey Overlay, Drawer modals, surface panels — shares a
 single token system that ships in two flagship themes:
 
 - **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
@@ -2688,21 +2688,20 @@ falls back to system colors so accessibility is preserved.
 
 | Combo | Action |
 | --- | --- |
-| `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
 | `⌘B` | Focus the Board surface |
 | `⌘G` | Focus the Issues surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
-| `Esc` | Close any open palette / overlay / drawer / dropdown |
+| `Esc` | Close any open overlay / drawer / dropdown |
 
 The rail keeps **PM** separate from the labeled **Issues**, **Works**, **Agents**,
 **Board**, **Settings**, **Logs**, **Index**, and **Env vars** entries. The selected surface fills a fixed pane;
 **Split view** adds an optional second pane. The status strip remains below the
-content area. Reach other actions through the Command Palette or their hotkeys.
+content area. Reach other actions through the rail or their hotkeys.
 
 ### Accessibility
 
-Every modal dialog (Command Palette, Hotkey Overlay, branch cleanup,
+Every modal dialog (Hotkey Overlay, branch cleanup,
 worktree migration, launch wizard) follows the WAI-ARIA
 dialog convention: `role="dialog"` with an accessible name, `aria-modal`,
 focus moves into the dialog on open and returns to the trigger on close,
