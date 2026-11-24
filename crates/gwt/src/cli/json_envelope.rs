@@ -1288,6 +1288,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "board.config.set"
         | "repository.required_checks.update"
         | "repository.settings.set"
+        | "repository.branch_protection.update"
         | "release.metadata.set"
         | "pr.reopen"
         | "pr.review.submit"
