@@ -1472,7 +1472,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await assertSharedSaved();
       expect((await fixture.launches()).length).toBe(launchesBeforePm);
       afterPm = await cursor(page);
-      await page.locator("#op-pm-entry").click();
+      await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       const runningPm = await pmStatus(page, firstProjectKey, afterPm, { is_running: true,
         running_member_id: pmMemberId, running_model: "gpt-6.1-sol", running_reasoning: "low" });
       await expect.poll(async () => (await fixture.launches()).length).toBe(launchesBeforePm + 1);
@@ -2188,8 +2188,12 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       await page.screenshot({ path: info.outputPath("works-live-five-reloaded.png") });
       const images: { name: string; image: string }[] = [];
       for (const surface of ["pm", "agents", "works"]) {
-        if (surface === "pm") await page.locator("#op-pm-entry").click();
-        else await page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
+        if (surface === "pm") {
+          await page.locator("#op-pm-entry").click();
+          await page.getByRole("button", { name: "Open PM terminal" }).click();
+        } else {
+          await page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
+        }
         await expect(main).toHaveAttribute("data-surface", surface);
         if (surface === "pm") {
           const header = main.locator('.workspace-window[data-pm="true"]');
