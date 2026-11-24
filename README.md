@@ -1896,7 +1896,10 @@ dialog. Choose **Approve once** or remember approval for that repository and
 operation kind; ask the PM to inspect or revoke saved approvals through
 `pm.approval.status` / `pm.approval.revoke`. Required-check changes use
 `repository.required_checks.update` and preserve the branch's strict policy and
-retained checks' app bindings.
+retained checks' app bindings. Branch protection toggles (`allow_force_pushes`,
+`required_conversation_resolution`, `enforce_admins`, `strict`) on `develop` or
+`main` use `repository.branch_protection.update`, which keeps every other
+protection field unchanged.
 
 The same scoped permission route supports `pr.reopen` for a chosen PR,
 `pr.review.submit` for an authorized GitHub review, `release.metadata.set` for

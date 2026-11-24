@@ -526,6 +526,12 @@ Supported direct scoped operations:
   required check names on `develop` or `main`; it preserves `strict` and each
   retained check's `app_id`. It cannot change other protection policy or the
   merge queue. Confirm the check exists before making it required.
+- `repository.branch_protection.update {branch, allow_force_pushes?,
+  required_conversation_resolution?, enforce_admins?, strict?}` changes only
+  the named boolean protection fields on `develop` or `main`; every other
+  protection field is carried through unchanged and the response is verified.
+  Use it when the Issue Monitor reports `not_ready` because force pushes are
+  allowed; add a missing required check with `repository.required_checks.update`.
 - `update.settings.set {auto_apply_updates}` changes the global application
   setting, across all projects. Read saved/effective state and blockers with
   `update.settings.status`; changing the preference does not force an update.
@@ -4433,6 +4439,7 @@ mod tests {
             "`repository.required_checks.update {branch, add, remove}`",
             "`develop` or `main`",
             "preserves `strict` and each retained check's `app_id`",
+            "`repository.branch_protection.update {branch, allow_force_pushes?,",
             "`update.settings.set {auto_apply_updates}`",
             "`pr.reopen {number}`",
             "`pr.review.submit {number, event, body?}`",
