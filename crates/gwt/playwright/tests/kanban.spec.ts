@@ -1163,7 +1163,8 @@ test.describe("Issue Bridge load recovery", () => {
       '[data-action="monitor-capacity-auto"]',
     ]) await expect(issueSurface.locator(selector)).toHaveCount(0);
     await expect(issueSurface.getByRole("switch", { name: "Auto-refill", exact: true })).toBeVisible();
-    await issueSurface.locator('[data-action="monitor-toggle"]').click();
+    // Issue #7728 AC-2: Issues has no own Start/Stop; it follows the project stop/start.
+    await expect(issueSurface.locator('[data-action="monitor-toggle"]')).toHaveCount(0);
     // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
     // server state only. A click sends the request and nothing moves until an
     // issue_monitor_status confirms it; the fixture stays silent on purpose.

@@ -1082,7 +1082,7 @@ mod pm_chat;
 mod profile;
 pub(crate) mod project_execution_policy;
 
-/// Issue Monitor can assign work only with a saved launch profile.
+/// Issues can assign work only with a saved launch profile.
 fn issue_monitor_has_launch_profile(project_root: &Path) -> bool {
     gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
         .ok()
@@ -14074,7 +14074,7 @@ impl AppRuntime {
     }
 
     /// Issue #7728: the one project stop/start. Stop pauses the PM patrol and
-    /// Issue Monitor assignment together; running sessions finish their work.
+    /// Issues assignment together; running sessions finish their work.
     /// Start resumes the PM only once assignment can start (fail closed).
     pub(crate) fn set_project_autonomy_events(
         &mut self,

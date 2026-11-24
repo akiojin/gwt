@@ -1409,7 +1409,9 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await expect.poll(async () => (await pmSettings(pmSettingsPath)).loop_interval_secs).toBe(90);
       if (!(await pmStatus(page, firstProjectKey)).paused) {
         afterPm = await cursor(page);
-        await operations.locator('[data-role="pm-pause-toggle"]').click();
+        // Issue #7728: the patrol pauses only through the one project stop.
+        await expect(operations.locator('[data-role="pm-pause-toggle"]')).toHaveCount(0);
+        await sendLiveGwtEvent(page, { kind: "set_project_autonomy", running: false });
         await pmStatus(page, firstProjectKey, afterPm, { paused: true });
       }
       await expect.poll(async () => (await pmSettings(pmSettingsPath)).paused).toBe(true);
@@ -1459,7 +1461,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await expect(operations).toBeVisible();
       await expect(interval).toHaveValue("90");
       await expect(autoStart).not.toBeChecked();
-      await expect(operations.locator('[data-role="pm-pause-toggle"]')).toHaveText("Resume");
+      await expect(operations.locator('[data-role="pm-autonomy-status"]')).toHaveText("Autonomous loop stopped with the project");
       await expect(detail.locator('[data-member-tuning-field="model"]')).toHaveValue("gpt-6.1-sol");
       await expect(detail.locator('[data-member-tuning-field="reasoning"]')).toHaveValue("low");
       expect(await pmSettings(pmSettingsPath)).toEqual(savedPm);

@@ -1227,7 +1227,7 @@ pub enum FrontendEvent {
     SetIssueMonitorEnabled {
         enabled: bool,
     },
-    /// Issue #7728: the one project stop/start. Stopping halts Issue Monitor
+    /// Issue #7728: the one project stop/start. Stopping halts Issues
     /// new assignments and the PM patrol together; running sessions drain.
     /// The Hub names its Project; a Project connection may omit the key.
     SetProjectAutonomy {
@@ -1901,7 +1901,7 @@ pub enum ProjectOwnerHealthState {
 pub struct ProjectAutonomyView {
     pub monitor_enabled: bool,
     pub pm_paused: bool,
-    /// Agents Issue Monitor launched that are still finishing their work.
+    /// Agents Issues launched that are still finishing their work.
     pub active_agents: u32,
 }
 

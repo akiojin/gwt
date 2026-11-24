@@ -15,6 +15,7 @@ import { HomeConversation } from "../surfaces/HomeConversation.jsx";
 import { ProjectThemes } from "../surfaces/ProjectThemes.jsx";
 import { AgentHistoryPlans } from "../surfaces/AgentHistoryPlans.jsx";
 import { FirstRunSetup } from "../surfaces/FirstRunSetup.jsx";
+import { ProjectAutonomy } from "../surfaces/ProjectAutonomy.jsx";
 
 const islands = Object.freeze({
   "workspace-state-notice": WorkspaceStateNotice,
@@ -32,6 +33,7 @@ const islands = Object.freeze({
   "project-themes": ProjectThemes,
   "agent-history-plans": AgentHistoryPlans,
   "first-run-setup": FirstRunSetup,
+  "project-autonomy": ProjectAutonomy,
 });
 
 export function mountIsland(name, container, props) {

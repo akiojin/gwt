@@ -583,7 +583,7 @@ test.describe("Surface rail", () => {
       await expect(popup).toBeHidden();
     };
     for (const [name, pattern] of [
-      ["Autonomous", /human approval/i], ["Monitoring", /queued issues/i],
+      ["Autonomous", /human approval/i],
       ["Auto-refill", /queue/i], ["Refill limit", /on with 0.*default limit of 3/i], ["Allowed labels", /matching issues/i],
     ] as const) await explain(issues.locator("[data-settings-issues-controls]").getByLabel(name, { exact: true }), pattern);
     await page.locator("#op-pm-settings-button").click();
@@ -591,7 +591,7 @@ test.describe("Surface rail", () => {
     const pm = page.locator('.agents-surface [data-role="pm-project-operations"]');
     await expect(pm).toBeVisible();
     for (const [role, pattern] of [
-      ["pm-autonomy-status", /autonomous coordination/i], ["pm-pause-toggle", /Issues stays unchanged/],
+      ["pm-autonomy-status", /follows the project stop\/start/i],
       ["pm-running-as", /agent, model and effort.*after restart/],
       ["pm-pending-chip", /Agent, model, and effort.*after restart/],
       ["pm-loop-interval", /Minimum: 10 seconds/], ["pm-auto-start", /automatically/],

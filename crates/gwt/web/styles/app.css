@@ -6802,6 +6802,22 @@ body.route-body {
 .project-owner-health[data-state="degraded"],
 .project-owner-health[data-state="wedged"] { color: var(--color-state-blocked); }
 
+/* Issue #7728: the one project stop/start (Hub list and Settings). */
+.project-autonomy {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.project-autonomy__state {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+.project-autonomy__state[data-state="running"] { color: var(--color-state-active); }
+.project-autonomy__state[data-state="stop_pending"] { color: var(--color-state-needs); }
+.project-stop-subject { font-weight: 600; }
+
 .gwt-hub__orphan {
   display: flex;
   flex-wrap: wrap;

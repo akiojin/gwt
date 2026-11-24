@@ -86,6 +86,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // SPEC-3431 FR-026 / FR-132: one shared PM settings controller feeds
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
+      import { createProjectAutonomyControl } from "/project-autonomy.js";
       import { createToastStack } from "/toast-host.js";
       import { createProjectPageMetadata, projectAgentSummary } from "/project-page-metadata.js";
       import { createNotificationCenter } from "/notification-center.js";
@@ -2581,6 +2582,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       let pmWindowId = null;
       const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
+      // Issue #7728: unknown until the first pm_status, so Settings never
+      // offers a stop/start action from a guessed PM state.
+      const projectAutonomyPmModel = createUiStateStore({ paused: null });
 
       function updatePmLauncher(workspace) {
         pmLauncherModel.update(state => ({ ...state, workspace }));
@@ -4846,6 +4850,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         renderProjectEnvironments: renderProjectExecutionEnvironments,
         renderPmEnvironments: renderPmExecutionEnvironments,
         projectEnvironmentSetsModel,
+        projectAutonomyPmModel,
+        createProjectAutonomyControl: options => createProjectAutonomyControl({ ...options, document }),
       });
 
       function ensureWindow(windowData) {
@@ -5569,6 +5575,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             applyPmSettingsReceiveEvent(event);
             pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
+            projectAutonomyPmModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});

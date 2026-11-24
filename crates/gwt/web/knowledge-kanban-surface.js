@@ -1512,13 +1512,13 @@ export function createKnowledgeKanbanSurface({
           settings.title = lines.join("\n");
           explainIssueControl(settings, settings.title);
         }
-        const toggle = element.querySelector('[data-action="monitor-toggle"]');
-        if (toggle) {
+        // Issue #7728: monitoring has no switch here; it follows the one
+        // project stop/start in Settings and the project list.
+        const monitorState = element.querySelector('[data-role="monitor-state"]');
+        if (monitorState) {
           const enabled = Boolean(issueMonitorModel.read().status.enabled);
-          toggle.textContent = enabled ? "Stop" : "Start";
-          toggle.dataset.enabled = enabled ? "true" : "false";
-          toggle.classList.toggle("primary", !enabled);
-          toggle.classList.toggle("destructive", enabled);
+          monitorState.textContent = enabled ? "Assigning" : "Not assigning";
+          monitorState.dataset.state = enabled ? "running" : "stopped";
         }
         // Issue #3561 / #4499: each control is a WAI-ARIA switch whose label
         // names the setting and whose aria-checked + state word carry the
@@ -1862,14 +1862,6 @@ export function createKnowledgeKanbanSurface({
         bar.querySelector('[data-action="monitor-limit-auto"]')?.addEventListener("click", () => {
           send({kind:"set_issue_monitor_max_active_agents",max_active_agents:null});
         });
-        bar
-          .querySelector('[data-action="monitor-toggle"]')
-          ?.addEventListener("click", () => {
-            send({
-              kind: "set_issue_monitor_enabled",
-              enabled: !Boolean(issueMonitorModel.read().status.enabled),
-            });
-          });
         bar
           .querySelector('[data-action="monitor-auto-refill"]')
           ?.addEventListener("click", () => {
@@ -3766,7 +3758,7 @@ export function createKnowledgeKanbanSurface({
             // Issue #7813 AC-2: name the gate instead of promising a scan.
             const hold = monitorStatus.terminal_queue_refill_hold;
             empty.textContent = phase === "queued"
-              ? (refill && stopped ? "Start the Issues to begin Auto-refill."
+              ? (refill && stopped ? "Start the project to begin Auto-refill."
                 : refill && hold === "limit_reached"
                   ? `Auto-refill is at its refill limit (${monitorStatus.terminal_queue_auto_refill_limit ?? 0}). Raise the limit in Issues settings to queue more.`
                 : refill && hold === "no_candidates"
@@ -5833,11 +5825,11 @@ export function createKnowledgeKanbanSurface({
                     <label class="issue-monitor-limit">Agent limit <input type="number" min="1" step="1" data-action="monitor-limit" aria-label="Agent limit" value="1" disabled /></label>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-limit-auto" aria-label="Set Agent limit to Auto" disabled>Auto</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
-                    <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
+                    <span class="project-autonomy__state" data-role="monitor-state" role="status" data-state="stopped">Not assigning</span>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Issues details</button>
                     <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                   </div>
-                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the Issues to begin Auto-refill.</p>
+                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the project to begin Auto-refill.</p>
                 </section>
                 <div class="workspace-toolbar kanban-toolbar is-stacked">
                   <div class="workspace-toolbar-main">
@@ -5923,9 +5915,9 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
-              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the Issues to begin Auto-refill."],
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the project to begin Auto-refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
-              ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
+              ['[data-role="monitor-state"]', "Whether Issues assigns queued issues. Stop or start the project in Settings > Issues or the project list."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],
               ['[data-issue-view="split"]', "Pair issues with interactive terminal views."],
             ]) explainIssueControl(body.querySelector(selector), text);
