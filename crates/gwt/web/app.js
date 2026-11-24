@@ -1240,13 +1240,14 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       function setConnectionState(connected, recoverSnapshots = false) {
         if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); tuningController.disconnectTuning(); }
-        if (!connected && executionEnvironmentsModel.read().agentPriorityPending) {
-          failAgentEnvironmentPriority("Connection lost before the priority change was confirmed.");
-        }
-        if (connected && rosterHost) send({ kind: "get_execution_environments" });
         connectionOverlay.setConnected(connected);
         updateThemeConnection(connected);
         handleLaunchWizardTransportChange(connected);
+        if (!connected) {
+          failAgentEnvironmentPriority("Connection lost before the priority change was confirmed.");
+        } else if (rosterHost) {
+          send({ kind: "get_execution_environments" });
+        }
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
