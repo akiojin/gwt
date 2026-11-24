@@ -8,6 +8,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 // browser-check supplies an isolated checkout server; fixture mode remains
 // useful for fast development while both modes exercise the same UI code.
@@ -249,7 +250,7 @@ test.describe("Surface rail", () => {
     await operations.evaluate(node => { (window as any).__ownedPmOperations = node; });
     await openPm();
     expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await expect(main.locator(".work-row")).toHaveCount(4);
     await openPm();
     await page.locator("#op-pm-settings-button").click();
@@ -273,7 +274,7 @@ test.describe("Surface rail", () => {
     await expect(windowById(page, "settings-window")).toHaveCount(0);
     await openPm();
     await expectPm();
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await expect(main.locator(".work-row")).toHaveCount(4);
     await expect(main.locator('.work-row[data-window-id="start-work-shell"]')).toHaveCount(0);
     await expect(main.locator('.work-row[data-window-id="pm-window"]')).toHaveCount(1);
@@ -438,7 +439,7 @@ test.describe("Surface rail", () => {
   test("the same work stays live in both panes and input follows the selected pane", async ({ page }, info) => {
     const errors = captureBrowserErrors(page);
     await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-one"] .work-open').click();
     await page.locator('.works-full .xterm').evaluate(node => { (window as any).__splitAgentTerminal = node; });
     await page.getByRole("button", { name: "Split view", exact: true }).click();
@@ -495,7 +496,7 @@ test.describe("Surface rail", () => {
   test("long work headlines preserve the fixed name, scrollable purpose and accessible full title", async ({ page }, info) => {
     const errors = captureBrowserErrors(page);
     await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     const row = page.locator('.work-row[data-window-id="agent-one"]');
     const name = row.locator('.work-name'), purposeNode = row.locator('.work-purpose');
     const purpose = "Investigate terminal output, preserve agent identity, and deliver the smallest verified change across the existing application surfaces. ".repeat(3).trim();
@@ -623,15 +624,15 @@ test.describe("Surface rail", () => {
     const errors = captureBrowserErrors(page);
     await page.addInitScript(() => localStorage.setItem("gwt:ui:agent-columns", "3"));
     await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await expect(page.locator('.work-row')).toHaveCount(3);
     await expect(page.locator('.agents-grid, .agents-tabs')).toHaveCount(0);
     await expect(page.getByRole("spinbutton", { name: "Agent columns" })).toHaveCount(0);
     await page.reload();
-    const works = page.locator('.op-rail__surface[data-surface="works"]');
+    const issues = page.locator('.op-rail__surface[data-surface="issues"]');
     const agents = page.locator('.op-rail__surface[data-surface="agents"]');
     const explanation = page.locator("#rail-control-explanation");
-    await works.hover();
+    await issues.hover();
     await expect(explanation).toBeVisible();
     const tip = await explanation.boundingBox(), railBox = await page.locator(".op-rail").boundingBox();
     expect(tip && railBox).toBeTruthy();
@@ -644,7 +645,7 @@ test.describe("Surface rail", () => {
     await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible();
     await page.setViewportSize({ width: 400, height: 700 });
-    await works.hover();
+    await issues.hover();
     await expect(explanation).toBeVisible();
     const narrowTip = await explanation.boundingBox(), narrowRail = await page.locator(".op-rail").boundingBox();
     expect(narrowTip && narrowRail).toBeTruthy();
@@ -653,8 +654,8 @@ test.describe("Surface rail", () => {
     await page.mouse.move(narrowTip!.x + narrowTip!.width / 2, narrowTip!.y + narrowTip!.height / 2);
     await expect(explanation).toBeVisible();
     await page.mouse.move(399, 699);
-    await works.focus();
-    await expect(works).toHaveAttribute("aria-describedby", "rail-control-explanation");
+    await issues.focus();
+    await expect(issues).toHaveAttribute("aria-describedby", "rail-control-explanation");
     await expect(explanation).toBeVisible();
     await agents.click();
     await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
@@ -664,7 +665,7 @@ test.describe("Surface rail", () => {
   test("Work previous and next retain direct input without terminal tabs", async ({ page }) => {
     const errors = captureBrowserErrors(page);
     await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-one"] .work-open').click();
     await page.locator('.works-full [data-action="next"]').click();
     await expect(page.locator('.works-full-name')).toHaveText("Birch");
@@ -677,7 +678,7 @@ test.describe("Surface rail", () => {
   test("Back keeps the native terminal live and reopening preserves its identity", async ({ page }) => {
     const errors = captureBrowserErrors(page);
     await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     const row = page.locator('.work-row[data-window-id="agent-one"]'); await row.locator('.work-open').click();
     await page.locator('.works-full .xterm').evaluate(node => { (window as any).__returnedWorkTerminal = node; });
     await clearMessages(page); await page.locator('.works-full [data-action="back"]').click();
@@ -748,7 +749,7 @@ test.describe("Surface rail", () => {
     const entry = (surface: string) => rail.locator(`[data-surface='${surface}']`);
 
     await expect(windowById(page, "board-window")).toBeVisible({ timeout: 10_000 });
-    await expect(surfaces.locator(".op-rail__surface-label")).toHaveText(["Themes", "Issues", "Works", "Agents", "Board", "Settings"]);
+    await expect(surfaces.locator(".op-rail__surface-label")).toHaveText(["Themes", "Issues", "Agents", "Board", "Settings"]);
     // The PM leads the rail, cut off from the surfaces by a rule. Themes
     // comes first: it groups the Issues below it (Issue #7643).
     const railOrder = await rail.evaluate((element) =>
@@ -758,10 +759,10 @@ test.describe("Surface rail", () => {
           : (node as HTMLElement).dataset.surface ?? "",
       ),
     );
-    expect(railOrder.slice(0, 8)).toEqual(["pm", "|", "themes", "issues", "works", "agents", "board", "settings"]);
+    expect(railOrder.slice(0, 7)).toEqual(["pm", "|", "themes", "issues", "agents", "board", "settings"]);
+    // Issue #7880 (design item 137): Works is folded into Issues.
+    await expect(entry("works")).toHaveCount(0);
     await expect(entry("pm")).toHaveText("PM");
-    await expect(entry("works").locator(".op-rail__surface-icon")).toHaveText("▤");
-    await expect(entry("works").locator(".op-rail__surface-icon")).toBeVisible();
     for (const surface of ["themes", "issues", "agents", "board", "settings"]) {
       await expect(entry(surface).locator("svg")).toBeVisible();
     }
@@ -773,7 +774,7 @@ test.describe("Surface rail", () => {
     expect(railWidth).toBe(64);
     // Move from another rail entry so a fresh headed context cannot reuse
     // an unchanged OS pointer position before Chromium receives hover state.
-    await entry("works").hover();
+    await entry("agents").hover();
     await entry("pm").hover();
     const pmGear = page.locator("#op-pm-settings-button");
     const railBounds = await rail.boundingBox();
@@ -794,9 +795,10 @@ test.describe("Surface rail", () => {
     expect(accent).not.toBe(idleEdge);
 
     // Works lists canonical local agents and the PM without canvas controls.
+    // It has no rail entry, so no rail entry is pressed while it shows.
     await clearMessages(page);
-    await entry("works").click();
-    await expect.poll(() => pressedSurfaces(page)).toEqual(["works"]);
+    await openWorks(page);
+    await expect.poll(() => pressedSurfaces(page)).toEqual([]);
     await expectSurfaceOnly(page);
     expect(
       (await sentMessages(page)).filter(
@@ -833,7 +835,7 @@ test.describe("Surface rail", () => {
     expect(await createdPresets(page)).toEqual([]);
 
     // Every entry explains itself on hover.
-    for (const surface of ["issues", "works", "agents", "board", "settings"]) {
+    for (const surface of ["issues", "agents", "board", "settings"]) {
       await expect(entry(surface)).toHaveAttribute("title", /\S/);
     }
     await expect(entry("issues")).toHaveAttribute("title", /⌘G/);

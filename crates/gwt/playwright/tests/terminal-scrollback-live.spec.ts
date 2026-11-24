@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 test.skip(!base, "requires an isolated browser-check checkout and fresh HOME");
@@ -68,7 +69,7 @@ test("Codex partial-region history survives the real owner snapshot", async ({ p
       await info.attach("partial-region-history.png", { contentType: "image/png", body: await page.screenshot() });
     } finally {
       if (id) {
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         await sendLiveGwtEvent(page, { kind: "close_window", id });
         await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
       }

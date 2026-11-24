@@ -130,7 +130,6 @@ test.describe("Operator chrome smoke", () => {
   test("rail items are reachable without any reveal interaction", async ({ page }) => {
     for (const id of [
       '[data-surface="issues"]',
-      '[data-surface="works"]',
       '[data-cmd="open-logs"]',
       '[data-cmd="open-index"]',
       '[data-cmd="open-profile"]',
@@ -177,6 +176,8 @@ test.describe("Operator chrome reduced-motion", () => {
 
   test("the rail renders identically under prefers-reduced-motion", async ({ page }) => {
     await expect(page.locator(".op-rail")).toBeVisible();
-    await expect(page.locator('[data-surface="works"]')).toBeVisible();
+    await expect(page.locator('[data-surface="issues"]')).toBeVisible();
+    // Issue #7880 (design item 137): Works has no rail entry.
+    await expect(page.locator('[data-surface="works"]')).toHaveCount(0);
   });
 });

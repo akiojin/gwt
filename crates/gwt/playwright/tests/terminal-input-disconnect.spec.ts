@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -92,7 +93,7 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
     };
   });
   await page.goto(appUrl);
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   const tile = page.locator(".works-surface:not(.works-surface--preview) .works-terminal[data-window-id='agent-1']");
   await expect(tile).toBeVisible();

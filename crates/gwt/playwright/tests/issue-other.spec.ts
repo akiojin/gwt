@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 // SPEC #3885 Phase 3: deterministic protocol data, real Chromium and checkout assets.
 // A browser-check Project URL uses the isolated binary's assets; without one the
@@ -125,7 +126,7 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(worksBlockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
   await expect(page.locator("#op-strip-waiting")).toHaveText("7");
   await expect(worksBlock).toHaveText("7");
-  await page.locator('[data-surface="works"]').click();
+  await openWorks(page);
   await expect(page.locator(".works-heading")).toBeVisible();
   await page.screenshot({ path: info.outputPath("workspace-attention-shared-state.png"), fullPage: true });
   await page.locator('[data-surface="issues"]').click();

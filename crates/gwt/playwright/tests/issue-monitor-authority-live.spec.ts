@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const CHECK_HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
@@ -251,8 +252,7 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
         expect(durable.windows.filter((pane: any) => pane.agent_id === "monitor-delivery-fixture")
           .map((pane: any) => `${pane.id}/${pane.session_id}`).sort())
           .toEqual(windows.map(window => `${window.id.split("::").at(-1)}/${window.session_id}`).sort());
-        await expect(page.locator('.op-rail__surface[data-surface="works"]')).toBeVisible({ timeout: 10_000 });
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
           await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
         for (const window of windows) {

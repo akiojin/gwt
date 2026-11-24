@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
 import { operationOutput, readOperationOutput } from "./_helpers/operation-envelope.mjs";
+import { openWorks } from "./_helpers/works-entry";
 
 let rosterReadSequence = 0;
 async function readCanonicalRoster(page: Page): Promise<any> {
@@ -2210,7 +2211,7 @@ request.catch(() => {});
         const main = current.getByRole("region", { name: "Main pane", exact: true });
         await expect(main.locator(".roster-capacity-note")).toContainText("Busy 1 / Team");
         await expect(main.locator(`.roster-row[data-member-id="${memberId}"] .roster-current`)).toContainText("In Works");
-        await current.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(current);
         await expect(main).toHaveAttribute("data-surface", "works");
         if (await main.locator(".works-full:not([hidden])").isVisible())
           await main.locator('.works-full [data-action="back"]').click();
@@ -2389,7 +2390,7 @@ request.catch(() => {});
       expect(agent.runtime_incarnation).toBeGreaterThan(0);
       expect(() => process.kill(launch.pid, 0)).not.toThrow();
       await info.attach(`local-live-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       const main = page.getByRole("region", { name: "Main pane", exact: true });
@@ -3394,7 +3395,7 @@ request.catch(() => {});
       expect(typeof retained.id === "string" && retained.id.length > 0).toBe(true);
       // The stopped diagnostic remains in the catalog; Works only shows live census members.
       await expect(restored.locator(`.workspace-window[data-id="${retained.id}"]`)).toHaveCount(1);
-      await restored.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(restored);
       if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       await expect(restored.locator(`.work-row[data-window-id="${retained.id}"]`)).toHaveCount(0);
@@ -3570,7 +3571,7 @@ request.catch(() => {});
       await expect.poll(async () => ["running", "idle"].includes((await agentWindow(restored, fresh.gwt_session_id!))?.status),
         { timeout: 60_000 }).toBe(true);
       const freshWindow = await agentWindow(restored, fresh.gwt_session_id!);
-      await restored.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(restored);
       if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       const tile = restored.locator(`.work-row[data-window-id="${freshWindow.id}"]`);

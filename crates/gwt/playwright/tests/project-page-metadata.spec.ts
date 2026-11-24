@@ -2,6 +2,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
 import { APP_URL, HUB_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 async function installMetadataBackend(page: Page) {
   await page.addInitScript(() => {
@@ -263,7 +264,7 @@ test("SPEC #5016 AC-HS2: live title, status strip and Works heading render one s
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   // The seeded stopped PM pane is the only agent: the server aggregate is RUN 0 / BLOCK 1.
   await expect(page).toHaveTitle(/— 0 running · 1 blocked — gwt$/);
-  await page.locator('.op-rail__surface[data-surface="works"]').click();
+  await openWorks(page);
   const heading = page.locator(".works-surface:not(.works-surface--preview) .works-counts");
   for (const [strip, works, value] of [["running", "running", "0"], ["waiting", "block", "1"], ["idle", "idle", "0"], ["error", "error", "0"]]) {
     await expect(page.locator(`#op-strip-${strip}`)).toHaveText(value);

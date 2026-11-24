@@ -56,10 +56,9 @@ test("the three Issue-family presets carry distinguishable role labels", () => {
   );
 
   const html = readFileSync(resolve(here, "../index.html"), "utf8");
-  const workLabel = html.match(/data-surface="works"[^>]*>[\s\S]*?op-rail__surface-label">([^<]+)/)?.[1];
-  assert.equal(workLabel, "Works", "the current Work surface retains its own visible label");
-  assert.equal(new Set([labels.issue, labels.issue_monitor, workLabel]).size, 3,
-    "Issue, Issues and the current Work surface remain distinguishable");
+  // Issue #7880 (design item 137): Works is folded into Issues, so the rail
+  // carries no Works entry and no path leads to the retired Works surface.
+  assert.doesNotMatch(html, /data-surface="works"/, "the rail has no Works entry");
 });
 
 test("user and agent copy uses the Issues name across shipped surfaces", () => {
