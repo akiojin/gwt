@@ -5149,6 +5149,7 @@ mod tests {
             proxy,
             blocking_tasks,
             hook_doctor_in_flight: Default::default(),
+            coalesced_reads: Default::default(),
             agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,

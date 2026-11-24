@@ -2119,6 +2119,7 @@ fn sample_runtime_with_events(
         proxy,
         blocking_tasks,
         hook_doctor_in_flight: Default::default(),
+        coalesced_reads: Default::default(),
         agent_maintenance: Default::default(),
         sessions_dir,
         launch_wizard_cache,
@@ -13142,6 +13143,8 @@ mod frontend_launch_tests;
 mod gui_slice_tests;
 #[cfg(test)]
 mod home_conversation_tests;
+#[cfg(test)]
+mod hydration_lock_tests;
 #[cfg(test)]
 mod issue_monitor_claim_tests;
 #[cfg(test)]

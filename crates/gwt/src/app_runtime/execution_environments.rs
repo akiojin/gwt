@@ -296,9 +296,36 @@ pub(crate) fn lists_without_environments(
         .collect()
 }
 
+fn load_known_projects(roots: Vec<(PathBuf, String)>) -> Vec<KnownProject> {
+    roots
+        .into_iter()
+        .filter_map(|(root, title)| {
+            let prefs =
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&root))
+                    .ok()?;
+            Some(KnownProject { root, title, prefs })
+        })
+        .collect()
+}
+
+fn installed_tools(cache: &LaunchWizardMemoryCache) -> Vec<String> {
+    cache
+        .agent_options()
+        .into_iter()
+        .filter(|option| option.available)
+        .map(|option| option.id)
+        .collect()
+}
+
 impl AppRuntime {
     /// Projects open in a tab, then recently opened ones.
     pub(super) fn known_projects(&self) -> Vec<KnownProject> {
+        load_known_projects(self.known_project_roots())
+    }
+
+    /// The in-memory half of [`Self::known_projects`]: no disk access, so it
+    /// is safe on the GUI event loop (Issue #7869 AC-1).
+    fn known_project_roots(&self) -> Vec<(PathBuf, String)> {
         let mut seen = std::collections::BTreeSet::new();
         self.tabs
             .iter()
@@ -309,23 +336,11 @@ impl AppRuntime {
                     .map(|project| (project.path.clone(), project.title.clone())),
             )
             .filter(|(root, _)| seen.insert(root.clone()))
-            .filter_map(|(root, title)| {
-                let prefs = gwt::load_issue_monitor_prefs(
-                    &gwt::issue_monitor_prefs_path_for_repo_path(&root),
-                )
-                .ok()?;
-                Some(KnownProject { root, title, prefs })
-            })
             .collect()
     }
 
     pub(super) fn installed_tools(&self) -> Vec<String> {
-        self.launch_wizard_cache
-            .agent_options()
-            .into_iter()
-            .filter(|option| option.available)
-            .map(|option| option.id)
-            .collect()
+        installed_tools(&self.launch_wizard_cache)
     }
 
     fn execution_environments_event(
@@ -366,24 +381,45 @@ impl AppRuntime {
         client_id: &str,
         context: Option<&ProjectContext>,
     ) -> Vec<OutboundEvent> {
-        let projects = self.known_projects();
-        let installed = self.installed_tools();
+        // Issue #7869 AC-1: project prefs reads and agent detection can wait
+        // on other processes, so only in-memory state is captured here.
+        let roots = self.known_project_roots();
+        let agent_cache = self.launch_wizard_cache.clone();
         let root = context.map(|context| context.project_root.clone());
         let proxy = self.proxy.clone();
         let reply_to = client_id.to_owned();
+        // AC-2: a resend while this client's read runs joins it.
+        let key = format!(
+            "execution-environments\0{client_id}\0{}",
+            root.as_deref()
+                .map(Path::to_string_lossy)
+                .unwrap_or_default()
+        );
+        let reads = self.coalesced_reads.clone();
+        if !reads.begin(&key) {
+            return Vec::new();
+        }
+        let worker_key = key.clone();
+        let worker_reads = reads.clone();
         match self.blocking_tasks.try_spawn(move || {
-            let event = Self::execution_environments_event(
-                environments::adopt_signed_in_accounts(),
-                &projects,
-                &installed,
-                root.as_deref(),
-            );
-            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                reply_to, event,
-            )]));
+            worker_reads.run(&worker_key, || {
+                let event = Self::execution_environments_event(
+                    environments::adopt_signed_in_accounts(),
+                    &load_known_projects(roots.clone()),
+                    &installed_tools(&agent_cache),
+                    root.as_deref(),
+                );
+                proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                    reply_to.clone(),
+                    event,
+                )]));
+            });
         }) {
             Ok(_) => Vec::new(),
-            Err(error) => Self::execution_environment_error(client_id, context, error.to_string()),
+            Err(error) => {
+                reads.abandon(&key);
+                Self::execution_environment_error(client_id, context, error.to_string())
+            }
         }
     }
 
