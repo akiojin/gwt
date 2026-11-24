@@ -6067,6 +6067,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           openAgents("project");
           agentsSurface.selectMember(memberId);
         },
+        onSelectReview: (target) => {
+          openAgents("project");
+          agentsSurface.selectReview(target);
+        },
         getTelemetry: () => worksTelemetryModel.read(),
         onFocus: focusWindowLocally,
         onPreviewFocus: (id) => {

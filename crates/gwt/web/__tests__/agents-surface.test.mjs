@@ -313,7 +313,26 @@ test("Issue #7035 Agents lists slot-occupying review windows with name, target a
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="r1"]'), null, "a reviewer is not a roster member");
   assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 2 \/ Team 2/,
     "Busy counts the implementation member and the review window that both hold slots");
+  const target = f.activityModel.read().agents[1], open = row.querySelector("button.roster-purpose");
+  assert.ok(open, "a review task is keyboard reachable like a member's current task");
+  open.click();
+  assert.deepEqual(f.opened, [target]);
+  assert.equal(f.surface.selectReview(target), true);
+  assert.equal(f.document.activeElement, open);
+  f.surface.sync();
+  assert.ok(f.document.activeElement === f.surface.element.querySelector(".roster-review button"), "readback preserves keyboard focus on the same review");
+  assert.equal(f.surface.selectReview({ ...target, runtime_incarnation: 2 }), false);
+  f.activityModel.update(state => ({ ...state, count: null }));
+  open.click();
+  assert.equal(f.opened.length, 1, "unknown activity cannot authorize the retained review button");
+  assert.equal(f.surface.selectReview(target), false);
+  f.activityModel.update(state => ({ ...state, count: 2 }));
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector(".roster-review button").disabled, true);
   f.activityModel.update(state => ({ ...state, count: 1, agents: state.agents.filter(agent => !agent.review_dispatch) }));
+  open.click();
+  assert.deepEqual(f.opened, [target], "a detached button cannot open a retired review");
+  assert.equal(f.surface.selectReview(target), false);
   f.flush();
   assert.equal(reviews.hidden, true, "the list hides once no review window runs");
   assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
