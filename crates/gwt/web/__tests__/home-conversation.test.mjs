@@ -237,6 +237,31 @@ test("a new message is sent to the chosen project and never to a silent pick", a
   assert.match(sent.textContent, /You.*to Beta.*Move the nightly update.*Delivered to the Project Manager of Beta\./);
 });
 
+test("native history replaces each confirmed local send once, including repeated text", async () => {
+  const { app, home, load, sends, socket } = fixture();
+  const text = "Check the nightly update";
+  const native = id => ({ id, role: "user", text });
+  const loadHistory = messages => load([alpha], [project(alpha, [], { conversation: { messages } })]);
+  const receipts = () => home().querySelectorAll("[data-home-sent]").length;
+  loadHistory([native("older")]);
+  for (const answer of [text, text]) {
+    assert.ok(app.home.actions.submit(answer, alpha.project_key));
+    socket.deliver({ kind: "pane_send_result", request_id: sends().at(-1).request_id, ok: true });
+  }
+  await settle();
+  assert.equal(receipts(), 2);
+  loadHistory([native("older"), native("first")]);
+  await settle();
+  assert.equal(receipts(), 1);
+  loadHistory([native("older"), native("first")]);
+  await settle();
+  assert.equal(receipts(), 1);
+  loadHistory([native("older"), native("first"), native("second")]);
+  await settle();
+  assert.equal(receipts(), 0);
+  assert.equal(home().querySelectorAll(".gwt-home__msg--me").length, 3);
+});
+
 test("a resolved topic is deleted only after a confirmation", async () => {
   const { document, home, load, answers, socket, topics } = fixture();
   load([alpha], [twoProjects[0]]);

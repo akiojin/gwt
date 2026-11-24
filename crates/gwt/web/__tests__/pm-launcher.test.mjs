@@ -207,10 +207,13 @@ test("FR-021: rail の PM 状態は running / stopped / absent を持つ", () =>
 test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
   const document = doc();
   const start = appJs.indexOf("      const pmLauncherModel = createUiStateStore(");
-  const end = appJs.indexOf("      let pendingPmFrame = false;", start);
+  const end = appJs.indexOf("      function openHomeDecisions()", start);
   assert.ok(start >= 0 && end > start);
   const { update, setPaused } = new Function("document", "createUiStateStore", "isWindowWithinViewport", `
-    let pmWindowId;
+    let pmWindowId = null;
+    const readPmWindowState = () => ({ windows: {} });
+    const applyPmDecisions = () => {};
+    const applyPmReviewAttention = () => {};
     ${appJs.slice(start, end)}
     return {
       update: updatePmLauncher,
@@ -239,32 +242,9 @@ test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
   assert.match(appJs, /case "pm_status":[\s\S]{0,420}pmLauncherModel\.update\(state => \(\{ \.\.\.state, paused: Boolean\(event\.paused\) \}\)\)/);
 });
 
-test("FR-019: PM クリックはローカルの camera-focus 経路を使う", () => {
-  // 実機検証（2026-08-06）で判明した欠陥の回帰固定。
-  //
-  // 初版は focusWindowRemotely(id, { center: true }) を使っていた。これは
-  // bounds をバックエンドへ送り、バックエンドが計算した viewport が
-  // workspace_state で返ってくるのを待つ「サーバー主導」の契約だが、
-  // SPEC-2008 FR-095 でカメラは per-viewer になり、viewport-sync は
-  // scope ごとに最初の 1 回しかサーバー viewport を採用しなくなった
-  // （それ以降は握り潰す）。PM ボタンが押せる時点でその 1 回は必ず
-  // 使い切られているため、計算結果は 100% 捨てられ、カメラは動かない。
-  //
-  // 動作している他の導線（minimap / Windows リスト / cycleFocus など）は
-  // すべてローカルの frameWindow() を使っている。PM もそちらに揃える。
-  assert.match(
-    appJs,
-    /function openPmAgent\(\)\s*\{[\s\S]*?requestWindowFrame\(pmWindowId\)/,
-    "既存 PM はローカル経路でフレーミングする",
-  );
-  // 起動要求に bounds は付けない（バックエンドの center 計算は届かない）。
-  assert.match(
-    appJs,
-    /function openPmAgent\(\)[\s\S]*?send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/,
-  );
-  // 起動後にマウントされた PM を必ずフレーミングする（PM は固定ワールド
-  // 座標に生えるので、カメラをパンしていると画面外に出現する）。
-  assert.match(appJs, /pendingPmFrame/);
+test("The PM rail opens Agents, which frames the exact PM terminal", () => {
+  assert.match(appJs, /getElementById\(id\)\?\.addEventListener\("click",[\s\S]*?openAgents\("ledger"\)/);
+  assert.match(appJs, /if \(pm\?\.is_pm && pm\.session_id === sessionId\) requestWindowFrame\(windowId\)/);
 });
 
 test("FR-019: 死んだ server-driven center 契約は残さない", () => {

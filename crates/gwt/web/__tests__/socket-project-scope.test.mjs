@@ -651,7 +651,6 @@ test("window reveal forces only its visible Reports snapshot and preserves termi
     document: { hidden: false }, socket: { readyState: 1 }, WebSocket: { OPEN: 1 },
     socketProjectKey: "project", activeProjectKey: () => "project",
     activeWorkspace: () => ({ windows: [pm, { id: "other", is_pm: true }] }),
-    pmChatViews: new Map([["pm", { logHost: { hidden: true } }], ["other", { logHost: { hidden: true } }]]),
     visibleWindowData: () => true,
     requestPmReports: (id, force) => { requests.push([id, force]); return { kind: "load_pm_reports", id }; },
     send: request => sent.push(request.id),
@@ -663,9 +662,8 @@ test("window reveal forces only its visible Reports snapshot and preserves termi
   assert.deepEqual(requests, [["pm", true]]);
   assert.deepEqual(sent, ["pm"]);
   assert.deepEqual(activated, ["terminal"]);
-  context.pmChatViews.get("pm").logHost.hidden = false;
   context.activateTerminalOnReveal("pm");
-  assert.deepEqual(sent, ["pm"], "Execution log keeps its existing hydration path");
+  assert.deepEqual(sent, ["pm", "pm"], "PM attention stays fresh with the terminal visible");
 });
 
 test("foreground recovery replaces the native backlog without replaying mutations", () => {
