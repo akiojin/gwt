@@ -155,8 +155,10 @@ export function createPmWindowModel() {
         // removal or the new order shows without waiting for the next poll.
         const request = previous?.decisionRequest;
         if (request?.status !== 'pending' || event.request_id !== request.requestId) return state;
+        // A refusal carries the current queue too (a decision answered
+        // elsewhere first is no longer in it), so it applies either way.
         next = { ...next,
-          decisions: event.ok && validDecisions(event.decisions) ? event.decisions : previous.decisions,
+          decisions: validDecisions(event.decisions) ? event.decisions : previous.decisions,
           decisionRequest: { ...request, status: event.ok ? 'ok' : 'failed',
             error: event.ok ? null : event.error || 'The decision queue refused the request.' } };
       } else if (event.kind === 'pm_request_task') {
@@ -693,9 +695,20 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     settledDecisionRequest = request.requestId;
     const fromDraft = draftAnswer === request.decisionId;
     draftAnswer = null;
+    // SPEC #7007 T-014 / T-016: the queue's error is internal wording that
+    // can name the decision's identifier; the surfaces say what happened and
+    // the next step instead.
     if (request.status !== 'ok') {
-      decisionSendError = { id: request.decisionId, message: request.error
-        || (request.action === 'defer' ? 'The decision could not be deferred.' : 'The answer could not be sent.') };
+      if (!items.some(item => item.id === request.decisionId)) {
+        decisionSendError = null;
+        deferNotice = { id: null, message: request.action === 'defer'
+          ? 'This decision was already settled elsewhere. Nothing was deferred.'
+          : 'This decision was already settled elsewhere. Your answer was not recorded.' };
+        return null;
+      }
+      decisionSendError = { id: request.decisionId, message: request.action === 'defer'
+        ? 'The decision was not deferred. Reload this window, then try again.'
+        : 'The answer was not recorded. Reload this window, then try again.' };
       return null;
     }
     decisionSendError = null;
