@@ -21,6 +21,7 @@ const AVAILABILITY_LABELS = {
 };
 
 function UsageLine({ account }) {
+  if (!account) return <p className="exec-env__usage">No usage reported for this account yet</p>;
   const reset = localTimeLabel(account.resetsAt);
   return (
     <p className="exec-env__usage" data-severity={account.severity || undefined}>
@@ -36,10 +37,36 @@ function UsageLine({ account }) {
   );
 }
 
+// Issue #7841 AC-2: the latest limit gwt saw the account hit, shown even when
+// the provider reports no usage.
+function LastLimit({ account }) {
+  const limit = account?.lastLimit;
+  if (!limit) return null;
+  const detected = localTimeLabel(limit.detectedAt);
+  const reset = localTimeLabel(limit.resetsAt);
+  return (
+    <p className="exec-env__meta" data-last-limit="">
+      {"Last limit hit "}
+      <time dateTime={limit.detectedAt}>{detected}</time>
+      {reset ? (
+        <>
+          {" · resets "}
+          <time dateTime={limit.resetsAt}>{reset}</time>
+        </>
+      ) : " · reset time not given"}
+    </p>
+  );
+}
+
 function LimitChip({ account }) {
-  if (account.limitReached) return <span className="exec-env__chip exec-env__chip--limit">Limit reached</span>;
-  if (account.usingCredits) return <span className="exec-env__chip">Using credits</span>;
+  if (account?.limitReached) return <span className="exec-env__chip exec-env__chip--limit">Limit reached</span>;
+  if (account?.usingCredits) return <span className="exec-env__chip">Using credits</span>;
   return null;
+}
+
+function poolLabel(environment) {
+  const count = environment.poolSize;
+  return `Using ${environment.accountName || "unknown"} · ${count} account${count === 1 ? "" : "s"} in pool`;
 }
 
 function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
@@ -74,7 +101,8 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
                 </span>
               </div>
               <p className="exec-env__meta">
-                {`Account ${environment.accountName || "unknown"} · Via ${environment.via}`}
+                {environment.poolSize ? poolLabel(environment) : `Account ${environment.accountName || "unknown"}`}
+                {` · Via ${environment.via}`}
                 {environment.toolVersion ? ` ${environment.toolVersion}` : ""}
                 {environment.projects.length === 0
                   ? " · Not on any project's list"
@@ -89,8 +117,8 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
                 <button type="button" aria-label={`${environment.readOnlyReason ? "Details for" : "Edit"} ${environment.name}`} onClick={() => onNavigate("edit", environment.id)}>
                   {environment.readOnlyReason ? "Details" : "Edit"}
                 </button>
-                {environment.usageProvider ? (
-                  <button type="button" aria-label={`Open the ${environment.accountName} account`} onClick={() => onNavigate("account", environment.usageProvider)}>
+                {environment.inUseAccountId ? (
+                  <button type="button" aria-label={`Open the ${environment.accountName} account`} onClick={() => onNavigate("account", environment.inUseAccountId)}>
                     Open account
                   </button>
                 ) : null}
@@ -132,41 +160,58 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
   );
 }
 
+function AccountRow({ pool, account, onNavigate }) {
+  const usage = account.usage;
+  return (
+    <li className="exec-env__card" data-account={account.id} data-sign-in={account.signIn.kind}>
+      <div className="exec-env__card-head">
+        <h3>{account.name}</h3>
+        <span className="exec-env__chips">
+          {account.inUse ? <span className="exec-env__chip">In use</span> : null}
+          <LimitChip account={usage} />
+        </span>
+      </div>
+      <p className="exec-env__meta">
+        {[pool.toolName, usage?.accountLabel, usage?.plan, account.signIn.label, usage?.usage ? usage.status.label : null]
+          .filter(Boolean).join(" · ")}
+      </p>
+      <UsageLine account={usage} />
+      <LastLimit account={usage} />
+      <div className="exec-env__actions">
+        <button type="button" aria-label={`Details for the ${account.name} account`} onClick={() => onNavigate("account", account.id)}>
+          Details
+        </button>
+      </div>
+    </li>
+  );
+}
+
 function Accounts({ model, headingRef, onNavigate, onOpenToolManagement }) {
-  const accounts = model.accounts || [];
+  const pools = model.pools || [];
   return (
     <>
       <div className="exec-env__header">
         <button type="button" className="exec-env__back" onClick={() => onNavigate("environments")}>← Execution environments</button>
         <h1 ref={headingRef} tabIndex={-1}>Accounts</h1>
-        <p className="exec-env__lead">Usage, reset times and limits are shown here, once per account.</p>
+        <p className="exec-env__lead">
+          Usage, reset times and limits are shown here, once per account. Each tool's accounts form a pool; sessions
+          start with the first account that can be used.
+        </p>
       </div>
-      {accounts.length === 0 ? (
+      {pools.length === 0 ? (
         <div className="exec-env__empty">
-          <h2>{model.loaded ? "No accounts report usage yet" : "Loading accounts…"}</h2>
-          <p>An account appears once its tool has been used on this device.</p>
+          <h2>{model.loaded ? "No accounts yet" : "Loading accounts…"}</h2>
+          <p>An account appears once its tool is signed in on this device.</p>
         </div>
-      ) : (
-        <ul className="exec-env__list" aria-label="Accounts">
-          {accounts.map(account => (
-            <li className="exec-env__card" key={account.provider} data-account={account.provider}>
-              <div className="exec-env__card-head">
-                <h2>{account.name}</h2>
-                <LimitChip account={account} />
-              </div>
-              <p className="exec-env__meta">
-                {[account.accountLabel, account.plan, account.usage ? account.status.label : null].filter(Boolean).join(" · ") || "Account"}
-              </p>
-              <UsageLine account={account} />
-              <div className="exec-env__actions">
-                <button type="button" aria-label={`Details for the ${account.name} account`} onClick={() => onNavigate("account", account.provider)}>
-                  Details
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
+      ) : pools.map(pool => (
+        <section className="exec-env__pool" key={pool.tool} data-pool={pool.tool} aria-label={`${pool.toolName} accounts`}>
+          <h2>{pool.toolName}</h2>
+          <p className="exec-env__meta">{`${pool.accounts.length} account${pool.accounts.length === 1 ? "" : "s"} in pool, in priority order`}</p>
+          <ul className="exec-env__list">
+            {pool.accounts.map(account => <AccountRow key={account.id} pool={pool} account={account} onNavigate={onNavigate} />)}
+          </ul>
+        </section>
+      ))}
       <section className="exec-env__manage" aria-label="Manage">
         <div className="exec-env__manage-row">
           <button type="button" onClick={onOpenToolManagement}>Tool management</button>
@@ -179,17 +224,19 @@ function Accounts({ model, headingRef, onNavigate, onOpenToolManagement }) {
 
 function AccountDetail({ model, account, headingRef, onNavigate, renderAccountUsage, onSetUsageCollection }) {
   const slotRef = useRef(null);
+  const usage = account?.usage || null;
+  const readable = usage && usage.status.kind !== "unknown";
   // The windows, credits and consumption card is still drawn by the
   // unmigrated usage renderer; refresh it whenever the rows change.
   useEffect(() => {
-    if (account) fillLegacySlot(slotRef.current, element => renderAccountUsage(element, account.provider));
+    if (readable) fillLegacySlot(slotRef.current, element => renderAccountUsage(element, usage.provider, usage.poolAccountId));
   });
   if (!account) {
     return (
       <div className="exec-env__header">
         <button type="button" className="exec-env__back" onClick={() => onNavigate("accounts")}>← Accounts</button>
         <h1 ref={headingRef} tabIndex={-1}>Account</h1>
-        <p className="exec-env__lead">{model.loaded ? "This account no longer reports usage." : "Loading account…"}</p>
+        <p className="exec-env__lead">{model.loaded ? "This account is no longer registered." : "Loading account…"}</p>
       </div>
     );
   }
@@ -198,33 +245,38 @@ function AccountDetail({ model, account, headingRef, onNavigate, renderAccountUs
       <div className="exec-env__header">
         <button type="button" className="exec-env__back" onClick={() => onNavigate("accounts")}>← Accounts</button>
         <h1 ref={headingRef} tabIndex={-1}>{`${account.name} account`}</h1>
-        <p className="exec-env__lead">{account.status.label}</p>
+        <p className="exec-env__lead">{[account.signIn.label, usage?.status.label].filter(Boolean).join(" · ")}</p>
       </div>
       <section className="exec-env__detail" aria-label="Usage and limits">
         <h2>Usage and limits</h2>
-        <div className="exec-env__usage-slot" ref={slotRef} data-usage-slot={account.provider} />
+        {readable ? (
+          <div className="exec-env__usage-slot" ref={slotRef} data-usage-slot={`${usage.provider}:${usage.poolAccountId}`} />
+        ) : (
+          <UsageLine account={usage} />
+        )}
+        <LastLimit account={usage} />
       </section>
-      {account.provider === "claude_code" ? (
+      {usage?.provider === "claude_code" ? (
         <section className="exec-env__detail" aria-label="Usage collection">
           <h2>Usage collection</h2>
           <label className="settings-toggle">
             <input
               type="checkbox"
-              checked={account.collectionEnabled}
-              onChange={() => onSetUsageCollection(account.provider, !account.collectionEnabled)}
+              checked={usage.collectionEnabled}
+              onChange={() => onSetUsageCollection(usage.provider, !usage.collectionEnabled)}
             />
             <span>Show Claude Code account usage (5-hour / weekly)</span>
           </label>
           <p className="exec-env__hint">
-            Off by default (opt-in). When enabled, Claude account usage reads your OAuth token from the Keychain /
-            credentials file and requests usage from the Anthropic API (polled at most once every 3 minutes). While
-            disabled, no Keychain read or network request happens. Per-session token usage is read locally and is not
-            affected by this setting.
+            Off by default (opt-in). When enabled, Claude account usage reads each account's OAuth token from the
+            Keychain / credentials file and requests usage from the Anthropic API (polled at most once every 3 minutes
+            per account). While disabled, no Keychain read or network request happens. Per-session token usage is read
+            locally and is not affected by this setting.
           </p>
         </section>
-      ) : (
-        <p className="exec-env__hint">Codex usage is read from local session files automatically.</p>
-      )}
+      ) : usage?.provider === "codex" ? (
+        <p className="exec-env__hint">Codex usage is read from the local session files of this account's conversations.</p>
+      ) : null}
       <div className="exec-env__actions">
         <button type="button" onClick={() => onNavigate("environments")}>View execution environments</button>
       </div>
@@ -253,7 +305,7 @@ export function ExecutionEnvironments({
     if (shownRef.current !== null && shownRef.current !== viewKey) focusElement(headingRef.current);
     shownRef.current = viewKey;
   }, [viewKey]);
-  const account = (model.accounts || []).find(item => item.provider === view.key) || null;
+  const account = (model.pools || []).flatMap(pool => pool.accounts).find(item => item.id === view.key) || null;
   const environment = (model.environments || []).find(item => item.id === view.key) || null;
   return (
     <section className="exec-env" aria-label="Execution environments" data-view={view.name}>

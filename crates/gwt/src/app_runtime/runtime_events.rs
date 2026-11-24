@@ -1066,10 +1066,7 @@ impl AppRuntime {
         let auth_agent = screen
             .and_then(gwt_core::usage::limit_notice::detect_provider_auth_notice)
             .filter(|provider| Some(*provider) == self.quota_provider_for_window(window_id))
-            .map(|provider| match provider {
-                gwt_core::usage::UsageProvider::Codex => "codex",
-                gwt_core::usage::UsageProvider::ClaudeCode => "claude",
-            });
+            .map(gwt_core::usage::UsageProvider::agent_command);
         let mut events = Vec::new();
         if auth_agent.is_some() {
             self.provider_quota_holds.remove(window_id);

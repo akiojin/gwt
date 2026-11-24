@@ -12643,6 +12643,8 @@ fn codex_usage_account(
 ) -> gwt_core::usage::ProviderUsage {
     gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::Codex,
+        pool_account_id: None,
+        last_limit: None,
         account_id: None,
         account_label: None,
         plan: None,

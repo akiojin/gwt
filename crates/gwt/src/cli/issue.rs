@@ -13925,6 +13925,8 @@ mod tests {
             &gwt_core::usage::snapshot_store::provider_usage_snapshot_path(),
             &[gwt_core::usage::ProviderUsage {
                 provider: gwt_core::usage::UsageProvider::Codex,
+                pool_account_id: None,
+                last_limit: None,
                 account_id: Some("acct".to_string()),
                 account_label: None,
                 plan: Some("pro".to_string()),
