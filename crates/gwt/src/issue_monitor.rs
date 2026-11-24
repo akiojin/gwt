@@ -6416,6 +6416,8 @@ pub struct AutonomousIssueRecord {
     /// off. A new head SHA starts the count over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_attempts: Option<AutonomousReviewAttempts>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_evidence_reviews: Vec<MergedEvidenceReview>,
     /// Issue #7810 AC-2: the gate inputs that kept a reviewed PR unmerged on
     /// the last consecutive scans. Cleared when the gate opens or a new
     /// review binds.
@@ -6853,10 +6855,64 @@ pub struct AutonomousReviewDispatch {
     pub reviewed_sha: String,
     pub required_criteria: Vec<String>,
     pub diff: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_evidence: Option<MergedEvidenceReviewDispatch>,
     /// SPEC #3200 Option A: the work branch kind, so the GUI spawns the review
     /// agent in the implementation agent's existing work-branch worktree.
     #[serde(default)]
     pub linked_issue_kind: LinkedIssueKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergedEvidenceReviewDispatch {
+    pub review: MergedEvidenceReview,
+    pub verdict_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergedEvidenceReview {
+    pub authorization_comment_id: u64,
+    pub evidence_revision: String,
+    pub reviewed_sha: String,
+    pub previous_fail_id: String,
+    verdict_token_hash: String,
+    pub outcome: MergedEvidenceReviewOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergedEvidenceReviewOutcome {
+    Pending,
+    Interrupted,
+    Fail,
+    Pass,
+}
+
+pub(crate) fn valid_merged_evidence_revision(revision: &str) -> bool {
+    let Some((kind, id)) = revision.split_once(':') else {
+        return false;
+    };
+    match kind {
+        "comment" => id
+            .parse::<u64>()
+            .is_ok_and(|number| number > 0 && number.to_string() == id),
+        "board" => uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id),
+        "verify" => id.strip_prefix("vat-").is_some_and(|id| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        }),
+        _ => false,
+    }
+}
+
+pub(crate) fn merged_evidence_authorization_text(
+    pr_number: u64,
+    sha: &str,
+    revision: &str,
+) -> String {
+    format!("I authorize one fresh independent evidence review of merged PR #{pr_number} at HEAD `{sha}`, using updated evidence revision `{revision}`.")
 }
 
 /// Issue #4117: one independent review window the monitor dispatched or
@@ -6953,15 +7009,40 @@ pub enum AutonomousFailureOutcome {
 }
 
 impl AutonomousIssueRecord {
-    fn is_wait_control_tombstone_only(&self) -> bool {
-        self.wait_control.as_ref().is_some_and(|control| {
-            control.ended
-                && self
-                    == &Self {
-                        wait_control: Some(control.clone()),
-                        ..Self::new(self.issue_number)
-                    }
-        })
+    fn pending_merged_evidence_review(&self) -> Option<&MergedEvidenceReview> {
+        self.merged_evidence_reviews
+            .last()
+            .filter(|review| review.outcome == MergedEvidenceReviewOutcome::Pending)
+    }
+
+    pub(crate) fn failed_review_veto(&self) -> bool {
+        self.review_passed == Some(false)
+            || self
+                .merged_evidence_reviews
+                .last()
+                .is_some_and(|review| review.outcome != MergedEvidenceReviewOutcome::Pass)
+    }
+
+    fn end_merged_evidence_review(&mut self, outcome: MergedEvidenceReviewOutcome) {
+        if let Some(review) = self.merged_evidence_reviews.last_mut() {
+            if review.outcome == MergedEvidenceReviewOutcome::Pending {
+                review.outcome = outcome;
+            }
+        }
+    }
+    fn is_autonomous_history_only(&self) -> bool {
+        let has_history = self.wait_control.is_some() || !self.merged_evidence_reviews.is_empty();
+        has_history
+            && self
+                .wait_control
+                .as_ref()
+                .is_none_or(|control| control.ended)
+            && self
+                == &Self {
+                    wait_control: self.wait_control.clone(),
+                    merged_evidence_reviews: self.merged_evidence_reviews.clone(),
+                    ..Self::new(self.issue_number)
+                }
     }
 
     fn mark_cancelled_claim_phase(&mut self, authority_epoch: u64) {
@@ -7060,6 +7141,7 @@ impl AutonomousIssueRecord {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
             gate_hold: None,
             cancelled_claim_phase: None,
         }
@@ -10051,7 +10133,14 @@ impl IssueMonitorState {
                 pr_number,
             );
         }
-        self.autonomous_records.remove(&issue_number);
+        if self
+            .autonomous_record(issue_number)
+            .is_some_and(|record| !record.merged_evidence_reviews.is_empty())
+        {
+            self.clear_autonomous_record(issue_number);
+        } else {
+            self.autonomous_records.remove(&issue_number);
+        }
         self.autonomous_handoffs.retain(|handoff| {
             handoff.issue_number != issue_number
                 || (handoff.state == AutonomousHandoffState::Resumed
@@ -10436,15 +10525,29 @@ impl IssueMonitorState {
     /// SPEC #3200 T-016/T-022: reset attempt state once work merges or resolves.
     /// Keep an ended typed control so an old writer cannot restore its wait.
     pub fn clear_autonomous_record(&mut self, issue_number: u64) {
-        let Some(record) = self.autonomous_records.remove(&issue_number) else {
+        let Some(record) = self.autonomous_records.get(&issue_number) else {
             return;
         };
-        if let Some(mut control) = record.wait_control {
+        if record.failed_review_veto()
+            && !record.merged_evidence_reviews.is_empty()
+            && !self.issue_is_closed(issue_number)
+        {
+            return;
+        }
+        let Some(mut record) = self.autonomous_records.remove(&issue_number) else {
+            return;
+        };
+        record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+        let mut wait_control = record.wait_control;
+        if let Some(control) = &mut wait_control {
             control.ended = true;
+        }
+        if wait_control.is_some() || !record.merged_evidence_reviews.is_empty() {
             self.autonomous_records.insert(
                 issue_number,
                 AutonomousIssueRecord {
-                    wait_control: Some(control),
+                    wait_control,
+                    merged_evidence_reviews: record.merged_evidence_reviews,
                     ..AutonomousIssueRecord::new(issue_number)
                 },
             );
@@ -11128,8 +11231,14 @@ impl IssueMonitorState {
                     .get(&record.issue_number)
                     .is_some_and(|startup_record| &*record == *startup_record)
             {
-                record.phase = AutonomousPhase::Implementing;
-                record.review_passed = None;
+                if record.pending_merged_evidence_review().is_some() {
+                    record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+                    record.review_passed = Some(false);
+                    record.phase = AutonomousPhase::Idle;
+                } else {
+                    record.phase = AutonomousPhase::Implementing;
+                    record.review_passed = None;
+                }
                 record.last_heartbeat = Some(now.to_string());
                 resumed.push(record.issue_number);
             }
@@ -14175,6 +14284,18 @@ impl IssueMonitorState {
             .collect::<BTreeSet<_>>();
         self.merge_inflight_launches_from_disk_excluding(disk, &reopened_fences);
         let rejected_terminal_companions = self.rejected_disk_terminal_failure_companions(disk);
+        let merged_evidence_audit = self
+            .autonomous_records
+            .values()
+            .filter(|record| !record.merged_evidence_reviews.is_empty())
+            .map(|record| (record.issue_number, record.merged_evidence_reviews.clone()))
+            .chain(
+                disk.autonomous_records
+                    .iter()
+                    .filter(|record| !record.merged_evidence_reviews.is_empty())
+                    .map(|record| (record.issue_number, record.merged_evidence_reviews.clone())),
+            )
+            .collect::<Vec<_>>();
         match autonomous_policy {
             AutonomousRecordRebasePolicy::DiskAuthoritative => {
                 let protected_local_records = rejected_terminal_companions
@@ -14234,6 +14355,20 @@ impl IssueMonitorState {
             if !reopened_fences.contains(&number) {
                 if let Some(record) = self.autonomous_records.get_mut(&number) {
                     *record = cancellation;
+                }
+            }
+        }
+        for (issue, reviews) in merged_evidence_audit {
+            let audit = &mut self.autonomous_record_mut(issue).merged_evidence_reviews;
+            for review in reviews {
+                match audit.binary_search_by_key(&review.authorization_comment_id, |entry| {
+                    entry.authorization_comment_id
+                }) {
+                    Ok(index) if audit[index].outcome == MergedEvidenceReviewOutcome::Pending => {
+                        audit[index] = review
+                    }
+                    Ok(_) => {}
+                    Err(index) => audit.insert(index, review),
                 }
             }
         }
@@ -17063,7 +17198,7 @@ impl IssueMonitorState {
         self.auto_close_merged_issues_enabled()
             && self
                 .autonomous_record(issue_number)
-                .is_none_or(|record| record.review_passed != Some(false))
+                .is_none_or(|record| !record.failed_review_veto())
     }
 
     /// A failed review vetoes completion; it does not establish a human decision.
@@ -18923,6 +19058,17 @@ impl IssueMonitorState {
         head_sha: Option<&str>,
         now: &str,
     ) -> Option<AutonomousReviewDispatchHold> {
+        self.review_dispatch_hold_inner(issue_number, pr_number, head_sha, now, false)
+    }
+
+    fn review_dispatch_hold_inner(
+        &self,
+        issue_number: u64,
+        pr_number: u64,
+        head_sha: Option<&str>,
+        now: &str,
+        merged_evidence: bool,
+    ) -> Option<AutonomousReviewDispatchHold> {
         let reason = if let Some(reason) = self.review_dispatch_exclusion_reason(issue_number) {
             reason
         } else if let Some(drain) = self.update_drain() {
@@ -18930,8 +19076,15 @@ impl IssueMonitorState {
                 "update_drain for v{} holds new review windows; use {UPDATE_DRAIN_RELEASE_OPERATION}",
                 drain.version
             )
-        } else if let Some(reason) =
-            self.review_retry_hold_reason(issue_number, pr_number, head_sha, now)
+        } else if !merged_evidence
+            && self.autonomous_record(issue_number).is_some_and(|record| {
+                record.failed_review_veto() && !record.merged_evidence_reviews.is_empty()
+            })
+        {
+            "merged source is awaiting a passing independent evidence review".to_string()
+        } else if let Some(reason) = (!merged_evidence)
+            .then(|| self.review_retry_hold_reason(issue_number, pr_number, head_sha, now))
+            .flatten()
         {
             reason
         } else if let Some(window) = self
@@ -19070,6 +19223,15 @@ impl IssueMonitorState {
         let pr_number = record.pr_number?;
         let reviewed_sha = record.reviewed_sha.clone().unwrap_or_default();
         let message = review_failure_message(message.into());
+        if record.pending_merged_evidence_review().is_some() {
+            let record = self.autonomous_record_mut(issue_number);
+            record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+            record.review_passed = Some(false);
+            record.phase = AutonomousPhase::Idle;
+            record.last_failure_message = Some(message);
+            self.close_review_window(issue_number, IssueMonitorIdleKind::BindingDead);
+            return Some(AutonomousReviewFailureOutcome::Exhausted { attempt: 1 });
+        }
         let max = self.autonomous_tuning.max_attempts;
         let base = self.autonomous_tuning.retry_backoff_base_secs;
         let cap = self.autonomous_tuning.retry_backoff_cap_secs;
@@ -19207,11 +19369,102 @@ impl IssueMonitorState {
         dispatch: AutonomousReviewDispatch,
         now: &str,
     ) -> Result<(), AutonomousReviewDispatchHold> {
+        self.dispatch_review_inner(dispatch, now, false)
+    }
+
+    pub(crate) fn dispatch_merged_evidence_review(
+        &mut self,
+        mut dispatch: AutonomousReviewDispatch,
+        authorization_comment_id: u64,
+        evidence_revision: &str,
+        verdict_token: String,
+        now: &str,
+    ) -> Result<(), AutonomousReviewDispatchHold> {
+        let refused = || {
+            AutonomousReviewDispatchHold {
+            reason: "merged evidence review has no matching failed verdict or this evidence revision was already used".into(),
+            since: now.to_string(),
+        }
+        };
+        if !self.config.enabled
+            || !self.autonomous_mode()
+            || self.issue_is_closed(dispatch.issue_number)
+            || authorization_comment_id == 0
+            || !valid_merged_evidence_revision(evidence_revision)
+        {
+            return Err(refused());
+        }
+        let record = self
+            .autonomous_record(dispatch.issue_number)
+            .ok_or_else(refused)?;
+        let failed = record
+            .review_attempts
+            .as_ref()
+            .filter(|attempts| {
+                attempts.verdict_failed && attempts.reviewed_sha == dispatch.reviewed_sha
+            })
+            .ok_or_else(refused)?;
+        if record.review_passed != Some(false)
+            || record.pr_number != Some(dispatch.pr_number)
+            || record.reviewed_sha.as_deref() != Some(dispatch.reviewed_sha.as_str())
+            || record
+                .merged_evidence_reviews
+                .last()
+                .is_some_and(|review| authorization_comment_id <= review.authorization_comment_id)
+            || record.merged_evidence_reviews.iter().any(|review| {
+                review.reviewed_sha == dispatch.reviewed_sha
+                    && review.evidence_revision == evidence_revision
+            })
+        {
+            return Err(refused());
+        }
+        dispatch.required_criteria = record
+            .acceptance_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.ids.clone())
+            .unwrap_or_default();
+        let review = MergedEvidenceReview {
+            authorization_comment_id,
+            evidence_revision: evidence_revision.to_string(),
+            reviewed_sha: dispatch.reviewed_sha.clone(),
+            previous_fail_id: format!(
+                "{}:{}:{}:{}:{}",
+                dispatch.issue_number,
+                dispatch.pr_number,
+                dispatch.reviewed_sha,
+                failed.last_failed_at,
+                failed.count,
+            ),
+            outcome: MergedEvidenceReviewOutcome::Pending,
+            verdict_token_hash: format!("{:x}", Sha256::digest(verdict_token.as_bytes())),
+        };
+        let issue_number = dispatch.issue_number;
+        dispatch.merged_evidence = Some(MergedEvidenceReviewDispatch {
+            review: review.clone(),
+            verdict_token,
+        });
+        self.dispatch_review_inner(dispatch, now, true)?;
+        self.autonomous_record_mut(issue_number)
+            .merged_evidence_reviews
+            .push(review);
+        Ok(())
+    }
+
+    fn dispatch_review_inner(
+        &mut self,
+        dispatch: AutonomousReviewDispatch,
+        now: &str,
+        merged_evidence: bool,
+    ) -> Result<(), AutonomousReviewDispatchHold> {
         let issue_number = dispatch.issue_number;
         let pr_number = dispatch.pr_number;
-        if let Some(hold) =
-            self.review_dispatch_hold(issue_number, pr_number, Some(&dispatch.reviewed_sha), now)
-        {
+        if let Some(hold) = self.review_dispatch_hold_inner(
+            issue_number,
+            pr_number,
+            Some(&dispatch.reviewed_sha),
+            now,
+            merged_evidence,
+        ) {
             self.hold_review_dispatch(issue_number, hold.clone());
             return Err(hold);
         }
@@ -19276,6 +19529,21 @@ impl IssueMonitorState {
                     && record.pr_number == Some(dispatch.pr_number)
                     && record.reviewed_sha.as_deref() == Some(dispatch.reviewed_sha.as_str())
                     && record.review_passed.is_none()
+                    && match (
+                        record.pending_merged_evidence_review(),
+                        dispatch.merged_evidence.as_ref(),
+                    ) {
+                        (None, None) => true,
+                        (Some(review), Some(evidence)) => {
+                            review == &evidence.review
+                                && review.verdict_token_hash
+                                    == format!(
+                                        "{:x}",
+                                        Sha256::digest(evidence.verdict_token.as_bytes())
+                                    )
+                        }
+                        _ => false,
+                    }
             });
         let unstarted_window =
             self.review_windows
@@ -19510,6 +19778,52 @@ impl IssueMonitorState {
     /// (a stale / wrong-SHA verdict is rejected). Returns `None` when rejected
     /// (no record / SHA mismatch), else `Some(passed)`.
     pub fn apply_review_verdict(
+        &mut self,
+        issue_number: u64,
+        reviewed_sha: &str,
+        verdict_raw: &str,
+    ) -> Option<bool> {
+        if self
+            .autonomous_record(issue_number)?
+            .merged_evidence_reviews
+            .iter()
+            .any(|review| review.reviewed_sha == reviewed_sha)
+        {
+            return None;
+        }
+        self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw)
+    }
+
+    pub(crate) fn apply_merged_evidence_review_verdict(
+        &mut self,
+        issue_number: u64,
+        reviewed_sha: &str,
+        verdict_token: &str,
+        verdict_raw: &str,
+    ) -> Option<bool> {
+        let record = self.autonomous_record(issue_number)?;
+        let review = record.pending_merged_evidence_review()?;
+        if record.phase != AutonomousPhase::Reviewing
+            || review.reviewed_sha != reviewed_sha
+            || review.verdict_token_hash
+                != format!("{:x}", Sha256::digest(verdict_token.as_bytes()))
+        {
+            return None;
+        }
+        let passed = self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw)?;
+        let record = self.autonomous_record_mut(issue_number);
+        record.end_merged_evidence_review(if passed {
+            MergedEvidenceReviewOutcome::Pass
+        } else {
+            MergedEvidenceReviewOutcome::Fail
+        });
+        // The source is already merged. Settlement consumes the new verdict;
+        // there is no merge to arm or implementation to requeue.
+        record.phase = AutonomousPhase::Idle;
+        Some(passed)
+    }
+
+    fn apply_bound_review_verdict(
         &mut self,
         issue_number: u64,
         reviewed_sha: &str,
@@ -21166,6 +21480,13 @@ impl IssueMonitorState {
 
     fn claim_candidate_exclusions_without_dependencies(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
+        if self.autonomous_record(issue_number).is_some_and(|record| {
+            record.failed_review_veto() && !record.merged_evidence_reviews.is_empty()
+        }) {
+            reasons.push(
+                "merged source is awaiting a passing independent evidence review".to_string(),
+            );
+        }
         if let Some(reason) = self.agent_schedule_launch_exclusion(issue_number) {
             reasons.push(reason);
         }
@@ -21725,8 +22046,13 @@ impl IssueMonitorState {
             {
                 // Cancellation is not a failed attempt. Queue push can resume
                 // PR discovery, while a late pane has no current review to join.
-                record.phase = AutonomousPhase::Implementing;
-                record.reviewed_sha = None;
+                if record.pending_merged_evidence_review().is_some() {
+                    record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+                    record.review_passed = Some(false);
+                } else {
+                    record.phase = AutonomousPhase::Implementing;
+                    record.reviewed_sha = None;
+                }
             }
         }
     }
@@ -23334,7 +23660,7 @@ impl IssueMonitorState {
                     && self.inbox_item(**issue).map_or_else(
                         || {
                             self.autonomous_record(**issue)
-                                .is_some_and(|record| !record.is_wait_control_tombstone_only())
+                                .is_some_and(|record| !record.is_autonomous_history_only())
                         },
                         |item| {
                             item.state == MonitorInboxState::Queued
@@ -23382,7 +23708,7 @@ impl IssueMonitorState {
             if let Some(record) = self
                 .autonomous_records
                 .get_mut(&issue_number)
-                .filter(|record| !record.is_wait_control_tombstone_only())
+                .filter(|record| !record.is_autonomous_history_only())
             {
                 if matches!(
                     record.phase,
@@ -23716,7 +24042,7 @@ impl IssueMonitorState {
         // independent review before completion cleanup can erase its veto.
         if self
             .autonomous_record(issue_number)
-            .is_some_and(|record| record.review_passed == Some(false))
+            .is_some_and(AutonomousIssueRecord::failed_review_veto)
         {
             self.hold_failed_merged_review(issue_number);
             return false;
@@ -23766,7 +24092,7 @@ impl IssueMonitorState {
         // autonomous loop completes (checked BEFORE the record is cleared).
         if self
             .autonomous_record(issue_number)
-            .is_some_and(|record| !record.is_wait_control_tombstone_only())
+            .is_some_and(|record| !record.is_autonomous_history_only())
         {
             self.push_autonomous_notice(
                 "done",
@@ -29875,6 +30201,7 @@ mod tests {
                 reviewed_sha: "test-sha".into(),
                 required_criteria: vec!["reporter-supplied requirement".into()],
                 diff: String::new(),
+                merged_evidence: None,
                 linked_issue_kind: LinkedIssueKind::Issue,
             });
             assert!(
@@ -32200,6 +32527,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
             gate_hold: None,
             cancelled_claim_phase: None,
         };
@@ -32328,6 +32656,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
             gate_hold: None,
             cancelled_claim_phase: None,
         };
@@ -32402,6 +32731,7 @@ mod tests {
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -32476,6 +32806,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
             gate_hold: None,
             cancelled_claim_phase: None,
         };
@@ -32539,6 +32870,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
             gate_hold: None,
             cancelled_claim_phase: None,
         };
@@ -32587,6 +32919,7 @@ mod tests {
             reviewed_sha: "merged-sha".to_string(),
             required_criteria: vec!["AC-1".to_string()],
             diff: "stale review diff".to_string(),
+            merged_evidence: None,
             linked_issue_kind: LinkedIssueKind::Issue,
         });
         let disk = IssueMonitorPrefs {
@@ -54208,6 +54541,112 @@ mod tests {
     }
 
     #[test]
+    fn merged_evidence_review_keeps_failed_verdict_until_fresh_pass() {
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
+        let mut candidate = checked_issue(42);
+        candidate.labels.push("gwt-spec".into());
+        scan_queued_candidates(&mut monitor, &[candidate], "2026-09-01T00:00:00Z");
+        monitor.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                "## Acceptance Criteria\n- [x] AC-1: done\n",
+            )
+            .snapshot(),
+        );
+        monitor.begin_review(42, 7, "aaa");
+        monitor.record_review_verdict(42, false);
+        let mut dispatch = review_dispatch_for(42, 7);
+        dispatch.reviewed_sha = "aaa".into();
+        let now = "2026-09-01T00:01:00Z";
+        assert!(monitor.dispatch_review(dispatch.clone(), now).is_err());
+        assert!(monitor
+            .dispatch_merged_evidence_review(
+                dispatch.clone(),
+                123,
+                "comment:456",
+                "fresh-token".into(),
+                now
+            )
+            .is_ok());
+        assert!(!monitor.merged_issue_close_allowed(42));
+        let verdict = r#"{"schema":"gwt-autonomous-review/v1","overall":"pass","criteria":[{"id":"AC-1","verdict":"pass"}]}"#;
+        assert_eq!(monitor.apply_review_verdict(42, "aaa", verdict), None);
+        let token = monitor
+            .pending_review_dispatches
+            .back()
+            .unwrap()
+            .merged_evidence
+            .as_ref()
+            .unwrap()
+            .verdict_token
+            .clone();
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", "stale", verdict),
+            None
+        );
+        let fail = r#"{"schema":"gwt-autonomous-review/v1","overall":"fail","criteria":[{"id":"AC-1","verdict":"fail"}]}"#;
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", &token, fail),
+            Some(false)
+        );
+        assert!(!monitor.merged_issue_close_allowed(42));
+        assert_eq!(monitor.apply_review_verdict(42, "aaa", verdict), None);
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            monitor.prefs(),
+        );
+        assert!(monitor
+            .dispatch_merged_evidence_review(
+                dispatch.clone(),
+                124,
+                "comment:456",
+                "other-token".into(),
+                now
+            )
+            .is_err());
+        assert!(monitor
+            .dispatch_merged_evidence_review(
+                dispatch,
+                125,
+                "comment:457",
+                "updated-token".into(),
+                now
+            )
+            .is_ok());
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", &token, verdict),
+            None
+        );
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", "updated-token", verdict),
+            Some(true)
+        );
+        assert!(monitor.merged_issue_close_allowed(42));
+        let old_fail_id = monitor
+            .autonomous_record(42)
+            .unwrap()
+            .merged_evidence_reviews[0]
+            .previous_fail_id
+            .clone();
+        monitor.clear_autonomous_record(42);
+        let audit = &monitor
+            .autonomous_record(42)
+            .unwrap()
+            .merged_evidence_reviews;
+        assert_eq!(audit[0].previous_fail_id, old_fail_id);
+        assert_eq!(audit[0].outcome, MergedEvidenceReviewOutcome::Fail);
+        assert_eq!(audit[1].outcome, MergedEvidenceReviewOutcome::Pass);
+    }
+
+    #[test]
     fn merged_delivery_with_failed_review_keeps_acceptance_unmet() {
         for autonomous in [false, true] {
             let mut monitor = test_monitor(IssueMonitorConfig::default());
@@ -59649,6 +60088,7 @@ mod tests {
             reviewed_sha: format!("sha-{pr_number}"),
             required_criteria: vec!["AC-1".to_string()],
             diff: "diff --git a/a b/a".to_string(),
+            merged_evidence: None,
             linked_issue_kind: LinkedIssueKind::Issue,
         }
     }

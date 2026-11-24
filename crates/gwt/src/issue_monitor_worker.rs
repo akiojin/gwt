@@ -3967,6 +3967,7 @@ fn advance_one_autonomous_issue(
                             reviewed_sha: sha,
                             required_criteria: criteria,
                             diff,
+                            merged_evidence: None,
                             linked_issue_kind,
                         },
                         now,

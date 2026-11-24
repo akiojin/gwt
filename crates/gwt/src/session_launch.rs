@@ -467,6 +467,12 @@ fn named_record_from_body(body: &str) -> Option<NamedIssueRecord> {
     named_records_in(body).into_iter().next_back()
 }
 
+pub(crate) fn github_body_is_stamped_by_pm(body: &str, session_id: &str) -> bool {
+    named_record_from_body(body).is_some_and(|record| {
+        record.session_id == session_id && record.role.as_deref() == Some("pm")
+    })
+}
+
 fn writer_from_record(record: &NamedIssueRecord) -> GithubWriter {
     let role = match record.role.as_deref() {
         Some("pm") => GithubWriterRole::Pm,

@@ -970,6 +970,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 issue_number: required_u64(params, "issue_number")?,
                 reviewed_sha: required_string(params, "reviewed_sha")?,
                 verdict_raw: required_string(params, "verdict_raw")?,
+                evidence_review_token: optional_string(params, "evidence_review_token")?,
+            })
+        }
+        "issue.monitor.review_merged_evidence" => {
+            CliCommand::Issue(IssueCommand::MonitorReviewMergedEvidence {
+                issue_number: required_u64(params, "issue_number")?,
+                pr_number: required_u64(params, "pr_number")?,
+                reviewed_sha: required_string(params, "reviewed_sha")?,
+                evidence_revision: required_string(params, "evidence_revision")?,
             })
         }
         "update.settings.status" => CliCommand::Update(super::UpdateCommand::SettingsStatus {
@@ -6061,6 +6070,7 @@ mod tests {
                 issue_number,
                 reviewed_sha,
                 verdict_raw,
+                evidence_review_token: _,
             }) => {
                 assert_eq!(issue_number, 42);
                 assert_eq!(reviewed_sha, "abc123");

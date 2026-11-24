@@ -3751,6 +3751,7 @@ mod tests {
             reviewed_sha: "abc123".to_string(),
             required_criteria: vec!["tests pass".to_string()],
             diff: "diff --git a/a b/a".to_string(),
+            merged_evidence: None,
             linked_issue_kind: gwt::LinkedIssueKind::Issue,
         };
         let review_payload = gwt::runtime_daemon_events::issue_monitor_payload(

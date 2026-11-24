@@ -1300,7 +1300,7 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
         &dispatch.reviewed_sha,
         &dispatch.diff,
     );
-    format!(
+    let prompt = format!(
         "{base}\n\nReview completion order for PR #{pr}: inspect the diff now, but before \
          finalizing or publishing a verdict, wait for all required CI checks to finish \
          using `gh pr checks {pr} --required --watch`. Pending, missing, or unreadable \
@@ -1328,6 +1328,16 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
         issue = dispatch.issue_number,
         pr = dispatch.pr_number,
         sha = dispatch.reviewed_sha,
+    );
+    let Some(evidence) = &dispatch.merged_evidence else {
+        return prompt;
+    };
+    format!(
+        "{prompt}\n\nThis is a fresh review of already-merged source. Re-evaluate every acceptance criterion using the updated external evidence at {:?} (PM authorization comment {}). Preserve the previous FAIL, identified by {:?}. Add \"evidence_review_token\": {:?} to the verdict operation params.",
+        evidence.review.evidence_revision,
+        evidence.review.authorization_comment_id,
+        evidence.review.previous_fail_id,
+        evidence.verdict_token,
     )
 }
 
@@ -8404,6 +8414,7 @@ mod review_dispatch_tests {
             reviewed_sha: "abc123".to_string(),
             required_criteria: vec!["AC-1".to_string()],
             diff: "diff --git a/x b/x".to_string(),
+            merged_evidence: None,
             linked_issue_kind: gwt::LinkedIssueKind::Spec,
         };
         let prompt = build_review_dispatch_prompt(&dispatch);
