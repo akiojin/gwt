@@ -11896,9 +11896,10 @@ impl AppRuntime {
                 self.set_project_autonomy_events(&context, client_id, running)
             }
             FrontendEvent::RefreshOrphanDaemons => self.start_orphan_observation(client_id, None),
-            FrontendEvent::LoadHomeConversation { request_id } => {
-                self.load_home_conversation_events(client_id, request_id)
-            }
+            FrontendEvent::LoadHomeConversation {
+                request_id,
+                history,
+            } => self.load_home_conversation_events(client_id, request_id, history),
             FrontendEvent::HomePmSend {
                 project_key,
                 text,

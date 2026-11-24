@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useStoreSelector } from "../store/useStoreSelector.js";
 import { focusElement } from "../hosts/focus.js";
@@ -113,19 +113,67 @@ export function HomeConversation({ store, actions }) {
   const { composer } = view;
   const initialMessage = useRef(null);
 
-  // The newest message is at the bottom: start there, and follow new messages.
-  const timelineKey = view.topics.map(topic => topic.id).join("\n");
-  useEffect(() => {
-    const target = messageRefs.current.get(view.initialMessage);
-    if (target && initialMessage.current !== view.initialMessage) {
-      initialMessage.current = view.initialMessage;
+  const [windowEnd, setWindowEnd] = useState(null);
+  const [wideHistory, setWideHistory] = useState(false);
+  const scrollAnchor = useRef(null);
+  const following = useRef(true);
+  const requestedMessage = initialMessage.current !== view.initialMessage ? view.initialMessage : null;
+  const targetIndex = requestedMessage ? view.topics.findIndex(topic => topic.id === requestedMessage) : -1;
+  const rememberedEnd = windowEnd ? view.topics.findIndex(topic => topic.id === windowEnd) + 1 : 0;
+  const end = targetIndex >= 0 ? Math.min(view.topics.length, targetIndex + 25)
+    : rememberedEnd || view.topics.length;
+  const start = view.decisionsOnly ? 0 : Math.max(0, end - (wideHistory ? 100 : 50));
+  const topics = view.topics.slice(start, end);
+  const timelineKey = topics.map(topic => topic.id).join("\n");
+
+  useLayoutEffect(() => {
+    const target = messageRefs.current.get(requestedMessage);
+    const anchor = scrollAnchor.current;
+    const anchorNode = anchor && messageRefs.current.get(anchor.id);
+    if (target) {
+      initialMessage.current = requestedMessage;
       scrollIntoCenter(target);
       focusElement(target);
-      setHighlight(view.initialMessage);
-    } else if (!view.initialMessage) {
+      setHighlight(requestedMessage);
+      const last = topics.at(-1);
+      if (end < view.topics.length) setWindowEnd(last.id);
+    } else if (anchorNode) {
+      if (anchor.before === undefined || anchor.before !== view.topics[0]?.id) scrollAnchor.current = null;
+      logRef.current.scrollTop += anchorNode.getBoundingClientRect().top - anchor.top;
+    } else if (following.current) {
       scrollToEnd(logRef.current);
     }
   }, [timelineKey, view.initialMessage]);
+
+  function rememberScrollAnchor(log, loadingOlder = false) {
+    const top = log.getBoundingClientRect().top;
+    for (const { id } of topics) {
+      const bounds = messageRefs.current.get(id)?.getBoundingClientRect();
+      if (bounds && bounds.bottom > top) {
+        scrollAnchor.current = { id, top: bounds.top, before: loadingOlder ? view.topics[0]?.id : undefined };
+        break;
+      }
+    }
+  }
+
+  function scrollTimeline(event) {
+    if (view.decisionsOnly) return;
+    const log = event.currentTarget;
+    const nearEnd = log.scrollHeight - log.clientHeight - log.scrollTop <= 16;
+    following.current = !windowEnd && nearEnd;
+    if (log.scrollTop <= 16 && log.scrollHeight > log.clientHeight) {
+      if (!start && !view.hasOlder) return;
+      if (!start && !actions.loadOlder()) return;
+      rememberScrollAnchor(log, !start);
+      setWideHistory(true);
+      const earlierEnd = Math.max(end - 50, start + 25);
+      setWindowEnd(view.topics[(start ? earlierEnd : Math.min(end, 50)) - 1]?.id ?? null);
+    } else if (nearEnd && windowEnd) {
+      rememberScrollAnchor(log);
+      const next = end + 50;
+      setWindowEnd(next >= view.topics.length ? null : view.topics[next - 1]?.id ?? null);
+    }
+  }
 
   // A confirmed send clears exactly the draft that was sent.
   useEffect(() => {
@@ -262,7 +310,7 @@ export function HomeConversation({ store, actions }) {
         {view.decisionsOnly ? <a className="text-button" href="/">Back to Home</a> : null}
       </header>
 
-      <div className="gwt-home__timeline" role="log" aria-label={COPY.conversation} ref={logRef} tabIndex={0}>
+      <div className="gwt-home__timeline" role="log" aria-label={COPY.conversation} ref={logRef} tabIndex={0} onScroll={scrollTimeline}>
         {!view.decisionsOnly && view.resolved.length ? (
           <div className="gwt-home__resolved" data-home-resolved>
             <input
@@ -325,7 +373,7 @@ export function HomeConversation({ store, actions }) {
 
         {view.notices.map(notice => <p className="gwt-home__note gwt-home__note--error" role="alert" key={notice}>{notice}</p>)}
 
-        {view.topics.map(topic => topic.kind === "reply-waiting" ? (
+        {topics.map(topic => topic.kind === "reply-waiting" ? (
           <article className="gwt-home__msg gwt-home__msg--pm" key={topic.id} role="status" aria-label={COPY.replyWaiting}>
             …
           </article>

@@ -3107,7 +3107,10 @@ mod tests {
         ));
         // Issue #7639: Home reads decisions and sends to a PM by project.
         assert!(hub_frontend_event_allowed(
-            &FrontendEvent::LoadHomeConversation { request_id: 1 }
+            &FrontendEvent::LoadHomeConversation {
+                request_id: 1,
+                history: Default::default()
+            }
         ));
         assert!(hub_frontend_event_allowed(&FrontendEvent::HomePmSend {
             project_key: "0123456789abcdef".to_string(),

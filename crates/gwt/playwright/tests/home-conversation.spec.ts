@@ -7,6 +7,7 @@
  * AC-3: the path stays whole with no project and with twenty.
  */
 import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import { HUB_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
@@ -23,10 +24,22 @@ const decision = (id: string, minutes: number, question: string, options: string
   reason: "Nothing else changes by waiting.", status: "open", created_at: minutesAgo(minutes), deferred_seq: null,
 });
 
+type NativeMessage = { id: string; role: string; text: string };
+type Conversation = {
+  availability: string;
+  messages: NativeMessage[];
+  older_messages?: NativeMessage[];
+  has_older?: boolean;
+};
+
 type Backend = {
   projects: unknown[];
   recent?: unknown[];
-  conversation: Array<{ project_key: string; title: string; pm_available: boolean; decisions: unknown[]; error?: string }>;
+  conversation: Array<{
+    project_key: string; title: string; pm_available: boolean; decisions: unknown[]; error?: string;
+    conversation?: Conversation;
+  }>;
+  historyPageSize?: number;
   pm?: { name: string; avatar: { kind: "preset"; preset_id: string } | { kind: "upload"; image: string } };
   // Hold the pane receipt so the test can observe delivery and reply separately.
   holdSend?: boolean;
@@ -86,11 +99,27 @@ async function installHomeBackend(page: Page, backend: Backend) {
         if (message.kind === "frontend_ready") {
           this.reply({ kind: "hub_state", hub: { app_version: "9.9.9", projects: backend.projects, recent_projects: backend.recent || [] } });
         } else if (message.kind === "load_home_conversation") {
-          this.reply({ kind: "home_conversation", request_id: message.request_id, pm: backend.pm, projects: backend.conversation.map(project => ({
-            ...project,
-            ...(state.rejectHomeRead ? { error: "Home read deferred", decisions: [], waiting_count: 0 }
-              : { decisions: queueOf(project.project_key).items, waiting_count: queueOf(project.project_key).waiting_count }),
-          })) });
+          if (message.history) state.sent.push(message);
+          this.reply({ kind: "home_conversation", request_id: message.request_id, pm: backend.pm, projects: backend.conversation.map(project => {
+            let conversation = project.conversation;
+            if (conversation && backend.historyPageSize) {
+              const { messages } = conversation;
+              const cursor = message.history?.[project.project_key];
+              const end = cursor ? messages.findIndex(item => item.id === cursor) : messages.length;
+              const start = Math.max(0, end - backend.historyPageSize);
+              conversation = {
+                ...conversation,
+                messages: messages.slice(-backend.historyPageSize),
+                older_messages: cursor && end >= 0 ? messages.slice(start, end) : [],
+                has_older: start > 0,
+              };
+            }
+            return {
+              ...project, conversation,
+              ...(state.rejectHomeRead ? { error: "Home read deferred", decisions: [], waiting_count: 0 }
+                : { decisions: queueOf(project.project_key).items, waiting_count: queueOf(project.project_key).waiting_count }),
+            };
+          }) });
         } else if (message.kind === "home_answer_decision" || message.kind === "home_defer_decision") {
           state.sent.push(message);
           const items = queues.get(message.project_key) || [];
@@ -143,6 +172,71 @@ const twoProjects: Backend = {
     ] },
   ],
 };
+
+for (const width of [1440, 390]) {
+  test(`Issue #7864 Home loads a long conversation at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const errors = collectBrowserErrors(page);
+    const theme = themeOf(info.project.name);
+    const history = Array.from({ length: 3000 }, (_, index) => ({
+      id: `history-${index}`,
+      role: index % 5 === 0 ? "user" : "assistant",
+      text: `Conversation entry ${index}`,
+    }));
+    const fixtureReady = performance.now();
+    await openHome(page, theme, { projects: [alpha], historyPageSize: 50, conversation: [{
+      project_key: alpha.project_key, title: alpha.title, pm_available: true, decisions: [],
+      conversation: { availability: "ready", messages: history },
+    }] });
+    const home = page.locator("[data-home]");
+    const log = home.getByRole("log");
+    const messages = log.getByText(/^Conversation entry \d+$/);
+    const entry = (index: number) => log.getByText(history[index].text, { exact: true });
+    await expect(messages).toHaveCount(50);
+    await expect(entry(2999)).toBeInViewport();
+    const initialMs = Math.round(performance.now() - fixtureReady);
+    await expect(log.locator("details")).toHaveCount(0);
+    await expect(entry(2949)).toHaveCount(0);
+
+    const samples: Array<{ mounted: number; loadMs: number; anchorDeltaPx: number }> = [];
+    for (const oldest of [2950, 2900, 2850]) {
+      const started = performance.now();
+      const before = await entry(oldest).evaluate(node => {
+        const log = node.closest('[role="log"]')!;
+        log.scrollTop = 0;
+        return node.getBoundingClientRect().top - log.getBoundingClientRect().top;
+      });
+      await expect(entry(oldest - 50)).toBeVisible();
+      const after = await entry(oldest).evaluate(node =>
+        node.getBoundingClientRect().top - node.closest('[role="log"]')!.getBoundingClientRect().top);
+      const mounted = await messages.count();
+      const anchorDeltaPx = Math.abs(after - before);
+      expect(anchorDeltaPx).toBeLessThanOrEqual(2);
+      expect(mounted).toBeLessThanOrEqual(100);
+      samples.push({ mounted, loadMs: Math.round(performance.now() - started), anchorDeltaPx });
+    }
+    const ids = (await messages.allTextContents()).map(text => Number(text.replace("Conversation entry ", "")));
+    expect(ids).toEqual(Array.from({ length: ids.length }, (_, index) => 2800 + index));
+    expect(await page.evaluate(() => (window as any).__homeSent.filter((message: any) => message.history)
+      .map((message: any) => Object.values(message.history)[0]))).toEqual(["history-2950", "history-2900", "history-2850"]);
+
+    const screenshot = info.outputPath(`pm-history-${theme}-${width}.png`);
+    await home.screenshot({ path: screenshot });
+    await info.attach("PM conversation history", { path: screenshot, contentType: "image/png" });
+    const metrics = info.outputPath(`pm-history-${theme}-${width}.json`);
+    await writeFile(metrics, JSON.stringify({ theme, width, history: history.length, initialMs, samples }, null, 2));
+    await info.attach("PM history metrics", { path: metrics, contentType: "application/json" });
+
+    for (let attempt = 0; attempt < 4 && (await entry(2999).count()) === 0; attempt++) {
+      const last = await messages.last().textContent();
+      await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await expect(messages.last()).not.toHaveText(last!);
+    }
+    await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await expect(entry(2999)).toBeInViewport();
+    expect(errors).toEqual([]);
+  });
+}
 
 test.describe("Home conversation with the Project Manager", () => {
   test("Issue #7638 Home and the shared header refresh the designated PM avatar", async ({ page }, testInfo) => {
