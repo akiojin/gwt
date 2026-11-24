@@ -2172,6 +2172,7 @@ fn sample_runtime_with_events(
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+        pool_account_logins: HashMap::new(),
         decision_answers_sent: HashSet::new(),
         decision_answers_in_flight: HashMap::new(),
         decision_answer_sequence: 0,

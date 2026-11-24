@@ -435,6 +435,7 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
     clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
     tuningController: { disconnectTuning() {} },
     handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
+    executionEnvironments: { connectionLost() {}, refreshVisibleAccounts() {} },
     executionEnvironmentsModel: {
       read: executionEnvironmentsModel.read,
       // The actual handlers run in the VM, but the store belongs to this realm.
@@ -951,4 +952,16 @@ test("close choices, Task mutations and view receipts belong to their exact live
     assert.doesNotThrow(() => assert.equal(context.send({ kind }), 'unavailable'));
   }
   assert.deepEqual(context.pendingMessages, []);
+});
+
+test("account login input belongs to its current connection and is never replayed", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  const input = { kind: "pool_account_login_input", login_id: "fixture-login", data: "fixture" };
+  assert.equal(context.send(input), "unavailable");
+  assert.deepEqual(context.pendingMessages, []);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.some(event => event.kind === input.kind), false);
+  assert.equal(context.send(input), "sent");
+  assert.deepEqual(sockets.at(-1).sent.at(-1), input);
 });

@@ -1279,6 +1279,32 @@ pub enum FrontendEvent {
     /// current project's priority list. Response is
     /// [`BackendEvent::ExecutionEnvironments`].
     GetExecutionEnvironments,
+    AddPoolAccount {
+        tool: String,
+    },
+    SignInPoolAccount {
+        account_id: String,
+    },
+    MovePoolAccount {
+        account_id: String,
+        direction: PoolAccountDirection,
+    },
+    UsePoolAccount {
+        account_id: String,
+    },
+    DeletePoolAccount {
+        account_id: String,
+    },
+    ResumeNextPoolAccount {
+        id: String,
+    },
+    PoolAccountLoginInput {
+        login_id: String,
+        data: String,
+    },
+    ClosePoolAccountLogin {
+        login_id: String,
+    },
     GetProjectEnvironmentSet,
     SetProjectEnvironmentSet {
         name: Option<String>,
@@ -2701,6 +2727,41 @@ pub struct AgentWorkFactsView {
     pub warning_count: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolAccountDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PoolAccountProviderView {
+    pub tool: String,
+    pub tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PoolAccountDeletionImpact {
+    pub sessions: Vec<String>,
+    pub agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PoolExecutionAccountView {
+    pub account_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PoolAccountSessionView {
+    pub id: String,
+    pub title: String,
+    pub is_pm: bool,
+    pub execution_account: PoolExecutionAccountView,
+    pub account_switches: Vec<gwt_agent::session::AccountSwitch>,
+}
+
 /// Issue #7741: an account an execution environment belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionAccountView {
@@ -2708,6 +2769,15 @@ pub struct ExecutionAccountView {
     pub name: String,
     pub tool: String,
     pub tool_name: String,
+    pub signed_in: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in_blocked_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_blocked_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_impact: Option<PoolAccountDeletionImpact>,
 }
 
 /// A project that has an execution environment on its list.
@@ -2741,6 +2811,8 @@ pub struct ExecutionEnvironmentView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_settings: Option<crate::execution_environments::ToolSettings>,
     pub projects: Vec<ExecutionEnvironmentProjectView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_impact: Option<PoolAccountDeletionImpact>,
 }
 
 /// One account and tool pair the Add screen offers.
@@ -2788,6 +2860,8 @@ pub struct PmExecutionEnvironmentsView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionEnvironmentsView {
     pub accounts: Vec<ExecutionAccountView>,
+    pub pool_providers: Vec<PoolAccountProviderView>,
+    pub active_sessions: Vec<PoolAccountSessionView>,
     pub environments: Vec<ExecutionEnvironmentView>,
     pub via_options: Vec<ExecutionEnvironmentViaOptionView>,
     pub pm: PmExecutionEnvironmentsView,
@@ -3187,6 +3261,17 @@ pub enum BackendEvent {
     /// Issue #7741: the execution environments as the screens show them.
     ExecutionEnvironments {
         view: Box<ExecutionEnvironmentsView>,
+    },
+    PoolAccountLoginStarted {
+        login_id: String,
+        account_id: String,
+    },
+    PoolAccountLoginOutput {
+        login_id: String,
+        data_base64: String,
+    },
+    PoolAccountLoginFinished {
+        login_id: String,
     },
     /// An execution environment request was refused. `message` says why and
     /// what to do instead.
@@ -4664,6 +4749,9 @@ impl BackendEvent {
             BackendEvent::FirstRunSetup { .. } => "first_run_setup",
             BackendEvent::FirstRunSetupError { .. } => "first_run_setup_error",
             BackendEvent::ExecutionEnvironments { .. } => "execution_environments",
+            BackendEvent::PoolAccountLoginStarted { .. } => "pool_account_login_started",
+            BackendEvent::PoolAccountLoginOutput { .. } => "pool_account_login_output",
+            BackendEvent::PoolAccountLoginFinished { .. } => "pool_account_login_finished",
             BackendEvent::ExecutionEnvironmentError { .. } => "execution_environment_error",
             BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
                 "issue_monitor_profiles_write_failed"

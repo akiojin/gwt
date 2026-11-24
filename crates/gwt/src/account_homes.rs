@@ -58,10 +58,137 @@ const COPILOT_ADOPTION_OVERRIDES: &[&str] = &[
     "GITHUB_TOKEN",
     "XDG_CONFIG_HOME",
 ];
+const CLAUDE_AUTH_OVERRIDES: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+const CODEX_AUTH_OVERRIDES: &[&str] = &[
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "OPENAI_BASE_URL",
+    "CODEX_API_BASE_URL",
+    "CHATGPT_BASE_URL",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignIn {
     pub identity: Option<String>,
+}
+
+/// Fixed provider invocation, with the account home isolated from the rest of
+/// the parent process's authentication settings.
+pub struct AccountLogin {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub remove_env: Vec<String>,
+}
+
+pub(crate) fn pool_login_tool_refusal(tool: &str) -> Option<&'static str> {
+    match resolve_agent_id(tool) {
+        Some(AgentId::ClaudeCode | AgentId::Codex | AgentId::GrokBuild) => None,
+        Some(AgentId::Copilot) => {
+            Some("Copilot account enrollment requires secure Keychain-only device sign-in.")
+        }
+        _ => Some("This provider allows only one account."),
+    }
+}
+
+pub fn pool_login_refusal(
+    account: &crate::execution_environments::Account,
+) -> Option<&'static str> {
+    pool_login_tool_refusal(&account.tool)
+}
+
+pub fn login_command(account: &crate::execution_environments::Account) -> io::Result<AccountLogin> {
+    if let Some(reason) = pool_login_refusal(account) {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+    }
+    let agent = resolve_agent_id(&account.tool).expect("supported pool tool");
+    let (args, credential_overrides): (&[&str], &[&str]) = match agent {
+        AgentId::ClaudeCode => (&["auth", "login"], CLAUDE_AUTH_OVERRIDES),
+        AgentId::Codex => (&["login"], CODEX_AUTH_OVERRIDES),
+        AgentId::GrokBuild => (
+            &["login", "--device-auth"],
+            &["GROK_API_KEY", "XAI_API_KEY", "XAI_BASE_URL"],
+        ),
+        _ => unreachable!("supported pool tool"),
+    };
+    let home_key = home_env_key(&account.tool).expect("supported pool tool");
+    let user_home = user_home()?;
+    let user_home = user_home.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "User home path is not valid Unicode",
+        )
+    })?;
+    let mut env = HashMap::from([
+        ("HOME".into(), user_home.to_owned()),
+        ("USERPROFILE".into(), user_home.to_owned()),
+    ]);
+    let mut remove_env: Vec<_> = credential_overrides
+        .iter()
+        .map(|key| (*key).into())
+        .collect();
+    if let Some(home) = &account.credential_home {
+        let path = Path::new(home);
+        if !is_managed_home(&account.tool, &account.id, path) || !isolated_credentials(&agent, path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "The managed account's credential path is unavailable.",
+            ));
+        }
+        env.insert(home_key.into(), home.clone());
+    } else {
+        remove_env.push(home_key.into());
+    }
+    Ok(AccountLogin {
+        program: agent.command().into(),
+        args: args.iter().map(|arg| (*arg).into()).collect(),
+        env,
+        remove_env,
+    })
+}
+
+pub fn pool_sign_in(account: &crate::execution_environments::Account) -> Option<SignIn> {
+    let home = account.credential_home.as_deref().map(Path::new);
+    if home.is_some_and(|home| !is_managed_home(&account.tool, &account.id, home)) {
+        return None;
+    }
+    if resolve_agent_id(&account.tool) == Some(AgentId::Copilot) {
+        let identity = account.sign_in_identity.as_deref()?;
+        if home.is_none() {
+            return sign_in_state(&account.tool, None).filter(|state| {
+                state
+                    .identity
+                    .as_deref()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(identity))
+            });
+        }
+        let token = keychain_copilot_token(&account.id)?;
+        let cwd = user_home().ok()?;
+        let (key, path) = account_launch_env(&account.tool, home)?;
+        let env = HashMap::from([(key.into(), path)]);
+        let removals: Vec<_> = COPILOT_ADOPTION_OVERRIDES
+            .iter()
+            .map(|key| (*key).into())
+            .collect();
+        let executable = copilot_executable(&HashMap::new(), &removals, &cwd)?;
+        confirm_copilot_identity(identity, Some(token), |token| {
+            copilot_status(&executable, token, &env, &removals, &cwd)
+        })
+        .ok()?;
+        return Some(SignIn {
+            identity: Some(identity.into()),
+        });
+    }
+    sign_in_state(&account.tool, home)
 }
 
 pub fn home_env_key(tool: &str) -> Option<&'static str> {
@@ -119,15 +246,7 @@ pub fn sign_in_state(tool: &str, home: Option<&Path>) -> Option<SignIn> {
     // browser login, so it continues to use the existing launch path.
     let default_home = user_home.join(local_home_name(&agent)?);
     let effective_home = home.unwrap_or(&default_home);
-    if home.is_some()
-        && (!effective_home.is_dir()
-            || credential_paths(&agent).iter().any(|name| {
-                effective_home
-                    .join(name)
-                    .symlink_metadata()
-                    .is_ok_and(|metadata| is_link(&metadata))
-            }))
-    {
+    if home.is_some() && !isolated_credentials(&agent, effective_home) {
         return None;
     }
     let signed_in = has_file_sign_in(tool, effective_home) || cli_sign_in(&agent, home, &user_home);
@@ -180,6 +299,16 @@ fn credential_paths(agent: &AgentId) -> &[&str] {
     }
 }
 
+fn isolated_credentials(agent: &AgentId, home: &Path) -> bool {
+    home.is_dir()
+        && credential_paths(agent)
+            .iter()
+            .all(|name| match home.join(name).symlink_metadata() {
+                Ok(metadata) => metadata.is_file() && !is_link(&metadata),
+                Err(error) => error.kind() == io::ErrorKind::NotFound,
+            })
+}
+
 fn has_secret(value: &Value) -> bool {
     value.as_str().is_some_and(|value| !value.trim().is_empty())
 }
@@ -189,15 +318,8 @@ fn cli_sign_in(agent: &AgentId, home: Option<&Path>, user_home: &Path) -> bool {
         return false;
     }
     let (args, credential_overrides): (&[&str], &[&str]) = match agent {
-        AgentId::ClaudeCode => (
-            &["auth", "status", "--json"],
-            &[
-                "ANTHROPIC_API_KEY",
-                "ANTHROPIC_AUTH_TOKEN",
-                "CLAUDE_CODE_OAUTH_TOKEN",
-            ],
-        ),
-        AgentId::Codex => (&["login", "status"], &["OPENAI_API_KEY", "CODEX_API_KEY"]),
+        AgentId::ClaudeCode => (&["auth", "status", "--json"], CLAUDE_AUTH_OVERRIDES),
+        AgentId::Codex => (&["login", "status"], CODEX_AUTH_OVERRIDES),
         _ => return false,
     };
     // On Claude Code an auth-status request can initialize a missing
@@ -548,6 +670,12 @@ pub fn prepare(tool: &str, account_id: &str) -> io::Result<PathBuf> {
     prepare_at(&user_home()?, tool, account_id)
 }
 
+/// A previously removed account may still have a home while its session
+/// finishes. Do not assign that home to a new account.
+pub(crate) fn managed_home_exists(tool: &str, account_id: &str) -> io::Result<bool> {
+    managed_home(&user_home()?, tool, account_id, false).map(|home| home.is_some())
+}
+
 /// Remove only the exact gwt-managed home for this account.
 pub fn remove(tool: &str, account_id: &str) -> io::Result<()> {
     remove_at(&user_home()?, tool, account_id)
@@ -754,6 +882,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn login_uses_the_account_home_and_clears_inherited_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut store = crate::execution_environments::Store::default();
+        for (tool, key, args, override_key) in [
+            (
+                "claude",
+                "CLAUDE_CONFIG_DIR",
+                &["auth", "login"][..],
+                "ANTHROPIC_API_KEY",
+            ),
+            ("codex", "CODEX_HOME", &["login"], "OPENAI_API_KEY"),
+            (
+                "grok",
+                "GROK_HOME",
+                &["login", "--device-auth"],
+                "XAI_API_KEY",
+            ),
+        ] {
+            let account = store.add_pool_account(tool).unwrap();
+            let login = login_command(&account).unwrap();
+            assert_eq!(login.program, tool);
+            assert_eq!(login.args, args);
+            assert_eq!(login.env.get(key), account.credential_home.as_ref());
+            assert!(login.remove_env.iter().any(|key| key == override_key));
+            assert!(pool_sign_in(&account).is_none());
+        }
+    }
+
+    #[test]
     fn only_supported_tools_have_an_isolated_launch_environment() {
         let home = Path::new("/fixture/account");
         for (tool, key) in [
@@ -847,8 +1005,11 @@ mod tests {
     #[test]
     fn an_isolated_home_cannot_sign_in_through_a_link_to_another_account() {
         let root = tempfile::tempdir().unwrap();
-        let home = root.path().join("isolated");
-        fs::create_dir(&home).unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let account = crate::execution_environments::Store::default()
+            .add_pool_account("codex")
+            .unwrap();
+        let home = Path::new(account.credential_home.as_deref().unwrap());
         let other_credentials = root.path().join("other-auth.json");
         fs::write(
             &other_credentials,
@@ -856,7 +1017,8 @@ mod tests {
         )
         .unwrap();
         std::os::unix::fs::symlink(other_credentials, home.join("auth.json")).unwrap();
-        assert_eq!(sign_in_state("codex", Some(&home)), None);
+        assert!(pool_sign_in(&account).is_none());
+        assert!(login_command(&account).is_err());
     }
 
     #[cfg(unix)]

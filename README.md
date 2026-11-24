@@ -49,6 +49,15 @@ Issues, SPECs, search, and Board context rather than from branch management.
   skipping one that is held by a limit or signed out. Once a project has saved
   the list, a registered agent also starts on the environment chosen this way,
   whatever tool it was registered with.
+  Accounts imports signed-in default accounts. Use **Add account** to open a
+  sign-in terminal for a separate Claude Code, Codex, or Grok Build account.
+  The new account stays unavailable to sessions until sign-in succeeds. You
+  can reopen its sign-in terminal, change its priority, or remove it from the
+  pool. **Use this account** puts it first for future starts and resumes.
+  To move a running session, including the PM, choose **Resume with the next
+  account**. gwt waits for the current turn to finish before resuming the
+  conversation. On a provider rate limit, gwt tries the next signed-in account
+  and resubmits the rejected turn after resuming.
 
 ## Install
 

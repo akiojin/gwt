@@ -504,6 +504,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const sessionUsageModel = createUiStateStore([]);
       // Issue #7741: the execution environment definitions and the last refusal.
       const executionEnvironmentsModel = createUiStateStore({ view: null, refusal: null });
+      const poolLoginEventModel = createUiStateStore(null);
       // Issue #7643: the last answer to a Themes screen request.
       const themeRepliesModel = createUiStateStore({ reply: null });
       let routeProjectMissing = false;
@@ -977,7 +978,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
+        if (["add_pool_account", "sign_in_pool_account", "move_pool_account", "use_pool_account", "delete_pool_account",
+              "resume_next_pool_account", "pool_account_login_input", "close_pool_account_login"].includes(message.kind) ||
+            ["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" || message.kind === "set_agent_execution_environments" ||
             (message.kind === "get_hook_doctor" && message.repair === true) || message.kind === "update_user_hooks") {
@@ -1246,9 +1249,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         handleLaunchWizardTransportChange(connected);
         if (!connected) {
           failAgentEnvironmentPriority("Connection lost before the priority change was confirmed.");
+          executionEnvironments.connectionLost();
         } else if (rosterHost) {
           send({ kind: "get_execution_environments" });
         }
+        if (connected) executionEnvironments.refreshVisibleAccounts();
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
@@ -5441,6 +5446,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             applyExecutionEnvironments(event.view);
             executionEnvironmentsModel.update(state => ({ ...state, view: event.view, agentPriorityPending: null, agentPriorityError: null }));
             break;
+          case "pool_account_login_started":
+          case "pool_account_login_output":
+          case "pool_account_login_finished":
+            poolLoginEventModel.update(() => event);
+            break;
           case "project_environment_set":
             projectEnvironmentSetsModel.update(state => ({ ...state, [event.project_root]: event }));
             break;
@@ -6084,6 +6094,20 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const executionEnvironments = createExecutionEnvironments({
         document, usageModel, supportedAgentsModel, renderAccountUsage, send,
         definitionsModel: executionEnvironmentsModel,
+        loginEventModel: poolLoginEventModel,
+        openLoginTerminal: (element, onData) => {
+          const terminal = new Terminal({
+            cols: 80, rows: 24, theme: XTERM_THEME_DARK,
+            fontFamily: resolveTerminalFontFamily(), fontSize: 13, scrollback: 0,
+          });
+          terminal.open(element);
+          terminal.focus();
+          const input = terminal.onData(onData);
+          return {
+            appendOutput: data => terminal.write(decodeBase64(data)),
+            dispose: () => { input.dispose(); terminal.dispose(); },
+          };
+        },
         onOpenToolManagement: () => document.dispatchEvent(
           new CustomEvent("settings:open", { detail: { target: "supported-agents" } })),
         onSetUsageCollection: (provider, enabled) => {
@@ -6095,6 +6119,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function setEnvironmentsHost(host) {
         const changed = executionEnvironments.element.hidden === Boolean(host);
         executionEnvironments.element.hidden = !host;
+        if (!host && changed) executionEnvironments.closeLogin(false);
         const targetHost = host || document.querySelector(".surface-area");
         if (executionEnvironments.element.parentElement !== targetHost) targetHost.appendChild(executionEnvironments.element);
         if (host && changed) {
@@ -6106,6 +6131,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         executionEnvironments.open(view);
         openSurface("environments");
       }
+      windowCatalogModel.subscribe(state => JSON.stringify(
+        catalogActiveWindows(state.catalog).map(window => [window.id, window.session_id])
+      ), () => executionEnvironments.refreshVisibleAccounts());
       document.addEventListener("environments:open", event => openExecutionEnvironments(event.detail?.view));
       // Issue #7643: Themes groups the project's Issues; opened from the rail.
       const projectThemes = createProjectThemes({

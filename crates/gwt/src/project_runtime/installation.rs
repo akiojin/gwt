@@ -71,6 +71,7 @@ pub(crate) struct OwnerSavedSessionRestore {
     pub request: serde_json::Value,
     pub source: gwt_agent::Session,
     pub origin: gwt_agent::SessionLaunchOrigin,
+    pub account_switch: Option<(String, gwt_agent::AccountSwitchReason)>,
     pub registry: Arc<std::sync::Mutex<crate::WindowRegistry>>,
     pub placeholders: Vec<crate::PersistedWindowState>,
     pub worktree_reserved: bool,
@@ -711,7 +712,15 @@ pub(crate) fn prepare_owner_saved_session_restore(
             }
         };
     }
-    if restore.origin == gwt_agent::SessionLaunchOrigin::UserRestart {
+    if let Some((account_id, reason)) = restore.account_switch.as_ref() {
+        config.execution_account_id = Some(account_id.clone());
+        config.execution_account_switch_reason = Some(*reason);
+        if is_pm && session.exact_resume_session_id().is_some() {
+            config
+                .args
+                .retain(|arg| arg != crate::pm_registry::PM_BOOTSTRAP_PROMPT);
+        }
+    } else if restore.origin == gwt_agent::SessionLaunchOrigin::UserRestart {
         config.launch_route = gwt_agent::LaunchRoute::Manual;
     }
     config.predecessor_session_id = Some(restore.source.id.clone());

@@ -91,6 +91,8 @@ function accountStatus(account) {
       return { kind: "no_data", label: "No usage data yet" };
     case "unavailable":
       return { kind: "unavailable", label: state.reason ? `Unavailable — ${state.reason}` : "Unavailable" };
+    case "unknown":
+      return { kind: "unknown", label: state.reason ? `Usage unknown (${state.reason})` : "Usage unknown" };
     case "stale":
       return { kind: "stale", label: `Last read ${Math.round((state.age_secs || 0) / 60)} min ago` };
     default:
@@ -100,8 +102,8 @@ function accountStatus(account) {
 
 // One row per account the backend reported: its usage, reset and limit
 // state, each read from the same snapshot.
-export function accountRows(snapshot) {
-  return (snapshot?.accounts || []).map(account => {
+export function accountRows(snapshot, view) {
+  const usage = (snapshot?.accounts || []).map(account => {
     const status = accountStatus(account);
     const credits = codexCreditStatus(account);
     const governing = readable(account) ? usageGoverningWindow(account) : null;
@@ -109,7 +111,10 @@ export function accountRows(snapshot) {
     let usage = null;
     if (credits?.active) usage = `Using credits · ${creditBalance(account.credits)}`;
     else if (governing) usage = `${Math.round(governing.percent)}% used`;
+    const poolAccountId = account.pool_account_id || null;
     return {
+      id: poolAccountId || account.provider,
+      poolAccountId,
       provider: account.provider,
       name: usageProviderName(account.provider),
       accountLabel: account.account_label || null,
@@ -124,18 +129,49 @@ export function accountRows(snapshot) {
       collectionEnabled: status.kind !== "disabled",
     };
   });
+  if (!Array.isArray(view?.pool_providers)) return usage;
+  const accounts = view.accounts || [];
+  const availableTools = new Set(view.pool_providers.filter(option => !option.blocked_reason).map(option => option.tool));
+  return accounts.map(account => {
+    const pool = accounts.filter(item => item.tool === account.tool);
+    const position = pool.indexOf(account);
+    const measured = usage.find(row => row.poolAccountId === account.id)
+      || (account.id === account.tool
+        ? usage.find(row => !row.poolAccountId && PROVIDER_TOOL[row.provider]?.agentId === account.tool)
+        : null);
+    return {
+      ...measured,
+      id: account.id,
+      name: account.name,
+      toolName: account.tool_name,
+      accountLabel: account.sign_in_identity || measured?.accountLabel,
+      status: measured?.status || { kind: "unknown", label: "Usage unknown" },
+      registered: true,
+      signedIn: account.signed_in,
+      first: pool.find(item => item.signed_in)?.id === account.id,
+      canUse: account.signed_in && position > 0,
+      canMoveUp: position > 0,
+      canMoveDown: position < pool.length - 1,
+      canSignIn: !account.sign_in_blocked_reason && availableTools.has(account.tool),
+      deleteBlockedReason: account.delete_blocked_reason,
+      deleteImpact: account.delete_impact,
+    };
+  });
 }
 
 // One row per execution environment the backend has defined (Issue #7741).
 // Usage is the account's, so it is shown on the environment that runs the
 // account's own tool; a tool that reads its own settings reports none.
 export function environmentRows(view, snapshot, agents) {
-  const usage = accountRows(snapshot);
+  const usage = accountRows(snapshot, view);
   const accounts = view?.accounts || [];
   return (view?.environments || []).map(environment => {
     const registered = accounts.find(account => account.id === environment.account_id) || null;
+    const isPool = environment.kind === "set" && Array.isArray(view?.pool_providers);
+    const pool = isPool ? accounts.filter(item => item.tool === environment.via_tool) : [];
+    const first = pool.find(item => item.signed_in);
     const account = environment.kind === "set"
-      ? usage.find(row => PROVIDER_TOOL[row.provider]?.agentId === registered?.tool) || null : null;
+      ? usage.find(row => isPool ? row.id === first?.id : PROVIDER_TOOL[row.provider]?.agentId === registered?.tool) || null : null;
     const agent = Array.isArray(agents)
       ? agents.find(candidate => candidate.id === environment.via_tool) || null : null;
     const availability = !environment.tool_installed ? "not_installed"
@@ -146,7 +182,7 @@ export function environmentRows(view, snapshot, agents) {
       name: environment.name,
       kind: environment.kind,
       accountName: environment.account_name,
-      usageProvider: account?.provider || null,
+      usageProvider: account?.provider ? account.id : null,
       via: environment.via_tool_name,
       viaTool: environment.via_tool,
       toolVersion: agent?.installed_version?.trim() || null,
@@ -158,6 +194,9 @@ export function environmentRows(view, snapshot, agents) {
       readOnlyReason: environment.runtime_read_only_reason || null,
       toolSettings: environment.tool_settings || null,
       projects: environment.projects || [],
+      poolSize: pool.length,
+      firstAccount: first?.name,
+      deleteImpact: environment.delete_impact,
     };
   });
 }
@@ -170,9 +209,10 @@ const VIEWS = new Set(["environments", "accounts", "account", "add", "edit", "de
 // catalog stay owned by their models. This host only derives rows.
 export function createExecutionEnvironments({
   document, usageModel, supportedAgentsModel, renderAccountUsage,
-  onOpenToolManagement, onSetUsageCollection, definitionsModel = null, send = () => {}, scheduleFrame,
+  onOpenToolManagement, onSetUsageCollection, openLoginTerminal, loginEventModel, definitionsModel = null, send = () => {}, scheduleFrame,
 }) {
   let definitions = null;
+  let login = null;
   // Whether this screen is waiting for an answer to its own request.
   let pending = false;
   const derive = () => {
@@ -180,7 +220,9 @@ export function createExecutionEnvironments({
     const agents = supportedAgentsModel?.read()?.agents ?? null;
     return {
       loaded: definitions != null,
-      accounts: accountRows(snapshot),
+      accounts: accountRows(snapshot, definitions),
+      poolProviders: definitions?.pool_providers,
+      activeSessions: definitions?.active_sessions || [],
       environments: environmentRows(definitions, snapshot, agents),
       registeredAccounts: definitions?.accounts || [],
       viaOptions: definitions?.via_options || [],
@@ -196,6 +238,7 @@ export function createExecutionEnvironments({
   let afterSave = null;
   function open(name = "environments", key = null) {
     if (!VIEWS.has(name)) return;
+    if (name !== "accounts") closeLogin(false);
     afterSave = null;
     model.update(state => ({
       ...state, error: null, saved: false,
@@ -206,7 +249,7 @@ export function createExecutionEnvironments({
     afterSave = next;
     pending = true;
     model.update(state => ({ ...state, saving: true, saved: false, error: null }));
-    send(message);
+    if (send(message) === "unavailable") applyError("The connection is unavailable. Try again when it reconnects.");
   }
   // `execution_environments`: the definitions after a read or a change.
   function applyView(view) {
@@ -216,6 +259,7 @@ export function createExecutionEnvironments({
     afterSave = null;
     model.update(state => ({
       ...state, ...derive(), error: null, saved: state.saving, saving: false,
+      login: state.login?.checking ? { ...state.login, checking: false } : state.login,
       view: next && state.saving ? next : state.view,
     }));
   }
@@ -227,18 +271,74 @@ export function createExecutionEnvironments({
     afterSave = null;
     model.update(state => ({ ...state, saving: false, saved: false, error: message }));
   }
+  function applyLoginEvent(event) {
+    if (event.kind === "pool_account_login_started") {
+      if (container.hidden) {
+        send({ kind: "close_pool_account_login", login_id: event.login_id });
+        return;
+      }
+      login = { id: event.login_id, chunks: [], terminal: null };
+      model.update(state => ({
+        ...state, error: null, view: { name: "accounts", key: null },
+        login: { id: event.login_id, accountId: event.account_id, finished: false },
+      }));
+      return;
+    }
+    if (event.login_id !== login?.id) return;
+    if (event.kind === "pool_account_login_output") {
+      if (login.terminal) login.terminal.appendOutput(event.data_base64);
+      else login.chunks.push(event.data_base64);
+    } else if (event.kind === "pool_account_login_finished") {
+      model.update(state => ({ ...state, login: { ...state.login, finished: true, checking: true } }));
+      reload();
+    }
+  }
+  function mountLoginTerminal(element, id) {
+    if (!openLoginTerminal || login?.id !== id) return undefined;
+    const current = login;
+    const terminal = openLoginTerminal(element, data => {
+      if (login === current && !model.read().login?.finished) send({ kind: "pool_account_login_input", login_id: id, data });
+    });
+    current.terminal = terminal;
+    for (const chunk of current.chunks) terminal.appendOutput(chunk);
+    current.chunks.length = 0;
+    return () => {
+      terminal.dispose();
+      current.terminal = null;
+    };
+  }
+  function closeLogin(refresh = true) {
+    if (!login) return;
+    const { id } = login;
+    login = null;
+    const finished = model.read().login?.finished;
+    model.update(state => ({ ...state, login: null }));
+    if (!finished) {
+      send({ kind: "close_pool_account_login", login_id: id });
+      if (refresh) reload();
+    }
+  }
   if (definitionsModel) {
     releases.push(definitionsModel.subscribe(state => state.view, view => { if (view) applyView(view); }));
     releases.push(definitionsModel.subscribe(state => state.refusal, refusal => { if (refusal) applyError(refusal.message); }));
   }
   const container = createDetachedIslandContainer(document);
+  if (loginEventModel) releases.push(loginEventModel.subscribe(state => state, event => { if (event) applyLoginEvent(event); }));
   const island = mountIsland("execution-environments", container, {
     store: model, renderAccountUsage, onNavigate: open, onOpenToolManagement, onSetUsageCollection,
     onAdd: input => request({ kind: "add_execution_environment", ...input }, { name: "environments", key: null }),
     onUpdate: (id, change) => request({ kind: "update_execution_environment", environment_id: id, ...change }),
     onDelete: id => request({ kind: "delete_execution_environment", environment_id: id }, { name: "environments", key: null }),
+    onAddPoolAccount: tool => request({ kind: "add_pool_account", tool }),
+    onSignInPoolAccount: account_id => request({ kind: "sign_in_pool_account", account_id }),
+    onMovePoolAccount: (account_id, direction) => request({ kind: "move_pool_account", account_id, direction }),
+    onUsePoolAccount: account_id => request({ kind: "use_pool_account", account_id }),
+    onDeletePoolAccount: account_id => request({ kind: "delete_pool_account", account_id }),
+    onResumeNextPoolAccount: id => request({ kind: "resume_next_pool_account", id }),
+    onMountLoginTerminal: mountLoginTerminal, onCloseLogin: () => closeLogin(),
   });
   function dispose() {
+    closeLogin(false);
     for (const release of releases) release?.();
     island.unmount();
   }
@@ -246,5 +346,20 @@ export function createExecutionEnvironments({
     pending = true;
     send({ kind: "get_execution_environments" });
   }
-  return { element: container, open, reload, dispose };
+  function refreshVisibleAccounts() {
+    if (!container.hidden && !pending && model.read().view.name === "accounts") reload();
+  }
+  function connectionLost() {
+    loginEventModel?.update(() => null);
+    if (login || pending) {
+      const message = login
+        ? "The login terminal closed when the connection was lost."
+        : "The connection was lost before the request was confirmed.";
+      login = null;
+      pending = false;
+      afterSave = null;
+      model.update(state => ({ ...state, login: null, saving: false, error: message }));
+    }
+  }
+  return { element: container, open, reload, refreshVisibleAccounts, closeLogin, connectionLost, dispose };
 }

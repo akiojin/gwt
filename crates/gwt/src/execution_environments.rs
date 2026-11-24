@@ -224,6 +224,118 @@ impl Store {
         self.accounts.iter().find(|account| account.tool == tool)
     }
 
+    pub fn pool_add_refusal(tool: &str) -> Option<Refusal> {
+        crate::account_homes::pool_login_tool_refusal(tool).map(|reason| Refusal(reason.into()))
+    }
+
+    /// Enroll an isolated account without changing the current pool priority.
+    /// The caller holds the store lock so concurrent enrollments get distinct IDs.
+    pub fn add_pool_account(&mut self, tool: &str) -> io::Result<Account> {
+        if let Some(refusal) = Self::pool_add_refusal(tool) {
+            return Err(refusal.into());
+        }
+        let tool = tool_command(tool).expect("supported pool tool");
+        let mut number = 2u64;
+        let id = loop {
+            let id = format!("{tool}-{number}");
+            if self.account(&id).is_none()
+                && !crate::account_homes::managed_home_exists(&tool, &id)?
+            {
+                break id;
+            }
+            number = number
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("Account IDs exhausted"))?;
+        };
+        let home = crate::account_homes::prepare(&tool, &id)?;
+        let home = home.into_os_string().into_string().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Account path is not valid Unicode",
+            )
+        })?;
+        let account = Account {
+            id,
+            name: format!("{} {number}", tool_name(&tool)),
+            tool,
+            credential_home: Some(home),
+            added_at: Some(gwt_core::timestamp::UtcTimestamp::now()),
+            origin: Some(AccountOrigin::Added),
+            sign_in_identity: None,
+        };
+        if self.environment_for_tool(&account.tool).is_none() {
+            self.environments.push(ExecutionEnvironment {
+                id: account.tool.clone(),
+                name: tool_name(&account.tool),
+                account_id: account.id.clone(),
+                via_tool: account.tool.clone(),
+                runtime: RuntimeOptions::default(),
+            });
+        }
+        self.accounts.push(account.clone());
+        Ok(account)
+    }
+
+    fn pool_account_index(&self, account_id: &str) -> Result<usize, Refusal> {
+        let index = self
+            .accounts
+            .iter()
+            .position(|account| account.id == account_id)
+            .ok_or_else(|| Refusal("This account is no longer registered.".into()))?;
+        if crate::account_homes::home_env_key(&self.accounts[index].tool).is_none() {
+            return Err(Refusal("This provider allows only one account.".into()));
+        }
+        Ok(index)
+    }
+
+    pub fn move_pool_account(
+        &mut self,
+        account_id: &str,
+        toward_front: bool,
+    ) -> Result<(), Refusal> {
+        let index = self.pool_account_index(account_id)?;
+        let tool = &self.accounts[index].tool;
+        let neighbor = if toward_front {
+            self.accounts[..index]
+                .iter()
+                .rposition(|account| &account.tool == tool)
+        } else {
+            self.accounts[index + 1..]
+                .iter()
+                .position(|account| &account.tool == tool)
+                .map(|offset| index + 1 + offset)
+        };
+        if let Some(neighbor) = neighbor {
+            self.accounts.swap(index, neighbor);
+        }
+        Ok(())
+    }
+
+    pub fn use_pool_account(&mut self, account_id: &str) -> Result<(), Refusal> {
+        let mut index = self.pool_account_index(account_id)?;
+        if crate::account_homes::pool_sign_in(&self.accounts[index]).is_none() {
+            return Err(Refusal("Sign in to this account before using it.".into()));
+        }
+        while let Some(previous) = self.accounts[..index]
+            .iter()
+            .rposition(|account| account.tool == self.accounts[index].tool)
+        {
+            self.accounts.swap(index, previous);
+            index = previous;
+        }
+        Ok(())
+    }
+
+    pub fn pool_delete_refusal(&self, account_id: &str) -> Option<Refusal> {
+        match self.account(account_id) {
+            None => Some(Refusal("This account is no longer registered.".into())),
+            Some(account) if account.credential_home.is_none() => Some(Refusal(
+                "Sign out in the provider's CLI to disconnect the native account.".into(),
+            )),
+            Some(_) => None,
+        }
+    }
+
     fn insert_default_account(&mut self, tool: &str) -> &mut Account {
         let name = format!("{} 1", tool_name(tool));
         self.accounts.push(Account {
@@ -294,11 +406,8 @@ impl Store {
     /// account is signed out.
     pub fn has_signed_in_managed_account(&self, tool: &str) -> bool {
         self.select_pool_account(tool, None, |account| {
-            let home = Path::new(account.credential_home.as_deref()?);
-            if !crate::account_homes::is_managed_home(tool, &account.id, home) {
-                return None;
-            }
-            crate::account_homes::sign_in_state(tool, Some(home))
+            account.credential_home.as_ref()?;
+            crate::account_homes::pool_sign_in(account)
         })
         .is_some()
     }
@@ -632,6 +741,17 @@ pub fn adopt_signed_in_accounts() -> io::Result<Store> {
     adopt_default_accounts(&ADOPTABLE_TOOLS)
 }
 
+/// Discover a native sign-in before registering the isolated account so its
+/// priority does not depend on whether the Accounts view finished loading.
+pub fn enroll_pool_account(tool: &str) -> io::Result<Account> {
+    if let Some(refusal) = Store::pool_add_refusal(tool) {
+        return Err(refusal.into());
+    }
+    let tool = tool_command(tool).expect("supported pool tool");
+    adopt_default_accounts(&[&tool])?;
+    mutate(|store| store.add_pool_account(&tool)).map(|(_, account)| account)
+}
+
 pub(crate) fn adopt_default_accounts(tools: &[&str]) -> io::Result<Store> {
     let current = load()?;
     let signed_in: Vec<_> = tools
@@ -880,6 +1000,68 @@ mod tests {
         assert_eq!(environment.via_tool, "claude");
         assert_eq!(store.kind(environment), EnvironmentKind::Set);
         assert_eq!(environment.runtime, RuntimeOptions::default());
+    }
+
+    #[test]
+    fn adding_and_reordering_accounts_preserves_the_pool_environment() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut store = store_with(&["grok", "codex"]);
+        let environment = store.environment("grok").unwrap().clone();
+        let second = store.add_pool_account("Grok Build").unwrap();
+        let third = store.add_pool_account("grok").unwrap();
+        assert_eq!(second.id, "grok-2");
+        assert_eq!(third.id, "grok-3");
+        assert_eq!(store.environment("grok"), Some(&environment));
+        assert!(store.use_pool_account(&third.id).is_err());
+
+        let credential_home = Path::new(third.credential_home.as_deref().unwrap());
+        fs::write(
+            credential_home.join("auth.json"),
+            r#"{"profile":{"key":"fixture"}}"#,
+        )
+        .unwrap();
+        store.use_pool_account(&third.id).unwrap();
+        assert_eq!(store.accounts[0].id, third.id);
+        store.move_pool_account(&third.id, false).unwrap();
+        assert_eq!(
+            store
+                .accounts
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["grok", "codex", "grok-3", "grok-2"]
+        );
+        assert!(store.delete_account(&third.id).is_empty());
+        assert_eq!(store.add_pool_account("grok").unwrap().id, "grok-4");
+    }
+
+    #[test]
+    fn refused_pool_tools_leave_the_store_unchanged() {
+        let mut store = store_with(&["agy"]);
+        let before = store.clone();
+        for tool in ["agy", "qwen", "hermes"] {
+            assert!(Store::pool_add_refusal(tool).is_some());
+            assert!(store.add_pool_account(tool).is_err());
+        }
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn enrolling_before_refresh_keeps_an_existing_native_account_first() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let native = home.path().join(".grok");
+        fs::create_dir(&native).unwrap();
+        fs::write(native.join("auth.json"), r#"{"profile":{"key":"fixture"}}"#).unwrap();
+
+        let added = enroll_pool_account("grok").unwrap();
+        let store = load().unwrap();
+        assert_eq!(store.accounts[0].id, "grok");
+        assert_eq!(store.accounts[0].origin, Some(AccountOrigin::Adopted));
+        assert_eq!(store.accounts[1], added);
+        assert!(store.pool_delete_refusal("grok").is_some());
+        assert!(store.pool_delete_refusal(&added.id).is_none());
     }
 
     fn ids(ids: &[&str]) -> Vec<String> {

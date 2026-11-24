@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { DeletionImpact } from "./AccountPool.jsx";
 
 // Issue #7741 (SPEC #7007 items 77-82): registering, editing and deleting an
 // execution environment. Every row comes from the backend's definitions; an
@@ -298,6 +299,7 @@ export function DeleteEnvironment({ model, environment, headingRef, onNavigate, 
           {`The ${environment.accountName || "account"} account and its other environments stay. Running sessions are not affected.`}
         </p>
       </section>
+      <DeletionImpact impact={environment.deleteImpact} />
       <RequestError error={model.error} />
       <div className="exec-env__actions">
         <button type="button" className="exec-env__danger" disabled={model.saving} onClick={() => onDelete(environment.id)}>

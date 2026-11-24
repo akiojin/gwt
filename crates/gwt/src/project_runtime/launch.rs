@@ -342,10 +342,11 @@ pub fn prepare_agent_launch(
         environment
             .with_project_root(&worktree_path)
             .apply_to_config(&mut config);
-        let predecessor = matches!(
-            config.session_mode,
-            gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
-        )
+        let predecessor = (config.execution_account_switch_reason.is_some()
+            || matches!(
+                config.session_mode,
+                gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
+            ))
         .then(|| {
             pm_restore_prior
                 .as_ref()
@@ -528,6 +529,7 @@ pub fn prepare_agent_launch(
             &mut session,
             predecessor.as_ref(),
             execution_account,
+            config.execution_account_switch_reason,
         );
         // Keep a separate observation identity if the resumed authority
         // cannot be installed. Never overwrite the coordinator's Session.

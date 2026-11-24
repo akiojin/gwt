@@ -2482,6 +2482,16 @@ enum UserEvent {
     BrowserDisconnected {
         client_id: String,
     },
+    PoolAccountLoginPrepared {
+        client_id: String,
+        login_id: String,
+        project_root: Option<PathBuf>,
+        result: Result<gwt::execution_environments::Account, String>,
+    },
+    PoolAccountLoginEnded {
+        client_id: String,
+        login_id: String,
+    },
     ProjectExecutionChoiceCompleted(
         Box<app_runtime::project_execution_policy::ProjectExecutionChoiceCompleted>,
     ),
@@ -5188,6 +5198,7 @@ mod tests {
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             active_agent_sessions: HashMap::new(),
+            pool_account_logins: HashMap::new(),
             decision_answers_sent: Default::default(),
             decision_answers_in_flight: Default::default(),
             decision_answer_sequence: 0,
@@ -12012,8 +12023,14 @@ fn main() -> std::io::Result<()> {
                 app.project_observation_invalidation_completed(*completed);
             }
             Event::UserEvent(UserEvent::BrowserDisconnected { client_id }) => {
-                let _ = client_id;
+                app.close_pool_account_login(&client_id);
                 clients.dispatch(app.reconcile_project_view_connections(&clients));
+            }
+            Event::UserEvent(UserEvent::PoolAccountLoginPrepared { client_id, login_id, project_root, result }) => {
+                clients.dispatch(app.pool_account_login_prepared(client_id, login_id, project_root, result));
+            }
+            Event::UserEvent(UserEvent::PoolAccountLoginEnded { client_id, login_id }) => {
+                clients.dispatch(app.pool_account_login_ended(client_id, login_id));
             }
             Event::UserEvent(UserEvent::ProjectExecutionChoiceCompleted(completed)) => {
                 clients.dispatch(app.project_execution_choice_completed(*completed));
