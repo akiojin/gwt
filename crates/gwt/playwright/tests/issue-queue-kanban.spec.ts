@@ -119,7 +119,8 @@ test.describe("Issues touch navigation", () => {
       await page.setViewportSize({ width, height: 844 });
       const measured = await sizes();
       expect(measured.map(control => control.label)).toEqual(expect.arrayContaining(["Auto-refill", "Autonomous mode", "Agent limit", "Issues settings", "Refresh cached work items"]));
-      expect(measured).toHaveLength(9);
+      // Issue #7728: the Start/Stop button left with the project stop/start.
+      expect(measured).toHaveLength(8);
       for (const control of measured) {
         expect(control.width, `${control.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
         expect(control.height, `${control.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
