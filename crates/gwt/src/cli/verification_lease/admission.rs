@@ -614,11 +614,11 @@ impl BoardNotice {
     fn maybe_post<E: CliEnv>(
         &mut self,
         env: &mut E,
-        started: Instant,
+        elapsed: Duration,
         max_wait: Duration,
         reason: BoardWaitReason,
     ) {
-        if self.posted || started.elapsed() < BOARD_NOTICE_AFTER {
+        if self.posted || elapsed < BOARD_NOTICE_AFTER {
             return;
         }
         self.posted = true;
@@ -631,7 +631,7 @@ impl BoardNotice {
             "現在の状態: verify.run は admission 待ちです（{}s 経過、上限 {}s）。\n\n\
              理由: {reason}\n\n\
              次: この tool が動いている間は結果を待ちます。deferred 後は同じ全 matrix を再投入するか、owner number を明示して issue.monitor.wait を宣言してください。watchdog は pool の空きと本人 pane の idle を確認して再開を一度通知します。待機を理由に作業を完了・blocked にしないでください。",
-            started.elapsed().as_secs(),
+            elapsed.as_secs(),
             max_wait.as_secs()
         );
         let command = BoardCommand::Post(Box::new(BoardPostCommand {
@@ -795,7 +795,12 @@ fn admit_inner<E: CliEnv>(
                 None,
             ));
         }
-        notice.maybe_post(env, started, max_wait, BoardWaitReason::WorktreeClaim);
+        notice.maybe_post(
+            env,
+            started.elapsed(),
+            max_wait,
+            BoardWaitReason::WorktreeClaim,
+        );
         sleep_until(deadline, poll);
     };
     check_cancellation(attempt)?;
@@ -852,7 +857,12 @@ fn admit_inner<E: CliEnv>(
                             None,
                         ));
                     }
-                    notice.maybe_post(env, started, max_wait, BoardWaitReason::CargoTarget);
+                    notice.maybe_post(
+                        env,
+                        started.elapsed(),
+                        max_wait,
+                        BoardWaitReason::CargoTarget,
+                    );
                     sleep_until(deadline, poll);
                 }
             }
@@ -982,7 +992,12 @@ fn admit_inner<E: CliEnv>(
                     deferral.queue_position = queue_position;
                     return Err(VerificationError::Deferred(Box::new(deferral)));
                 }
-                notice.maybe_post(env, started, max_wait, BoardWaitReason::HostAdmission);
+                notice.maybe_post(
+                    env,
+                    started.elapsed(),
+                    max_wait,
+                    BoardWaitReason::HostAdmission,
+                );
             }
             Err(CoordinatorError::Cancelled { attempt_id }) => {
                 return Err(cancelled(&attempt_id).into())
@@ -1068,7 +1083,7 @@ mod tests {
         let mut notice = BoardNotice::default();
         notice.maybe_post(
             &mut env,
-            Instant::now().checked_sub(BOARD_NOTICE_AFTER).unwrap(),
+            BOARD_NOTICE_AFTER,
             Duration::from_secs(DEFAULT_MAX_WAIT_SECS),
             BoardWaitReason::HostAdmission,
         );
