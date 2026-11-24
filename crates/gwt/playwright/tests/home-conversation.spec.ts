@@ -6,6 +6,7 @@
  *       the project it belongs to.
  * AC-3: the path stays whole with no project and with twenty.
  */
+import { randomUUID } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 import { HUB_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
@@ -117,11 +118,12 @@ async function installHomeBackend(page: Page, backend: Backend) {
   }, backend);
 }
 
-async function openHome(page: Page, theme: string, backend: Backend) {
+async function openHome(page: Page, theme: string, backend: Backend, beforeNavigation?: () => Promise<void>) {
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
   const baseUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
   if (!baseUrl) await installEmbeddedRoutes(page);
   await installHomeBackend(page, backend);
+  await beforeNavigation?.();
   await page.goto(baseUrl ? new URL(new URL(HUB_URL).pathname, baseUrl).href : HUB_URL);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await expect(page.locator("[data-home]")).toBeVisible();
@@ -414,3 +416,76 @@ test.describe("Home conversation with the Project Manager", () => {
     expect(errors).toEqual([]);
   });
 });
+
+for (const width of [1440, 390]) {
+  test(`Issue #7848 Home sends attachments at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const errors = collectBrowserErrors(page);
+    const theme = themeOf(info.project.name);
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH6cAAAAASUVORK5CYII=", "base64");
+    const project = { project_key: alpha.project_key, title: alpha.title, pm_available: true, decisions: [] };
+    await openHome(page, theme, { projects: [alpha], conversation: [project] }, async () => {
+      if (!process.env.GWT_PLAYWRIGHT_BASE_URL) {
+        await page.route("**/internal/attachment-upload-token", route => route.fulfill({ json: { token: "test-token" } }));
+        await page.route("**/internal/attachments/upload?*", route => {
+          const query = new URL(route.request().url()).searchParams;
+          return route.fulfill({ json: { upload_id: randomUUID(), filename: query.get("filename"),
+            mime_type: query.get("mime_type"), size: Number(query.get("size")) } });
+        });
+      }
+    });
+    const home = page.locator("[data-home]");
+    const draft = home.getByRole("textbox", { name: "Message to the Project Manager" });
+    await expect(home.getByRole("button", { name: "Attach files" })).toBeVisible();
+    const choosing = page.waitForEvent("filechooser");
+    await home.getByRole("button", { name: "Attach files" }).click();
+    await (await choosing).setFiles([
+      { name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("Read this") },
+      { name: "remove.txt", mimeType: "text/plain", buffer: Buffer.from("Remove this") },
+    ]);
+    await draft.evaluate(node => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["Dropped"], "notes.txt", { type: "text/plain" }));
+      node.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    });
+    await draft.evaluate((node, bytes) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array(bytes)], "clipboard.png", { type: "image/png" }));
+      node.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+    }, [...png]);
+    const list = home.getByRole("list", { name: "Draft attachments" });
+    await expect(list.getByRole("listitem")).toHaveCount(4);
+    await list.getByRole("button", { name: "Remove remove.txt" }).click();
+    await expect(list.getByRole("listitem")).toHaveCount(3);
+    await draft.fill("Please review these attachments.");
+    await home.locator("[data-home-send]").click();
+    const sent = home.locator("[data-home-sent]");
+    await expect(sent).toContainText("Please review these attachments.");
+    await expect(sent.getByText("brief.txt")).toBeVisible();
+    await expect(sent.getByText("notes.txt")).toBeVisible();
+    const preview = sent.getByRole("img", { name: "clipboard.png" });
+    await expect(preview).toBeVisible();
+    await expect.poll(() => preview.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
+    await expect(list).toHaveCount(0);
+    const sentEvents = await page.evaluate(() => (window as any).__homeSent);
+    expect(sentEvents).toHaveLength(1);
+    expect(sentEvents[0].text).toBe("Please review these attachments.\r");
+    expect(sentEvents[0].attachments.map((file: any) => file.filename)).toEqual(["brief.txt", "notes.txt", "clipboard.png"]);
+    const paths = sentEvents[0].attachments.map((file: any) =>
+      `".gwt/drop-files/${file.upload_id.replaceAll("-", "")}-${file.filename}"`);
+    await page.evaluate(project => (window as any).__homeProjects([project]), {
+      ...project, conversation: { availability: "ready", messages: [{
+        id: "native-user", role: "user",
+        text: `Please review these attachments.\n\nFiles: [${paths.join(", ")}]`,
+      }] },
+    });
+    await expect(sent).toHaveCount(0, { timeout: 10000 });
+    const native = home.getByRole("list", { name: "Attachments", exact: true });
+    await expect(native.getByRole("img", { name: "clipboard.png" })).toBeVisible();
+    await expect(native.getByText("brief.txt")).toBeVisible();
+    const screenshot = info.outputPath(`pm-attachments-${theme}-${width}.png`);
+    await home.screenshot({ path: screenshot });
+    await info.attach("PM chat attachments", { path: screenshot, contentType: "image/png" });
+    expect(errors).toEqual([]);
+  });
+}

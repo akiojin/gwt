@@ -963,6 +963,7 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
 
 test('Reports rejects file-drop input while Execution log keeps the attachment bridge', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1001,8 +1002,10 @@ test('Reports rejects file-drop input while Execution log keeps the attachment b
 });
 
 // Exercise the real token/XHR path: the uploader override bypasses both.
+let clipboardFixtureId = 0;
 async function clipboardFixture(windowId, run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL(`../attachment-upload.js?fixture=${++clipboardFixtureId}`, import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1078,6 +1081,7 @@ test('clipboard failure shows and reports the concrete upload cause', async () =
 
 test('Works full terminals own browser and native file drops and their progress', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1123,6 +1127,7 @@ test('Works full terminals own browser and native file drops and their progress'
 
 async function attachmentLifecycleFixture(run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
