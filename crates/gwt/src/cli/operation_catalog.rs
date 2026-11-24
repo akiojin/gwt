@@ -723,6 +723,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.branch_freshness.refresh",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.status.set",
         aliases: &[],
     },

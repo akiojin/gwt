@@ -100,6 +100,8 @@ pub enum PmCommand {
     Status {
         project_root: Option<String>,
     },
+    /// Fetch origin and record the result for the registered PM's current turn.
+    BranchFreshnessRefresh,
     /// Persist whether the resident PM should start on the next project open.
     SetAutoStart {
         project_root: Option<String>,
@@ -856,6 +858,19 @@ pub(super) fn run<E: CliEnv>(
                     .to_string(),
             );
             out.push('\n');
+            Ok(0)
+        }
+        PmCommand::BranchFreshnessRefresh => {
+            let session = ambient_session_id()
+                .ok_or_else(|| refusal("requires this project's registered PM session".into()))?;
+            super::hook::branch_freshness::refresh(env.repo_path(), &session).map_err(|error| {
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    refusal(error.to_string())
+                } else {
+                    ApiError::Unexpected(error.to_string()).into()
+                }
+            })?;
+            out.push_str("git fetch origin succeeded and was recorded for this PM turn\n");
             Ok(0)
         }
         PmCommand::StatusSet {

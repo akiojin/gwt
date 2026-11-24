@@ -2392,6 +2392,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
+        "pm.branch_freshness.refresh" => {
+            reject_unknown_params(params, &[], "pm.branch_freshness.refresh")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::BranchFreshnessRefresh)
+        }
         "pm.status.set" => {
             reject_unknown_params(
                 params,
