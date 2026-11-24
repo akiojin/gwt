@@ -84,7 +84,7 @@ function drawSpark(document, svg, input, maximum, minutes = 30, label = "Tokens 
 const summaryCells = [["running", "RUNNING"], ["block", "BLOCK"], ["idle", "IDLE"], ["error", "ERROR"]];
 
 export function createWorksSurface({ projectKey, document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  summaryModel, workProjectionModel, mountTerminal, mountPreview, onRevokeTerminal = () => {}, onReleaseTerminal = () => {}, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+  summaryModel, workProjectionModel, mountTerminal, mountPreview, onRevokeTerminal = () => {}, onReleaseTerminal = () => {}, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, onSelectReview = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
@@ -108,20 +108,28 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
   const telemetryFor = work => getTelemetry()?.by_window?.[work.data.id] || {};
   function setName(host, work) {
     const memberId = work.member?.member_id || "";
+    const review = !memberId && !work.retained && !work.assignment.is_pm && work.assignment.review_dispatch;
+    const reviewIdentity = review ? JSON.stringify([work.hostId, work.assignment.window_id, work.assignment.session_id, work.assignment.runtime_incarnation]) : "";
     let name = host.firstElementChild;
-    if (!name || name.dataset.memberId !== memberId) {
+    if (!name || name.dataset.memberId !== memberId || name.dataset.review !== reviewIdentity) {
       host.replaceChildren();
-      name = document.createElement(memberId ? "button" : "span");
+      name = document.createElement(memberId || review ? "button" : "span");
       name.dataset.memberId = memberId;
-      name.className = memberId ? "work-member work-name" : "work-name";
-      if (memberId) {
+      name.dataset.review = reviewIdentity;
+      name.className = memberId || review ? "work-member work-name" : "work-name";
+      if (memberId || review) {
         name.type = "button";
-        name.addEventListener("click", event => { event.stopPropagation(); onSelectMember(memberId); });
+        const target = targetFor(work);
+        name.addEventListener("click", event => {
+          event.stopPropagation();
+          if (review) { const current = exactWork(target); if (finite(activityModel.read().count) && current?.assignment.review_dispatch && !current.retained) onSelectReview(target); }
+          else onSelectMember(memberId);
+        });
       }
       host.append(name);
     }
     name.textContent = nameFor(work);
-    if (memberId) name.setAttribute("aria-label", `View ${nameFor(work)} in Agents`);
+    if (memberId || review) name.setAttribute("aria-label", `View ${nameFor(work)} in Agents`);
     let badge = host.querySelector(".window-role-badge");
     if (work.assignment.is_pm && !badge) {
       badge = document.createElement("span"); badge.className = "window-role-badge"; badge.textContent = "PM";
