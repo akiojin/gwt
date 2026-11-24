@@ -31,6 +31,7 @@ test("adds and signs in an account while the running account stays in its origin
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   const theme = info.project.name.includes("light") ? "light" : "dark";
   const fixture = await startExactRelaunchFixture(info, {
+    freshNativeIds: true,
     async prepare({ home, bin, env }) {
       // Select the default account from the pool rather than an explicit override.
       delete env.CODEX_HOME;
@@ -134,11 +135,27 @@ exec "$(dirname "$0")/codex-recorder" "$@"
     expect(() => process.kill(running.pid, 0), "the original native provider remains alive").not.toThrow();
     await info.attach("account priorities", { body: await surface.screenshot(), contentType: "image/png" });
 
+    await active.getByRole("button", { name: "Resume with the next account" }).click();
+    await expect.poll(fixture.launches, { timeout: 45_000 }).toHaveLength(2);
+    const [, affected] = await fixture.launches();
+    expect(affected.resume_session_id).toBe(running.provider_session_id);
+    const addedSession = surface.locator("[data-account-session]").filter({ hasText: "Using Codex 2" });
+    await expect(addedSession).toHaveCount(1);
+    const sessionTitle = await addedSession.getByRole("heading").innerText();
+    const windowId = await addedSession.getAttribute("data-account-session");
     await addedAccount.getByRole("button", { name: "Delete Codex 2" }).click();
-    await page.getByRole("dialog", { name: "Delete Codex 2?" }).getByRole("button", { name: "Delete account" }).click();
+    const deletion = page.getByRole("dialog", { name: "Delete Codex 2?" });
+    await expect(deletion.getByText(sessionTitle, { exact: true })).toBeVisible();
+    await deletion.getByRole("button", { name: "Delete account" }).click();
     await expect(addedAccount).toHaveCount(0);
     await expect(defaultAccount).toContainText("First choice");
-    await expect(active).toHaveCount(1);
+    await expect.poll(fixture.launches, { timeout: 45_000 }).toHaveLength(3);
+    const [unchanged, , resumed] = await fixture.launches();
+    expect(unchanged).toEqual(running);
+    expect(resumed.resume_session_id).toBe(affected.provider_session_id);
+    const restoredSession = await readFile(join(fixture.home, ".gwt", "sessions", `${resumed.gwt_session_id}.toml`), "utf8");
+    expect(restoredSession).toContain(`restore_source_session_id = "${affected.gwt_session_id}"`);
+    await expect(surface.locator(`[data-account-session="${windowId}"]`)).toContainText("Using Codex 1");
     expect(await readFile(join(fixture.home, ".codex", "auth.json"), "utf8")).toBe(authFixture("default"));
     expect(errors, "zero console and page errors").toEqual([]);
   } finally {
