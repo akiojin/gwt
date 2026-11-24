@@ -5929,16 +5929,13 @@ mod tests {
             &["config", "remote.origin.uploadpack", "sh -c 'sleep 600' --"],
         );
 
-        let started = std::time::Instant::now();
         let error =
             fetch_pm_worktree_base_within(&repo, "origin/main", std::time::Duration::from_secs(1))
                 .expect_err("an unanswered fetch fails");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(60),
-            "the fetch is bounded, took {:?}",
-            started.elapsed()
+        assert_eq!(
+            error.to_string(),
+            "fetch PM base origin/main: process deadline expired"
         );
-        assert!(error.to_string().starts_with("fetch PM base origin/main"));
     }
 
     /// Issue #3767 AC-2 / AC-3: the terse wake clause and the full Stop-gate
