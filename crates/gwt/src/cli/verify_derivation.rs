@@ -976,6 +976,23 @@ fn derive_for_host_excluding(
     };
 
     let code_changed = !rust_crates.is_empty() || workspace_rust || skills || frontend || other;
+    // Issue #7304: the Rust matrix only means something in a Cargo
+    // workspace. Elsewhere, refuse rather than register cargo commands that
+    // can never run, and name the paths the agent must cover explicitly.
+    if code_changed && !worktree.join("Cargo.toml").is_file() {
+        let uncovered: Vec<&str> = paths
+            .iter()
+            .filter(|path| !is_docs_path(path))
+            .filter(|path| {
+                !(is_node_script_path(path) && !node_test_paths(worktree, path).is_empty())
+            })
+            .map(String::as_str)
+            .collect();
+        return Err(format!(
+            "verify.plan derive cannot cover this checkout: there is no Cargo.toml at the worktree root, so the Rust matrix does not apply, and no project-neutral runner covers {}; register this project's own verification commands with verify.plan params.commands",
+            uncovered.join(", ")
+        ));
+    }
     if code_changed {
         push_unique(&mut commands, "rustc --version".to_string());
         push_unique(&mut commands, CI_FMT_GATE.to_string());
@@ -1581,6 +1598,19 @@ mod tests {
     /// gwt launches produce).
     fn fixture(worktree: &Path) {
         crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        write(worktree, "Cargo.toml", "[workspace]\n");
+        git(worktree, &["add", "Cargo.toml"]);
+        git(worktree, &["commit", "-qm", "chore: cargo workspace"]);
+        git(
+            worktree,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(worktree, &["checkout", "-q", "-b", "work/fixture"]);
+    }
+
+    /// The same shape for a project that is not a Cargo workspace.
+    fn bare_fixture(worktree: &Path) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
         git(
             worktree,
             &["update-ref", "refs/remotes/origin/develop", "HEAD"],
@@ -1872,6 +1902,45 @@ mod tests {
         let plain = tempfile::tempdir().unwrap();
         let err = derive(plain.path()).unwrap_err();
         assert!(err.contains("git worktree"), "{err}");
+    }
+
+    // Issue #7304 (#5953): a checkout without a root `Cargo.toml` is not a
+    // Cargo workspace, so derivation never proposes cargo commands there.
+    // Tool-neutral surfaces still derive; anything only the Rust matrix
+    // could cover refuses instead of registering a matrix that cannot run.
+    #[test]
+    fn non_cargo_checkout_never_derives_cargo_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        bare_fixture(dir.path());
+        write(dir.path(), "package.json", "{}\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "chore: node project"]);
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(dir.path(), "README.md", "# readme\n");
+        write(dir.path(), "scripts/tool.mjs", "export {};\n");
+        write(
+            dir.path(),
+            "scripts/tool.test.mjs",
+            "import './tool.mjs';\n",
+        );
+        let plan = derive(dir.path()).unwrap();
+        assert_eq!(
+            plan.commands,
+            vec![
+                r#"node --test "scripts/tool.test.mjs""#.to_string(),
+                r#"bunx markdownlint-cli2 "README.md""#.to_string(),
+            ]
+        );
+
+        write(dir.path(), "src/app.ts", "export {};\n");
+        let err = derive(dir.path()).unwrap_err();
+        assert!(err.contains("Cargo.toml"), "{err}");
+        assert!(err.contains("src/app.ts"), "{err}");
+        assert!(err.contains("params.commands"), "{err}");
+        assert!(!err.contains("cargo test"), "{err}");
     }
 
     #[test]

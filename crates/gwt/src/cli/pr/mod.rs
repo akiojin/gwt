@@ -5914,7 +5914,7 @@ fn main() -> ExitCode {
     /// `origin/develop` with work continuing on a feature branch — carrying
     /// exactly `changed` as its diff.
     fn ready_gate_worktree(worktree: &std::path::Path, changed: &[(&str, &str)]) {
-        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        crate::cli::trusted_store::init_cargo_repo_with_origin(worktree);
         for args in [
             vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
             vec!["checkout", "-q", "-b", "work/issue-4510"],
