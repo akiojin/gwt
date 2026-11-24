@@ -289,8 +289,9 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
       expect(await page.locator(".op-rail").evaluate(element => element.scrollWidth - element.clientWidth),
         "the rail must not hide entries behind a sideways scroll").toBeLessThanOrEqual(0);
       const items = page.locator(".op-rail__item:visible");
-      // The notification bell moved to the shared header (Issue #7740).
-      expect(await items.count()).toBeGreaterThanOrEqual(10);
+      // The notification bell moved to the shared header (Issue #7740);
+      // the palette (Issue #7879) and Works (Issue #7880) left the rail.
+      expect(await items.count()).toBeGreaterThanOrEqual(9);
       for (const item of await items.all()) {
         await expect(item).toBeInViewport({ ratio: 1 });
         const box = (await item.boundingBox())!;
