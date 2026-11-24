@@ -3073,10 +3073,26 @@ pub(crate) fn prepare_owner_agent_admission(
                 )
             })
     });
+    let review_dispatch = launch_feedback_context
+        .as_ref()
+        .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
+    let fresh_member_prefs = selected_agent_member_id
+        .as_deref()
+        .filter(|_| {
+            !review_dispatch && !input.is_continue_work && input.restore_source.is_none()
+                && config.session_mode == gwt_agent::SessionMode::Normal
+        })
+        .map(|member_id| {
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(input.project_root),
+            ).map_err(|error| error.to_string())?;
+            if !prefs.member_environment_allows_tool(member_id, config.agent_id.command()) {
+                return Err("The execution environment is no longer available for the selected Agent. Reload and try again.".into());
+            }
+            Ok::<_, String>((member_id, prefs))
+        })
+        .transpose()?;
     if let Some(issue_number) = issue_monitor_issue_number {
-        let review_dispatch = launch_feedback_context
-            .as_ref()
-            .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
         prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
             project_root: input.project_root.into(),
@@ -3085,30 +3101,23 @@ pub(crate) fn prepare_owner_agent_admission(
             target_branch: config.branch.clone().unwrap_or_default(),
             issue_link_cache_dir: input.issue_link_cache_dir.into(),
         })?;
-        if !review_dispatch
-            && monitor_requested_tier.is_none()
-            && !input.is_continue_work
-            && input.restore_source.is_none()
-            && config.session_mode == gwt_agent::SessionMode::Normal
-        {
-            if let Some(member_id) = selected_agent_member_id.as_deref() {
-                let prefs = crate::load_issue_monitor_prefs(
-                    &crate::issue_monitor_prefs_path_for_repo_path(input.project_root),
-                )
-                .map_err(|error| error.to_string())?;
-                let matches = crate::agent_registry::member_profile(&prefs, member_id).is_some_and(
+        if monitor_requested_tier.is_none() {
+            if let Some((member_id, prefs)) = &fresh_member_prefs {
+                let matches = crate::agent_registry::member_profile(prefs, member_id).is_some_and(
                     |profile| {
                         // Issue #7647: the agent starts with the project's
                         // environment, its traits and that environment's
                         // runtime options, as the candidate was prepared.
                         let tool = config.agent_id.command();
-                        let profile = if prefs.environment_lists_tool(tool) {
+                        let profile = if prefs.environment_lists_tool(tool)
+                            || prefs.member_environment_overrides_tool(member_id, tool)
+                        {
                             profile.on_tool(tool)
                         } else {
                             profile
                         };
                         let profile = crate::execution_environments::candidate_as_started(
-                            &prefs, profile, false,
+                            prefs, profile, false,
                         );
                         if !profile
                             .agent_id
@@ -3255,7 +3264,11 @@ pub(crate) fn prepare_owner_agent_admission(
             monitor_requested_tier.filter(|_| !feedback.issue_monitor_review_dispatch)
         {
             crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-                let tiers = prefs.effective_launch_tiers();
+                let candidates = prefs
+                    .registered_launch_profiles_with_tool_filter(issue_number, |tool| {
+                        tool == config.agent_id.command()
+                    });
+                let tiers = prefs.launch_tiers_for_pool(&candidates);
                 let eligible = tiers.get(usize::from(tier)).is_some_and(|pool| {
                     pool.iter().any(|profile| {
                         if selected_agent_member_id.is_some()

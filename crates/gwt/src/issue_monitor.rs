@@ -1606,6 +1606,14 @@ impl IssueMonitorPrefs {
         &self,
         issue_number: u64,
     ) -> Vec<IssueMonitorLaunchProfile> {
+        self.registered_launch_profiles_with_tool_filter(issue_number, |_| true)
+    }
+
+    pub fn registered_launch_profiles_with_tool_filter(
+        &self,
+        issue_number: u64,
+        usable: impl Fn(&str) -> bool,
+    ) -> Vec<IssueMonitorLaunchProfile> {
         let pool = self.launch_profile_pool();
         let host = crate::process::current_hostname();
         let delivery_member = self
@@ -1620,16 +1628,37 @@ impl IssueMonitorPrefs {
             .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
         let scheduled =
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
-        if let (Some(roster), Some(tool)) = (&self.agent_roster, self.environment_tool_for_agents())
-        {
-            return roster
-                .members
-                .iter()
-                .filter(|member| self.registered_member_can_take(member, scheduled, issue_number))
-                .map(|member| {
-                    self.member_candidate_on_environment(&pool, &member.agent_member_id, &tool)
+        if let Some(roster) = &self.agent_roster {
+            let Ok(store) = crate::execution_environments::load() else {
+                return Vec::new();
+            };
+            let project_order = self.environment_tools().is_some();
+            if project_order
+                || roster.members.iter().any(|member| {
+                    store.agent_priority_ids(&member.agent_member_id).is_some()
+                        && self.registered_member_can_take(member, scheduled, issue_number)
                 })
-                .collect();
+            {
+                return roster
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        self.registered_member_can_take(member, scheduled, issue_number)
+                    })
+                    .filter_map(|member| {
+                        let candidate =
+                            self.member_candidate_with_store(&store, &pool, member, &usable)?;
+                        (project_order
+                            || scheduled.is_some()
+                            || store.agent_priority_ids(&member.agent_member_id).is_some()
+                            || pool.first().is_some_and(|primary| {
+                                primary.agent_member_id.is_some()
+                                    && primary.agent_id == candidate.agent_id
+                            }))
+                        .then_some(candidate)
+                    })
+                    .collect();
+            }
         }
         let Some(primary) = pool
             .first()

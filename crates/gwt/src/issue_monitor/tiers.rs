@@ -288,12 +288,16 @@ impl IssueMonitorPrefs {
             .is_some_and(|profile| profile.agent_member_id.is_some())
         {
             // Registered agents' tiers are those of the tool they start with.
-            return self.launch_tiers_for_pool(&self.agent_candidates_on_environment(pool));
+            let candidates = self.agent_candidates_on_environment(pool, |_| true);
+            if candidates.is_empty() {
+                return vec![Vec::new(); self.launch_tiers_for_pool(&[]).len()];
+            }
+            return self.launch_tiers_for_pool(&candidates);
         }
         self.launch_tiers_for_pool(&pool)
     }
 
-    fn launch_tiers_for_pool(
+    pub(crate) fn launch_tiers_for_pool(
         &self,
         selected: &[IssueMonitorLaunchProfile],
     ) -> Vec<Vec<IssueMonitorLaunchProfile>> {
@@ -343,8 +347,23 @@ impl IssueMonitorPrefs {
         available: Option<&[String]>,
         select: impl Fn(&[IssueMonitorLaunchProfile]) -> LaunchProfileSelection,
     ) -> Option<IssueMonitorTierSelection> {
-        let selected = self.registered_launch_profiles_for_issue(issue_number);
-        let tiers = self.launch_tiers_for_pool(&selected);
+        self.select_auto_launch_profile_with_tool_filter(
+            issue_number,
+            is_spec,
+            available,
+            |_| true,
+            select,
+        )
+    }
+
+    pub fn select_auto_launch_profile_with_tool_filter(
+        &self,
+        issue_number: u64,
+        is_spec: bool,
+        available: Option<&[String]>,
+        usable: impl Fn(&str) -> bool,
+        select: impl Fn(&[IssueMonitorLaunchProfile]) -> LaunchProfileSelection,
+    ) -> Option<IssueMonitorTierSelection> {
         let bound = self
             .launch_profile_pool()
             .first()
@@ -359,7 +378,27 @@ impl IssueMonitorPrefs {
             .get(&issue_number)
             .map_or(0, |record| record.floor)
             .max(self.tier_overrides.get(&issue_number).copied().unwrap_or(0));
-        let start = tier_for(tier_input, is_spec, floor, tiers.len().min(255) as u8);
+        let configured_tiers = self.launch_tiers_for_pool(&[]);
+        let start = tier_for(
+            tier_input,
+            is_spec,
+            floor,
+            configured_tiers.len().min(255) as u8,
+        );
+        let selected = self.registered_launch_profiles_with_tool_filter(issue_number, |tool| {
+            available.is_none_or(|agents| agents.iter().any(|id| id == tool))
+                && usable(tool)
+                && (!self.launch_auto
+                    || configured_tiers
+                        .iter()
+                        .skip(usize::from(start))
+                        .flatten()
+                        .any(|profile| {
+                            normalize_issue_monitor_provider(&profile.agent_id).as_deref()
+                                == Some(tool)
+                        }))
+        });
+        let tiers = self.launch_tiers_for_pool(&selected);
         let mut skipped = Vec::new();
         for (index, pool) in tiers.into_iter().enumerate().skip(usize::from(start)) {
             let pool: Vec<_> = self

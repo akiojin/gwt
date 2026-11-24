@@ -27,6 +27,8 @@ type Backend = {
   recent?: unknown[];
   conversation: Array<{ project_key: string; title: string; pm_available: boolean; decisions: unknown[]; error?: string }>;
   pm?: { name: string; avatar: { kind: "preset"; preset_id: string } | { kind: "upload"; image: string } };
+  // Hold the pane receipt so the test can observe delivery and reply separately.
+  holdSend?: boolean;
   // Project keys whose PM refuses a message.
   refuse?: string[];
 };
@@ -52,6 +54,11 @@ async function installHomeBackend(page: Page, backend: Backend) {
       return { waiting_count: items.length, items };
     };
     (window as any).__homeSent = state.sent;
+    const sockets: FixtureWebSocket[] = [];
+    (window as any).__homeEvent = (event: object) => sockets.at(-1)?.reply(event);
+    (window as any).__homeProjects = (projects: Backend["conversation"]) => {
+      backend.conversation = projects;
+    };
     (window as any).__setHomePm = (pm: Backend["pm"]) => {
       backend.pm = pm;
       state.rejectHomeRead = pm === undefined;
@@ -64,6 +71,7 @@ async function installHomeBackend(page: Page, backend: Backend) {
       readyState = 0;
       constructor(public url: string) {
         super();
+        sockets.push(this);
         setTimeout(() => {
           this.readyState = 1;
           this.dispatchEvent(new Event("open"));
@@ -94,6 +102,7 @@ async function installHomeBackend(page: Page, backend: Backend) {
             error: found ? null : `decision ${message.decision_id} was not found`, decisions: queueOf(message.project_key) });
         } else if (message.kind === "home_pm_send") {
           state.sent.push(message);
+          if (backend.holdSend) return;
           const refused = (backend.refuse || []).includes(message.project_key);
           this.reply({ kind: "pane_send_result", ok: !refused, window_id: refused ? null : "tab::pm",
             error: refused ? "No Project Manager is running for this project. Open the project, then try again." : null,
@@ -292,6 +301,63 @@ test.describe("Home conversation with the Project Manager", () => {
     expect(sent).toEqual([beta.project_key, alpha.project_key]);
     expect(errors).toEqual([]);
   });
+
+  for (const width of [1440, 390]) {
+    test(`Issue #7844 Home shows reply waiting at ${width}px`, async ({ page }, info) => {
+      await page.setViewportSize({ width, height: 900 });
+      const errors = collectBrowserErrors(page);
+      const project = { project_key: alpha.project_key, title: "Alpha", pm_available: true,
+        decisions: [decision("older", 5, "Older decision", ["Approve", "Defer"])] };
+      const theme = themeOf(info.project.name);
+      await page.clock.install();
+      await openHome(page, theme, { projects: [alpha], conversation: [project], holdSend: true });
+      const home = page.locator("[data-home]");
+      const log = home.getByRole("log");
+      const typing = log.getByRole("status", { name: "Project Manager is replying" });
+      const draft = home.getByRole("textbox", { name: "Message to the Project Manager" });
+      async function send(body: string) {
+        await draft.fill(body);
+        await home.locator("[data-home-send]").click();
+        await expect(typing).toHaveText("…");
+        await expect(typing).toBeInViewport();
+        await expect(log.locator(":scope > :last-child")).toHaveText("…");
+      }
+      const receipt = (ok: boolean) => page.evaluate(ok => {
+        const win = window as any;
+        win.__homeEvent({ kind: "pane_send_result", ok, request_id: win.__homeSent.at(-1).request_id });
+      }, ok);
+      await send("What is next?");
+      await receipt(true);
+      await expect(draft).toHaveValue("");
+      await expect(typing).toBeVisible();
+      const screenshot = info.outputPath(`reply-waiting-${theme}-${width}.png`);
+      await home.screenshot({ path: screenshot });
+      await info.attach("PM reply waiting", { path: screenshot, contentType: "image/png" });
+      const conversation = { availability: "ready", messages: [{ id: "u1", role: "user", text: "What is next?" }] };
+      await page.evaluate(project => (window as any).__homeProjects([project]), { ...project, conversation });
+      await page.clock.runFor(5000);
+      await expect(typing).toBeVisible();
+      await page.evaluate(project => (window as any).__homeProjects([project]), { ...project, conversation: {
+        ...conversation, messages: [...conversation.messages, { id: "a1", role: "assistant", text: "Check the queue." }],
+      } });
+      await page.clock.runFor(5000);
+      await expect(log.locator(":scope > :last-child")).toContainText("Check the queue.");
+      await expect(typing).toHaveCount(0);
+
+      await send("Please confirm.");
+      await receipt(false);
+      await expect(typing).toHaveCount(0);
+      await expect(draft).toHaveValue("Please confirm.");
+
+      await send("Are you still there?");
+      await receipt(true);
+      await expect(draft).toHaveValue("");
+      await page.evaluate(project => (window as any).__homeProjects([project]), { ...project, pm_interrupted: true });
+      await page.clock.runFor(5000);
+      await expect(typing).toHaveCount(0);
+      expect(errors).toEqual([]);
+    });
+  }
 
   test("AC-3: with no project the PM guides to the ways of adding one", async ({ page }, testInfo) => {
     const errors = collectBrowserErrors(page);

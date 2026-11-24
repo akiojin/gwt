@@ -1313,6 +1313,11 @@ pub enum FrontendEvent {
     SetPmExecutionEnvironments {
         environment_ids: Vec<String>,
     },
+    /// Replace a registered agent's priority list. Empty inherits the project.
+    SetAgentExecutionEnvironments {
+        member_id: String,
+        environment_ids: Vec<String>,
+    },
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         /// Legacy clients may still send this retired setting; ignore it.
@@ -1924,6 +1929,9 @@ pub struct HomeProjectConversationView {
     pub title: String,
     /// Whether a PM session is registered for this project and can be sent to.
     pub pm_available: bool,
+    /// The registered PM session stopped or was interrupted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pm_interrupted: bool,
     /// The queue's own waiting count; Home never recounts the items.
     pub waiting_count: usize,
     pub decisions: Vec<gwt_core::decision_queue::DecisionItem>,
@@ -1956,6 +1964,7 @@ impl HomeProjectConversationView {
             project_key,
             title,
             pm_available,
+            pm_interrupted: false,
             waiting_count: queue.waiting_count,
             decisions: queue.items,
             conversation: None,
@@ -2794,6 +2803,8 @@ pub struct ExecutionEnvironmentsView {
     pub environments: Vec<ExecutionEnvironmentView>,
     pub via_options: Vec<ExecutionEnvironmentViaOptionView>,
     pub pm: PmExecutionEnvironmentsView,
+    pub agent_priorities:
+        std::collections::BTreeMap<String, crate::execution_environments::AgentEnvironmentPriority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectExecutionEnvironmentsView>,
 }

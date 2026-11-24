@@ -49,6 +49,8 @@ const COPY = {
 };
 
 const SEND_TIMEOUT_MS = 15_000;
+// A provider can fail without leaving a native message or a session status.
+const REPLY_WAIT_MS = 120_000;
 const REFRESH_MS = 5_000;
 
 const topicId = (projectKey, decisionId) => `${projectKey}:${decisionId}`;
@@ -67,7 +69,7 @@ function withDecisions(state, event) {
   if (!Number.isSafeInteger(event.request_id) || event.request_id <= state.appliedRequest) return state;
   const projects = (event.projects || []).map(project => ({
     key: project.project_key, title: project.title || project.project_key,
-    pmAvailable: Boolean(project.pm_available), error: project.error || null,
+    pmAvailable: Boolean(project.pm_available), pmInterrupted: Boolean(project.pm_interrupted), error: project.error || null,
     decisions: project.decisions || [], waitingCount: project.waiting_count ?? 0,
     conversation: project.conversation,
   }));
@@ -112,14 +114,20 @@ function reconcileSent(sent, projects) {
   const claimed = sent.filter(receipt => receipt.nativeId)
     .map(receipt => topicId(receipt.projectKey, receipt.nativeId));
   return sent.map(receipt => {
-    if (receipt.nativeId) return receipt;
     const project = projects.find(candidate => candidate.key === receipt.projectKey);
-    const message = project?.conversation?.messages?.find(item =>
+    const messages = project?.conversation?.messages || [];
+    const native = receipt.nativeId ? null : messages.find(item =>
       item.role === "user" && item.text === receipt.text
       && !receipt.previousIds.includes(item.id) && !claimed.includes(topicId(receipt.projectKey, item.id)));
-    if (!message) return receipt;
-    claimed.push(topicId(receipt.projectKey, message.id));
-    return { ...receipt, nativeId: message.id };
+    if (native) claimed.push(topicId(receipt.projectKey, native.id));
+    const nativeId = receipt.nativeId ?? native?.id;
+    const index = messages.findIndex(item => item.id === nativeId);
+    const next = index === -1 ? null : messages.slice(index + 1).find(item =>
+      item.role === "user" || (item.role === "assistant" && String(item.text ?? "").trim()));
+    const availability = project?.conversation?.availability;
+    const waitingForReply = receipt.waitingForReply && project?.pmAvailable && !project.pmInterrupted
+      && availability !== "unsupported" && availability !== "unavailable" && !next;
+    return { ...receipt, nativeId, waitingForReply };
   });
 }
 
@@ -132,7 +140,7 @@ function withSendResult(state, requestId, ok, error) {
   }
   const receipt = {
     id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project,
-    text: pending.answer, at: Date.now(), previousIds: pending.previousIds,
+    text: pending.answer, at: Date.now(), previousIds: pending.previousIds, waitingForReply: true,
   };
   return {
     ...state, pending: null, failure: null, sentCount: state.sentCount + 1,
@@ -178,13 +186,29 @@ function homeConversationView(state, route) {
     id: message.id, kind: "message", projectKey: message.projectKey, project: message.project,
     createdAt: isoTime(message.at), lines: [message.text], status: COPY.delivered(message.project),
   }));
+  const replyWaiting = [
+    ...state.sent.filter(message => message.waitingForReply).map(message => `reply-${message.id}`),
+    ...(pending && !pending.decisionId ? [`reply-sent-${pending.requestId}`] : []),
+  ].map(id => ({ id, kind: "reply-waiting" }));
   // Oldest at the top, newest at the bottom (design item 230).
-  const history = state.projects.flatMap(project => (project.conversation?.messages || []).map(message => ({
-    id: topicId(project.key, message.id), kind: message.role === "assistant" ? "pm-message" : "message",
-    project: project.title, lines: [message.text],
-  })));
-  const topics = route.decisions ? waiting : [...history, ...[...waiting, ...messages]
-    .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))];
+  const sentByNativeId = new Map(state.sent.filter(message => message.nativeId)
+    .map(message => [topicId(message.projectKey, message.nativeId), message]));
+  const history = [], recent = [...waiting, ...messages];
+  for (const project of state.projects) {
+    let sentAt;
+    for (const message of project.conversation?.messages || []) {
+      const id = topicId(project.key, message.id);
+      if (message.role === "user") sentAt = sentByNativeId.get(id)?.at;
+      const topic = { id, kind: message.role === "assistant" ? "pm-message" : "message",
+        project: project.title, lines: [message.text] };
+      // Keep a submitted turn at its delivery position when native history
+      // replaces the optimistic user message and the reply starts.
+      if (sentAt === undefined) history.push(topic);
+      else recent.push({ ...topic, sortAt: isoTime(sentAt) });
+    }
+  }
+  const topics = route.decisions ? waiting : [...history, ...recent
+    .sort((a, b) => (a.sortAt ?? a.createdAt ?? "").localeCompare(b.sortAt ?? b.createdAt ?? "")), ...replyWaiting];
   // Issue #7742 AC-4: the queues' own waiting counts, never a recount of the
   // topics drawn here.
   const count = state.loaded ? state.projects.reduce((sum, project) => sum + project.waitingCount, 0) : null;
@@ -377,14 +401,25 @@ export function createHomeConversation({
 
   // The catalog that follows a connection starts the first read.
   function connected() {
-    if (!refreshTimer) refreshTimer = win.setInterval(requestDecisions, REFRESH_MS);
+    if (!refreshTimer) refreshTimer = win.setInterval(() => {
+      state.update(current => {
+        const now = Date.now();
+        if (!current.sent.some(receipt => receipt.waitingForReply && now - receipt.at >= REPLY_WAIT_MS)) return current;
+        return { ...current, sent: current.sent.map(receipt => now - receipt.at >= REPLY_WAIT_MS
+          ? { ...receipt, waitingForReply: false } : receipt) };
+      });
+      requestDecisions();
+    }, REFRESH_MS);
   }
 
   function connectionLost() {
     if (refreshTimer) win.clearInterval(refreshTimer);
     refreshTimer = null;
-    const pending = state.read().pending;
-    if (pending) state.update(current => withUnconfirmed(current, pending.requestId));
+    state.update(current => {
+      const next = current.pending ? withUnconfirmed(current, current.pending.requestId) : current;
+      if (!next.sent.some(receipt => receipt.waitingForReply)) return next;
+      return { ...next, sent: next.sent.map(receipt => ({ ...receipt, waitingForReply: false })) };
+    });
   }
 
   const container = createDetachedIslandContainer(document);

@@ -1198,7 +1198,7 @@ fn prepare_issue_monitor_launch(
             resume: Ok(PreparedIssueMonitorResumeAttempt::default()),
         });
     };
-    if auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated {
+    if issue_monitor_launch_provider_signed_out(profile, auth_probe) {
         return Err(gwt::issue_monitor::provider_unauthenticated_message(
             &profile.agent_id,
         ));
@@ -4600,7 +4600,7 @@ impl AppRuntime {
                 Some(choice) => {
                     if let Some(mut facts) = reusable_facts {
                         if let Some(profile) = choice.profiles.preferred_profile() {
-                            if auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated {
+                            if issue_monitor_launch_provider_signed_out(profile, auth_probe) {
                                 return Err(gwt::issue_monitor::provider_unauthenticated_message(&profile.agent_id));
                             }
                         }
@@ -6095,8 +6095,14 @@ impl AppRuntime {
         // funnels through the normal launch-failed path, so the active slot
         // is released instead of burning on a provider login screen.
         if prepared.is_none()
-            && (self.issue_monitor_provider_auth_probe)(&profile_agent_id)
-                == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+            && previous_profiles
+                .preferred_profile()
+                .is_some_and(|profile| {
+                    issue_monitor_launch_provider_signed_out(
+                        profile,
+                        self.issue_monitor_provider_auth_probe,
+                    )
+                })
         {
             return Err(gwt::issue_monitor::provider_unauthenticated_message(
                 &profile_agent_id,
@@ -8183,7 +8189,7 @@ fn issue_plan_assignee_candidates(
         .iter()
         .map(|member| {
             let profile = prefs
-                .member_launch_candidate(&member.agent_member_id)
+                .member_launch_candidate_with_tool_filter(&member.agent_member_id, is_installed)
                 .map(|candidate| {
                     gwt::execution_environments::candidate_as_started(&prefs, candidate, false)
                 });
@@ -8859,7 +8865,7 @@ fn issue_monitor_candidate_exclusion(
     profile: &gwt::IssueMonitorLaunchProfile,
     pool_size: usize,
     codex_config_error: Option<&str>,
-    auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
+    auth_probe: impl Fn(&str) -> gwt::issue_monitor::ProviderAuthState,
 ) -> Option<String> {
     codex_config_exclusion(profile, codex_config_error).or_else(|| {
         (pool_size > 1
@@ -8867,6 +8873,16 @@ fn issue_monitor_candidate_exclusion(
                 == gwt::issue_monitor::ProviderAuthState::Unauthenticated)
             .then(|| gwt::issue_monitor::provider_unauthenticated_message(&profile.agent_id))
     })
+}
+
+fn issue_monitor_launch_provider_signed_out(
+    profile: &gwt::LaunchWizardPreviousProfile,
+    auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
+) -> bool {
+    auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+        && (profile.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+            || !gwt::execution_environments::load()
+                .is_ok_and(|store| store.has_signed_in_managed_account(&profile.agent_id)))
 }
 
 /// The reason no candidate was eligible: the refusal that names what to fix,
@@ -9190,13 +9206,38 @@ fn issue_monitor_owner_launch_profile_choice(
     codex_config_error: Option<&str>,
     auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
 ) -> Result<IssueMonitorLaunchProfileChoice, String> {
+    use gwt::issue_monitor::ProviderAuthState;
+
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
+    let store = gwt::execution_environments::load().ok();
+    let auth_state = |tool: &str| {
+        let state = auth_probe(tool);
+        if state == ProviderAuthState::Unauthenticated
+            && store
+                .as_ref()
+                .is_some_and(|store| store.has_signed_in_managed_account(tool))
+        {
+            ProviderAuthState::Authenticated
+        } else {
+            state
+        }
+    };
     let exclusion = |profile: &gwt::IssueMonitorLaunchProfile, pool_size: usize| {
-        issue_monitor_candidate_exclusion(profile, pool_size, codex_config_error, auth_probe)
+        issue_monitor_candidate_exclusion(profile, pool_size, codex_config_error, auth_state)
+    };
+    let options = cache.agent_options();
+    let usable = |tool: &str| {
+        gwt_agent::resolve_agent_id(tool)
+            .is_some_and(|agent| agent.supports_monitor_initial_prompt())
+            && options
+                .iter()
+                .find(|option| option.id == tool)
+                .is_none_or(|option| option.available)
+            && auth_state(tool) != ProviderAuthState::Unauthenticated
     };
     if !prefs.launch_auto {
-        let pool = prefs.registered_launch_profiles_for_issue(issue_number);
+        let pool = prefs.registered_launch_profiles_with_tool_filter(issue_number, usable);
         if prefs
             .launch_profile_pool()
             .first()
@@ -9238,6 +9279,9 @@ fn issue_monitor_owner_launch_profile_choice(
                 tier: None,
             });
         }
+        if !prefs.execution_environments.is_empty() {
+            return Err("No eligible execution environment is available for this project.".into());
+        }
         let choice =
             issue_monitor_launch_profile_choice(cache, provider_usage_accounts, project_root, None);
         if let Some(error) = codex_config_error.filter(|_| {
@@ -9250,11 +9294,10 @@ fn issue_monitor_owner_launch_profile_choice(
         }
         return Ok(choice);
     }
-    let available = cache
-        .agent_options()
-        .into_iter()
+    let available = options
+        .iter()
         .filter(|option| option.available)
-        .map(|option| option.id)
+        .map(|option| option.id.clone())
         .collect::<Vec<_>>();
     let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let unauthenticated = std::cell::RefCell::new(Vec::new());
@@ -9263,6 +9306,7 @@ fn issue_monitor_owner_launch_profile_choice(
         &available,
         issue_number,
         linked_issue_kind == gwt::LinkedIssueKind::Spec,
+        usable,
         |profile, pool_size| {
             let reason = exclusion(profile, pool_size);
             if let Some(reason) = &reason {
@@ -9334,6 +9378,7 @@ pub(super) fn select_issue_monitor_automatic_profile(
         available,
         issue_number,
         is_spec,
+        |_| true,
         |profile, _| codex_config_exclusion(profile, codex_config_error),
         now,
     )
@@ -9344,6 +9389,7 @@ fn select_issue_monitor_automatic_profile_excluding(
     available: &[String],
     issue_number: u64,
     is_spec: bool,
+    usable: impl Fn(&str) -> bool,
     exclusion: impl Fn(&gwt::IssueMonitorLaunchProfile, usize) -> Option<String>,
     now: &str,
 ) -> Option<gwt::issue_monitor::IssueMonitorTierSelection> {
@@ -9353,11 +9399,17 @@ fn select_issue_monitor_automatic_profile_excluding(
     } else {
         "kind:issue".to_string()
     }];
-    prefs.select_auto_launch_profile(issue_number, is_spec, Some(available), |pool| {
-        select_issue_monitor_profiles_excluding(pool, &exclusion, |pool| {
-            gwt::select_launch_profile(pool, &holds, &work_tags, None, now)
-        })
-    })
+    prefs.select_auto_launch_profile_with_tool_filter(
+        issue_number,
+        is_spec,
+        Some(available),
+        usable,
+        |pool| {
+            select_issue_monitor_profiles_excluding(pool, &exclusion, |pool| {
+                gwt::select_launch_profile(pool, &holds, &work_tags, None, now)
+            })
+        },
+    )
 }
 
 fn issue_monitor_launch_profile_choice(

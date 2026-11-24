@@ -35,6 +35,7 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
 const TRAIT_CHOICES = { reasoning_level: [["low", "Low"], ["standard", "Standard"], ["high", "High"], ["max", "Max"]],
   speed: [["normal", "Normal"], ["fast", "Fast"], ["fastest", "Fastest"]] };
 const PERSONALITY_MAX_CHARS = 4000;
+const ENVIRONMENT_ORDER_RESTORED = "Returned to the project's order";
 const savedTraits = member => ({ reasoning_level: member?.traits?.reasoning_level || "", speed: member?.traits?.speed || "", personality: member?.traits?.personality || "" });
 const traitLabel = (name, value) => TRAIT_CHOICES[name].find(([id]) => id === value)?.[1] || "";
 const traitsSummary = member => {
@@ -44,14 +45,14 @@ const traitsSummary = member => {
 };
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
+export function createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onSetAvatar = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {}, onOpenPmTerminal = () => {} }) {
+  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onSetEnvironmentPriority = () => {}, onSetAvatar = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {}, onOpenPmTerminal = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span><button type="button" class="wizard-button" data-action="pm-terminal">Open PM terminal</button></div>
     <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> registered members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Registered members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
-    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. The tool a session starts with comes from the project's available execution environments, not from the member. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
+    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. Sessions use the project's available execution environments in the agent's order, when set. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" data-project-only hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
   if (executionModel) {
@@ -115,6 +116,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
   let renderedDetail = null;
   const memberRows = new Map();
   const nameFields = new Map();
+  const memberPriority = memberId => executionEnvironmentsModel?.read().view?.agent_priorities?.[memberId];
   let submittedSnapshot = null, scheduleNotice = "", pendingSource = null;
   const emptySwitch = { intents: [], pending: null, error: null, disconnected: false };
   const switchState = () => switchModel?.read() || emptySwitch;
@@ -397,6 +399,59 @@ export function createAgentsSurface({ document, storage, executionModel, project
     panel.insertBefore(history, actions || null);
     renderedDetail = { key, currentWork, actions };
   }
+  function syncEnvironmentPriority(panel, memberId) {
+    const { view, agentPriorityPending, agentPriorityError } = executionEnvironmentsModel.read();
+    const environments = view?.environments || [];
+    const priority = memberPriority(memberId);
+    const ids = priority?.environment_ids || [];
+    const list = panel.querySelector("ol"), picker = panel.querySelector("select");
+    const disabled = !view || !!agentPriorityPending;
+    const key = JSON.stringify([environments.map(({ id, name }) => [id, name]), ids]);
+    if (panel.dataset.environmentKey !== key) {
+      const previousPick = picker.value;
+      picker.replaceChildren(...environments.filter(environment => !ids.includes(environment.id)).map(environment => {
+        const option = document.createElement("option"); option.value = environment.id; option.textContent = environment.name;
+        option.selected = option.value === previousPick;
+        return option;
+      }));
+      list.replaceChildren(...ids.map((id, index) => {
+        const name = environments.find(environment => environment.id === id)?.name || id;
+        const row = document.createElement("li"); row.className = "project-environments__item"; row.dataset.environmentId = id;
+        const title = document.createElement("span"); title.className = "project-environments__name"; title.textContent = name;
+        const actions = document.createElement("div"); actions.className = "project-environments__actions";
+        for (const [label, offset] of [["Move up", -1], ["Move down", 1], ["Remove", 0]]) {
+          const button = document.createElement("button"); button.type = "button"; button.className = "wizard-button"; button.textContent = label;
+          button.setAttribute("aria-label", `${label} ${name}`);
+          const target = index + offset, edge = target < 0 || target >= ids.length;
+          button.dataset.edge = String(edge);
+          button.addEventListener("click", () => {
+            if (button.disabled || executionEnvironmentsModel.read().agentPriorityPending) return;
+            const next = [...(memberPriority(memberId)?.environment_ids || [])];
+            const from = next.indexOf(id), to = from + offset;
+            if (from < 0 || to < 0 || to >= next.length) return;
+            if (offset) [next[from], next[to]] = [next[to], next[from]];
+            else next.splice(from, 1);
+            onSetEnvironmentPriority(memberId, next);
+          });
+          actions.append(button);
+        }
+        row.append(title, actions);
+        return row;
+      }));
+      panel.dataset.environmentKey = key;
+    }
+    list.hidden = ids.length === 0;
+    const status = panel.querySelector("[role=status]");
+    status.textContent = !view ? "Loading execution environments…" : priority?.reverted_to_project
+      ? ENVIRONMENT_ORDER_RESTORED : ids.length ? "" : "Using the project's order";
+    const hasOptions = picker.options.length > 0;
+    panel.querySelector("form").hidden = !hasOptions;
+    picker.disabled = panel.querySelector("[type=submit]").disabled = disabled || !hasOptions;
+    for (const button of list.querySelectorAll("button")) button.disabled = disabled || button.dataset.edge === "true";
+    const error = panel.querySelector("[role=alert]");
+    error.textContent = agentPriorityError?.memberId === memberId ? agentPriorityError.message : "";
+    error.hidden = !error.textContent;
+  }
   function memberNameField(member) {
     let field = nameFields.get(member.member_id);
     if (!field) {
@@ -439,6 +494,25 @@ export function createAgentsSurface({ document, storage, executionModel, project
         const next = { ...field.traitsDraft, personality: field.traitsDraft.personality.trim() };
         onSetTraits(latest.member_id, Object.fromEntries(Object.entries(next).filter(([, value]) => value)));
       });
+      if (executionEnvironmentsModel) {
+        const priority = document.createElement("fieldset");
+        priority.className = "settings-section project-environments"; priority.dataset.memberEnvironments = "";
+        priority.innerHTML = `<legend>Execution environment priority</legend>
+          <p class="settings-help">Only environments allowed by the project can be used. Clear the list to use the project's order.</p>
+          <ol class="project-environments__list" aria-label="Execution environments in priority order"></ol>
+          <p class="settings-help" role="status"></p>
+          <form class="project-environments__add"><label class="settings-field"><span>Add an execution environment</span><select class="settings-select"></select></label><button type="submit" class="wizard-button">Add to the end</button></form>
+          <p class="settings-status" data-kind="error" role="alert" hidden></p>`;
+        priority.querySelector("form").addEventListener("submit", event => {
+          event.preventDefault();
+          const selected = priority.querySelector("select").value;
+          const ids = memberPriority(member.member_id)?.environment_ids || [];
+          if (selected && !ids.includes(selected) && !executionEnvironmentsModel.read().agentPriorityPending) {
+            onSetEnvironmentPriority(member.member_id, [...ids, selected]);
+          }
+        });
+        field.environmentPriority = priority;
+      }
       // Issue #7635: the avatar is the agent's own; choosing one changes every display of it.
       const avatarPicker = document.createElement("section"); avatarPicker.className = "roster-avatar-picker"; avatarPicker.dataset.memberAvatar = "";
       const avatarTitle = document.createElement("h4"); avatarTitle.id = `roster-avatar-title-${member.member_id}`; avatarTitle.textContent = "Avatar";
@@ -474,7 +548,9 @@ export function createAgentsSurface({ document, storage, executionModel, project
       });
       avatarChoices.append(upload);
       avatarPicker.append(avatarTitle, avatarChoices, file, avatarError); field.avatarPicker = avatarPicker; field.showAvatarError = showAvatarError;
-      label.append(input); who.append(name, meta, label, status, retry, avatarPicker, eligibleLabel, selectPm, traits, tuning); field.avatar = avatar(member); head.append(field.avatar, who);
+      label.append(input); who.append(name, meta, label, status, retry, avatarPicker, eligibleLabel, selectPm, traits, tuning);
+      if (field.environmentPriority) who.append(field.environmentPriority);
+      field.avatar = avatar(member); head.append(field.avatar, who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
@@ -512,6 +588,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
       control.disabled = !rosterReady(rosterModel.read());
     }
     field.traits.querySelector('[data-action="save-traits"]').disabled = held || !field.traitsDraft;
+    if (field.environmentPriority) syncEnvironmentPriority(field.environmentPriority, member.member_id);
     const shown = renderAgentAvatar(field.avatar, member).dataset;
     for (const button of field.avatarPicker.querySelectorAll("[data-avatar-choice]")) {
       const id = button.dataset.avatarChoice;
@@ -644,7 +721,8 @@ export function createAgentsSurface({ document, storage, executionModel, project
       }
       // The controls sit at the row's trailing edge, so the body of the row stays the selection target.
       const traits = document.createElement("span"); traits.className = "roster-row-traits";
-      who.append(name, purpose, traits, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state, order);
+      const priorityNotice = document.createElement("span"); priorityNotice.className = "settings-help"; priorityNotice.dataset.environmentPriorityNotice = ""; priorityNotice.hidden = true;
+      who.append(name, purpose, traits, priorityNotice, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state, order);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
@@ -665,6 +743,9 @@ export function createAgentsSurface({ document, storage, executionModel, project
     purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
     const traits = row.querySelector(".roster-row-traits");
     traits.textContent = traitsSummary(member); traits.title = traits.textContent; traits.hidden = !traits.textContent;
+    const priorityNotice = row.querySelector("[data-environment-priority-notice]");
+    priorityNotice.hidden = !memberPriority(member.member_id)?.reverted_to_project;
+    priorityNotice.textContent = priorityNotice.hidden ? "" : ENVIRONMENT_ORDER_RESTORED;
     const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
     if (cached.summariesKey !== summariesKey) {
       const assignments = row.querySelector(".roster-assignments"); assignments.replaceChildren();
@@ -776,6 +857,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     running.textContent = `Running ${number(count)}`;
   }));
   if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
+  if (executionEnvironmentsModel) unsubscribers.push(executionEnvironmentsModel.subscribeFrame(state => state, sync));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
   return { element, sync, syncPreview, selectMember, selectReview, openPmSettings, setPreviewHost, setView, get view() { return view; }, dispose() { if (disposed) return; historyPlans.unmount(); releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); closeRemoval(); document.removeEventListener("keydown", removalEscape); removal.remove(); disposed = true; } };

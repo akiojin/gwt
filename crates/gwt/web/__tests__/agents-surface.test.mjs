@@ -23,7 +23,7 @@ const members = [
   { member_id: "m2", name: "Two", provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, environmentView, onSetEnvironmentPriority, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -36,18 +36,39 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   rosterController.applyAgentRosterSnapshot({ project_key: "project", members: members.map(member => ({ ...member, agent_member_id: member.member_id })), revision: 3, revision_decimal: "3", capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] });
   const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
   const switchModel = switching ? createUiStateStore(switching, options) : undefined;
+  const executionEnvironmentsModel = environmentView ? createUiStateStore({ view: environmentView }, options) : undefined;
   const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], traitsSaved = [], avatarsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
   if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
-  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onSetAvatar: (id, avatar) => avatarsSaved.push([id, avatar]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, onSetEnvironmentPriority, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onSetAvatar: (id, avatar) => avatarsSaved.push([id, avatar]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { traitsSaved, avatarsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { traitsSaved, avatarsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, added, reassigned, refreshed, switchModel, switched, saved, continued, executionEnvironmentsModel };
 }
+
+test("Agent environment priority removes the last override and shows a deletion fallback on its member row", async () => {
+  const writes = [];
+  const environmentView = {
+    environments: [{ id: "codex", name: "Codex pool" }],
+    agent_priorities: { m1: { environment_ids: ["codex"], reverted_to_project: false } },
+  };
+  const f = await fixture({ environmentView, onSetEnvironmentPriority: (memberId, ids) => writes.push([memberId, ids]) });
+  const panel = f.surface.element.querySelector(".roster-detail [data-member-environments]");
+  panel.querySelector('[aria-label="Remove Codex pool"]').click();
+  assert.deepEqual(writes, [["m1", []]]);
+  f.executionEnvironmentsModel.update(() => ({
+    view: { environments: [], agent_priorities: { m1: { environment_ids: [], reverted_to_project: true } } },
+  }));
+  f.flush();
+  assert.match(panel.textContent, /Returned to the project's order/);
+  assert.match(f.surface.element.querySelector('[data-member-id="m1"]').textContent, /Returned to the project's order/);
+  assert.doesNotMatch(f.surface.element.querySelector('[data-member-id="m2"]').textContent, /Returned to the project's order/);
+  f.surface.dispose();
+});
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
   const f = await fixture(), input = f.surface.element.querySelector('[aria-label="Display name"]');

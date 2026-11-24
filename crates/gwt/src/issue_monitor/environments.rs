@@ -1,4 +1,5 @@
 use super::*;
+use crate::execution_environments::{self, Store};
 
 /// Issue #7741 (SPEC #7007 item 82): one entry of a project's "available
 /// execution environments" list. The order of the list is the priority.
@@ -64,12 +65,23 @@ impl IssueMonitorPrefs {
     /// The saved list's tools in priority order, or `None` when the list was
     /// never saved and launches choose as they always did.
     pub(super) fn environment_tools(&self) -> Option<Vec<String>> {
-        let tools: Vec<_> =
-            normalize_project_execution_environments(self.execution_environments.clone())
-                .into_iter()
+        if self.execution_environments.is_empty() {
+            return None;
+        }
+        let store = execution_environments::load().ok();
+        self.environment_tools_in(store.as_ref())
+    }
+
+    fn environment_tools_in(&self, store: Option<&Store>) -> Option<Vec<String>> {
+        let list = normalize_project_execution_environments(self.execution_environments.clone());
+        (!list.is_empty()).then(|| {
+            list.into_iter()
+                .filter(|entry| {
+                    store.is_none_or(|store| !store.environment_was_deleted(&entry.environment_id))
+                })
                 .map(|entry| entry.tool)
-                .collect();
-        (!tools.is_empty()).then_some(tools)
+                .collect()
+        })
     }
 
     /// The tools launches use today, in the order they are tried. This is the
@@ -126,7 +138,7 @@ impl IssueMonitorPrefs {
             .first()
             .is_some_and(|profile| profile.agent_member_id.is_some())
         {
-            return self.agent_candidates_on_environment(pool);
+            return self.agent_candidates_on_environment(pool, |_| true);
         }
         self.environment_candidates(pool)
     }
@@ -137,8 +149,7 @@ impl IssueMonitorPrefs {
     /// held, the first is kept so the wait names it. `None` when the project
     /// never saved a list, where an agent keeps the tool it was registered
     /// with.
-    pub(super) fn environment_tool_for_agents(&self) -> Option<String> {
-        let tools = self.environment_tools()?;
+    fn first_environment_tool(&self, tools: Vec<String>) -> Option<String> {
         let now = gwt_core::timestamp::UtcTimestamp::now();
         tools
             .iter()
@@ -147,18 +158,78 @@ impl IssueMonitorPrefs {
             .cloned()
     }
 
+    fn member_environment_order(&self, store: &Store, member_id: &str) -> Option<Vec<String>> {
+        let priority = store.agent_priority_ids(member_id)?;
+        let (_, allowed) = execution_environments::project_list(store, self);
+        let allowed_tool = |id: &str| {
+            let entry = allowed.iter().find(|entry| entry.environment_id == id)?;
+            let environment = store.environment(id)?;
+            (entry.tool == environment.via_tool).then(|| entry.tool.clone())
+        };
+        Some(priority.iter().filter_map(|id| allowed_tool(id)).collect())
+    }
+
+    pub(super) fn member_environment_tool(
+        &self,
+        store: &Store,
+        member_id: &str,
+        mut usable: impl FnMut(&str) -> bool,
+    ) -> Option<String> {
+        let Some(tools) = self.member_environment_order(store, member_id) else {
+            return self.first_environment_tool(self.environment_tools_in(Some(store))?);
+        };
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        tools.into_iter().find(|tool| {
+            hold_reset_after(&self.provider_quota_holds, tool, now).is_none() && usable(tool)
+        })
+    }
+
+    pub(crate) fn member_environment_allows_tool(&self, member_id: &str, tool: &str) -> bool {
+        execution_environments::load().is_ok_and(|store| {
+            self.member_environment_order(&store, member_id)
+                .map_or_else(
+                    || {
+                        let id = self
+                            .execution_environments
+                            .iter()
+                            .find(|entry| entry.tool == tool)
+                            .map_or(tool, |entry| &entry.environment_id);
+                        !store.environment_was_deleted(id)
+                    },
+                    |tools| tools.iter().any(|candidate| candidate == tool),
+                )
+        })
+    }
+
+    pub(crate) fn member_environment_overrides_tool(&self, member_id: &str, tool: &str) -> bool {
+        execution_environments::load().ok().is_some_and(|store| {
+            self.member_environment_order(&store, member_id)
+                .is_some_and(|tools| tools.iter().any(|candidate| candidate == tool))
+        })
+    }
+
     /// Registered agents' saved candidates as they start now. The saved pool
     /// itself keeps each agent's registered tool.
     pub(super) fn agent_candidates_on_environment(
         &self,
         candidates: Vec<IssueMonitorLaunchProfile>,
+        usable: impl Fn(&str) -> bool,
     ) -> Vec<IssueMonitorLaunchProfile> {
-        let Some(tool) = self.environment_tool_for_agents() else {
-            return candidates;
+        let Ok(store) = execution_environments::load() else {
+            return Vec::new();
         };
         candidates
             .into_iter()
-            .map(|candidate| candidate.on_tool(&tool))
+            .filter_map(|candidate| {
+                let id = candidate.agent_member_id.as_deref().unwrap_or_default();
+                if let Some(tool) = self.member_environment_tool(&store, id, &usable) {
+                    return Some(candidate.on_tool(&tool));
+                }
+                (self.environment_tools_in(Some(&store)).is_none()
+                    && store.agent_priority_ids(id).is_none()
+                    && !store.environment_was_deleted(&candidate.agent_id))
+                .then_some(candidate)
+            })
             .collect()
     }
 
@@ -167,6 +238,15 @@ impl IssueMonitorPrefs {
     /// Projects without a list use the member's saved launch profile or a
     /// general launch profile for the member's registered tool.
     pub fn member_launch_candidate(&self, member_id: &str) -> Option<IssueMonitorLaunchProfile> {
+        self.member_launch_candidate_with_tool_filter(member_id, |_| true)
+    }
+
+    pub fn member_launch_candidate_with_tool_filter(
+        &self,
+        member_id: &str,
+        usable: impl Fn(&str) -> bool,
+    ) -> Option<IssueMonitorLaunchProfile> {
+        let store = execution_environments::load().ok()?;
         let pool = self.launch_profile_pool();
         let member = self
             .agent_roster
@@ -174,10 +254,27 @@ impl IssueMonitorPrefs {
             .members
             .iter()
             .find(|member| member.agent_member_id == member_id)?;
-        if let Some(tool) = self.environment_tool_for_agents() {
-            return Some(self.member_candidate_on_environment(&pool, member_id, &tool));
+        self.member_candidate_with_store(&store, &pool, member, usable)
+    }
+
+    pub(super) fn member_candidate_with_store(
+        &self,
+        store: &Store,
+        pool: &[IssueMonitorLaunchProfile],
+        member: &crate::agent_names::AgentMember,
+        usable: impl FnMut(&str) -> bool,
+    ) -> Option<IssueMonitorLaunchProfile> {
+        let member_id = &member.agent_member_id;
+        if let Some(tool) = self.member_environment_tool(store, member_id, usable) {
+            return Some(self.member_candidate_on_environment(pool, member_id, &tool));
         }
-        self.legacy_member_candidate(&pool, member)
+        if store.agent_priority_ids(member_id).is_some()
+            || self.environment_tools_in(Some(store)).is_some()
+        {
+            return None;
+        }
+        self.legacy_member_candidate(pool, member)
+            .filter(|candidate| !store.environment_was_deleted(&candidate.agent_id))
     }
 
     pub(super) fn legacy_member_profile<'pool>(
@@ -503,6 +600,82 @@ mod tests {
         assert!(prefs.environment_lists_tool("grok"));
         assert!(!prefs.environment_lists_tool("claude"));
         assert!(!IssueMonitorPrefs::default().environment_lists_tool("codex"));
+    }
+
+    #[test]
+    fn a_members_priority_intersects_each_projects_allowed_environment_ids() {
+        let mut prefs = roster_prefs();
+        let mut store = crate::execution_environments::Store::default();
+        for tool in ["claude", "codex", "grok"] {
+            store.register_account(tool).unwrap();
+        }
+        prefs.execution_environments = listed(&[("claude", "claude"), ("codex", "codex")]);
+        store
+            .set_agent_list(
+                "m-claude",
+                &["grok".into(), "codex".into(), "claude".into()],
+            )
+            .unwrap();
+        let choice = |prefs: &IssueMonitorPrefs, member: &str| {
+            prefs.member_environment_tool(&store, member, |_| true)
+        };
+        assert_eq!(choice(&prefs, "m-codex").as_deref(), Some("claude"));
+        assert_eq!(choice(&prefs, "m-claude").as_deref(), Some("codex"));
+        assert_eq!(
+            prefs
+                .member_environment_tool(&store, "m-claude", |tool| tool != "codex")
+                .as_deref(),
+            Some("claude")
+        );
+        let mut other = prefs.clone();
+        other
+            .execution_environments
+            .insert(0, listed(&[("grok", "grok")]).remove(0));
+        assert_eq!(choice(&other, "m-claude").as_deref(), Some("grok"));
+        prefs
+            .execution_environments
+            .retain(|entry| entry.tool != "codex");
+        assert_eq!(choice(&prefs, "m-claude").as_deref(), Some("claude"));
+        assert_eq!(choice(&other, "m-claude").as_deref(), Some("grok"));
+        assert_eq!(
+            store.agent_priorities["m-claude"].environment_ids,
+            ["grok", "codex", "claude"]
+        );
+    }
+
+    #[test]
+    fn a_registered_launch_skips_a_removed_environment_even_with_a_stale_project_list() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut prefs = roster_prefs();
+        prefs.execution_environments = listed(&[("codex", "codex"), ("claude:hermes", "hermes")]);
+        execution_environments::mutate(|store| {
+            store.register_account("codex").unwrap();
+            store.register_account("claude").unwrap();
+            store.register_via("claude", "hermes", None)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
+
+        execution_environments::mutate(|store| {
+            store.set_agent_list("m-claude", &["claude:hermes".into()])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("hermes"));
+
+        execution_environments::mutate(|store| Ok(store.delete_environment("claude:hermes")?))
+            .unwrap();
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
+        assert!(!prefs.member_environment_allows_tool("m-claude", "hermes"));
+        assert!(
+            execution_environments::load().unwrap().agent_priorities["m-claude"]
+                .reverted_to_project
+        );
     }
 
     #[test]

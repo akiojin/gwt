@@ -2241,6 +2241,9 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the frontend is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
+    /// Issue #7664: tabs whose PM launch was refused for a transient machine
+    /// capacity reason. The scheduled tick re-runs their automatic ensure.
+    pub(crate) pending_pm_launch_retry_tabs: Vec<String>,
     /// Issue #7702: FrontendReady owner snapshots that did not fit in this
     /// event-loop slice. A fresh budget emits them on `GuiSliceContinue`.
     pub(crate) pending_frontend_ready_snapshots: Vec<gui_slice::PendingFrontendSnapshots>,
@@ -5290,6 +5293,7 @@ impl AppRuntime {
             initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
+            pending_pm_launch_retry_tabs: Vec::new(),
             pending_frontend_ready_snapshots: Vec::new(),
             gui_slice_continue_queued: false,
             deferred_issue_monitor_launches: None,
@@ -9155,6 +9159,7 @@ impl AppRuntime {
         now: &str,
     ) -> Vec<OutboundEvent> {
         let mut events = self.agent_switch_tick_events();
+        self.retry_transient_pm_launch_failures();
         if !self.issue_monitor_materializer_ready() {
             return events;
         }
@@ -12027,7 +12032,8 @@ impl AppRuntime {
             | FrontendEvent::UpdateExecutionEnvironment { .. }
             | FrontendEvent::DeleteExecutionEnvironment { .. }
             | FrontendEvent::SetProjectExecutionEnvironments { .. }
-            | FrontendEvent::SetPmExecutionEnvironments { .. }) => {
+            | FrontendEvent::SetPmExecutionEnvironments { .. }
+            | FrontendEvent::SetAgentExecutionEnvironments { .. }) => {
                 self.execution_environment_events(&client_id, None, event)
             }
             FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
@@ -13455,7 +13461,8 @@ impl AppRuntime {
             | FrontendEvent::UpdateExecutionEnvironment { .. }
             | FrontendEvent::DeleteExecutionEnvironment { .. }
             | FrontendEvent::SetProjectExecutionEnvironments { .. }
-            | FrontendEvent::SetPmExecutionEnvironments { .. }) => {
+            | FrontendEvent::SetPmExecutionEnvironments { .. }
+            | FrontendEvent::SetAgentExecutionEnvironments { .. }) => {
                 self.execution_environment_events(&client_id, Some(context), event)
             }
             FrontendEvent::LoadThemes { request_id } => {

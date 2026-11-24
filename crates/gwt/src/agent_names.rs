@@ -1599,7 +1599,10 @@ fn reserve_project_member_inner(
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(root, prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
-        let listed = requested_tool.as_deref().is_some_and(|tool| prefs.environment_lists_tool(tool));
+        let listed = requested_tool.as_deref().is_some_and(|tool| {
+            prefs.environment_lists_tool(tool)
+                || selected_member_id.is_some_and(|id| prefs.member_environment_overrides_tool(id, tool))
+        });
         let matches_tool = |member: &AgentMember| matches_tool(member, listed);
         let runs = |profile: &crate::IssueMonitorLaunchProfile, tool: &String| listed || &profile.agent_id == tool;
         if !listed && selected_member_id.is_some_and(|id| {
