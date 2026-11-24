@@ -445,7 +445,7 @@ fn assert_stop_gates(repo: &Path, session: &str, silent: bool) {
 }
 
 #[test]
-fn admitted_waiter_notifies_once_after_its_busy_pane_becomes_idle() {
+fn admitted_waiter_stays_silent_after_its_attempt_completes() {
     let arena = Arena::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let holder_repo = arena.repo("holder");
@@ -516,15 +516,13 @@ fn admitted_waiter_notifies_once_after_its_busy_pane_becomes_idle() {
         received.try_recv().is_err(),
         "busy panes must not be notified"
     );
+    // #5993: the busy caller already received the completed result. A pane
+    // that becomes idle afterwards is finishing its task, so the admitted
+    // notice must not reopen it. Observe several 5s companion poll cycles.
     idle.store(true, Ordering::Release);
-    let (session, text) = received
-        .recv_timeout(Duration::from_secs(30))
-        .expect("live admission must notify when the original pane becomes idle");
-    assert_eq!(session, "live-waiter");
-    assert!(text.contains("Do not start another verify.run"), "{text}");
     assert!(
-        received.try_recv().is_err(),
-        "notify the original attempt once"
+        received.recv_timeout(Duration::from_secs(16)).is_err(),
+        "a completed attempt must not send the admitted resume notice"
     );
 }
 
