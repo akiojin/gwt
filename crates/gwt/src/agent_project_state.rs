@@ -4508,11 +4508,9 @@ fn continue_bound_terminal_compatibility_inner(
                 "terminal compatibility continuation could not validate the durable authority",
             )
         })?;
-    let receipt = result.ok_or_else(|| {
-        TerminalCompatibilityError::Authority(
-            "terminal compatibility continuation authority changed before commit",
-        )
-    })??;
+    let receipt = result.ok_or(TerminalCompatibilityError::Authority(
+        "terminal compatibility continuation authority changed before commit",
+    ))??;
     match receipt.outcome {
         AgentWorkTerminalizationOutcome::Emitted
         | AgentWorkTerminalizationOutcome::AlreadyMatching => Ok(receipt),
