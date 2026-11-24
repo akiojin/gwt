@@ -2056,11 +2056,11 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   decisions and NeedsHuman still follow the existing decision and permission
   boundaries. Only after these checks may the existing no-change reporting
   rules apply.
-- Before judging branch divergence or stagnation, run `git fetch origin` in
-  the target repository during this cycle, then inspect the branch again.
-  A previous cycle's fetch is not current evidence. The advisory is warning-only;
-  a failed fetch or provider payload without an explicit successful exit status
-  leaves freshness unknown.
+- Before judging branch divergence or stagnation, send the envelope below to
+  gwtd in this project during the current cycle. It runs `git fetch origin`
+  and records the exit status. After success, inspect the branch. The advisory
+  is warning-only. A failed fetch leaves freshness unknown.
+  `{"schema_version":1,"operation":"pm.branch_freshness.refresh","params":{}}`
 - Every cycle, also check the agents that are running with the single
   `pane.health` snapshot described in *Steering the running agents*.
   Read the Board for what they reported themselves; bounded `pane.read` is

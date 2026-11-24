@@ -929,6 +929,8 @@ fn format_pm_help() -> String {
         "  pm.status.set Save the PM's current explanation and retain history.",
         "               Requires a registered PM or a direct user CLI call.",
         "               Identical content and Monitor state do not renew it.",
+        "  pm.branch_freshness.refresh Fetch origin and record success for the current PM turn.",
+        "               Registered PM only. Params must be empty.",
         "  pm.theme.record Record the current human PM turn's theme decision (registered PM only).",
         "               Required: original (the latest human message), decision create|update|none|declined.",
         "               create: title, summary (new gwt-theme Issue). update: number, note (comment).",
