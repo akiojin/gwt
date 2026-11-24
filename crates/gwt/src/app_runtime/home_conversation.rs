@@ -354,6 +354,7 @@ mod tests {
     #[test]
     fn home_attachments_stage_uploaded_bytes_in_the_pm_worktree() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let uploads = crate::attachment_upload::AttachmentUploadStore::new(temp.path().into());
         let (upload_id, path) = uploads.allocate_path();
         std::fs::write(&path, b"PM evidence").unwrap();
