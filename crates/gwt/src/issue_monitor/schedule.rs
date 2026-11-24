@@ -1494,6 +1494,95 @@ mod tests {
         .expect("schedule.reassign must provide a canonical recovery path after cleanup");
     }
 
+    /// Issue #7351 (#6526): a vanished window leaves a readable runtime sidecar
+    /// whose PTY child has exited. The queued Issue must not stay
+    /// `agent_plan_missing` forever, while a live child still fences reuse.
+    #[test]
+    fn issue_7351_vanished_session_with_exited_runtime_sidecar_recovers_the_plan() {
+        const TEST: &str = "issue_monitor::schedule::tests::issue_7351_vanished_session_with_exited_runtime_sidecar_recovers_the_plan";
+        if std::env::var_os("GWT_SCHEDULE_CHILD_WAIT").is_some() {
+            use std::io::Read;
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+            return;
+        }
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let (_temp, _home, root, sessions, roster) = fixture();
+        let member = &roster.members[0].agent_member_id;
+        crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "vanished-window",
+            Some(41),
+            None,
+            None,
+            Some(member),
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(&root, "work/issue-41", gwt_agent::AgentId::Codex);
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            member,
+            "vanished-window",
+            &session.id,
+        )
+        .unwrap();
+        let mut child = OwnedChild(
+            gwt_core::process::resolved_command(gwt_core::process::ProcessPlanRequest::new(
+                std::env::current_exe().unwrap(),
+            ))
+            .unwrap()
+            .args(["--exact", TEST])
+            .env("GWT_SCHEDULE_CHILD_WAIT", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        );
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        runtime.host_started_at = crate::process::host_process_start_time(std::process::id());
+        runtime.child_pid = Some(child.0.id());
+        runtime.child_started_at = crate::process::host_process_start_time(child.0.id());
+        runtime.runtime_incarnation = Some(3);
+        assert!(runtime.child_started_at.is_some());
+        let sidecar = gwt_agent::runtime_state_path(&sessions, &session.id);
+        runtime.save(&sidecar).unwrap();
+        // The window vanishes: its Session file is gone, the sidecar remains.
+        fs::remove_file(sessions.join(format!("{}.toml", session.id))).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
+        assert!(
+            monitor
+                .agent_schedule_launch_exclusion(41)
+                .is_some_and(|reason| reason.starts_with("agent_plan_missing")),
+            "a live PTY child still fences the reservation"
+        );
+        drop(child.0.stdin.take());
+        assert!(child.0.wait().unwrap().success());
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
+        assert!(
+            monitor.agent_schedule_launch_exclusion(41).is_none(),
+            "an exited child's sidecar must not strand the queued Issue"
+        );
+    }
+
     #[test]
     fn issue_6749_idle_scheduled_member_uses_its_own_profile_after_reload_and_reassign() {
         let (_temp, _home, root, sessions, roster) = fixture();
