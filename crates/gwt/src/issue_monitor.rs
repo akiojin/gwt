@@ -4084,6 +4084,7 @@ fn usage_state_label(state: &gwt_core::usage::UsageState) -> &'static str {
         UsageState::NoData => "no_data",
         UsageState::Unavailable { .. } => "unavailable",
         UsageState::Stale { .. } => "stale",
+        UsageState::Unknown { .. } => "unknown",
     }
 }
 
@@ -5307,7 +5308,7 @@ pub fn provider_reauthentication_required_message(agent_id: &str) -> String {
     let provider = match usage_provider_for_agent(agent_id) {
         Some(gwt_core::usage::UsageProvider::Codex) => "Codex",
         Some(gwt_core::usage::UsageProvider::ClaudeCode) => "Claude Code",
-        None => agent_id,
+        _ => agent_id,
     };
     format!(
         "{provider} reauthentication required; sign in to the provider CLI, then retry the Issue."
@@ -13168,9 +13169,11 @@ impl IssueMonitorState {
         let Some(account_id) = account.account_id.as_deref() else {
             return false;
         };
+        // Provider quota holds are kept for Codex and Claude only.
         let provider = match account.provider {
             gwt_core::usage::UsageProvider::Codex => "codex",
             gwt_core::usage::UsageProvider::ClaudeCode => "claude",
+            _ => return false,
         };
         // A queued snapshot from another GUI must not roll an account switch
         // back. Identity-only changes are confirmed by the local scan instead.
@@ -32767,6 +32770,8 @@ mod tests {
 
         let exhausted = ProviderUsage {
             provider: UsageProvider::Codex,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,
@@ -33577,6 +33582,8 @@ mod tests {
     ) -> gwt_core::usage::ProviderUsage {
         gwt_core::usage::ProviderUsage {
             provider,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,
@@ -56657,6 +56664,8 @@ mod tests {
 
         let healthy = ProviderUsage {
             provider: UsageProvider::Codex,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,
@@ -56704,6 +56713,8 @@ mod tests {
 
         let model_full = ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,

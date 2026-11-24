@@ -6,7 +6,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import "../__tests__/jsx-loader.mjs";
 import { ExecutionEnvironments } from "../src/surfaces/ExecutionEnvironments.jsx";
-import { accountRows, environmentRows } from "../../web/execution-environments.js";
+import { accountPools, accountRows, environmentRows } from "../../web/execution-environments.js";
 import { createUiStateStore } from "../../web/ui-state-store.js";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -54,8 +54,8 @@ const hermes = (extra = {}) => definition("claude:hermes", {
 });
 const definitionsOf = (...environments) => ({
   accounts: [
-    { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1" },
-    { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1" },
+    { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1", sign_in: "signed_in" },
+    { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1", sign_in: "signed_in" },
   ],
   environments,
   via_options: [
@@ -77,7 +77,8 @@ async function mount(snapshot, {
   const focused = [];
   window.HTMLElement.prototype.focus = function focus() { focused.push(this); };
   const state = () => ({
-    loaded, accounts: accountRows(snapshot), environments: environmentRows(loaded ? definitions : null, snapshot, agents),
+    loaded, accounts: accountRows(snapshot), pools: accountPools(loaded ? definitions : null, accountRows(snapshot)),
+    environments: environmentRows(loaded ? definitions : null, snapshot, agents),
     registeredAccounts: definitions.accounts, viaOptions: definitions.via_options, error: null, saving: false, saved: false, ...extra,
   });
   const model = createUiStateStore({ ...state(), view }, { scheduleFrame: callback => { callback(); return () => {}; } });
@@ -86,9 +87,9 @@ async function mount(snapshot, {
   const root = createRoot(document.body);
   await act(async () => root.render(React.createElement(ExecutionEnvironments, {
     store: model,
-    renderAccountUsage: (element, provider) => {
-      calls.rendered.push(provider);
-      element.textContent = `usage card for ${provider}`;
+    renderAccountUsage: (element, provider, poolAccountId) => {
+      calls.rendered.push(`${provider}:${poolAccountId}`);
+      element.textContent = `usage card for ${provider}:${poolAccountId}`;
     },
     onNavigate: navigate,
     onOpenToolManagement: () => { calls.tools += 1; },
@@ -110,7 +111,7 @@ test("the landing view lists every environment with its tool, usage and limit st
   const cards = [...document.querySelectorAll("[data-environment]")];
   assert.deepEqual(cards.map(card => card.dataset.environment), ["claude", "codex"]);
   assert.match(cards[0].textContent, /Limit reached/);
-  assert.match(cards[0].textContent, /Account Claude Code 1 · Via Claude Code 2\.1\.3 · Not on any project's list/);
+  assert.match(cards[0].textContent, /Using Claude Code 1 · 1 account in pool · Via Claude Code 2\.1\.3 · Not on any project's list/);
   assert.match(cards[0].textContent, /58% used · resets /);
   const time = cards[0].querySelector("time");
   // linkedom keeps React's property spelling; browsers serialize `datetime`.
@@ -133,25 +134,87 @@ test("every account row opens its detail and the detail hosts the usage card", a
   const rows = [...document.querySelectorAll("[data-account]")];
   assert.equal(rows.length, 2);
   for (const row of rows) assert.ok(row.querySelector("button"), "each account row has a way to its detail");
-  assert.match(rows[0].textContent, /work@example\.test · Max · Up to date/);
+  assert.match(rows[0].textContent, /Claude Code · work@example\.test · Max · Signed in · Up to date/);
 
-  await click(button("Details for the Codex account"));
-  assert.equal(document.querySelector("h1").textContent, "Codex account");
-  assert.equal(document.querySelector("[data-usage-slot]").textContent, "usage card for codex");
-  assert.ok(calls.rendered.includes("codex"));
+  await click(button("Details for the Codex 1 account"));
+  assert.equal(document.querySelector("h1").textContent, "Codex 1 account");
+  assert.equal(document.querySelector("[data-usage-slot]").textContent, "usage card for codex:codex");
+  assert.ok(calls.rendered.includes("codex:codex"));
   assert.equal(document.querySelector("input[type=checkbox]"), null, "Codex usage has no opt-in");
 
   await click(button("← Accounts"));
-  await click(button("Details for the Claude Code account"));
-  assert.equal(document.querySelector("[data-usage-slot]").textContent, "usage card for claude_code");
+  await click(button("Details for the Claude Code 1 account"));
+  assert.equal(document.querySelector("[data-usage-slot]").textContent, "usage card for claude_code:claude");
   await click(button("← Accounts"));
   await click(button("← Execution environments"));
   assert.equal(document.querySelector("h1").textContent, "Execution environments");
 });
 
+// Issue #7841 AC-1 / AC-2 / AC-3: one row per account, grouped by pool, with
+// its provider, name, plan, sign-in, usage, reset and limit state; a tool
+// without an official usage source says so and keeps the last limit seen.
+test("Accounts lists each pool's accounts with their own usage, sign-in and limits", async () => {
+  const definitions = {
+    ...definitionsOf(definition("claude"), definition("codex")),
+    accounts: [
+      { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1", sign_in: "signed_in" },
+      { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1", sign_in: "signed_in" },
+      { id: "claude-2", tool: "claude", tool_name: "Claude Code", name: "Claude Code 2", sign_in: "signed_out" },
+      { id: "grok", tool: "grok", tool_name: "Grok Build", name: "Grok Build 1", sign_in: "signed_in" },
+    ],
+  };
+  const grok = {
+    provider: "grok_build", pool_account_id: "grok", state: { kind: "unknown", reason: "no official usage source" },
+    windows: [], limit_reached: false, last_limit: { detected_at: "2026-11-24T02:00:00Z", resets_at: "2099-11-24T06:00:00Z" },
+  };
+  const second = claude({ pool_account_id: "claude-2", account_label: "second@example.test", plan: "Pro", limit_reached: true });
+  const { document, click, button } = await mount({ accounts: [codex(), claude(), second, grok] }, {
+    definitions, view: { name: "accounts", key: null },
+  });
+  const pools = [...document.querySelectorAll("[data-pool]")];
+  assert.deepEqual(pools.map(pool => pool.dataset.pool), ["claude", "codex", "grok"]);
+  assert.match(pools[0].textContent, /2 accounts in pool, in priority order/);
+  const rows = [...pools[0].querySelectorAll("[data-account]")];
+  assert.deepEqual(rows.map(row => row.dataset.account), ["claude", "claude-2"]);
+  assert.match(rows[0].textContent, /In use/);
+  assert.doesNotMatch(rows[1].textContent, /In use/);
+  assert.match(rows[1].textContent, /Claude Code · second@example\.test · Pro · Not signed in/);
+  assert.match(rows[1].textContent, /Limit reached/);
+  assert.match(rows[1].textContent, /58% used · resets /);
+
+  const grokRow = document.querySelector('[data-account="grok"]');
+  assert.match(grokRow.textContent, /Usage unknown \(no official usage source\)/);
+  assert.match(grokRow.textContent, /Last limit hit .* · resets /);
+  assert.match(grokRow.textContent, /Limit reached/);
+
+  await click(button("Details for the Grok Build 1 account"));
+  assert.equal(document.querySelector("h1").textContent, "Grok Build 1 account");
+  assert.equal(document.querySelector("[data-usage-slot]"), null, "no usage card is drawn without usage");
+  assert.match(document.body.textContent, /Usage unknown \(no official usage source\)/);
+  assert.match(document.body.textContent, /Last limit hit/);
+});
+
+// Issue #7841 AC-3: the environment row names its pool's size and the
+// account in use, and opens that account.
+test("an account's own environment shows its pool size and the account in use", async () => {
+  const definitions = {
+    ...definitionsOf(definition("claude"), definition("codex")),
+    accounts: [
+      { id: "claude-2", tool: "claude", tool_name: "Claude Code", name: "Claude Code 2", sign_in: "signed_in" },
+      { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1", sign_in: "signed_in" },
+      { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1", sign_in: "signed_in" },
+    ],
+  };
+  const { document, click, button } = await mount({ accounts: [claude(), codex(), claude({ pool_account_id: "claude-2" })] }, { definitions });
+  const [own] = [...document.querySelectorAll("[data-environment]")];
+  assert.match(own.textContent, /Using Claude Code 2 · 2 accounts in pool · Via Claude Code/);
+  await click(button("Open the Claude Code 2 account"));
+  assert.equal(document.querySelector("h1").textContent, "Claude Code 2 account");
+});
+
 test("Claude usage collection is switched from its account detail", async () => {
   const off = claude({ state: { kind: "disabled" }, windows: [] });
-  const { document, click, calls } = await mount({ accounts: [off] }, { view: { name: "account", key: "claude_code" } });
+  const { document, click, calls } = await mount({ accounts: [off] }, { view: { name: "account", key: "claude" } });
   const checkbox = document.querySelector("input[type=checkbox]");
   assert.equal(checkbox.checked, false);
   await click(checkbox);

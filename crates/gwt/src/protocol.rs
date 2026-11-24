@@ -2692,13 +2692,25 @@ pub struct AgentWorkFactsView {
     pub warning_count: Option<usize>,
 }
 
-/// Issue #7741: an account an execution environment belongs to.
+/// Issue #7841: whether an account's credential home is signed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSignInView {
+    SignedIn,
+    SignedOut,
+    /// gwt cannot tell without starting a sign-in.
+    Unknown,
+}
+
+/// Issue #7741: an account an execution environment belongs to. Accounts of
+/// one tool form its pool, in priority order (Issue #7841).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionAccountView {
     pub id: String,
     pub name: String,
     pub tool: String,
     pub tool_name: String,
+    pub sign_in: AccountSignInView,
 }
 
 /// A project that has an execution environment on its list.

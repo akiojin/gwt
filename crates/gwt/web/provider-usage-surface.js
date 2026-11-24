@@ -15,7 +15,7 @@
 //   window title the user knows it by (Issue #3862). Returning a falsy
 //   value falls back to a shortened session id.
 import { createUiStateStore } from "./ui-state-store.js";
-import { USAGE_PROVIDER_NAME } from "./execution-environments.js";
+import { USAGE_PROVIDER_NAME, usagePoolAccountId } from "./execution-environments.js";
 
 export function createProviderUsageSurface({
   renderWorkspaceWindows,
@@ -516,8 +516,11 @@ export function createProviderUsageSurface({
 
       // Issue #7648 — draw one account's usage card into the Execution
       // environments account detail, the single surface for usage and limits.
-      function renderAccountUsage(container, provider) {
-        const account = (latestProviderUsage().accounts || []).find(item => item.provider === provider);
+      // Issue #7841: a provider can have several accounts; the pool account
+      // picks the one (a row without one is the provider's default account).
+      function renderAccountUsage(container, provider, poolAccountId = null) {
+        const account = (latestProviderUsage().accounts || []).find(item => item.provider === provider &&
+          (poolAccountId == null || usagePoolAccountId(item) === poolAccountId));
         container.replaceChildren(...(account ? [buildUsageProviderCard(account)] : []));
       }
 
