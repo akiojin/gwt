@@ -8,3 +8,8 @@ export function scrollToEnd(element) {
 export function scrollIntoCenter(element) {
   element?.scrollIntoView?.({ block: "center" });
 }
+
+
+export function restoreScrollAnchor(container, element, top) {
+  container.scrollTop += element.getBoundingClientRect().top - top;
+}

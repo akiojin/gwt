@@ -98,7 +98,7 @@ function conversationHistory(previous, conversation) {
     messages.set(message.id, message);
   }
   return {
-    history: [...messages.values()],
+    history: [...messages].map(([, message]) => message),
     hasOlder: Boolean(conversation?.has_older) && (older.length > 0 || overlap < 0 || previous?.hasOlder),
   };
 }

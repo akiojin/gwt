@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useStoreSelector } from "../store/useStoreSelector.js";
 import { focusElement } from "../hosts/focus.js";
-import { scrollIntoCenter, scrollToEnd } from "../hosts/scroll.js";
+import { restoreScrollAnchor, scrollIntoCenter, scrollToEnd } from "../hosts/scroll.js";
 import { localTimeLabel, relativeTimeLabel } from "./time-labels.js";
 
 // Home: the conversation with the Project Manager (Issue #7639, SPEC #7007
@@ -139,7 +139,7 @@ export function HomeConversation({ store, actions }) {
       if (end < view.topics.length) setWindowEnd(last.id);
     } else if (anchorNode) {
       if (anchor.before === undefined || anchor.before !== view.topics[0]?.id) scrollAnchor.current = null;
-      logRef.current.scrollTop += anchorNode.getBoundingClientRect().top - anchor.top;
+      restoreScrollAnchor(logRef.current, anchorNode, anchor.top);
     } else if (following.current) {
       scrollToEnd(logRef.current);
     }
