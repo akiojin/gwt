@@ -624,12 +624,14 @@ fn managed_home(
     for name in [".gwt", "accounts", agent.command(), account_id] {
         path.push(name);
         if create {
-            let mut dir = fs::DirBuilder::new();
+            let dir = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let dir = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut dir = dir;
                 dir.mode(0o700);
-            }
+                dir
+            };
             if let Err(error) = dir.create(&path) {
                 if error.kind() != io::ErrorKind::AlreadyExists {
                     return Err(error);
