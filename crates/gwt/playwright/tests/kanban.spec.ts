@@ -264,7 +264,7 @@ test.describe("Issue Bridge load recovery", () => {
           const update = store.update;
           store.update = reduce => {
             update(reduce);
-            const receipt = store.read().errorReceipt;
+            const receipt = store.read()?.errorReceipt;
             if (receipt) window.__knowledgeErrorReceipt = receipt;
           };
           return store;
@@ -351,7 +351,7 @@ test.describe("Issue Bridge load recovery", () => {
           const update = store.update;
           store.update = reduce => {
             update(reduce);
-            const receipt = store.read().detailReceipt;
+            const receipt = store.read()?.detailReceipt;
             if (receipt) window.__knowledgeDetailReceipt = receipt;
           };
           return store;
@@ -424,7 +424,7 @@ test.describe("Issue Bridge load recovery", () => {
           const update = store.update;
           store.update = reduce => {
             update(reduce);
-            const receipt = store.read().searchReceipt;
+            const receipt = store.read()?.searchReceipt;
             if (receipt) window.__knowledgeSearchReceipt = receipt;
           };
           return store;
@@ -765,7 +765,7 @@ test.describe("Issue Bridge load recovery", () => {
           const update = store.update;
           store.update = reduce => {
             update(reduce);
-            const receipt = store.read().entriesReceipt;
+            const receipt = store.read()?.entriesReceipt;
             if (receipt) window.__knowledgeEntriesReceipt = receipt;
           };
           return store;
