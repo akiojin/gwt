@@ -5547,6 +5547,12 @@ fn attempt_count_is_zero(attempts: &u32) -> bool {
     *attempts == 0
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousReviewFailure {
+    pub reviewed_sha: String,
+    pub criteria: Vec<crate::issue_monitor_review::FailedReviewCriterion>,
+}
+
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousIssueSummary {
@@ -5579,6 +5585,9 @@ pub struct AutonomousIssueSummary {
     /// its current head has no PASS verdict from the independent review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_hold: Option<String>,
+    /// Independent review evidence for the currently reviewed SHA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_failure: Option<AutonomousReviewFailure>,
     /// Issue #7810 AC-2: the inputs keeping the reviewed PR's gate closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_hold: Option<AutonomousGateHold>,
@@ -6458,6 +6467,8 @@ pub struct AutonomousReviewAttempts {
     /// verdict, so the SHA is not reviewed again until the PR head moves.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub verdict_failed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_criteria: Vec<crate::issue_monitor_review::FailedReviewCriterion>,
 }
 
 /// Issue #4815: what recording a failed review window did.
@@ -16381,6 +16392,19 @@ impl IssueMonitorState {
                         steering: record.steering.clone(),
                         review_dispatch_hold: record.review_dispatch_hold.clone(),
                         merge_hold: record.merge_hold_reason(),
+                        review_failure: record
+                            .review_attempts
+                            .as_ref()
+                            .filter(|attempts| {
+                                record.review_passed == Some(false)
+                                    && record.reviewed_sha.as_deref()
+                                        == Some(attempts.reviewed_sha.as_str())
+                                    && !attempts.failed_criteria.is_empty()
+                            })
+                            .map(|attempts| AutonomousReviewFailure {
+                                reviewed_sha: attempts.reviewed_sha.clone(),
+                                criteria: attempts.failed_criteria.clone(),
+                            }),
                         gate_hold: record.gate_hold.clone(),
                         pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
                             handoff_id: handoff.handoff_id.clone(),
@@ -18660,6 +18684,15 @@ impl IssueMonitorState {
     /// SPEC #3200 FR-015: record the independent-review verdict for the in-flight
     /// reviewed SHA. The gate is evaluated on the next tick.
     pub fn record_review_verdict(&mut self, issue_number: u64, passed: bool) {
+        self.record_review_verdict_with_failures(issue_number, passed, Vec::new());
+    }
+
+    fn record_review_verdict_with_failures(
+        &mut self,
+        issue_number: u64,
+        passed: bool,
+        failed_criteria: Vec<crate::issue_monitor_review::FailedReviewCriterion>,
+    ) {
         let max = self.autonomous_tuning.max_attempts;
         let record = self.autonomous_record_mut(issue_number);
         record.review_passed = Some(passed);
@@ -18690,6 +18723,7 @@ impl IssueMonitorState {
                 last_failed_at: now.clone(),
                 not_before: None,
                 verdict_failed: true,
+                failed_criteria,
             });
             let pr = record
                 .pr_number
@@ -19251,6 +19285,7 @@ impl IssueMonitorState {
             last_failed_at: now.to_string(),
             not_before: not_before.clone(),
             verdict_failed: false,
+            failed_criteria: Vec::new(),
         });
         // The record returns to Implementing: the PR is still open and the
         // next scan re-detects it; the ladder decides when it is dispatched.
@@ -19844,7 +19879,12 @@ impl IssueMonitorState {
             outcome,
             crate::issue_monitor_review::ReviewGateOutcome::Pass
         );
-        self.record_review_verdict(issue_number, passed);
+        let failed_criteria = if passed {
+            Vec::new()
+        } else {
+            crate::issue_monitor_review::failed_review_criteria(verdict_raw)
+        };
+        self.record_review_verdict_with_failures(issue_number, passed, failed_criteria);
         Some(passed)
     }
 
@@ -53293,6 +53333,62 @@ mod tests {
     }
 
     #[test]
+    fn closed_failed_review_preserves_criterion_evidence_in_status() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::review-7",
+                Some(7),
+                WindowState::Idle,
+                true,
+            )],
+        ));
+        let verdict = serde_json::json!({
+            "schema": crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA,
+            "overall": "fail",
+            "criteria": [
+                {"id": "AC-1", "verdict": "fail", "evidence": "No restart evidence"},
+                {"id": "AC-2", "verdict": "pass", "evidence": "CI passed"},
+                {"id": "AC-3", "verdict": "fail", "evidence": "Wrong head checked"}
+            ]
+        });
+
+        assert_eq!(
+            monitor.apply_review_verdict(7, "abc123", &verdict.to_string()),
+            Some(false)
+        );
+        assert_eq!(
+            monitor.take_pending_idle_pane_closes()[0].window_id,
+            "tab-1::review-7"
+        );
+        // Restore persisted state with no live reviewer or transcript.
+        let prefs = serde_json::to_vec(&monitor.prefs()).unwrap();
+        let mut restored = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_slice(&prefs).unwrap(),
+        );
+        let status = serde_json::to_value(restored.agent_status()).unwrap();
+        assert_eq!(
+            status["gui_status"]["autonomous_issues"][0]["review_failure"],
+            serde_json::json!({
+                "reviewed_sha": "abc123",
+                "criteria": [
+                    {"id": "AC-1", "evidence": "No restart evidence"},
+                    {"id": "AC-3", "evidence": "Wrong head checked"}
+                ]
+            })
+        );
+
+        restored.begin_review(7, 99, "new-head");
+        let status = serde_json::to_value(restored.agent_status()).unwrap();
+        assert!(status["gui_status"]["autonomous_issues"][0]
+            .get("review_failure")
+            .is_none());
+    }
+
+    #[test]
     fn resume_after_restart_preserves_durable_review_verdicts() {
         let mut monitor = autonomous_state();
         monitor.begin_review(7, 70, "pending-sha");
@@ -60205,6 +60301,7 @@ mod tests {
             last_failed_at: IDLE_NOW.to_string(),
             not_before: None,
             verdict_failed: false,
+            failed_criteria: Vec::new(),
         });
         let attempts = review_attempts_of(&monitor, 41);
         let bindings = monitor.prefs().launch_bindings;
