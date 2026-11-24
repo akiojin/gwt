@@ -79,13 +79,17 @@ export function AddPoolAccount({ options, saving, error, onAdd, onDismiss }) {
 
 export function DeletionImpact({ impact }) {
   if (!impact) return null;
-  const { sessions = [], agents = [] } = impact;
+  const { sessions = [], agents = [], unknown_sessions = [] } = impact;
   return (
     <dl className="exec-env__facts">
       <div>
         <dt>Sessions to resume after their turn</dt>
         <dd>{sessions.length ? <ul>{sessions.map((name, index) => <li key={index}>{name}</li>)}</ul> : "None"}</dd>
       </div>
+      {unknown_sessions.length ? <div>
+        <dt>Impact unknown</dt>
+        <dd><ul>{unknown_sessions.map((name, index) => <li key={index}>{name}</li>)}</ul></dd>
+      </div> : null}
       <div>
         <dt>Agents whose priorities will change</dt>
         <dd>{agents.length ? <ul>{agents.map((name, index) => <li key={index}>{name}</li>)}</ul> : "None"}</dd>

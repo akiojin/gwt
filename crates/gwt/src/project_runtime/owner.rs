@@ -837,7 +837,7 @@ pub(crate) enum OwnerMessage {
     AccountPoolProbed {
         id: String,
         incarnation: u64,
-        pool: std::io::Result<Vec<String>>,
+        pool: std::io::Result<accounts::AccountPoolProbe>,
     },
     MobileInputWritten {
         identity: super::events::OwnerMobileInputIdentity,

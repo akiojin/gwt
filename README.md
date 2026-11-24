@@ -57,7 +57,10 @@ Issues, SPECs, search, and Board context rather than from branch management.
   To move a running session, including the PM, choose **Resume with the next
   account**. gwt waits for the current turn to finish before resuming the
   conversation. On a provider rate limit, gwt tries the next signed-in account
-  and resubmits the rejected turn after resuming.
+  and resubmits the rejected turn after resuming. If removing an active
+  account leaves only other tools, the session waits and lists the configured
+  alternatives. Starting a conversation with a different tool is a separate
+  action.
 
 ## Install
 

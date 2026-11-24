@@ -313,7 +313,7 @@ test("an environment through a tool that reads its own settings shows them read-
 // AC-4: the confirmation names the projects that use the environment.
 test("deleting an environment names the projects that use it before it is deleted", async () => {
   const { document, click, button, calls } = await mount({ accounts: [claude()] }, {
-    definitions: definitionsOf(definition("claude"), hermes()),
+    definitions: definitionsOf(definition("claude"), { ...hermes(), delete_impact: { unknown_sessions: ["Hermes review"] } }),
   });
   await click(button("Delete Claude Code 1 (via Hermes Agent)"));
   assert.equal(document.querySelector("h1").textContent, "Delete this execution environment?");
@@ -321,6 +321,7 @@ test("deleting an environment names the projects that use it before it is delete
   assert.deepEqual(projects, ["alpha — priority 2"]);
   assert.match(document.body.textContent, /taken off the list of each of these projects/);
   assert.match(document.body.textContent, /The Claude Code 1 account and its other environments stay/);
+  assert.match(document.body.textContent, /Impact unknown.*Hermes review/s);
   assert.deepEqual(calls.deleted, []);
   await click(button("Delete"));
   assert.deepEqual(calls.deleted, ["claude:hermes"]);

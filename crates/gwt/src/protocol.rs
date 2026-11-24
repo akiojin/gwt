@@ -2745,6 +2745,7 @@ pub struct PoolAccountProviderView {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PoolAccountDeletionImpact {
     pub sessions: Vec<String>,
+    pub unknown_sessions: Vec<String>,
     pub agents: Vec<String>,
 }
 

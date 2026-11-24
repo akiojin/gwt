@@ -75,10 +75,16 @@ impl AccountSwitchState {
     }
 }
 
+pub(crate) struct AccountPoolProbe {
+    signed_in: Vec<String>,
+    other_environments: Vec<String>,
+}
+
 struct SwitchRequest {
     incarnation: u64,
     account_id: String,
     reason: AccountSwitchReason,
+    account_deleted: bool,
     selected: Option<String>,
     probing: bool,
 }
@@ -166,11 +172,14 @@ impl OwnerState {
         }
         let account_id = account.account_id.clone();
         let state = self.account_switches.entry(id.into()).or_default();
-        if state.request.is_none() {
+        if let Some(request) = &mut state.request {
+            request.account_deleted |= deleted.is_some();
+        } else {
             state.request = Some(SwitchRequest {
                 incarnation,
                 account_id,
                 reason: AccountSwitchReason::Manual,
+                account_deleted: deleted.is_some(),
                 selected: None,
                 probing: false,
             });
@@ -228,6 +237,7 @@ impl OwnerState {
             incarnation: runtime.incarnation,
             account_id: account.account_id.clone(),
             reason: AccountSwitchReason::RateLimit,
+            account_deleted: false,
             selected: None,
             probing: false,
         });
@@ -399,6 +409,9 @@ impl OwnerState {
                 .snapshot
         };
         let tool = source.agent_id.command().to_owned();
+        let root = self.root.clone();
+        let source_id = source.id.clone();
+        let member_id = source.agent_member_id.clone();
         let allow_fresh_start = request.reason == AccountSwitchReason::RateLimit
             && self
                 .runtimes
@@ -415,6 +428,10 @@ impl OwnerState {
                 .agent
                 .as_ref()
                 .is_none_or(|agent| agent.snapshot.exact_resume_session_id().is_none())
+                && !self.account_switches[id]
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.account_deleted)
             {
                 self.account_switches
                     .get_mut(id)
@@ -434,22 +451,28 @@ impl OwnerState {
             .request
             .as_mut()
             .expect("queued switch request");
+        let list_other_tools = request.reason == AccountSwitchReason::Manual;
         request.probing = true;
         let id = id.to_owned();
         let incarnation = request.incarnation;
         let sender = self.sender.clone();
         self.input_jobs += 1;
         super::spawn_owner_worker(move || {
-            let pool = crate::execution_environments::load().map(|store| {
-                store
+            let pool = crate::execution_environments::load().map(|store| AccountPoolProbe {
+                other_environments: if list_other_tools {
+                    other_environment_names(&store, &root, &tool, &source_id, member_id.as_deref())
+                } else {
+                    Vec::new()
+                },
+                signed_in: store
                     .accounts
-                    .into_iter()
+                    .iter()
                     .filter(|account| {
                         account.tool == tool
                             && crate::account_homes::pool_sign_in(account).is_some()
                     })
-                    .map(|account| account.id)
-                    .collect::<Vec<_>>()
+                    .map(|account| account.id.clone())
+                    .collect(),
             });
             let _ = sender.send(super::OwnerMessage::AccountPoolProbed {
                 id,
@@ -463,7 +486,7 @@ impl OwnerState {
         &mut self,
         id: &str,
         incarnation: u64,
-        pool: std::io::Result<Vec<String>>,
+        pool: std::io::Result<AccountPoolProbe>,
     ) {
         self.input_jobs -= 1;
         let Some(state) = self.account_switches.get_mut(id) else {
@@ -494,21 +517,33 @@ impl OwnerState {
             return;
         };
         let now = UtcTimestamp::now();
-        let pool = pool.iter().map(String::as_str);
+        let signed_in = pool.signed_in.iter().map(String::as_str);
         // An explicit request looks at the configured priority. A quota
         // refusal instead walks forward from the account that was refused.
         request.selected = match request.reason {
-            AccountSwitchReason::Manual => {
-                pool.clone().find(|account| *account != request.account_id)
-            }
+            AccountSwitchReason::Manual => signed_in
+                .clone()
+                .find(|account| *account != request.account_id),
             AccountSwitchReason::RateLimit => {
                 state
                     .attempts
-                    .next_account(pool.clone(), &request.account_id, now)
+                    .next_account(signed_in.clone(), &request.account_id, now)
             }
         }
         .map(str::to_owned);
-        if request.selected.is_none() && request.reason == AccountSwitchReason::Manual {
+        let missing_conversation = request.account_deleted
+            && state.retired.is_none()
+            && self.runtimes[id]
+                .agent
+                .as_ref()
+                .is_none_or(|agent| agent.snapshot.exact_resume_session_id().is_none());
+        if missing_conversation {
+            request.selected = None;
+        }
+        if request.selected.is_none()
+            && request.reason == AccountSwitchReason::Manual
+            && !request.account_deleted
+        {
             state.request = None;
             self.account_switch_notice(
                 id,
@@ -519,7 +554,7 @@ impl OwnerState {
         state.next_check = request
             .selected
             .is_none()
-            .then(|| state.attempts.next_reset(pool, now))
+            .then(|| state.attempts.next_reset(signed_in, now))
             .flatten();
         if state.retired.is_some() {
             self.launch_switched_account(id);
@@ -530,6 +565,10 @@ impl OwnerState {
         };
         let detail = if request.selected.is_some() {
             "Resuming with another account".into()
+        } else if missing_conversation && !pool.signed_in.is_empty() {
+            "Waiting to resume (the tool has no saved conversation)".into()
+        } else if request.account_deleted && state.next_check.is_none() {
+            deleted_account_hold(&pool.other_environments)
         } else if let Some(reset) = state.next_check {
             format!(
                 "Waiting to resume (account resets at {})",
@@ -725,6 +764,65 @@ impl OwnerState {
     }
 }
 
+fn other_environment_names(
+    store: &crate::execution_environments::Store,
+    root: &std::path::Path,
+    tool: &str,
+    session_id: &str,
+    member_id: Option<&str>,
+) -> Vec<String> {
+    let pm = crate::pm_registry::session_is_registered_pm(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(root),
+        session_id,
+    );
+    let explicit = if pm {
+        Some(store.pm_list().1)
+    } else {
+        member_id
+            .and_then(|id| store.agent_priorities.get(id))
+            .filter(|priority| !priority.environment_ids.is_empty())
+            .map(|priority| {
+                priority
+                    .environment_ids
+                    .iter()
+                    .filter_map(|id| store.environment(id))
+                    .collect()
+            })
+    };
+    if let Some(list) = explicit {
+        return list
+            .into_iter()
+            .filter(|env| env.via_tool != tool)
+            .map(|env| env.name.clone())
+            .collect();
+    }
+    let Ok(prefs) =
+        crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(root))
+    else {
+        return Vec::new();
+    };
+    crate::execution_environments::project_list(store, &prefs)
+        .1
+        .into_iter()
+        .filter(|env| env.tool != tool)
+        .map(|env| {
+            store
+                .environment(&env.environment_id)
+                .map_or(env.tool, |definition| definition.name.clone())
+        })
+        .collect()
+}
+
+fn deleted_account_hold(other_environments: &[String]) -> String {
+    if other_environments.is_empty() {
+        return "Waiting to resume (no signed-in account for this tool)".into();
+    }
+    format!(
+        "Waiting to resume (other tools only). Start a new conversation to use: {}.",
+        other_environments.join(", "),
+    )
+}
+
 fn ready_to_switch(runtime: &WindowRuntime, request: &SwitchRequest) -> bool {
     runtime.incarnation == request.incarnation
         && runtime.agent.as_ref().is_some_and(|agent| {
@@ -743,6 +841,18 @@ fn ready_to_switch(runtime: &WindowRuntime, request: &SwitchRequest) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{AccountSwitchState, Instant, SubmittedInput};
+
+    #[test]
+    fn account_switch_deletion_hold_names_other_tools_without_resuming() {
+        assert_eq!(
+            super::deleted_account_hold(&["Claude Code".into()]),
+            "Waiting to resume (other tools only). Start a new conversation to use: Claude Code."
+        );
+        assert_eq!(
+            super::deleted_account_hold(&[]),
+            "Waiting to resume (no signed-in account for this tool)"
+        );
+    }
 
     #[test]
     fn replay_uses_the_last_submitted_turn_and_disarms_ambiguous_edits() {

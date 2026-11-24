@@ -213,7 +213,11 @@ fn deletion_impact(
         })
         .map(|(member_id, _)| member_id.clone())
         .collect();
-    PoolAccountDeletionImpact { sessions, agents }
+    PoolAccountDeletionImpact {
+        sessions,
+        agents,
+        unknown_sessions: Vec::new(),
+    }
 }
 
 fn account_deletion_impact(
@@ -436,14 +440,30 @@ impl AppRuntime {
                     &is_installed,
                     &environments::tool_settings,
                 );
+                let unknown_via_sessions = |ids: &[String]| {
+                    let mut titles: Vec<_> = active
+                        .iter()
+                        .filter(|(session, _)| {
+                            ids.iter().any(|id| {
+                                store.environment(id).is_some_and(|env| {
+                                    store.kind(env) == environments::EnvironmentKind::Via
+                                        && env.via_tool == session.agent_id
+                                })
+                            })
+                        })
+                        .map(|(session, _)| session.display_name.clone())
+                        .collect();
+                    titles.sort();
+                    titles
+                };
                 let mut sessions: Vec<_> = active
-                    .into_iter()
+                    .iter()
                     .filter_map(|(active, root)| {
                         let visible =
                             project_root.is_none_or(|scope| root.as_deref() == Some(scope));
                         Some((
                             visible,
-                            account_session_view(sessions_dir, active, root.as_deref())?,
+                            account_session_view(sessions_dir, active.clone(), root.as_deref())?,
                         ))
                     })
                     .collect();
@@ -484,8 +504,9 @@ impl AppRuntime {
                         .pool_delete_refusal(&account.id)
                         .map(|reason| reason.0);
                     if row.delete_blocked_reason.is_none() {
-                        let (_, mut impact) =
+                        let (removed, mut impact) =
                             account_deletion_impact(&store, &all_sessions, &account.id);
+                        impact.unknown_sessions = unknown_via_sessions(&removed);
                         name_affected_agents(&mut impact, &names);
                         row.delete_impact = Some(impact);
                     }
@@ -498,6 +519,8 @@ impl AppRuntime {
                             None,
                             std::slice::from_ref(&row.id),
                         );
+                        impact.unknown_sessions =
+                            unknown_via_sessions(std::slice::from_ref(&row.id));
                         name_affected_agents(&mut impact, &names);
                         row.delete_impact = Some(impact);
                     }

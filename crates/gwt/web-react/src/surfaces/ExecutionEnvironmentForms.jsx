@@ -296,7 +296,7 @@ export function DeleteEnvironment({ model, environment, headingRef, onNavigate, 
           </>
         )}
         <p className="exec-env__hint">
-          {`The ${environment.accountName || "account"} account and its other environments stay. Running sessions are not affected.`}
+          {`The ${environment.accountName || "account"} account and its other environments stay.`}
         </p>
       </section>
       <DeletionImpact impact={environment.deleteImpact} />
