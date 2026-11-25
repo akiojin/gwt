@@ -559,7 +559,7 @@ pub fn authenticated_pm_pane_send_input_events(
     let Some(body) = text.strip_suffix('\r') else {
         return finish(
             "failed",
-            Some("pm.message.send requires one line terminated by a carriage return".to_string()),
+            Some("pm.message.send payload requires a carriage return terminator".to_string()),
         );
     };
     if body.len() > PM_DELIVERY_MAX_BODY_BYTES {
@@ -753,15 +753,16 @@ pub fn authenticated_pm_pane_send_input_events(
             let target_entry = expected_entry.as_ref().ok_or_else(|| {
                 "pm.message.send refused: target has no captured physical writer".to_string()
             })?;
+            let (current_revision, unsent_user_input, _) = expected_pty
+                .ordinary_input_observation()
+                .ok_or_else(|| "PM input revision is unavailable; readback-only".to_string())?;
             let ordinary_revision = replay
                 .as_ref()
-                .map(|guard| guard.ordinary_revision)
-                .or_else(|| expected_pty.ordinary_input_revision())
-                .ok_or_else(|| "PM input revision is unavailable; readback-only".to_string())?;
-            if expected_pty.ordinary_input_revision() != Some(ordinary_revision)
-                || expected_pty.has_unsent_user_input()
-            {
-                return Err("PM input changed; readback-only recovery".to_string());
+                .map_or(current_revision, |guard| guard.ordinary_revision);
+            if current_revision != ordinary_revision || unsent_user_input {
+                return Err(format!(
+                    "PM input blocks delivery; readback-only recovery (expected_revision={ordinary_revision}, current_revision={current_revision}, unsent_user_input={unsent_user_input})"
+                ));
             }
             let reservation = Arc::clone(expected_pty)
                 .reserve_input_transaction()
@@ -778,6 +779,12 @@ pub fn authenticated_pm_pane_send_input_events(
             // body is written through, so the paste wrapping and
             // the write see the same composer state.
             let bracketed_paste = reservation.bracketed_paste_enabled();
+            let multiline_body = split_pane_submit(payload).0.contains(['\r', '\n']);
+            const MULTILINE_PASTE_REQUIRED: &str =
+                "pm.message.send requires bracketed paste for a multiline body";
+            if multiline_body && !bracketed_paste {
+                return Err(MULTILINE_PASTE_REQUIRED.to_string());
+            }
             let outcome = drive_verified_pane_submit(
                 payload,
                 bracketed_paste,
@@ -895,7 +902,7 @@ pub fn authenticated_pm_pane_send_input_events(
                                         body_attempted = true;
                                     }
                                 };
-                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                reservation.with_unchanged_ordinary_input_diagnostics(ordinary_revision, || {
                                     // Recheck after the body/submit settle and at
                                     // every retry, including submit-only recovery.
                                     if target_is_grok {
@@ -904,6 +911,11 @@ pub fn authenticated_pm_pane_send_input_events(
                                         } else {
                                             expected_pty.ensure_grok_prompt_input_ready()?;
                                         }
+                                    }
+                                    if multiline_body && !owned_submit && !reservation.bracketed_paste_enabled() {
+                                        return Err(gwt_terminal::TerminalError::PtyIoError {
+                                            details: MULTILINE_PASTE_REQUIRED.to_string(),
+                                        });
                                     }
                                     commit(&mut mark_attempted)
                                 })

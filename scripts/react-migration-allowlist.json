@@ -33,7 +33,6 @@
   "crates/gwt/web/project-page-metadata.js",
   "crates/gwt/web/project-shell-surface.js",
   "crates/gwt/web/provider-usage-surface.js",
-  "crates/gwt/web/recovery-center-modal.js",
   "crates/gwt/web/release-notes-window.js",
   "crates/gwt/web/render-degradation-banner.js",
   "crates/gwt/web/settings-surface.js",

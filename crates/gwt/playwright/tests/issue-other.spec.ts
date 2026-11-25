@@ -396,10 +396,10 @@ test("Issue list snapshots refresh a queued query through shared views", async (
   // A later message on the same FIFO proves all rejected replies were consumed.
   const processed = page.waitForEvent("dialog");
   await page.evaluate(() => (window as any).__otherEmit({
-    kind: "workspace_projection_prune_error", message: "Issue list snapshots processed",
+    kind: "ui_trace_error", message: "Issue list snapshots processed",
   }));
   const dialog = await processed;
-  expect(dialog.message()).toBe("Work Projection Prune error: Issue list snapshots processed");
+  expect(dialog.message()).toBe("UI trace error: Issue list snapshots processed");
   await dialog.dismiss();
   await expect(entry.locator(".knowledge-row-title")).toHaveText(latest);
   expect(await entry.evaluate(node => node === (window as any).__klistRow)).toBe(true);
@@ -468,10 +468,10 @@ test("Remote branch snapshots replace Other rows and preserve branch launch", as
       const fixture = window as any;
       fixture.__otherEmit({ kind: "remote_start_work_branches", id, branches });
       // Observe completion on the same receive FIFO before negative assertions.
-      fixture.__otherEmit({ kind: "workspace_projection_prune_error", message: "Remote snapshot processed" });
+      fixture.__otherEmit({ kind: "ui_trace_error", message: "Remote snapshot processed" });
     }, { id, branches });
     const dialog = await processed;
-    expect(dialog.message()).toBe("Work Projection Prune error: Remote snapshot processed");
+    expect(dialog.message()).toBe("UI trace error: Remote snapshot processed");
     await dialog.dismiss();
   };
   await emitBranches("closed-issue-window", ["origin/feature/ignored"]);

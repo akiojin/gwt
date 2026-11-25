@@ -1619,10 +1619,10 @@ test.describe("Issue Related Work Resume", () => {
       const processed = page.waitForEvent("dialog");
       await page.evaluate(events => {
         for (const event of events) window.__issueBridgeFixtureSocket.emit(event);
-        window.__issueBridgeFixtureSocket.emit({ kind: "workspace_projection_prune_error", message: "Resume list processed" });
+        window.__issueBridgeFixtureSocket.emit({ kind: "ui_trace_error", message: "Resume list processed" });
       }, events);
       const dialog = await processed;
-      expect(dialog.message()).toBe("Work Projection Prune error: Resume list processed");
+      expect(dialog.message()).toBe("UI trace error: Resume list processed");
       await dialog.dismiss();
     };
     await emitAndFlush([{ ...list, workspace_id: "stale-workspace" }, { ...list, operation_id: "stale-operation" }]);
@@ -1709,11 +1709,11 @@ test.describe("Issue Related Work Resume", () => {
         // Both kinds retain FIFO order through the socket dispatcher. Seeing
         // this later dialog proves the outcome ran before negative assertions.
         window.__issueBridgeFixtureSocket.emit({
-          kind: "workspace_projection_prune_error", message: "Resume outcome processed",
+          kind: "ui_trace_error", message: "Resume outcome processed",
         });
       }, { kind, operationId, message });
       const dialog = await processed;
-      expect(dialog.message()).toBe("Work Projection Prune error: Resume outcome processed");
+      expect(dialog.message()).toBe("UI trace error: Resume outcome processed");
       await dialog.dismiss();
     };
     await emitOutcome("workspace_resume_agent_error", `${first.operation_id}-stale`,

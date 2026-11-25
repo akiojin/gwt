@@ -634,13 +634,19 @@ fn assert_pm_send_waits_for_exact_target_hook_ack(agent_id: gwt_agent::AgentId) 
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _owner_home = ScopedGwtHome::set(temp.path());
+    let multiline = agent_id == gwt_agent::AgentId::Codex;
     let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), agent_id, false);
     let repo = fixture.repo.clone();
     let target_window = fixture.target.id.clone();
     let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
 
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643ae";
-    let body = "verify this exact body";
+    let body = if multiline {
+        fixture.target.pty.set_bracketed_paste(true);
+        "verify this exact body\n\nincluding the final newline\n"
+    } else {
+        "verify this exact body"
+    };
     let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
     let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
     let ack_receipt_path = receipt_path.clone();
@@ -948,7 +954,9 @@ fn assert_pm_unconfirmed_delivery_preserves_a_later_draft(agent_id: gwt_agent::A
     );
     assert!(matches!(result.blocking_recv().unwrap(),
         BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
-            if status == "unconfirmed" && reason.contains("readback-only")));
+            if status == "unconfirmed"
+                && reason.contains("readback-only")
+                && reason.contains("unsent_user_input=true")));
     assert!(entry.handle.has_unsent_user_input());
     let reservation = entry.handle.reserve_input_transaction().unwrap();
     assert_eq!(
@@ -1466,6 +1474,23 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
         original_transaction + 1,
         "refused callers and targets must not reserve a protected write"
     );
+    fixture.target.pty.set_bracketed_paste(false);
+    let (responder, result, cancellation) = AgentPmSendResponder::channel();
+    fixture.send(
+        "pm".into(),
+        &uuid::Uuid::new_v4().to_string(),
+        &fixture.target.id,
+        "first line\nsecond line\r",
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "failed" && reason.contains("bracketed paste")));
+    assert!(
+        !cancellation.cancel(),
+        "raw multiline input must never be written"
+    );
+
     let (responder, result, cancellation) =
         AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
     fixture.send(
