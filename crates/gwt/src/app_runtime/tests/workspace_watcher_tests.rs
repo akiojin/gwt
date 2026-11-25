@@ -1836,31 +1836,55 @@ fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_w
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, window_id) =
         apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
-    let projection = apply_title_sync_sample_projection(
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let mut projection = apply_title_sync_sample_projection(
         &repo,
         &window_id,
         Some("Board milestone title"),
         Some("posted a decision"),
     );
+    projection.board_refs = (0..27_000).map(|id| format!("board-{id}")).collect();
     super::super::workspace_views::reset_full_active_work_projection_builds();
 
     let events = runtime.apply_board_projection_refresh(super::super::BoardProjectionRefreshed {
         context: runtime.project_context("tab-1"),
         events: Vec::new(),
         milestone: Some((repo.clone(), projection)),
-        ..Default::default()
+        decision_notifications: (0..5)
+            .map(|id| super::super::board::BoardDecisionNotification {
+                entry_id: format!("decision-{id}"),
+                session_id: format!("session-{id}"),
+            })
+            .collect(),
     });
 
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
         0
     );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
-        "the milestone must still refresh the pane heading: {events:?}"
-    );
+    assert!(events.is_empty(), "the GUI only schedules preparation");
+    let prepare_workspace = {
+        let mut tasks = tasks.lock().unwrap();
+        assert_eq!(
+            tasks.len(),
+            2,
+            "one task for all decisions, one for Workspace"
+        );
+        tasks.pop().unwrap()
+    };
+    prepare_workspace();
+    let UserEvent::WorkspaceProjectionPatchPrepared(prepared) =
+        into_recorded_project_payload(recorded.lock().unwrap().remove(0))
+    else {
+        panic!("expected the worker's prepared Workspace patch");
+    };
+    assert_eq!(prepared.projection.board_refs.len(), 27_000);
+    assert!(runtime
+        .apply_workspace_projection_patch(*prepared)
+        .is_some());
     let tab = runtime.tab("tab-1").expect("tab");
     assert_eq!(
         tab.workspace

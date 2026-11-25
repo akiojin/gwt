@@ -239,7 +239,8 @@ pub(crate) fn prepare_workspace_projection_patch(
         .unwrap_or_default();
     // Input is a bounded snapshot. Always use the existing bounded wire mapper
     // so journal/Work/Session histories cannot enter a watcher patch.
-    projection = super::bounded_active_work_projection_snapshot(&projection);
+    let board_refs = std::mem::take(&mut projection.board_refs);
+    projection = super::bounded_active_work_projection_snapshot(&projection, board_refs);
     let event = BackendEvent::ActiveWorkProjectionPatch {
         projection: Box::new(projection.clone()),
     };
@@ -343,6 +344,7 @@ mod tests {
             revision: 3,
             cached: Some(super::super::bounded_active_work_projection_snapshot(
                 &cached,
+                Vec::new(),
             )),
             fresh: Box::new(fresh),
             sessions: Vec::new(),

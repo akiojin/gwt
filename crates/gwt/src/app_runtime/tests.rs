@@ -10855,7 +10855,7 @@ fn workspace_test_work(
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         session_agent_total: agents.len() as u32,
         agents,
         works,

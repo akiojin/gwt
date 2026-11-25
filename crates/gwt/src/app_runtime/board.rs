@@ -14,6 +14,7 @@
 //! flow through here unchanged — the handler emits the same
 //! `BackendEvent::BoardEntries` / `BackendEvent::BoardError` responses.
 
+use futures_util::StreamExt;
 use gwt_core::timestamp::UtcTimestamp;
 
 use std::{
@@ -788,9 +789,7 @@ impl AppRuntime {
     }
 
     /// Issue #4406: apply a Board refresh that ran off the GUI event loop.
-    /// A Work milestone is merged into the cached Active Work view, the same
-    /// cache-only path the Workspace watcher takes (Issue #3783); rebuilding
-    /// Active Work here cost seconds per Board post.
+    /// A Work milestone shares the Workspace watcher's background preparation.
     pub(crate) fn apply_board_projection_refresh(
         &mut self,
         refreshed: BoardProjectionRefreshed,
@@ -808,9 +807,7 @@ impl AppRuntime {
             return Vec::new();
         }
         let context = context.as_ref().expect("current Board project context");
-        for notification in decision_notifications {
-            self.notify_board_decision(context, notification);
-        }
+        self.queue_board_decision_notifications(context, decision_notifications);
         events.retain(|event| match &event.event {
             BackendEvent::BoardEntries { id, .. } => {
                 self.project_key_for_window(id) == Some(&context.project_key)
@@ -818,36 +815,23 @@ impl AppRuntime {
             _ => false,
         });
         if let Some((project_root, projection)) = milestone {
-            events.extend(
-                self.apply_workspace_projection_title_sync_cache_only(&project_root, &projection),
-            );
+            self.queue_workspace_projection_patch(&project_root, Box::new(projection));
         }
         events
     }
 
-    /// Board notifications have internal authority to send only this fixed
-    /// pointer to a saved decision. They never grant an agent PM input rights
-    /// or turn the decision's untrusted body into a privileged prompt.
-    fn notify_board_decision(
+    /// Submit the history-sized notification batch off the GUI event loop.
+    fn queue_board_decision_notifications(
         &self,
         context: &super::ProjectContext,
-        notification: BoardDecisionNotification,
+        notifications: Vec<BoardDecisionNotification>,
     ) {
+        if notifications.is_empty() {
+            return;
+        }
         let root = context.project_root.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().map_err(|error| error.to_string())
-                .and_then(|executor| executor.block_on(async {
-                    let client = gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
-                        &root, &gwt_core::paths::gwt_home(),
-                    ).await?;
-                    client.command(gwt::project_runtime::events::OwnerCommand::NotifyBoardDecision {
-                        entry_id: notification.entry_id, session_id: notification.session_id,
-                    }).await
-                }));
-            if let Err(error) = result {
-                tracing::warn!(%error, "project owner declined Board notification");
-            }
+            notify_board_decisions(&root, notifications);
         }) {
             tracing::warn!(%error, "Board notification worker unavailable");
         }
@@ -861,6 +845,46 @@ impl AppRuntime {
         let job = self.board_projection_refresh_job(project_root);
         let (refreshed, _) = run_board_projection_refresh(job, BoardScopedViews::new());
         self.apply_board_projection_refresh(refreshed)
+    }
+}
+
+/// The project owner validates the saved decision and its exact recipient
+/// before delivering this fixed pointer to the session.
+fn notify_board_decisions(root: &Path, notifications: Vec<BoardDecisionNotification>) {
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())
+        .and_then(|executor| {
+            executor.block_on(async {
+                let client =
+                    gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
+                        root,
+                        &gwt_core::paths::gwt_home(),
+                    )
+                    .await?;
+                // One client and a bounded number of concurrent commands keep
+                // the notification backlog out of the blocking worker pool.
+                futures_util::stream::iter(notifications)
+                    .for_each_concurrent(8, |notification| async {
+                        let result = client
+                            .command(
+                                gwt::project_runtime::events::OwnerCommand::NotifyBoardDecision {
+                                    entry_id: notification.entry_id,
+                                    session_id: notification.session_id,
+                                },
+                            )
+                            .await;
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "project owner declined Board notification");
+                        }
+                    })
+                    .await;
+                Ok::<(), String>(())
+            })
+        });
+    if let Err(error) = result {
+        tracing::warn!(%error, "project owner declined Board notification");
     }
 }
 
@@ -898,8 +922,8 @@ pub(crate) struct BoardProjectionRefreshed {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoardDecisionNotification {
-    entry_id: String,
-    session_id: String,
+    pub(super) entry_id: String,
+    pub(super) session_id: String,
 }
 
 /// Scoped Board views of one project, by Board window, kept between refreshes
