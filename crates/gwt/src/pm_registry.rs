@@ -588,11 +588,10 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
         .ok()
         .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
         || body.is_empty()
-        || body.contains(['\r', '\n'])
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "PM delivery prompt identity must be one non-empty line",
+            "PM delivery requires a canonical operation ID and non-empty body",
         ));
     }
     let body_sha256 = pm_delivery_prompt_sha256(body);
@@ -9094,7 +9093,7 @@ mod tests {
     #[test]
     fn pm_delivery_prompt_identifies_its_source_and_preserves_body_hash() {
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
-        let body = "report exact status";
+        let body = "report exact status\n\ninclude the next step\n";
         let hash = pm_delivery_prompt_sha256(body);
         let prompt = protected_pm_delivery_prompt(operation_id, body).unwrap();
         assert!(prompt.contains("PM delivery"), "{prompt}");
