@@ -5,10 +5,8 @@ path after the headed workflow has landed on the base. Pass the complete
 local headless matrix through `verify.run`, leaving `headed_e2e_commands`
 unset. Create the Ready PR with these two lines in its body.
 
-```text
-Headed Evidence: CI
-Agent Visual Check: pending (CI headed)
-```
+- `Headed Evidence: CI`
+- `Agent Visual Check: pending (CI headed)`
 
 The required WebView check runs Chromium on Xvfb and uploads
 `webview-headed-<run-id>-<attempt>` before it waits for review. Download that
@@ -20,9 +18,7 @@ events. Publish the
 result through `pr.comment`. Include the reviewed artifact and image paths,
 and put the following acknowledgement on its own line.
 
-```text
-Agent Visual Check: pass (headed CI <run-id>/<attempt>, <PR-head-SHA>)
-```
+`Agent Visual Check: pass (headed CI <run-id>/<attempt>, <PR-head-SHA>)`
 
 The WebView check requires that exact acknowledgement from the PR author
 before it passes. Record any defect and repair it before acknowledging a
