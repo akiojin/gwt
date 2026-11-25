@@ -308,11 +308,10 @@ pub use protocol::{
     LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
     ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
     PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectAutonomyView,
-    ProjectTabView, RecentProjectView, RecoveryCenterItemState, RecoveryCenterItemView,
-    RecoveryCenterLoadStatus, RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView,
-    WorkEventView, WorkItemView, WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView,
-    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
-    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource,
-    WorkspaceStateNoticeKind, WorkspaceStateNoticeView, WorkspaceView,
+    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
+    WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
+    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
+    WorkspaceResumeSource, WorkspaceStateNoticeKind, WorkspaceStateNoticeView, WorkspaceView,
 };
 pub use window_registry::WindowRegistry;

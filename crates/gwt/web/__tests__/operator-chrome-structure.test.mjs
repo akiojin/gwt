@@ -3096,15 +3096,20 @@ test("FR-044 (安心) / SPEC #3885 FR-015: fixed surface controls retain agent R
   assert.match(appSource, /updateWindowKillSwitchControls/);
 });
 
-test("#4777: STOP ALL is absent from the rail and keeps its confirmed command route", () => {
+test("#7882: retired palette-only operations leave no internal route behind", () => {
   const railItem = document.querySelector('.op-rail__item[data-cmd="stop-all-windows"]');
   assert.equal(Boolean(railItem), false, "Stop all agents must be absent from the rail");
   assert.equal(Boolean(document.querySelector(".op-rail__item--stop-all")), false);
-  // op:command routes to requestStopAllWindows, which confirms and emits
-  // stop_all_windows. The palette entry retired with the palette (#7879).
-  assert.match(appSource, /case "stop-all-windows":/);
-  assert.match(appSource, /kind:\s*"stop_all_windows"/);
-  assert.match(appSource, /function requestStopAllWindows\(\)/);
+  assert.equal(Boolean(document.getElementById("recovery-center-modal")), false);
+  // SPEC #7007 items 151 / 179: Recovery Center and the manual STOP ALL are
+  // retired, and Work projection prune lives in gwtd only.
+  for (const retired of [
+    /case "stop-all-windows":/, /stop_all_windows/, /requestStopAllWindows/,
+    /case "open-recovery-center":/, /recovery_center/, /recoveryCenter/,
+    /workspace_projection_prune/, /WorkspaceProjectionPrune/,
+  ]) {
+    assert.doesNotMatch(appSource, retired);
+  }
 });
 
 test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", () => {

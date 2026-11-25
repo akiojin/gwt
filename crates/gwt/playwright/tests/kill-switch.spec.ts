@@ -15,9 +15,8 @@ const errors = new WeakMap<Page, string[]>();
 // event the frontend sends. Asserts the FR-040..044 controls:
 //   - FR-041/3885: STOP is in the Issue menu; window chrome has no STOP
 //   - FR-044: a stopped window exposes RESTART -> restart_window
-//   - FR-042: the stop-all-windows command confirms then sends stop_all_windows
-//     (its palette entry and the FR-043 send-input entry retired with the
-//     command palette, #7879)
+//   - FR-042 STOP ALL and the FR-043 send-input entry are retired
+//     (#7879 / #7882, SPEC #7007 item 179)
 //   - FR-040: a needs_input transition pops an in-app attention toast that
 //     frames the window on click
 test.describe("Anshin Phase 1 kill-switch + attention", () => {
@@ -151,28 +150,6 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     const sent = await page.evaluate(() => window.__sent);
     expect(sent.find((e) => e.kind === "restart_window").id).toBe("agent-1");
   });
-
-  test("STOP ALL confirms then sends stop_all_windows", async ({ page }) => {
-    if (!liveBase) await installEmbeddedRoutes(page);
-    await installKillSwitchBackend(page);
-    await page.goto(appUrl);
-
-    await expect(page.locator('.workspace-window[data-id="agent-1"]')).toBeAttached({
-      timeout: 10_000,
-    });
-
-    await expect(page.locator('.op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
-    await expect(page.locator("#op-palette-button")).toHaveCount(0);
-    page.once("dialog", (dialog) => dialog.accept());
-    await page.evaluate(() => document.dispatchEvent(
-      new CustomEvent("op:command", { detail: { id: "stop-all-windows" } }),
-    ));
-
-    await expect
-      .poll(() => page.evaluate(() => window.__sentKinds))
-      .toContain("stop_all_windows");
-  });
-
 
   test("manual and Issues-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
     if (!liveBase) await installEmbeddedRoutes(page);

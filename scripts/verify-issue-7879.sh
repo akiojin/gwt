@@ -244,5 +244,4 @@ GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
     crates/gwt/playwright/tests/project-hub.spec.ts \
     crates/gwt/playwright/tests/project-open-surfaces.spec.ts \
     crates/gwt/playwright/tests/prompt-runtime-responsiveness-live.spec.ts \
-    crates/gwt/playwright/tests/recovery-center-live.spec.ts \
     crates/gwt/playwright/tests/ui-trace-feedback.spec.ts "$@"

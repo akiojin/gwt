@@ -362,38 +362,6 @@ pub enum ContinueWorkOutcomeKind {
     Failed,
 }
 
-/// Public Recovery Center state. This deliberately mirrors only the three
-/// user-facing lifecycle states and never carries durable authority details.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RecoveryCenterItemState {
-    Pending,
-    Acknowledged,
-    Conflicted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RecoveryCenterLoadStatus {
-    Ready,
-    NotFound,
-    Error,
-}
-
-/// Allowlisted Recovery Center row. `action_handle` is process-local and
-/// opaque; the remaining fields are presentation data derived from the
-/// sanitized Board payload already accepted by RecoveryStore.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RecoveryCenterItemView {
-    pub action_handle: String,
-    pub state: RecoveryCenterItemState,
-    pub worktree_form: gwt_core::coordination::BoardWorktreeForm,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    pub summary: String,
-    pub updated_at: String,
-}
-
 /// SPEC #1921 Phase 86 (#3813): wire shape of the agent process-tree
 /// resource policy shared by `update_system_settings` and the
 /// `system_settings` / `system_settings_updated` replies. Numeric `null`
@@ -573,18 +541,6 @@ pub enum FrontendEvent {
         revision: u64,
         visible: bool,
         focused: bool,
-    },
-    /// Explicit, client-scoped Recovery Center refresh. Durable identities are
-    /// discovered from the active project and never accepted from the client.
-    LoadRecoveryCenter {
-        request_id: String,
-    },
-    /// Resolve one process-local row handle. Only acknowledged rows may yield
-    /// a public Board entry id.
-    OpenRecoveryCenterBoardEntry {
-        request_id: String,
-        generation: u64,
-        action_handle: String,
     },
     /// Toggle Claude account-usage collection (SPEC-2970 FR-009).
     SetClaudeAccountUsageEnabled {
@@ -783,11 +739,6 @@ pub enum FrontendEvent {
     StopWindow {
         id: String,
     },
-    /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's
-    /// runtime, keeping all windows on the canvas. The confirm-before-stop
-    /// prompt is the frontend's responsibility; the backend just executes the
-    /// per-window stop for each currently-running agent window.
-    StopAllWindows {},
     /// SPEC-2356 安心 Addendum (FR-044): relaunch the window's agent in place
     /// using its existing preset / persisted Session, preserving the window id
     /// and appending to (never wiping) the prior terminal output. Works for a
@@ -1687,17 +1638,6 @@ pub enum FrontendEvent {
     /// replies with the authoritative status on success.
     UpdateAutostart {
         enabled: bool,
-    },
-    /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
-    /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
-    /// archive→delete transitions. `ids` limits the action to specific
-    /// `WorkspaceProjection::id` values; an empty list means "every classified
-    /// entry". Backend replies with [`BackendEvent::WorkspaceProjectionPruneResult`].
-    WorkspaceProjectionPrune {
-        #[serde(default)]
-        dry_run: bool,
-        #[serde(default)]
-        ids: Vec<String>,
     },
     /// Diagnostics > Stop UI Trace: persist the browser-side metadata-only
     /// trace payload as a project-scoped JSONL artifact. Backend replies with
@@ -3005,20 +2945,6 @@ pub enum BackendEvent {
         project_root: String,
         panes: Vec<FleetPaneView>,
     },
-    RecoveryCenterState {
-        request_id: String,
-        generation: u64,
-        status: RecoveryCenterLoadStatus,
-        items: Vec<RecoveryCenterItemView>,
-    },
-    RecoveryCenterBoardEntry {
-        request_id: String,
-        generation: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        board_entry_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
     /// Project-scoped persistent membership and assignment history.
     AgentRoster {
         roster: AgentRosterView,
@@ -3959,22 +3885,6 @@ pub enum BackendEvent {
     AutostartError {
         message: String,
     },
-    /// SPEC-2359 US-41: response to [`FrontendEvent::WorkspaceProjectionPrune`].
-    /// `mode` is `"dry_run"` or `"applied"`; counts reflect the plan executed
-    /// against `~/.gwt/projects/*/workspace/`.
-    WorkspaceProjectionPruneResult {
-        mode: String,
-        archived: usize,
-        deleted: usize,
-        skipped: usize,
-    },
-    /// SPEC-2359 US-41: error reply for
-    /// [`FrontendEvent::WorkspaceProjectionPrune`] when the backend cannot
-    /// classify or apply the plan (e.g. unreadable projection file, IO error
-    /// during delete).
-    WorkspaceProjectionPruneError {
-        message: String,
-    },
     /// Diagnostics trace artifact was written to the project log directory.
     UiTraceSaved {
         path: String,
@@ -4183,16 +4093,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "active_work_projection_patch",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
-    ),
-    BackendEventPolicy::new(
-        "recovery_center_state",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "recovery_center_board_entry",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "window_list",
@@ -4709,16 +4609,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
-        "workspace_projection_prune_result",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "workspace_projection_prune_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
         "ui_trace_saved",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -4769,8 +4659,6 @@ impl BackendEvent {
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::FleetPaneList { .. } => "fleet_pane_list",
-            BackendEvent::RecoveryCenterState { .. } => "recovery_center_state",
-            BackendEvent::RecoveryCenterBoardEntry { .. } => "recovery_center_board_entry",
             BackendEvent::AgentRoster { .. } => "agent_roster",
             BackendEvent::AgentRosterError { .. } => "agent_roster_error",
             BackendEvent::AgentSchedule { .. } => "agent_schedule",
@@ -4908,12 +4796,6 @@ impl BackendEvent {
             BackendEvent::SystemSettingsError { .. } => "system_settings_error",
             BackendEvent::AutostartStatus { .. } => "autostart_status",
             BackendEvent::AutostartError { .. } => "autostart_error",
-            BackendEvent::WorkspaceProjectionPruneResult { .. } => {
-                "workspace_projection_prune_result"
-            }
-            BackendEvent::WorkspaceProjectionPruneError { .. } => {
-                "workspace_projection_prune_error"
-            }
             BackendEvent::UiTraceSaved { .. } => "ui_trace_saved",
             BackendEvent::UiTraceError { .. } => "ui_trace_error",
             BackendEvent::ReleaseNotesPayload { .. } => "release_notes_payload",
@@ -4993,8 +4875,7 @@ mod tests {
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
         IndexSearchScope, IndexSearchTarget, LogScopeSelection, ProfileEntryView,
-        ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
-        RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
+        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -7951,20 +7832,6 @@ mod tests {
     }
 
     #[test]
-    fn frontend_event_workspace_projection_prune_round_trips() {
-        let payload = r#"{"kind":"workspace_projection_prune","dry_run":true,"ids":["w1","w2"]}"#;
-        let event: FrontendEvent =
-            serde_json::from_str(payload).expect("deserialize WorkspaceProjectionPrune");
-        match event {
-            FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
-                assert!(dry_run);
-                assert_eq!(ids, vec!["w1".to_string(), "w2".to_string()]);
-            }
-            other => panic!("unexpected variant: {other:?}"),
-        }
-    }
-
-    #[test]
     fn frontend_event_launch_wizard_goto_step_round_trips() {
         // SPEC-2014 FR-128 / SC-084: progress rail クリックの goto_step action。
         use crate::launch_wizard::{LaunchWizardAction, WizardPhase};
@@ -8020,45 +7887,6 @@ mod tests {
                 serde_json::from_value(value).expect("deserialize holder decision action");
             assert_eq!(round_tripped, action);
         }
-    }
-
-    #[test]
-    fn frontend_event_workspace_projection_prune_defaults() {
-        let payload = r#"{"kind":"workspace_projection_prune"}"#;
-        let event: FrontendEvent = serde_json::from_str(payload).expect("deserialize defaults");
-        match event {
-            FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
-                assert!(!dry_run);
-                assert!(ids.is_empty());
-            }
-            other => panic!("unexpected variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn backend_event_workspace_projection_prune_result_serializes() {
-        let event = BackendEvent::WorkspaceProjectionPruneResult {
-            mode: "dry_run".to_string(),
-            archived: 3,
-            deleted: 1,
-            skipped: 5,
-        };
-        let value = serde_json::to_value(&event).expect("serialize");
-        assert_eq!(value["kind"], "workspace_projection_prune_result");
-        assert_eq!(value["mode"], "dry_run");
-        assert_eq!(value["archived"], 3);
-        assert_eq!(value["deleted"], 1);
-        assert_eq!(value["skipped"], 5);
-    }
-
-    #[test]
-    fn backend_event_workspace_projection_prune_error_serializes() {
-        let event = BackendEvent::WorkspaceProjectionPruneError {
-            message: "scan failed: permission denied".to_string(),
-        };
-        let value = serde_json::to_value(&event).expect("serialize");
-        assert_eq!(value["kind"], "workspace_projection_prune_error");
-        assert_eq!(value["message"], "scan failed: permission denied");
     }
 
     #[test]
@@ -8244,88 +8072,6 @@ mod tests {
         assert_eq!(value["message"], "trace payload missing entries");
     }
 
-    #[test]
-    fn recovery_center_frontend_events_carry_only_correlation_and_opaque_handles() {
-        let load = serde_json::from_value::<FrontendEvent>(serde_json::json!({
-            "kind": "load_recovery_center",
-            "request_id": "request-1"
-        }))
-        .expect("deserialize recovery center load");
-        assert!(matches!(
-            load,
-            FrontendEvent::LoadRecoveryCenter { request_id } if request_id == "request-1"
-        ));
-
-        let open = serde_json::from_value::<FrontendEvent>(serde_json::json!({
-            "kind": "open_recovery_center_board_entry",
-            "request_id": "request-2",
-            "generation": 7,
-            "action_handle": "opaque-row-handle"
-        }))
-        .expect("deserialize recovery center Board action");
-        assert!(matches!(
-            open,
-            FrontendEvent::OpenRecoveryCenterBoardEntry {
-                request_id,
-                generation: 7,
-                action_handle,
-            } if request_id == "request-2" && action_handle == "opaque-row-handle"
-        ));
-    }
-
-    #[test]
-    fn recovery_center_backend_projection_is_public_safe_and_uses_canonical_facets() {
-        let event = BackendEvent::RecoveryCenterState {
-            request_id: "request-1".to_string(),
-            generation: 3,
-            status: RecoveryCenterLoadStatus::Ready,
-            items: vec![RecoveryCenterItemView {
-                action_handle: "opaque-row-handle".to_string(),
-                state: RecoveryCenterItemState::Acknowledged,
-                worktree_form: gwt_core::coordination::BoardWorktreeForm::BranchBacked,
-                title: Some("Delivery recovered".to_string()),
-                summary: "Public Board summary".to_string(),
-                updated_at: "2026-08-10T00:00:00Z".to_string(),
-            }],
-        };
-
-        let value = serde_json::to_value(event).expect("serialize recovery center state");
-        assert_eq!(value["kind"], "recovery_center_state");
-        assert_eq!(value["status"], "ready");
-        assert_eq!(value["items"][0]["state"], "acknowledged");
-        assert_eq!(value["items"][0]["worktree_form"], "branch-backed");
-        assert_eq!(value["items"][0]["action_handle"], "opaque-row-handle");
-        let encoded = serde_json::to_string(&value).expect("encode projection");
-        for forbidden in [
-            "session_id",
-            "project_root",
-            "recovery_id",
-            "intent_id",
-            "provider_receipt",
-            "payload_digest",
-            "private_error",
-        ] {
-            assert!(
-                !encoded.contains(forbidden),
-                "Recovery Center wire projection leaked private field {forbidden}: {encoded}"
-            );
-        }
-    }
-
-    #[test]
-    fn recovery_center_board_action_returns_only_public_board_entry_identity() {
-        let event = BackendEvent::RecoveryCenterBoardEntry {
-            request_id: "request-2".to_string(),
-            generation: 3,
-            board_entry_id: Some("public-board-entry".to_string()),
-            error: None,
-        };
-        let value = serde_json::to_value(event).expect("serialize recovery center action");
-        assert_eq!(value["kind"], "recovery_center_board_entry");
-        assert_eq!(value["board_entry_id"], "public-board-entry");
-        assert_eq!(value.as_object().expect("object").len(), 4);
-    }
-
     // SPEC-2356 安心 Addendum (FR-041): StopWindow is a distinct kill-switch
     // event that carries the window id only — it never removes the window.
     #[test]
@@ -8340,18 +8086,6 @@ mod tests {
             event,
             FrontendEvent::StopWindow { id } if id == "tab-1::agent-1"
         ));
-    }
-
-    // SPEC-2356 安心 Addendum (FR-042): StopAllWindows carries no payload; the
-    // backend decides which windows are running agents.
-    #[test]
-    fn stop_all_windows_deserializes_empty_payload_contract() {
-        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
-            "kind": "stop_all_windows"
-        }))
-        .expect("deserialize stop_all_windows");
-
-        assert!(matches!(event, FrontendEvent::StopAllWindows {}));
     }
 
     // SPEC-2356 安心 Addendum (FR-044): RestartWindow carries the window id of a
