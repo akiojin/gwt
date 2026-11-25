@@ -9,16 +9,50 @@ import { createProjectAutonomyControl } from "./project-autonomy.js";
 //   opens the Project in its own browser tab.
 // - Setup: the first-run setup (Issue #7731). It opens by itself while this
 //   machine still needs it, and from Settings at any time.
+// - Environments: the execution environments and accounts of this machine
+//   (Issue #7648 AC-7), the same screen a project page opens from its header.
 import { renderProjectCloneModal, createFolderPickerController, createOpenProjectPathForm } from "./project-clone-modal.js";
 import { HUB_URL_PATH, projectUrlPath, routeWebSocketUrl } from "./frontend-route.js";
 import { createProjectExecutionPolicyModel, mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { createAppChrome } from "./app-chrome.js";
 import { createHomeConversation } from "./home-conversation.js";
-import { createFirstRunSetup } from "./first-run-setup.js";
+import { createFirstRunSetup, firstRunSetupUrlPath } from "./first-run-setup.js";
+import { createExecutionEnvironments } from "./execution-environments.js";
+import { createProviderUsageSurface } from "./provider-usage-surface.js";
 
 // The view a `/?view=…` link opens; anything else is Home.
-const HUB_VIEWS = Object.freeze(["home", "projects", "setup"]);
+const HUB_VIEWS = Object.freeze(["home", "projects", "setup", "environments"]);
+
+// The account sign-in terminal. xterm loads on first use: the Hub does not
+// draw terminals otherwise.
+const XTERM_MODULE = "/assets/xterm/xterm.mjs";
+function decodeBase64(base64) {
+  return Uint8Array.from(atob(base64), value => value.charCodeAt(0));
+}
+function openLoginTerminal(doc, element, onData) {
+  let terminal = null;
+  let input = null;
+  let disposed = false;
+  const pending = [];
+  import(XTERM_MODULE).then(({ Terminal }) => {
+    if (disposed) return;
+    const fontFamily = doc.defaultView.getComputedStyle(doc.documentElement).getPropertyValue("--font-mono").trim();
+    terminal = new Terminal({ cols: 80, rows: 24, fontSize: 13, scrollback: 0, ...(fontFamily ? { fontFamily } : {}) });
+    terminal.open(element);
+    terminal.focus();
+    input = terminal.onData(onData);
+    for (const data of pending.splice(0)) terminal.write(decodeBase64(data));
+  }).catch(error => doc.defaultView.console?.warn?.("[gwt hub] login terminal failed to load", error));
+  return {
+    appendOutput: data => (terminal ? terminal.write(decodeBase64(data)) : pending.push(data)),
+    dispose: () => {
+      disposed = true;
+      input?.dispose();
+      terminal?.dispose();
+    },
+  };
+}
 
 const HUB_RESULT_KINDS = new Set([
   "hub_state",
@@ -187,8 +221,57 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     onRequired: needed => { if (needed) showView("setup"); },
   });
   const setupView = setup.element;
+  // Issue #7648 AC-7: the execution environments screen. Its definitions,
+  // the usage snapshot and the tool catalog reach this page as they reach a
+  // project page; nothing here is project-scoped, so it has no priority list.
+  const { applyProviderUsageUi, renderAccountUsage, usageModel } = createProviderUsageSurface({ renderWorkspaceWindows: () => {} });
+  const supportedAgentsModel = createUiStateStore({ agents: null });
+  const environmentDefinitions = createUiStateStore({ view: null, refusal: null });
+  const poolLoginEvents = createUiStateStore(null);
+  const environments = createExecutionEnvironments({
+    document: doc, usageModel, supportedAgentsModel, renderAccountUsage, send,
+    definitionsModel: environmentDefinitions,
+    loginEventModel: poolLoginEvents,
+    openLoginTerminal: (element, onData) => openLoginTerminal(doc, element, onData),
+    // Tool management lives in a project's Settings; here the setup's Tools step registers them.
+    onOpenToolManagement: () => win.location.assign(firstRunSetupUrlPath("tools")),
+    onSetUsageCollection: (provider, enabled) => {
+      if (provider === "claude_code") send({ kind: "set_claude_account_usage_enabled", enabled });
+    },
+  });
+  const environmentsView = environments.element;
+  environmentsView.classList.add("gwt-hub__environments");
+  environmentsView.hidden = true;
+  // Answers to the screen's requests and the broadcasts it is drawn from.
+  function receiveEnvironments(event) {
+    switch (event?.kind) {
+      case "execution_environments":
+        environmentDefinitions.update(state => ({ ...state, view: event.view }));
+        return true;
+      case "execution_environment_error":
+        environmentDefinitions.update(state => ({ ...state, refusal: { message: event.message } }));
+        return true;
+      case "pool_account_login_started":
+      case "pool_account_login_output":
+      case "pool_account_login_finished":
+        poolLoginEvents.update(() => event);
+        return true;
+      case "provider_usage":
+        applyProviderUsageUi({
+          accounts: event.accounts || [],
+          sessions: (event.sessions || []).filter(session => session.active !== false),
+          consumption: event.consumption || [],
+        });
+        return true;
+      case "supported_agent_list":
+        supportedAgentsModel.update(state => ({ ...state, agents: event.agents || [] }));
+        return true;
+      default:
+        return false;
+    }
+  }
   projectsView.append(header, actions, search, openSection.element, recentSection.element, orphanSection.element);
-  root.append(notice, error, homeView, projectsView, setupView);
+  root.append(notice, error, homeView, projectsView, setupView, environmentsView);
 
   let view = "home";
   function showView(next) {
@@ -197,6 +280,17 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     homeView.hidden = view !== "home";
     projectsView.hidden = view !== "projects";
     setupView.hidden = view !== "setup";
+    const showEnvironments = view === "environments";
+    if (environmentsView.hidden === showEnvironments) {
+      environmentsView.hidden = !showEnvironments;
+      if (showEnvironments) {
+        environments.open("environments");
+        send({ kind: "list_supported_agents" });
+        environments.reload();
+      } else {
+        environments.closeLogin(false);
+      }
+    }
     // Home fills the screen and scrolls its own timeline.
     doc.body.classList.toggle("route-body--chat", view === "home");
     setActiveSurface(view);
@@ -478,6 +572,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     if (event && home.receive(event)) return;
     if (event && setup.receive(event)) return;
     if (event && closeController.receive(event)) return;
+    if (receiveEnvironments(event)) return;
     if (event?.kind === "project_execution_status") {
       executionResults.update(() => event.status);
       return;
@@ -547,6 +642,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       closeController.connectionLost();
       home.connectionLost();
       setup.connectionLost();
+      environments.connectionLost();
       for (const policy of executionPolicies.values()) policy.connectionLost();
       closeCloneTab();
       if (cloneState.cloning) {
@@ -605,6 +701,7 @@ export function mountHubApp({ window: win, document: doc }) {
   const chrome = createAppChrome({ document: doc, handlers: {
     pm: () => app?.showView("home"),
     projects: () => app?.showView("projects"),
+    environments: () => app?.showView("environments"),
   } });
   const page = chrome.mountPage();
   app = createHubApp({ window: win, document: doc, setVersion: chrome.setVersion,

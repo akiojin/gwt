@@ -79,10 +79,11 @@ async function mount(snapshot, {
   const state = () => ({
     loaded, accounts: accountRows(snapshot), pools: accountPools(loaded ? definitions : null, accountRows(snapshot)),
     environments: environmentRows(loaded ? definitions : null, snapshot, agents),
+    definitions: loaded ? definitions : null,
     registeredAccounts: definitions.accounts, viaOptions: definitions.via_options, error: null, saving: false, saved: false, ...extra,
   });
   const model = createUiStateStore({ ...state(), view }, { scheduleFrame: callback => { callback(); return () => {}; } });
-  const calls = { tools: 0, collection: [], rendered: [], added: [], updated: [], deleted: [], pool: [] };
+  const calls = { tools: 0, collection: [], rendered: [], added: [], updated: [], deleted: [], pool: [], priority: [] };
   const navigate = (name, key = null) => model.update(current => ({ ...current, view: { name, key } }));
   const root = createRoot(document.body);
   await act(async () => root.render(React.createElement(ExecutionEnvironments, {
@@ -97,6 +98,7 @@ async function mount(snapshot, {
     onAdd: input => calls.added.push(input),
     onUpdate: (id, change) => calls.updated.push([id, change]),
     onDelete: id => calls.deleted.push(id),
+    onSetProjectEnvironments: ids => calls.priority.push(ids),
     onAddPoolAccount: tool => calls.pool.push(["add", tool]),
     onSignInPoolAccount: id => calls.pool.push(["sign-in", id]),
     onSaveCopilotAccount: (...values) => calls.pool.push(["save-copilot", ...values]),
@@ -206,6 +208,33 @@ test("the landing view lists every environment with its tool, usage and limit st
   assert.equal(time.getAttribute("datetime") ?? time.getAttribute("dateTime"), RESET);
   assert.match(cards[1].textContent, /Available/);
   assert.match(cards[1].textContent, /90% used/);
+});
+
+// Issue #7648 AC-6: the open project's priority list is edited on this screen.
+test("the landing view edits the open project's priority list and a page without a project has none", async () => {
+  const withProject = {
+    ...DEFAULT_DEFINITIONS,
+    project: {
+      project_root: "/p/alpha", saved: true,
+      entries: [
+        { environment_id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1" },
+        { environment_id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1" },
+      ],
+    },
+  };
+  const { document, click, button, calls } = await mount({ accounts: [] }, { definitions: withProject });
+  const list = document.querySelector('[data-environment-list="project"]');
+  assert.ok(list, "the priority list is on the screen");
+  assert.deepEqual([...list.querySelectorAll(".project-environments__name")].map(item => item.textContent),
+    ["1. Codex 1", "2. Claude Code 1"]);
+  // It is already on the screen it would link to.
+  assert.equal(list.querySelector('[data-action="environment-manage"]'), null);
+  await click(button("Move down Codex 1"));
+  await click(button("Remove Claude Code 1"));
+  assert.deepEqual(calls.priority, [["claude", "codex"], ["codex"]]);
+
+  const hub = await mount({ accounts: [] });
+  assert.equal(hub.document.querySelector('[data-environment-list="project"]'), null);
 });
 
 test("empty and loading states are told apart", async () => {
