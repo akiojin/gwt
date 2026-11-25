@@ -1446,8 +1446,10 @@ jobs:
               --output="/workspace/$evidence/browser" \
               --reporter=line,/workspace/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs
           node -e 'const a = require("node:assert/strict"); const r = require(process.argv[1]); a.equal(r.status, "passed"); a.equal(r.failed, 0); a.ok(r.chromium_dark_passed > 0); a.ok(r.chromium_light_passed > 0);' "$GITHUB_WORKSPACE/$evidence/report.json"
-          test -n "$(find "$evidence/browser" -name '*.png' -print -quit)"
-          test -n "$(find "$evidence/browser" -name 'trace.zip' -print -quit)"
+          for theme in dark light; do
+            test -n "$(find "$evidence/browser" -path "*-chromium-$theme/*.png" -print -quit)"
+            test -n "$(find "$evidence/browser" -path "*-chromium-$theme/trace.zip" -print -quit)"
+          done
         # The full serial suite measured 14.7m before image/bootstrap overhead.
         # Retain all cases with finite execution headroom.
         timeout-minutes: 35
@@ -1473,13 +1475,13 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          grep -Fxq 'Headed Evidence: CI' <<<"$PR_BODY" || exit 0
+          grep -Fxq 'Headed Evidence: CI' <<<"${PR_BODY//$'\r'/}" || exit 0
           expected="Agent Visual Check: pass (headed CI $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT, $PR_HEAD)"
           echo "Review the WebView evidence artifact, then record: $expected"
           for attempt in {1..48}; do
             if gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --slurp \
               | jq -e --arg author "$PR_AUTHOR" --arg expected "$expected" \
-                'any(.[][]; .user.login == $author and (.body | split("\n") | index($expected) != null))' >/dev/null; then
+                'any(.[][]; .user.login == $author and (.body | split("\n") | map(rtrimstr("\r")) | index($expected) != null))' >/dev/null; then
               exit 0
             fi
             sleep 15
