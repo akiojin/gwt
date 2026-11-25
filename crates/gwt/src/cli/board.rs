@@ -48,6 +48,7 @@ pub enum BoardCommand {
     RecoveryPost {
         intent_id: String,
         command: Box<BoardPostCommand>,
+        manual_recovery: bool,
     },
     /// `board.config.show` — print this repo's resolved Board routing (provider /
     /// channel / tenant) so per-project separation can be confirmed by running
@@ -403,7 +404,11 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        BoardCommand::RecoveryPost { intent_id, command } => {
+        BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery,
+        } => {
             let BoardPostCommand {
                 kind,
                 body,
@@ -454,12 +459,17 @@ pub(super) fn run<E: CliEnv>(
                 env.repo_path(),
                 &intent_id,
                 input,
+                manual_recovery,
             );
             let rendered = serde_json::to_string(&report)
                 .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
             out.push_str(&rendered);
             out.push('\n');
-            0
+            i32::from(
+                manual_recovery
+                    && report.state
+                        != crate::recovery_delivery::RecoveryDeliveryState::Acknowledged,
+            )
         }
         BoardCommand::ConfigShow => {
             let routing = routing_for(env.repo_path());
@@ -1049,7 +1059,11 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         broadcast,
     });
     Ok(match intent_id {
-        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        Some(intent_id) => BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery: false,
+        },
         None => BoardCommand::Post(command),
     })
 }
@@ -1334,6 +1348,7 @@ mod tests {
             BoardCommand::RecoveryPost {
                 intent_id: "test-intent".into(),
                 command: post,
+                manual_recovery: false,
             }
         } else {
             BoardCommand::Post(post)
@@ -3702,6 +3717,7 @@ mod tests {
                     resolves: vec!["blocked-entry-1974".to_string()],
                     ..Default::default()
                 }),
+                manual_recovery: false,
             },
             &mut out,
         );
@@ -3735,7 +3751,12 @@ mod tests {
             s("stable-intent-1"),
         ])
         .expect("recovery board post");
-        let BoardCommand::RecoveryPost { intent_id, command } = recovery else {
+        let BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery: false,
+        } = recovery
+        else {
             panic!("--intent-id must select the recovery route");
         };
         assert_eq!(intent_id, "stable-intent-1");

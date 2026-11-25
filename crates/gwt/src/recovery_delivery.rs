@@ -232,13 +232,14 @@ impl RecoveryDeliveryAuthority {
 pub(crate) struct RecoveryDeliveryAuthorityError;
 
 /// Resolve the current durable Host Session without migrating or synthesizing
-/// a ledger. Exact worktree/repository/binding checks fail closed. Worktree
+/// a ledger. Exact worktree, repository, and Session authority checks fail closed. Worktree
 /// form is structural: attached HEAD is Branch-backed, detached HEAD is
 /// Ephemeral, and an unreadable HEAD is Unknown; filesystem name prefixes are
 /// never consulted.
 pub(crate) fn resolve_delivery_authority(
     repo_root: &Path,
     ambient_session_id: Option<&str>,
+    manual_recovery: bool,
 ) -> Result<RecoveryDeliveryAuthority, RecoveryDeliveryAuthorityError> {
     let session_id = ambient_session_id
         .map(str::trim)
@@ -251,9 +252,9 @@ pub(crate) fn resolve_delivery_authority(
     if session.id != session_id || session.runtime_target != LaunchRuntimeTarget::Host {
         return Err(RecoveryDeliveryAuthorityError);
     }
-    SessionExecutionIdentity::from_session(&session)
+    let has_binding = SessionExecutionIdentity::from_session(&session)
         .map_err(|_| RecoveryDeliveryAuthorityError)?
-        .ok_or(RecoveryDeliveryAuthorityError)?;
+        .is_some();
 
     let invocation = dunce::canonicalize(repo_root).map_err(|_| RecoveryDeliveryAuthorityError)?;
     let session_worktree =
@@ -280,6 +281,19 @@ pub(crate) fn resolve_delivery_authority(
     }
 
     let (worktree_form, origin_branch) = classify_worktree_origin(&repository);
+    // A resident PM has no producing binding. Manual recovery can use its
+    // exact registration and detached worktree as the alternative authority.
+    if !has_binding
+        && !(manual_recovery
+            && worktree_form == BoardWorktreeForm::Ephemeral
+            && crate::pm_registry::registered_pm_worktree_authority(
+                &project_state_root,
+                session_id,
+                &invocation,
+            ))
+    {
+        return Err(RecoveryDeliveryAuthorityError);
+    }
     if let Some(branch) = origin_branch.as_deref() {
         if canonical_branch(&session.branch) != canonical_branch(branch) {
             return Err(RecoveryDeliveryAuthorityError);
@@ -332,11 +346,12 @@ pub(crate) fn classify_worktree_origin(
     }
 }
 
-/// Production entrypoint used only when `board.post` carries `intent_id`.
+/// Exact Board delivery for `board.post` with an intent and Monitor manual recovery.
 pub fn deliver_board_recovery(
     repo_root: &Path,
     intent_id: &str,
     input: RecoveryDeliveryInput,
+    manual_recovery: bool,
 ) -> RecoveryDeliveryReport {
     deliver_with(
         repo_root,
@@ -344,7 +359,11 @@ pub fn deliver_board_recovery(
         input,
         board_provider::recovery_route_for,
         |repo_root| {
-            resolve_delivery_authority(repo_root, std::env::var(GWT_SESSION_ID_ENV).ok().as_deref())
+            resolve_delivery_authority(
+                repo_root,
+                std::env::var(GWT_SESSION_ID_ENV).ok().as_deref(),
+                manual_recovery,
+            )
         },
         |repo_root, authority| {
             let store = RecoveryStore::for_repo(repo_root, authority.authority.session_id.clone())?;
