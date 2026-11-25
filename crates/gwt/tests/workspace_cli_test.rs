@@ -1359,6 +1359,17 @@ fn mutation_state_snapshot(fixture: &Fixture) -> MutationStateSnapshot {
     MutationStateSnapshot(entries)
 }
 
+/// #7816: a settled lost update leaves only its `not_applied` claim marker.
+fn without_operation_receipts(snapshot: MutationStateSnapshot) -> MutationStateSnapshot {
+    MutationStateSnapshot(
+        snapshot
+            .0
+            .into_iter()
+            .filter(|(path, _, _)| !path.contains("workspace-update-receipts"))
+            .collect(),
+    )
+}
+
 fn container_home_state_snapshot(fixture: &Fixture) -> MutationStateSnapshot {
     let mut entries = Vec::new();
     snapshot_tree(
@@ -2599,20 +2610,27 @@ fn workspace_update_proxy_response_loss_never_replays_locally_or_to_the_host() {
 
     assert!(
         !output.status.success(),
-        "response loss must remain an unknown outcome: {}",
+        "response loss must not report success: {}",
+        output_text(&output)
+    );
+    assert!(
+        output_text(&output).contains("outcome=not_applied"),
+        "#7816: an update the Host never reserved must settle as not_applied: {}",
         output_text(&output)
     );
     assert_secret_redacted(&output, FORWARD_TOKEN);
     server.receive();
     assert_eq!(
-        mutation_state_snapshot(&fixture),
+        without_operation_receipts(mutation_state_snapshot(&fixture)),
         before,
         "response loss must not trigger a local compatibility continuation"
     );
 }
 
+/// #7816: an operation the Host never reserved settles as final `not_applied`
+/// without touching delivery state, so a stalled update never stays unconfirmed.
 #[test]
-fn workspace_receipt_missing_is_read_only_and_unconfirmed() {
+fn workspace_receipt_missing_settles_not_applied_without_delivery() {
     let fixture = fixture();
     prepare_exact_ensured_host(&fixture);
     let before = workspace_delivery_state_snapshot(&fixture);
@@ -2620,10 +2638,13 @@ fn workspace_receipt_missing_is_read_only_and_unconfirmed() {
         &fixture,
         r#"{"schema_version":1,"operation":"workspace.receipt","params":{"operation_id":"aafc5f24-e5a5-4270-956d-86ac31dafb88"}}"#,
     );
-    assert_ok(&result, "read-only receipt query");
+    assert_ok(&result, "receipt settlement");
     let receipt: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
-    assert_eq!(receipt["status"], "unconfirmed");
-    assert_eq!(workspace_delivery_state_snapshot(&fixture), before);
+    assert_eq!(receipt["status"], "not_applied");
+    assert_eq!(
+        without_operation_receipts(workspace_delivery_state_snapshot(&fixture)),
+        before
+    );
 }
 
 #[test]

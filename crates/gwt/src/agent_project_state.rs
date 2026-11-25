@@ -12169,6 +12169,67 @@ mod tests {
         });
     }
 
+    /// #7816: a Host stalled past the bridge timeout leaves the operation unreserved.
+    /// Settlement must finalize it as `not_applied` and the late Host apply must refuse it.
+    #[test]
+    fn workspace_operation_lost_before_reservation_settles_not_applied() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_unique_mutation_target(repo, repo, &session, "work-operation-lost");
+            std::fs::write(
+                gwt_core::paths::gwt_workspace_journal_path_for_repo_path(repo),
+                b"",
+            )
+            .unwrap();
+            let request = AgentWorkspaceUpdateRequest {
+                schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session.id.clone(),
+                primary_provider_session_id: None,
+                observation: observe_agent_runtime(repo).unwrap(),
+                intent: AgentWorkspaceUpdateIntent {
+                    summary: Some("response lost while the Host stalled".to_string()),
+                    ..Default::default()
+                },
+            };
+            let settle = |id: &str| {
+                serde_json::to_value(
+                    crate::workspace_update_receipt::settle(repo, &session.id, id, None).unwrap(),
+                )
+                .unwrap()["status"]
+                    .clone()
+            };
+
+            let lost = uuid::Uuid::new_v4().to_string();
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            assert_eq!(settle(&lost), "not_applied");
+            let late = apply_bound_authenticated_workspace_update_with_operation_id(
+                repo,
+                &session.id,
+                &binding,
+                request.clone(),
+                Some(&lost),
+            )
+            .unwrap_err();
+            assert_eq!(
+                late.code,
+                AgentWorkspaceUpdateErrorCode::TransactionConflict
+            );
+            assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            assert_eq!(settle(&lost), "not_applied");
+
+            let applied = uuid::Uuid::new_v4().to_string();
+            apply_bound_authenticated_workspace_update_with_operation_id(
+                repo,
+                &session.id,
+                &binding,
+                request,
+                Some(&applied),
+            )
+            .unwrap();
+            assert_eq!(settle(&applied), "applied");
+        });
+    }
+
     #[test]
     fn workspace_operation_receipt_refuses_pending_or_changed_work_without_repair() {
         with_strict_target_fixture(|repo, session| {
