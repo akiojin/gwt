@@ -37,7 +37,9 @@ individual specs. Use `--headed` to select a local headed run explicitly.
 
 The required WebView CI job retains the measured reporter JSON, screenshots
 and traces as `webview-headed-<run-id>-<attempt>`. The artifact belongs to the
-PR's Test workflow run and is the input for the agent's visual review.
+PR's Test workflow run and is the input for the agent's visual review. CI
+retains PNGs for the full suite and action/console traces for failures and
+the terminal-rendering suite's passing cases, including native hide/show.
 
 ## Test layout
 

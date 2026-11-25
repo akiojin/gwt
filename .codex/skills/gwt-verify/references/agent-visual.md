@@ -14,8 +14,9 @@ The required WebView check runs Chromium on Xvfb and uploads
 `webview-headed-<run-id>-<attempt>` before it waits for review. Download that
 artifact from the PR's Test workflow. Confirm the run belongs to the exact PR
 head. Check `report.json` for passing Chromium in both themes and zero failures,
-open relevant screenshots in dark and light, and use the traces to confirm
-the executed behavior and absence of console and page errors. Publish the
+open relevant screenshots in dark and light, and confirm the relevant test
+results in the CI logs. Use retained traces to inspect action and console
+events. Publish the
 result through `pr.comment`. Include the reviewed artifact and image paths,
 and put the following acknowledgement on its own line.
 

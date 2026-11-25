@@ -1,6 +1,7 @@
 import { chromium, defineConfig, devices } from "@playwright/test";
 
 const chromiumChannel = process.env.GWT_PLAYWRIGHT_CHROMIUM_CHANNEL;
+const ciHeadedEvidence = process.env.GWT_CI_HEADED_EVIDENCE === "1";
 const desktopChrome = chromiumChannel
   ? { ...devices["Desktop Chrome"], channel: chromiumChannel }
   : devices["Desktop Chrome"];
@@ -40,8 +41,12 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   use: {
     baseURL: process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/",
-    trace: "on-first-retry",
-    screenshot: process.env.GWT_HEADED_E2E_SCREENSHOTS === "1" ? "on" : "off",
+    // Retain failures for the full suite; native terminal tests also retain
+    // passing traces for the agent's headed review.
+    trace: ciHeadedEvidence
+      ? { mode: "retain-on-failure", screenshots: false, snapshots: false, sources: false }
+      : "on-first-retry",
+    screenshot: ciHeadedEvidence ? "on" : "off",
     colorScheme: "dark",
     // For explicit headed runs, open the window off screen where supported.
     // Do not start it

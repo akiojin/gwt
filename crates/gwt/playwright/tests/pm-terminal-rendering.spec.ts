@@ -6,6 +6,10 @@ import { withNativeHiddenPage } from "./_helpers/native-chromium";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 import { openWorks } from "./_helpers/works-entry";
 
+if (process.env.GWT_CI_HEADED_EVIDENCE === "1") {
+  test.use({ trace: { mode: "on", screenshots: false, snapshots: false, sources: false } });
+}
+
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
 const PM = "pm-terminal";
