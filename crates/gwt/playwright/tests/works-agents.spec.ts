@@ -832,7 +832,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).getByRole("button", { name: /Rest member|Reactivate/ })).toHaveCount(0);
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
     const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", name: "Dahlia", pm_eligible: false }, 3]]);
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", name: "Dahlia" }, 3]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(null));
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy —");
@@ -1171,6 +1171,14 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(plan(5004).getByRole("button", { name: "Reassign issue #5004", exact: true })).toBeInViewport();
     await page.screenshot({ path: info.outputPath("agents-plans-400.png") });
   });
+  // Issue #7646 AC-7: the Hub's header opens a project page on the ledger.
+  test("Issue #7646 a project page opened with ?view=agents shows the agent ledger", async ({ page }) => {
+    const url = new URL(page.url()); url.searchParams.set("view", "agents");
+    await page.goto(url.href);
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    await expect(roster(page).locator('.roster-list[aria-label="Team members"] .roster-row').first()).toBeVisible();
+    expect(new URL(page.url()).searchParams.has("view")).toBe(false);
+  });
   // Issue #7646: the header opens the ledger, its order is the assignee
   // priority, and deletion follows the live Project Manager assignment.
   test("Issue #7646 header opens the agent ledger with reorder and guarded deletion", async ({ page }, info) => {
@@ -1198,10 +1206,15 @@ test.describe("Works and Agents approved baseline", () => {
 
     const detail = roster(page).locator(".roster-detail");
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
-    await detail.locator('[data-action="pm-eligible"]').check();
+    // Issue #7646 AC-5: any idle member can be designated; no eligibility is asked.
+    await expect(detail.locator('[data-action="pm-eligible"]')).toHaveCount(0);
     await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
     await detail.locator('[data-action="select-pm"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    // Issue #7646 AC-6 (A-26): the footer and the project settings' PM row
+    // follow the designation.
+    await expect(page.locator(".app-foot__pm")).toHaveText("PM: Cedar");
+    await expect(page.locator('[data-role="pm-watching"]').first()).toContainText("Cedar is this device's Project Manager.");
     await roster(page).getByRole("button", { name: "Delete Cedar", exact: true }).click();
     await expect(dialog.getByRole("heading")).toHaveText("Cedar cannot be deleted");
     await expect(dialog).toContainText("Cedar is the Project Manager for this project. Select another Project Manager first");
@@ -1212,12 +1225,13 @@ test.describe("Works and Agents approved baseline", () => {
 
     // Reassigning the Project Manager lifts the guard from the live state.
     await roster(page).getByLabel("Name for new member", { exact: true }).fill("Dahlia");
-    await roster(page).getByLabel("PM eligible for new member", { exact: true }).check();
     await roster(page).locator('.roster-capacity [data-action="add"]').click();
     await roster(page).locator('.roster-row[data-member-id="m-added"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
     await detail.locator('[data-action="select-pm"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await expect(page.locator(".app-foot__pm")).toHaveText("PM: Dahlia");
+    await expect(page.locator('[data-role="pm-watching"]').first()).toContainText("Dahlia is this device's Project Manager.");
     await roster(page).getByRole("button", { name: "Delete Cedar", exact: true }).click();
     await expect(dialog.getByRole("heading")).toHaveText("Delete Cedar?");
     await expect(dialog).toContainText("for every project");
@@ -1436,12 +1450,6 @@ test.describe("Works and Agents approved baseline", () => {
     let writes = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "set_tuning");
     expect(writes).toHaveLength(1); expect(writes[0].action.member_id).toBe("m-idle");
     expect(writes[0].action).not.toHaveProperty("agent_id"); expect(writes[0]).not.toHaveProperty("expected_revision");
-    await page.evaluate(() => (window as any).__worksAgentsFixture.deferEligibility());
-    await detail.locator('[data-action="pm-eligible"]').check();
-    await expect(detail.locator('[data-action="select-pm"]')).toBeDisabled();
-    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    await expect(detail.locator('[data-action="pm-eligible"]')).toBeChecked();
-    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseEligibility());
     await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
     await detail.locator('[data-action="select-pm"]').click();
     await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
@@ -1521,7 +1529,6 @@ async function installWorksAgentsBackend(page: Page) {
     const rejectedScheduleRevisions: any[] = [];
     let queueRevision = "queue-v1:fixture-1", scheduleRevision = 7, deferredSchedule = false;
     let pendingSchedule: any = null, pendingRename: any = null, deferredRename = false, firstRenameReceipt: any = null;
-    let deferredEligibility = false, pendingEligibilityReceipt: string | null = null;
     let holdCatalogs = false;
     const planned = [
       { agent_member_id: "m-one", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }] },
@@ -1630,17 +1637,13 @@ async function installWorksAgentsBackend(page: Page) {
             return;
           }
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
-          if (message.action.kind === "set_pm_eligibility") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.pm_eligible = message.action.eligible; revision++; } }
-          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && !member.assignment) { for (const other of members) if (other.agent_member_id === pmMemberId) { other.is_pm = false; other.pm_project_key = null; } pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
+          if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member && !member.assignment) { member.pm_eligible = true; for (const other of members) if (other.agent_member_id === pmMemberId) { other.is_pm = false; other.pm_project_key = null; } pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id || "codex", name: message.action.name, pm_eligible: message.action.pm_eligible === true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "move") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id), target = index + (message.action.direction === "up" ? -1 : 1); if (index >= 0 && target >= 0 && target < members.length) { [members[index], members[target]] = [members[target], members[index]]; revision++; } }
           if (message.action.kind === "set_traits") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.traits = message.action.traits; revision++; } }
           if (message.action.kind === "set_avatar") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.avatar = message.action.avatar; revision++; } }
           if (message.action.kind === "remove") { const index = members.findIndex(member => member.agent_member_id === message.action.member_id); if (index >= 0 && members[index].agent_member_id !== pmMemberId && !members[index].assignment) { members.splice(index, 1); revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
-          if (message.action.kind === "set_pm_eligibility" && deferredEligibility) {
-            pendingEligibilityReceipt = JSON.stringify({ ...rosterSnapshot(), request_id: message.request_id }); return;
-          }
           this.emit({ ...rosterSnapshot(), request_id: message.request_id });
           if (message.action.kind === "read" && pmMemberId) this.emit(pmStatus());
         }
@@ -1695,12 +1698,6 @@ async function installWorksAgentsBackend(page: Page) {
         } else socket.emit(phase === "catalog" ? workspace() : activity());
       },
       pmUnknown() { socket.emit({ ...pmStatus(), profile_revision: null, configured_agent_id: null }); },
-      deferEligibility() { deferredEligibility = true; },
-      releaseEligibility() {
-        if (!pendingEligibilityReceipt) throw new Error("No pending eligibility receipt");
-        const receipt = pendingEligibilityReceipt; pendingEligibilityReceipt = null; deferredEligibility = false;
-        socket.emit(JSON.parse(receipt));
-      },
       holdCatalogs() { holdCatalogs = true; },
       reconnectCatalogs() { holdCatalogs = false; socket.close(); },
       deferRename() { deferredRename = true; },

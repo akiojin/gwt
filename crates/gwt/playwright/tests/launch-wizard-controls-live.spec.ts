@@ -203,10 +203,9 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
     };
     const memberName = `PM editor Grok ${testInfo.project.name}-${randomUUID().slice(0, 8)}`;
     await surface.getByRole("textbox", { name: "Name for new member", exact: true }).fill(memberName);
-    await surface.getByRole("checkbox", { name: "PM eligible for new member", exact: true }).check();
     const registered = await rosterMutation("add", () => surface.locator('.roster-capacity [data-action="add"]').click());
     const member = registered.members.find((value: any) => value.name === memberName);
-    expect(member).toMatchObject({ enabled: true, pm_eligible: true, assignment: null });
+    expect(member).toMatchObject({ enabled: true, assignment: null });
     const memberId = member.agent_member_id;
     expect(memberId).toMatch(/^[0-9a-f-]{36}$/i);
     await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();

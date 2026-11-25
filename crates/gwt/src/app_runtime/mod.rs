@@ -690,6 +690,7 @@ pub struct WindowRuntime {
     // Only a final owner ACK makes the cached frame a reusable history snapshot.
     pub(crate) has_final_snapshot: bool,
     pending_snapshot: Option<PendingOwnerSnapshot>,
+    inventory_projection: Option<(u64, Option<gwt::pm_activity::PmActivity>)>,
     pub(crate) has_unsent_user_input: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
@@ -735,6 +736,7 @@ impl WindowRuntime {
             screen_seq: 0,
             has_final_snapshot: false,
             pending_snapshot: None,
+            inventory_projection: None,
             has_unsent_user_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input_observation: None,
             last_human_input_at: None,
@@ -1004,6 +1006,7 @@ pub(crate) struct RemoteOwnerInventoryComplete {
     )>,
     pub(crate) continue_request: Option<(String, String, String)>,
     pub(crate) result: Result<Vec<(RemoteRuntimeSnapshot, Option<gwt_agent::Session>)>, String>,
+    pm_prefs: Option<Arc<gwt::pm_registry::PmPrefs>>,
 }
 impl std::fmt::Debug for RemoteOwnerInventoryComplete {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -17384,6 +17387,18 @@ impl AppRuntime {
         snapshot: RemoteRuntimeSnapshot,
         session: Option<gwt_agent::Session>,
     ) -> Vec<OutboundEvent> {
+        self.apply_remote_owner_projection(context, window_id, client, snapshot, session, false)
+    }
+
+    fn apply_remote_owner_projection(
+        &mut self,
+        context: &ProjectContext,
+        window_id: &str,
+        client: gwt::project_runtime::client::ProjectRuntimeClient,
+        snapshot: RemoteRuntimeSnapshot,
+        session: Option<gwt_agent::Session>,
+        keep_terminal: bool,
+    ) -> Vec<OutboundEvent> {
         let Some(identity) = client.identity().cloned() else {
             return Vec::new();
         };
@@ -17537,6 +17552,16 @@ impl AppRuntime {
             .get_mut(window_id)
             .map(|runtime| std::mem::take(&mut runtime.pending_owner_commands))
             .unwrap_or_default();
+        let terminal_delivery = keep_terminal.then(|| {
+            let previous = self
+                .runtimes
+                .get_mut(window_id)
+                .expect("matched inventory pane");
+            (
+                previous.pending_snapshot.take(),
+                previous.has_final_snapshot,
+            )
+        });
         let mut runtime = WindowRuntime::remote(
             snapshot.id.clone(),
             snapshot.incarnation,
@@ -17573,22 +17598,30 @@ impl AppRuntime {
             .or_else(|| snapshot.closing.then(|| "Shutdown is in progress".into()));
         runtime.exit_confirmed = snapshot.exit_confirmed;
         runtime.exit_code = snapshot.exit_code;
-        let terminal = BackendEvent::TerminalSnapshot {
+        if let Some((pending_snapshot, has_final_snapshot)) = terminal_delivery {
+            runtime.pending_snapshot = pending_snapshot;
+            runtime.has_final_snapshot = has_final_snapshot;
+        }
+        let terminal = (!keep_terminal).then(|| BackendEvent::TerminalSnapshot {
             id: window_id.to_string(),
             data_base64: base64::engine::general_purpose::STANDARD.encode(&runtime.screen_ansi),
-        };
+        });
         let detail = runtime.detail.clone();
         self.runtimes.insert(window_id.to_string(), runtime);
         let status_events = self.apply_owner_status_projection(window_id, snapshot.status, detail);
         self.invalidate_project_caches(&context.project_root);
-        let mut events = vec![
-            self.workspace_state_broadcast(context),
-            OutboundEvent::project(context.project_key.clone(), terminal)
-                .with_terminal_stream_seq(Some(snapshot.screen_seq)),
-        ];
+        let mut events = vec![self.workspace_state_broadcast(context)];
+        if let Some(terminal) = terminal {
+            events.push(
+                OutboundEvent::project(context.project_key.clone(), terminal)
+                    .with_terminal_stream_seq(Some(snapshot.screen_seq)),
+            );
+        }
         events.extend(status_events);
         events.extend(discarded_input);
-        events.extend(self.request_owner_snapshot(window_id, None));
+        if !keep_terminal {
+            events.extend(self.request_owner_snapshot(window_id, None));
+        }
         if activity_changed {
             self.invalidate_workspace_projection_patch(&context.tab_id);
             events.extend(self.active_work_projection_broadcast_for_tab(&context.tab_id));
@@ -17666,6 +17699,20 @@ impl AppRuntime {
                             .collect::<Result<Vec<_>, String>>()
                     })
                 });
+            let pm_prefs = result
+                .as_ref()
+                .is_ok_and(|panes| panes.iter().any(|(snapshot, _)| snapshot.agent_id.is_some()))
+                .then(|| {
+                    gwt::pm_registry::load_pm_prefs(
+                        &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+                    )
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        tracing::warn!(project = %context.project_root.display(), %error, "failed to read PM registration for owner inventory");
+                    })
+                    .ok()
+                })
+                .flatten();
             proxy.send(UserEvent::RemoteOwnerInventoryComplete(Box::new(
                 RemoteOwnerInventoryComplete {
                     context,
@@ -17675,6 +17722,7 @@ impl AppRuntime {
                     status_revisions,
                     continue_request,
                     result,
+                    pm_prefs,
                 },
             )));
         }) {
@@ -17714,6 +17762,77 @@ impl AppRuntime {
         )
     }
 
+    fn owner_inventory_matches(
+        &self,
+        window_id: &str,
+        snapshot: &RemoteRuntimeSnapshot,
+        session: Option<&gwt_agent::Session>,
+    ) -> bool {
+        let Some(runtime) = self.runtimes.get(window_id) else {
+            return false;
+        };
+        let window = self
+            .window_lookup
+            .get(window_id)
+            .and_then(|address| self.tab(&address.tab_id)?.workspace.window(&address.raw_id));
+        let input = |observation: gwt::project_runtime::events::OwnerInputObservation| {
+            (observation.revision, observation.has_unsent_user_input)
+        };
+        // Elapsed time in an input observation grows on every read; its
+        // revision identifies the input activity affecting the projection.
+        runtime.started_at_ms == snapshot.started_at_ms
+            && runtime.child_pid == snapshot.child_pid
+            && runtime.raw_status == snapshot.raw_status
+            && runtime.status == snapshot.status
+            && runtime.detail.as_deref()
+                == snapshot
+                    .detail
+                    .as_deref()
+                    .or_else(|| snapshot.closing.then_some("Shutdown is in progress"))
+            && runtime.exit_confirmed == snapshot.exit_confirmed
+            && runtime.exit_code == snapshot.exit_code
+            && runtime.input_observation.map(input) == snapshot.input_observation.map(input)
+            && runtime
+                .has_unsent_user_input
+                .load(std::sync::atomic::Ordering::Acquire)
+                == (snapshot.has_unsent_user_input || runtime.input_delivery_pending())
+            && window.is_some_and(|window| {
+                window.session_id == snapshot.session_id
+                    && window.agent_name == snapshot.agent_name
+                    && snapshot
+                        .agent_id
+                        .as_ref()
+                        .is_none_or(|id| window.agent_id.as_ref() == Some(id))
+                    && snapshot
+                        .purpose_title
+                        .as_ref()
+                        .is_none_or(|title| window.purpose_title.as_ref() == Some(title))
+            })
+            && match (
+                &snapshot.session_id,
+                &snapshot.agent_id,
+                &snapshot.worktree_path,
+            ) {
+                (Some(session_id), Some(agent_id), Some(worktree)) => self
+                    .active_agent_sessions
+                    .get(window_id)
+                    .is_some_and(|active| {
+                        &active.session_id == session_id
+                            && &active.agent_id == agent_id
+                            && &active.worktree_path == worktree
+                            && active.branch_name == snapshot.branch.as_deref().unwrap_or_default()
+                            && active.display_name
+                                == snapshot.display_name.as_ref().unwrap_or(agent_id).as_str()
+                            && active.runtime_target
+                                == snapshot
+                                    .runtime_target
+                                    .or_else(|| session.map(|session| session.runtime_target))
+                                    .unwrap_or(gwt_agent::LaunchRuntimeTarget::Host)
+                    }),
+                _ => true,
+            }
+    }
+
     pub(crate) fn handle_remote_owner_inventory_complete(
         &mut self,
         completion: RemoteOwnerInventoryComplete,
@@ -17726,6 +17845,7 @@ impl AppRuntime {
             status_revisions,
             continue_request,
             result,
+            pm_prefs,
         } = completion;
         if !self.project_context_is_current(&context) {
             return Vec::new();
@@ -17785,6 +17905,7 @@ impl AppRuntime {
                             status_revisions,
                             continue_request,
                             result: Ok(panes),
+                            pm_prefs,
                         },
                     )));
                 return events;
@@ -17867,7 +17988,7 @@ impl AppRuntime {
             if let Some(runtime) = self.runtimes.get(&window_id).filter(|runtime| {
                 runtime.owner_identity == identity && runtime.incarnation == snapshot.incarnation
             }) {
-                if snapshot.screen_seq < runtime.screen_seq {
+                if snapshot.screen_seq < runtime.screen_seq.max(runtime.output_seq) {
                     continue;
                 }
                 let captured = status_revisions
@@ -17886,13 +18007,64 @@ impl AppRuntime {
                     snapshot.exit_code = runtime.exit_code;
                 }
             }
-            events.extend(self.install_remote_owner_projection(
-                &context,
-                &window_id,
-                client.clone(),
-                snapshot,
-                session,
-            ));
+            let activity = pm_prefs.as_ref().and_then(|prefs| {
+                gwt::pm_activity::for_window(
+                    prefs,
+                    snapshot.session_id.as_deref(),
+                    Some(snapshot.started_at_ms),
+                )
+            });
+            let connection_id = self
+                .project_state(&context)
+                .map(|state| state.project_owner_connection_id);
+            let projection = connection_id.map(|connection_id| (connection_id, activity));
+            let pm_matches = snapshot.agent_id.is_none()
+                || pm_prefs.as_ref().is_some_and(|prefs| {
+                    self.pm_session_for_root(&context.project_root)
+                        .map(String::as_str)
+                        == prefs
+                            .registration
+                            .as_ref()
+                            .map(|registration| registration.session_id.as_str())
+                });
+            let keep_terminal = self.runtimes.get(&window_id).is_some_and(|runtime| {
+                runtime.owner_pane_id == owner_id
+                    && runtime.owner_identity == identity
+                    && runtime.incarnation == snapshot.incarnation
+                    && connection_id.is_some()
+                    && runtime.inventory_projection.map(|(id, _)| id) == connection_id
+                    && runtime.screen_seq == snapshot.screen_seq
+                    && runtime.output_seq == snapshot.screen_seq
+                    && runtime.screen == snapshot.screen
+                    && runtime.screen_ansi == snapshot.screen_ansi
+            });
+            let unchanged = keep_terminal
+                && pm_matches
+                && self
+                    .runtimes
+                    .get(&window_id)
+                    .and_then(|runtime| runtime.inventory_projection)
+                    == projection
+                && self.owner_inventory_matches(&window_id, &snapshot, session.as_ref());
+            if unchanged {
+                if let Some(session_id) = snapshot.session_id.as_ref() {
+                    self.launch_wizard_cache
+                        .record_prepared_session(session_id, session);
+                }
+                events.extend(self.retry_remote_runtime_commands(&window_id, Instant::now()));
+            } else {
+                events.extend(self.apply_remote_owner_projection(
+                    &context,
+                    &window_id,
+                    client.clone(),
+                    snapshot,
+                    session,
+                    keep_terminal,
+                ));
+                if let Some(runtime) = self.runtimes.get_mut(&window_id) {
+                    runtime.inventory_projection = projection;
+                }
+            }
             if focus_owner_pane.as_deref() == Some(owner_id.as_str()) {
                 events.extend(self.focus_window_events(&window_id));
             }

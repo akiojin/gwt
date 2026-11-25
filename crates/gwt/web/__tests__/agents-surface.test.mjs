@@ -23,7 +23,7 @@ const members = [
   { member_id: "m2", name: "Two", provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, environmentView, onSetEnvironmentPriority, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, environmentView, onSetEnvironmentPriority, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false, onSelectPm } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -43,7 +43,7 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], traitsSaved = [], avatarsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
   if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
-  const surface = createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, onSetEnvironmentPriority, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onSetAvatar: (id, avatar) => avatarsSaved.push([id, avatar]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, onSetEnvironmentPriority, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onSelectPm, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (...args) => { added.push({ name: args[0], extra: args.length - 1 }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onSetAvatar: (id, avatar) => avatarsSaved.push([id, avatar]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
@@ -476,7 +476,7 @@ test("Agents add and rest actions target a member and Past shows measured contri
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
   name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
   f.surface.element.querySelector('[data-action="add"]').click();
-  assert.deepEqual(f.added, [{ name: "Maple", pm_eligible: false }]);
+  assert.deepEqual(f.added, [{ name: "Maple", extra: 0 }]);
   f.surface.element.querySelector('[data-tab="past"]').click();
   assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
   assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
@@ -764,8 +764,8 @@ test("Agents registers an explicit name alone, with no tool, model or reasoning,
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
   assert.ok(name, "registration exposes an accessible display name field");
   assert.equal(name.classList.contains("settings-input"), true, "registration reuses the tokenized shared input primitive");
-  const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]');
-  assert.ok(eligible, "registration exposes the eligibility draft"); assert.equal(eligible.checked, false);
+  // Issue #7646 AC-5 (item 44): PM eligibility is not an attribute of a member.
+  assert.equal(f.surface.element.querySelector('[aria-label="PM eligible for new member"]'), null, "registration asks no eligibility");
   const register = f.surface.element.querySelector('[data-action="add"]');
   const input = value => { name.value = value; name.dispatchEvent(new f.window.Event("input")); };
   assert.equal(register.disabled, true, "empty names cannot register");
@@ -775,7 +775,7 @@ test("Agents registers an explicit name alone, with no tool, model or reasoning,
   input("  Maple  ");
   assert.equal(register.title, "Register this name.");
   register.click();
-  assert.deepEqual(f.added, [{ name: "Maple", pm_eligible: false }]);
+  assert.deepEqual(f.added, [{ name: "Maple", extra: 0 }]);
   f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
   assert.equal(name.value, "  Maple  ", "backend rejection retains the draft");
   name.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null })); f.flush();
@@ -787,10 +787,9 @@ test("Agents registers an explicit name alone, with no tool, model or reasoning,
     members: [...state.members, { member_id: "other-writer", name: "Maple", enabled: true }] })); f.flush();
   assert.equal(name.value, "  Maple  ", "a later read must not mistake another writer's member for the rejected registration");
   f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
-  input("Cedar"); eligible.checked = true; register.click();
-  assert.equal(f.added.at(-1).pm_eligible, true);
+  input("Cedar"); register.click();
+  assert.deepEqual(f.added.at(-1), { name: "Cedar", extra: 0 });
   f.rosterModel.update(state => ({ ...state, error: "Refused" })); f.flush();
-  assert.equal(eligible.checked, true, "rejection retains checked eligibility");
   register.click();
   f.activityModel.update(state => ({ ...state, count: 2 })); f.flush();
   f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null,
@@ -805,9 +804,23 @@ test("configured PM remains a selectable named member with lossless roster revis
   assert.equal(f.surface.element.querySelectorAll('.roster-row').length, 1);
   assert.equal(f.surface.selectMember('m1'), true);
   assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').disabled, false);
-  assert.equal(f.surface.element.querySelector('[data-action="pm-eligible"]').checked, true);
-  assert.equal(f.surface.element.querySelector('[data-action="pm-eligible"]').disabled, true);
+  assert.equal(f.surface.element.querySelector('[data-action="pm-eligible"]'), null, "the ledger shows no PM eligibility");
+  assert.doesNotMatch(f.surface.element.querySelector('.roster-detail').textContent, /PM eligible/);
   assert.match(f.surface.element.querySelector('.roster-row').textContent, /Project Manager/);
+});
+
+// Issue #7646 AC-5 (items 44 and 100): the user designates any member; no
+// eligibility gates the assignment.
+test("any idle member can be designated as Project Manager from the ledger", async () => {
+  const selected = [];
+  const f = await fixture({ onSelectPm: memberId => selected.push(memberId) });
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_eligible: false, pm_project_key: null, assignment: null } : member) })); f.flush();
+  assert.equal(f.surface.selectMember("m2"), true);
+  const button = f.surface.element.querySelector('[data-action="select-pm"]');
+  assert.equal(button.textContent, "Select as Project Manager");
+  assert.equal(button.disabled, false);
+  button.click();
+  assert.deepEqual(selected, ["m2"]);
 });
 
 test("project app shares one tuning controller and routes role receipts without reconnect replay", () => {
@@ -860,13 +873,12 @@ test("ordinary roster rejection receipts show current role/registration diagnost
   const begin = (kind, request_id, rest = {}) => f.rosterController.beginAgentRosterRequest({ kind: "agent_roster", project_key: "project", request_id, action: { kind, ...rest }, expected_revision: f.rosterModel.read().revision });
   const rosterSnapshot = (revision, error = null) => ({ project_key: "project", revision, members: f.rosterModel.read().members.map(member => ({ ...member, agent_member_id: member.member_id })), error });
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]'); name.value = "New member"; name.dispatchEvent(new f.window.Event("input"));
-  const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]'); eligible.checked = true;
   assert.equal(begin("activate", "activate-current", { member_id: "m2" }), false);
   assert.equal(begin("rest", "rest-current", { member_id: "m2" }), false);
-  assert.equal(begin("add", "add-current", { name: "New member", agent_id: "codex", pm_eligible: true }), true);
+  assert.equal(begin("add", "add-current", { name: "New member", agent_id: "codex" }), true);
   f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "add-current", message: "Roster changed. Reload before retrying registration." }); f.flush();
   assert.match(f.surface.element.querySelector('.roster-error').textContent, /Reload before retrying registration/);
-  assert.equal(name.value, "New member"); assert.equal(eligible.checked, true);
+  assert.equal(name.value, "New member");
   begin("select_pm", "select-current", { member_id: "m2" });
   f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(4, "Member is selected in an implementation pool; remove it before selecting PM."), "select-current"); f.flush();
   assert.match(f.surface.element.querySelector('.roster-error').textContent, /implementation pool/);
@@ -876,26 +888,23 @@ test("ordinary roster rejection receipts show current role/registration diagnost
   assert.equal(f.rosterModel.read().error, null, "fresh matching Reload clears the refusal");
   f.scheduleModel.update(state => ({ ...state, snapshot: { ...state.snapshot, roster_revision: 4 } })); f.flush();
   assert.equal(f.surface.element.querySelector('[data-action="switch-next"]').disabled, false, "fresh Reload recovers the existing roster.error-dependent switch path");
-  assert.equal(name.value, "New member"); assert.equal(eligible.checked, true);
+  assert.equal(name.value, "New member");
   f.surface.selectMember("m2");
-  const memberEligible = f.surface.element.querySelector('[data-action="pm-eligible"]');
-  begin("set_pm_eligibility", "delayed-current", { member_id: "m2", eligible: true });
+  begin("select_pm", "delayed-current", { member_id: "m2" });
   f.flush();
-  assert.equal(memberEligible.checked, true, "pending eligibility survives a redraw");
-  assert.notEqual(f.rosterModel.read().members[1].pm_eligible, true, "pending display does not change canonical eligibility");
   assert.equal(f.surface.element.querySelector('[data-action="select-pm"]').disabled, true, "PM selection waits for canonical approval");
   begin("read", "parallel-read");
   f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "parallel-read");
-  f.flush(); assert.equal(memberEligible.checked, true, "parallel read preserves the pending intent");
+  f.flush();
   assert.equal(f.rosterModel.read().pending_roster.request_id, "delayed-current", "Read never consumes the mutation");
-  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(5, "Eligibility refused: configured member cannot change."), "delayed-current"); f.flush();
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(5, "Selection refused: member is busy."), "delayed-current"); f.flush();
   assert.equal(f.rosterModel.read().revision, 6, "old response does not hydrate old canonical");
   assert.equal(f.rosterModel.read().pending_roster, null);
-  assert.equal(memberEligible.checked, false, "correlated refusal restores canonical eligibility");
-  assert.match(f.rosterModel.read().error, /Eligibility refused/);
+  assert.equal(f.rosterModel.read().members[1].pm_project_key, undefined, "correlated refusal keeps the canonical PM");
+  assert.match(f.rosterModel.read().error, /Selection refused/);
   begin("read", "superseded-read"); begin("read", "current-read");
   f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "superseded-read");
-  assert.match(f.rosterModel.read().error, /Eligibility refused/, "superseded Read cannot clear the banner");
+  assert.match(f.rosterModel.read().error, /Selection refused/, "superseded Read cannot clear the banner");
   f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "current-read");
   assert.equal(f.rosterModel.read().error, null);
   begin("move", "move-current", { member_id: "m2", direction: "up" });

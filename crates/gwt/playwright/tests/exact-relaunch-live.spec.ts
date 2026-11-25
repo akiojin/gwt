@@ -1380,11 +1380,10 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       };
       const beforePmAdd = await readRoster(page);
       await surface.getByRole("textbox", { name: "Name for new member", exact: true }).fill("Project A PM member");
-      await surface.getByRole("checkbox", { name: "PM eligible for new member", exact: true }).check();
       const pmRoster = await pmMutation("add", () => surface.locator('.roster-capacity [data-action="add"]').click());
       expect(pmRoster.members).toHaveLength(beforePmAdd.members.length + 1);
       const pmMember = pmRoster.members.find(member => member.name === "Project A PM member")!;
-      expect(pmMember).toMatchObject({ agent_id: "codex", pm_eligible: true, assignment: null });
+      expect(pmMember).toMatchObject({ agent_id: "codex", assignment: null });
       const pmMemberId = pmMember.agent_member_id;
       expect(pmMemberId).not.toBe(memberId);
       expect(pmMemberId).not.toBe(spare.agent_member_id);
