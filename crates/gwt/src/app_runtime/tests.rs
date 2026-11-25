@@ -2142,6 +2142,8 @@ fn sample_runtime_with_events(
         issue_monitor_launch_failure_causes: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
         issue_monitor_launch_attempts: HashMap::new(),
+        issue_monitor_stale_retry_at: HashMap::new(),
+        issue_monitor_cleanup_retries: HashMap::new(),
         issue_monitor_launch_queue: Vec::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         // Issue #3878: own the fallback commit budget instead of inheriting

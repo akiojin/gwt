@@ -36,6 +36,47 @@ test.describe("Issue queue real backend launch", () => {
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
+  test("Issue #7817 launch_now leaves a delivered PM check queued without starting its Agent", async ({ page }, info) => {
+    const issueNumber = 43;
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      page,
+      issueNumber,
+      additionalIssueNumbers: [44],
+      initialBodies: {
+        43: "## Acceptance Criteria\n- [x] AC-1: Deliver the implementation.\n- [ ] AC-2: [main-verification] PM verifies main.",
+      },
+      monitorPreferences: {
+        merged_issue_settlements: [{
+          issue_number: issueNumber,
+          pr_number: 7,
+          merge_sha: "1234567890123456789012345678901234567890",
+          action: { kind: "await_close", unmet: ["AC-2"] },
+          settled_at: new Date().toISOString(),
+        }],
+      },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const launchNow = await fixture.operationAsync("issue.monitor.launch_now", { number: issueNumber });
+      expect(JSON.parse(launchNow.output).priority_updated).toBe(true);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [44] });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([44]);
+      const status = fixture.fixtureOperation("issue.monitor.status");
+      const row = JSON.parse(status.output).inbox.find((item: any) => item.issue_number === issueNumber);
+      expect(row.exclusion_reason).toContain("delivered Issue is awaiting PM or main verification");
+      expect(row.launched_window_id).toBeUndefined();
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors).toEqual([]);
+  });
+
   test("Issue #6996 five submissions immediately after GUI restart do not report finalizer waits as errors", async ({ page }, info) => {
     test.setTimeout(360_000);
     const issueNumbers = [43, 44, 45, 46, 47];

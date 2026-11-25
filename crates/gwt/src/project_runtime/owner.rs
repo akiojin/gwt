@@ -187,11 +187,30 @@ struct AgentOperation {
     replies: Vec<oneshot::Sender<OwnerReply>>,
     cancel_replies: Vec<oneshot::Sender<OwnerReply>>,
     cancellation_cleaned: bool,
+    stale_monitor_cleanup: Option<StaleMonitorLaunchCleanup>,
     manual_predecessor_stopped: Option<gwt_agent::SessionExecutionIdentity>,
     retained_manual_failure: Option<super::events::OwnerRetainedManualLaunchFailure>,
     pending_continue: Option<super::launch_payload::PendingContinueWork>,
     failed_session: Option<gwt_agent::Session>,
     result: Option<OwnerReply>,
+}
+
+#[derive(Clone)]
+struct StaleMonitorLaunchCleanup {
+    row: super::agent_dispatch::OwnedWindowRecordCleanup,
+    feedback: super::launch_payload::LaunchFeedbackContext,
+}
+
+impl StaleMonitorLaunchCleanup {
+    fn finish(&self, current: &AtomicBool) -> Result<bool, String> {
+        self.row.finish()?;
+        retry_unclaimed_monitor_capacity(
+            &self.row.root,
+            Some(&self.feedback),
+            current,
+            super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE,
+        )
+    }
 }
 
 impl AgentOperation {
@@ -370,6 +389,7 @@ pub(crate) struct AgentPrepared {
     retirement_reason: Option<String>,
     registry_cleanup: Option<super::agent_dispatch::OwnedWindowRecordCleanup>,
     cancelled_cleanup: bool,
+    stale_monitor_cleanup: Option<StaleMonitorLaunchCleanup>,
     durable_candidate_removed: bool,
     purpose_title: Option<String>,
     operation_id: String,
@@ -2032,6 +2052,7 @@ impl OwnerState {
                         operation.cancellation_cleaned = cleanup.is_ok();
                         if cleanup.is_ok() {
                             operation.failed_session = None;
+                            operation.stale_monitor_cleanup = None;
                         }
                     }
                     let error = match cleanup {
@@ -4804,6 +4825,7 @@ impl OwnerState {
                     replies: Vec::new(),
                     cancel_replies: Vec::new(),
                     cancellation_cleaned: true,
+                    stale_monitor_cleanup: None,
                     manual_predecessor_stopped: None,
                     retained_manual_failure: None,
                     pending_continue: None,
@@ -4852,6 +4874,23 @@ impl OwnerState {
             let _ = reply.send(Ok(
                 json!({"cancelled":true,"id":id,"operation_id":operation_id}),
             ));
+            return;
+        }
+        if let Some(cleanup) = operation.stale_monitor_cleanup.clone() {
+            let in_flight = !operation.cancel_replies.is_empty();
+            operation.cancel_replies.push(reply);
+            if !in_flight {
+                self.agent_dispatch_jobs += 1;
+                let sender = self.sender.clone();
+                spawn_owner_worker(move || {
+                    let cleanup = cleanup.finish(&AtomicBool::new(true)).map(|_| json!({}));
+                    let _ = sender.send(OwnerMessage::ProcessLaunchFailed {
+                        operation_id,
+                        detail: super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into(),
+                        cleanup,
+                    });
+                });
+            }
             return;
         }
         if operation.failed_session.is_some() {
@@ -5639,6 +5678,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -5773,6 +5813,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -5909,6 +5950,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -6029,18 +6071,25 @@ impl OwnerState {
             return;
         }
         let rejection_in_progress = self.agent_operations.values().any(|operation| {
-            operation
-                .pending_monitor_rejection_issue()
-                .is_some_and(|issue| {
-                    config.linked_issue_number == Some(issue)
-                        || metadata
-                            .launch_feedback_context
+            (operation.id == id && operation.stale_monitor_cleanup.is_some())
+                || operation
+                    .pending_monitor_rejection_issue()
+                    .or_else(|| {
+                        operation
+                            .stale_monitor_cleanup
                             .as_ref()
-                            .and_then(|feedback| {
-                                feedback.issue_monitor_launch_binding_issue_number()
-                            })
-                            == Some(issue)
-                })
+                            .and_then(|cleanup| cleanup.feedback.issue_monitor_issue_number)
+                    })
+                    .is_some_and(|issue| {
+                        config.linked_issue_number == Some(issue)
+                            || metadata
+                                .launch_feedback_context
+                                .as_ref()
+                                .and_then(|feedback| {
+                                    feedback.issue_monitor_launch_binding_issue_number()
+                                })
+                                == Some(issue)
+                    })
         });
         let retry_stopped_predecessor = metadata.manual_successor.as_ref().and_then(|choice| {
             let operation = self.agent_operations.get(&operation_id)?;
@@ -6179,6 +6228,7 @@ impl OwnerState {
                         replies: Vec::new(),
                         cancel_replies: Vec::new(),
                         cancellation_cleaned: true,
+                        stale_monitor_cleanup: None,
                         manual_predecessor_stopped: None,
                         retained_manual_failure: None,
                         pending_continue: None,
@@ -6331,6 +6381,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: retry_stopped_predecessor.clone(),
                 retained_manual_failure: None,
                 pending_continue: continuation.clone(),
@@ -7148,7 +7199,7 @@ impl OwnerState {
                 && !input.physical_spawn_started
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
-            let cancelled_cleanup = if unproved_manual_cleanup {
+            let mut cancelled_cleanup = if unproved_manual_cleanup {
                 let (worktree, binding) = manual_successor_prepared
                     .as_ref()
                     .expect("unmaterialized Manual cleanup has a captured preparation");
@@ -7190,6 +7241,7 @@ impl OwnerState {
                 }
                 Ok(())
             };
+            let mut stale_monitor_cleanup = None;
             let mut monitor_failure_committed = false;
             if let Err(error) = &result {
                 if !input.physical_spawn_started
@@ -7203,21 +7255,55 @@ impl OwnerState {
                         .as_ref()
                         .is_ok_and(|row| row.as_ref().is_none_or(|row| row.session_id.is_none()))
                 {
-                    match retry_unclaimed_monitor_capacity(
-                        &root,
-                        admission_feedback.as_ref(),
-                        &input.current,
-                        &error.detail,
+                    let stale =
+                        error.detail == super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE;
+                    if let (true, Some(feedback), Ok(registry)) = (
+                        stale,
+                        admission_feedback.as_ref().filter(|feedback| {
+                            feedback.issue_monitor_delivery_id.is_some()
+                                && !feedback.issue_monitor_review_dispatch
+                                && feedback.issue_monitor_autonomous_handoff.is_none()
+                        }),
+                        &owner_registry,
                     ) {
-                        Ok(true) => match cleanup_monitor_window_record() {
-                            Ok(()) => monitor_failure_committed = true,
-                            Err(error) => {
-                                tracing::warn!(%error, "capacity retry row cleanup remains unconfirmed");
+                        let cleanup = StaleMonitorLaunchCleanup {
+                            row: super::agent_dispatch::OwnedWindowRecordCleanup {
+                                registry: registry.clone(),
+                                registry_path: owner_registry_path.clone(),
+                                root: root.clone(),
+                                project_key: cleanup_project_key.clone(),
+                                canonical_id: id.clone(),
+                                expected_session_id: None,
+                            },
+                            feedback: feedback.clone(),
+                        };
+                        match cleanup.finish(&input.current) {
+                            Ok(committed) => {
+                                cancelled_cleanup = true;
+                                monitor_failure_committed = committed;
                             }
-                        },
-                        Ok(false) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, "capacity retry remains unconfirmed");
+                            Err(error) => {
+                                tracing::warn!(%error, "stale Monitor admission cleanup remains unconfirmed");
+                                stale_monitor_cleanup = Some(cleanup);
+                            }
+                        }
+                    } else if !stale {
+                        match retry_unclaimed_monitor_capacity(
+                            &root,
+                            admission_feedback.as_ref(),
+                            &input.current,
+                            &error.detail,
+                        ) {
+                            Ok(true) => match cleanup_monitor_window_record() {
+                                Ok(()) => monitor_failure_committed = true,
+                                Err(error) => {
+                                    tracing::warn!(%error, "capacity retry row cleanup remains unconfirmed");
+                                }
+                            },
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, "capacity retry remains unconfirmed");
+                            }
                         }
                     }
                 }
@@ -7289,6 +7375,7 @@ impl OwnerState {
                 });
                 if let Some(launch) = launch.filter(|_| {
                     !monitor_failure_committed
+                        && stale_monitor_cleanup.is_none()
                         && restore
                             .as_ref()
                             .is_none_or(|restore| restore.account_switch.is_none())
@@ -7437,6 +7524,7 @@ impl OwnerState {
                 retirement_reason,
                 registry_cleanup,
                 cancelled_cleanup,
+                stale_monitor_cleanup,
                 durable_candidate_removed,
                 purpose_title,
                 operation_id,
@@ -7635,6 +7723,7 @@ impl OwnerState {
             retirement_reason,
             registry_cleanup,
             cancelled_cleanup,
+            stale_monitor_cleanup,
             durable_candidate_removed,
             purpose_title,
             operation_id,
@@ -7798,6 +7887,7 @@ impl OwnerState {
                         });
                 if let Some(operation) = self.agent_operations.get_mut(&operation_id) {
                     operation.cancellation_cleaned = cancelled_cleanup;
+                    operation.stale_monitor_cleanup = stale_monitor_cleanup;
                     if retained {
                         operation.retained_manual_failure =
                             Some(super::events::OwnerRetainedManualLaunchFailure {
@@ -13343,6 +13433,7 @@ fn retry_unclaimed_monitor_capacity(
 ) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
         (crate::issue_monitor::is_monitor_spawn_hold_refusal(detail)
+            || detail == super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE
             || detail.starts_with("Machine Agent capacity is occupied;")
             || detail.starts_with("Machine Agent capacity observation is unavailable;")
             || detail.starts_with("Machine Agent census is uncertain;"))
@@ -13550,6 +13641,7 @@ mod worker_tests {
                 replies: Vec::new(),
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -13603,6 +13695,53 @@ mod worker_tests {
             owner.owner_monitor_window_snapshot("current").windows.len(),
             1
         );
+    }
+
+    #[test]
+    fn issue_7817_failed_exact_cleanup_retains_the_unclaimed_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.join("home"));
+        let (owner, _, _) = owner_fixture(root);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(root);
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.pending_launch_deliveries.push(
+            serde_json::from_value(json!({
+                "delivery_id": "delivery-42", "issue_number": 42,
+                "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+                "claim_id": "claim-42", "created_at": "2026-11-25T00:00:00Z"
+            }))
+            .unwrap(),
+        );
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let blocker = root.join("blocked");
+        std::fs::write(&blocker, b"cannot create a registry below a file").unwrap();
+        let cleanup = StaleMonitorLaunchCleanup {
+            row: super::super::agent_dispatch::OwnedWindowRecordCleanup {
+                registry: owner.agent_registry.clone().unwrap(),
+                registry_path: blocker.join("registry.json"),
+                root: root.into(),
+                project_key: owner.project_key.clone(),
+                canonical_id: format!("{}::agent-1", owner.project_key),
+                expected_session_id: None,
+            },
+            feedback: serde_json::from_value(json!({
+                "client_id": "test", "title": "Issues",
+                "issue_monitor_issue_number": 42, "issue_monitor_delivery_id": "delivery-42",
+                "issue_monitor_review_dispatch": false
+            }))
+            .unwrap(),
+        };
+        let current = AtomicBool::new(true);
+        assert!(cleanup.finish(&current).is_err());
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        std::fs::remove_file(&blocker).unwrap();
+        std::fs::create_dir(&blocker).unwrap();
+        assert_eq!(cleanup.finish(&current), Ok(true));
+        let after = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(after.pending_launch_deliveries.is_empty());
+        assert!(after.autonomous_records[0].retry_not_before.is_some());
     }
 
     #[test]
@@ -14883,6 +15022,7 @@ mod tests {
                 replies: Vec::new(),
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -15418,6 +15558,7 @@ mod tests {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -15479,6 +15620,7 @@ mod tests {
                 registry_cleanup: None,
                 retirement_reason: None,
                 cancelled_cleanup: false,
+                stale_monitor_cleanup: None,
                 durable_candidate_removed: false,
                 purpose_title: None,
                 operation_id: "operation".into(),
@@ -16323,6 +16465,7 @@ mod tests {
                 replies: Vec::new(),
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,

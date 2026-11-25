@@ -1930,6 +1930,9 @@ pub struct IssueMonitorSpawnAdmissionInput {
 pub const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
     "Issues spawn admission changed; prepare the launch again";
 
+/// 21 seconds between retries allow at most three preparations in any minute.
+pub const MONITOR_STALE_RETRY_SECS: u64 = 21;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IssueMonitorAdmissionFileVersion {
     Metadata(Option<(std::time::SystemTime, u64)>),

@@ -975,6 +975,12 @@ pub(crate) struct RemoteOwnerLaunchComplete {
     pub(crate) restore_feedback: Option<RestoreLaunchFeedback>,
     pub(crate) result: Result<RemoteOwnerLaunchOutcome, String>,
 }
+
+pub(crate) struct IssueMonitorCleanupRetry {
+    issue_number: u64,
+    next_retry: Option<std::time::Instant>,
+    completion: RemoteOwnerLaunchComplete,
+}
 impl std::fmt::Debug for RemoteOwnerLaunchComplete {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteOwnerLaunchComplete")
@@ -2189,6 +2195,9 @@ pub struct AppRuntime {
     pub(crate) issue_monitor_launch_failure_causes: HashMap<PathBuf, String>,
     pub(crate) issue_monitor_launch_preparations: HashSet<wizard::IssueMonitorLaunchPreparationKey>,
     pub(crate) issue_monitor_launch_attempts: HashMap<wizard::IssueMonitorLaunchPreparationKey, u8>,
+    pub(crate) issue_monitor_stale_retry_at:
+        HashMap<(gwt_core::repo_hash::ProjectKey, u64), std::time::Instant>,
+    pub(crate) issue_monitor_cleanup_retries: HashMap<String, IssueMonitorCleanupRetry>,
     pub(crate) issue_monitor_launch_queue: Vec<wizard::PendingIssueMonitorLaunch>,
     pub(crate) issue_monitor_materializer_id: String,
     /// Issue #3878: budget for one local fallback commit of Issues
@@ -5316,6 +5325,8 @@ impl AppRuntime {
             issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
             issue_monitor_launch_attempts: HashMap::new(),
+            issue_monitor_stale_retry_at: HashMap::new(),
+            issue_monitor_cleanup_retries: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
@@ -16618,6 +16629,33 @@ impl AppRuntime {
         &mut self,
         completion: RemoteOwnerLaunchComplete,
     ) -> Vec<OutboundEvent> {
+        let retry = self
+            .issue_monitor_cleanup_retries
+            .remove(&completion.window_id);
+        let stale = gwt::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE;
+        if let Some(issue_number) = retry.map(|retry| retry.issue_number).or_else(|| {
+            self.pending_launch_feedback_contexts
+                .get(&completion.window_id)
+                .and_then(|feedback| feedback.issue_monitor_launch_binding_issue_number())
+        }) {
+            if completion.result.as_ref().is_err_and(|error| {
+                error.strip_prefix(stale).is_some_and(|detail| {
+                    detail.starts_with("; exact owner cleanup remains pending:")
+                })
+            }) {
+                // Do not publish a normal failure or discard the exact operation
+                // while its cleanup may still own the Issue's window.
+                self.issue_monitor_cleanup_retries.insert(
+                    completion.window_id.clone(),
+                    IssueMonitorCleanupRetry {
+                        issue_number,
+                        next_retry: Some(std::time::Instant::now() + monitor_stale_retry_delay()),
+                        completion,
+                    },
+                );
+                return Vec::new();
+            }
+        }
         let RemoteOwnerLaunchComplete {
             context,
             window_id,
@@ -17161,6 +17199,46 @@ impl AppRuntime {
             wizard_events.extend(self.pm_status_broadcast_events(&context));
         }
         wizard_events
+    }
+
+    fn retry_issue_monitor_launch_cleanups(&mut self, now: std::time::Instant) {
+        for retry in self.issue_monitor_cleanup_retries.values_mut() {
+            if retry.next_retry.is_none_or(|next| now < next) {
+                continue;
+            }
+            let mut completion = retry.completion.clone();
+            let proxy = self.proxy.clone();
+            if self
+                .blocking_tasks
+                .try_spawn(move || {
+                    let result = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| error.to_string())
+                        .and_then(|executor| {
+                            executor.block_on(cancel_remote_owner_launch(
+                                &completion.owner_pane_id,
+                                &completion.operation_id,
+                                &completion.client_cell,
+                                &completion.cancel_ack,
+                            ))
+                        });
+                    let stale =
+                        gwt::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE;
+                    completion.result = result
+                        .map(|()| RemoteOwnerLaunchOutcome::MonitorFailureClosed {
+                            detail: stale.into(),
+                        })
+                        .map_err(|error| {
+                            format!("{stale}; exact owner cleanup remains pending: {error}")
+                        });
+                    proxy.send(UserEvent::RemoteOwnerLaunchComplete(Box::new(completion)));
+                })
+                .is_ok()
+            {
+                retry.next_retry = None;
+            }
+        }
     }
 
     /// The pending immutable feedback is consumed once, whether the owner
@@ -17821,4 +17899,8 @@ impl AppRuntime {
         }
         events
     }
+}
+
+fn monitor_stale_retry_delay() -> Duration {
+    Duration::from_secs(gwt::project_runtime::installation::MONITOR_STALE_RETRY_SECS)
 }

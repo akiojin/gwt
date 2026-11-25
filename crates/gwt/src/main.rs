@@ -5172,6 +5172,8 @@ mod tests {
             issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_launch_attempts: std::collections::HashMap::new(),
+            issue_monitor_stale_retry_at: HashMap::new(),
+            issue_monitor_cleanup_retries: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_fallback_commit_timeout:
