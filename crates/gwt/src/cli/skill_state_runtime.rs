@@ -80,7 +80,7 @@ pub(super) fn run_with_start_evidence<E: CliEnv>(
                     return Ok(1);
                 }
             };
-            if current.owner_spec.is_some() && current.owner_spec != Some(spec) {
+            if owner_conflicts(current.owner_spec, spec) {
                 out.push_str(&format!(
                     "{verb}: phase refused: state owns SPEC-{owner:?}, got --spec {spec}\n",
                     owner = current.owner_spec
@@ -88,6 +88,7 @@ pub(super) fn run_with_start_evidence<E: CliEnv>(
                 return Ok(2);
             }
             let next = SkillState {
+                owner_spec: bound_owner(current.owner_spec, spec),
                 phase: Some(label.clone()),
                 ..current
             };
@@ -117,6 +118,22 @@ pub(super) fn run_with_start_evidence<E: CliEnv>(
     }
 }
 
+/// SPEC-0 is the documented placeholder owner used before the real SPEC id
+/// exists (e.g. `register.start` before `issue.spec.create`). An unowned or
+/// placeholder lifecycle may be bound to the real id by `phase` /
+/// `complete` / `abort`; once bound, a different id is refused (#7342).
+fn owner_conflicts(owner: Option<u64>, spec: u64) -> bool {
+    matches!(owner, Some(owner) if owner != 0 && owner != spec)
+}
+
+fn bound_owner(owner: Option<u64>, spec: u64) -> Option<u64> {
+    if spec == 0 {
+        owner
+    } else {
+        Some(spec)
+    }
+}
+
 fn finalize(
     worktree: &std::path::Path,
     skill_name: &str,
@@ -139,7 +156,7 @@ fn finalize(
             return Ok(1);
         }
     };
-    if current.owner_spec.is_some() && current.owner_spec != Some(spec) {
+    if owner_conflicts(current.owner_spec, spec) {
         out.push_str(&format!(
             "{verb}: finalize refused: state owns SPEC-{owner:?}, got --spec {spec}\n",
             owner = current.owner_spec
@@ -147,6 +164,7 @@ fn finalize(
         return Ok(2);
     }
     let next = SkillState {
+        owner_spec: bound_owner(current.owner_spec, spec),
         active: false,
         phase: reason
             .as_ref()

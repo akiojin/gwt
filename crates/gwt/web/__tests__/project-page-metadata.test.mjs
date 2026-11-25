@@ -37,13 +37,13 @@ test("server aggregate renders exact project counts, unread, and semantic favico
   const icon = document.querySelector('link[rel="icon"]');
   assert.equal(icon.dataset.state, "idle", "favicon also waits for the shared frame");
   flush();
-  assert.equal(document.title, "● Repo A — RUN 2 · BLOCK 1 — gwt");
+  assert.equal(document.title, "● Repo A — 2 running · 1 blocked — gwt");
   assert.equal(icon.dataset.state, "error");
   assert.equal(icon.dataset.unread, "true");
   assert.match(decodeURIComponent(icon.href), /red/);
   controller.update({ running_count: 0, block_count: 1, error_count: 0, unread: false, revision: 6 });
   flush();
-  assert.equal(document.title, "Repo A — RUN 0 · BLOCK 1 — gwt");
+  assert.equal(document.title, "Repo A — 0 running · 1 blocked — gwt");
   assert.equal(icon.dataset.state, "blocked");
   controller.update({ running_count: 1, block_count: 0, unread: false, revision: 7 });
   flush();
@@ -57,7 +57,7 @@ test("Hub metadata remains fixed despite aggregate and name input", () => {
   controller.setProjectName("Repo A");
   controller.update({ running_count: 7, unread: true });
   controller.reportAttention();
-  assert.equal(document.title, "gwt — Hub");
+  assert.equal(document.title, "gwt — Home");
   assert.deepEqual(sent, []);
   assert.equal(document.querySelector('link[rel="icon"]').getAttribute("href"), "data:,");
 });
@@ -79,7 +79,7 @@ test("unchanged metadata skips frames while acknowledgements and shared counts a
   assert.equal(document.querySelector('link[rel="icon"]').dataset.state, "blocked");
   controller.update({ ...aggregate, error_count: 0, unread: false, revision: 5 });
   flush();
-  assert.equal(document.title, "Project — RUN 2 · BLOCK 1 — gwt");
+  assert.equal(document.title, "Project — 2 running · 1 blocked — gwt");
 });
 test("metadata uses Operator tokens without literal palette colors", () => {
   const source = readFileSync(new URL("../project-page-metadata.js", import.meta.url), "utf8");
@@ -113,11 +113,11 @@ test("old aggregate cannot overwrite newer metadata", () => {
   controller.update({ running_count: 2, unread: false, revision: 5 });
   controller.update({ running_count: 99, unread: true, revision: 4 });
   flush();
-  assert.equal(document.title, "Project — RUN 2 · BLOCK 0 — gwt");
+  assert.equal(document.title, "Project — 2 running · 0 blocked — gwt");
   controller.resetConnection();
   controller.update({ running_count: 1, revision: 1 });
   flush();
-  assert.equal(document.title, "Project — RUN 1 · BLOCK 0 — gwt");
+  assert.equal(document.title, "Project — 1 running · 0 blocked — gwt");
 });
 test("metadata owns the received snapshot across theme, name, and attention updates", () => {
   const { document, window, sent, controller, flush } = setup();
@@ -127,7 +127,7 @@ test("metadata owns the received snapshot across theme, name, and attention upda
   controller.setProjectName("Repo A");
   document.hasFocus = () => true;
   window.dispatchEvent(new window.Event("focus"));
-  assert.equal(document.title, "● Repo A — RUN 2 · BLOCK 1 — gwt");
+  assert.equal(document.title, "● Repo A — 2 running · 1 blocked — gwt");
   const icon = document.querySelector('link[rel="icon"]');
   assert.equal(icon.dataset.state, "error");
   assert.equal(icon.dataset.unread, "true");
@@ -138,7 +138,7 @@ test("metadata owns the received snapshot across theme, name, and attention upda
   assert.equal(acknowledgements().length, 1, "reconnect must not acknowledge an old connection's snapshot");
   controller.update({ running_count: 1, unread: false, revision: 1 });
   flush();
-  assert.equal(document.title, "Repo A — RUN 1 · BLOCK 0 — gwt");
+  assert.equal(document.title, "Repo A — 1 running · 0 blocked — gwt");
   assert.equal(icon.dataset.state, "running");
 });
 test("unavailable favicon style API does not prevent title updates or acknowledgement", () => {
@@ -147,7 +147,7 @@ test("unavailable favicon style API does not prevent title updates or acknowledg
   document.hasFocus = () => true;
   assert.doesNotThrow(() => controller.update({ running_count: 3, unread: true, revision: 9 }));
   assert.doesNotThrow(flush);
-  assert.equal(document.title, "● Project — RUN 3 · BLOCK 0 — gwt");
+  assert.equal(document.title, "● Project — 3 running · 0 blocked — gwt");
   assert.equal(sent.at(-1).revision, 9);
 });
 

@@ -1,4 +1,7 @@
 //! The existing daemon's single physical pane store and enqueue-only mailbox.
+#[path = "owner_accounts.rs"]
+mod accounts;
+
 use super::events::{OwnerCommand, OwnerEvent, OwnerReply, OwnerRequest};
 use super::presence::{GuiPresence, ResidencySnapshot};
 use super::{
@@ -184,11 +187,30 @@ struct AgentOperation {
     replies: Vec<oneshot::Sender<OwnerReply>>,
     cancel_replies: Vec<oneshot::Sender<OwnerReply>>,
     cancellation_cleaned: bool,
+    stale_monitor_cleanup: Option<StaleMonitorLaunchCleanup>,
     manual_predecessor_stopped: Option<gwt_agent::SessionExecutionIdentity>,
     retained_manual_failure: Option<super::events::OwnerRetainedManualLaunchFailure>,
     pending_continue: Option<super::launch_payload::PendingContinueWork>,
     failed_session: Option<gwt_agent::Session>,
     result: Option<OwnerReply>,
+}
+
+#[derive(Clone)]
+struct StaleMonitorLaunchCleanup {
+    row: super::agent_dispatch::OwnedWindowRecordCleanup,
+    feedback: super::launch_payload::LaunchFeedbackContext,
+}
+
+impl StaleMonitorLaunchCleanup {
+    fn finish(&self, current: &AtomicBool) -> Result<bool, String> {
+        self.row.finish()?;
+        retry_unclaimed_monitor_capacity(
+            &self.row.root,
+            Some(&self.feedback),
+            current,
+            super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE,
+        )
+    }
 }
 
 impl AgentOperation {
@@ -367,6 +389,7 @@ pub(crate) struct AgentPrepared {
     retirement_reason: Option<String>,
     registry_cleanup: Option<super::agent_dispatch::OwnedWindowRecordCleanup>,
     cancelled_cleanup: bool,
+    stale_monitor_cleanup: Option<StaleMonitorLaunchCleanup>,
     durable_candidate_removed: bool,
     purpose_title: Option<String>,
     operation_id: String,
@@ -382,6 +405,7 @@ pub(crate) enum CloseCause {
     DiagnosticExit,
     PmGenericCrash,
     GuiLifetime,
+    AccountSwitch,
 }
 impl CloseCause {
     fn restore_policy(self) -> Option<bool> {
@@ -389,7 +413,7 @@ impl CloseCause {
             Self::ExplicitClose | Self::ExplicitStop | Self::NaturalExit | Self::DiagnosticExit => {
                 Some(false)
             }
-            Self::PmGenericCrash | Self::GuiLifetime => None,
+            Self::PmGenericCrash | Self::GuiLifetime | Self::AccountSwitch => None,
         }
     }
 
@@ -398,7 +422,7 @@ impl CloseCause {
     }
 
     fn permits_retained_row_close(self, runtime: &WindowRuntime) -> bool {
-        matches!(self, Self::ExplicitStop)
+        matches!(self, Self::ExplicitStop | Self::AccountSwitch)
             || (matches!(self, Self::DiagnosticExit)
                 && runtime.agent.is_some()
                 && !runtime_uses_pm_worktree(runtime))
@@ -828,6 +852,12 @@ pub(crate) enum OwnerMessage {
     InputWritten {
         reply: oneshot::Sender<OwnerReply>,
         result: Result<Option<super::events::OwnerInputObservation>, String>,
+        input: Option<accounts::InputCapture>,
+    },
+    AccountPoolProbed {
+        id: String,
+        incarnation: u64,
+        pool: std::io::Result<accounts::AccountPoolProbe>,
     },
     MobileInputWritten {
         identity: super::events::OwnerMobileInputIdentity,
@@ -836,6 +866,7 @@ pub(crate) enum OwnerMessage {
         attempted: bool,
         result: Result<(), String>,
         observation: Option<super::events::OwnerInputObservation>,
+        started: std::time::Instant,
     },
     PmWakeWritten {
         operation_id: String,
@@ -843,6 +874,7 @@ pub(crate) enum OwnerMessage {
         facts: serde_json::Value,
         reply: oneshot::Sender<OwnerReply>,
         result: Result<super::pm_delivery::PmWakeWrite, String>,
+        input: (String, u64, String, std::time::Instant),
     },
     PmWakeAcknowledged {
         result: Result<(), String>,
@@ -1337,6 +1369,7 @@ pub(crate) struct OwnerState {
     test_dispatch_barriers: Vec<(bool, oneshot::Sender<()>)>,
     policy_usage_accounts: Vec<gwt_core::usage::ProviderUsage>,
     policy_capacity_resumes: HashMap<String, super::runtime_events::ProviderCapacityResume>,
+    account_switches: HashMap<String, accounts::AccountSwitchState>,
     #[cfg(any(test, feature = "test-gh-guard"))]
     next_capacity_checkpoint: Option<(
         String,
@@ -1435,6 +1468,7 @@ impl OwnerState {
             test_reconciler: None,
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
+            account_switches: HashMap::new(),
             agent_registry,
             shared_registry_initialization: None,
             registry_projection,
@@ -2018,6 +2052,7 @@ impl OwnerState {
                         operation.cancellation_cleaned = cleanup.is_ok();
                         if cleanup.is_ok() {
                             operation.failed_session = None;
+                            operation.stale_monitor_cleanup = None;
                         }
                     }
                     let error = match cleanup {
@@ -2478,13 +2513,36 @@ impl OwnerState {
                     let _ = reply
                         .send(serde_json::to_value(receipt).map_err(|error| error.to_string()));
                 }
-                OwnerMessage::InputWritten { reply, result } => {
+                OwnerMessage::InputWritten {
+                    reply,
+                    result,
+                    input,
+                } => {
                     self.input_jobs -= 1;
+                    if let Some(input) = input {
+                        if result.is_ok() {
+                            self.remember_account_input(
+                                &input.id,
+                                input.incarnation,
+                                &input.bytes,
+                                input.typed,
+                                input.started,
+                            );
+                        }
+                        self.account_input_finished(&input.id);
+                    }
                     let _ = reply.send(
                         result.map(|observation| json!({"ok":true,
                             "has_unsent_user_input":observation.map(|value| value.has_unsent_user_input),
                             "input_observation":observation})),
                     );
+                }
+                OwnerMessage::AccountPoolProbed {
+                    id,
+                    incarnation,
+                    pool,
+                } => {
+                    self.account_pool_probed(&id, incarnation, pool);
                 }
                 OwnerMessage::MobileInputWritten {
                     identity,
@@ -2493,10 +2551,20 @@ impl OwnerState {
                     attempted,
                     result,
                     observation,
+                    started,
                 } => {
                     self.input_jobs -= 1;
                     if attempted && self.exact(&identity.id, identity.incarnation).is_ok() {
                         self.begin_policy_input(&identity.id, &data);
+                        if result.is_ok() {
+                            self.remember_account_input(
+                                &identity.id,
+                                identity.incarnation,
+                                &data,
+                                false,
+                                started,
+                            );
+                        }
                     }
                     self.pm_wake_permits.finish_mobile(&identity, &transaction);
                     transaction.finish(attempted, result, observation);
@@ -2506,9 +2574,20 @@ impl OwnerState {
                     facts,
                     reply,
                     result,
+                    input: (id, incarnation, text, started),
                 } => {
                     self.input_jobs -= 1;
                     self.pm_wake_permits.finish(&operation_id);
+                    if matches!(result, Ok(super::pm_delivery::PmWakeWrite::Injected)) {
+                        self.remember_account_input(
+                            &id,
+                            incarnation,
+                            text.as_bytes(),
+                            true,
+                            started,
+                        );
+                    }
+                    self.account_input_finished(&id);
                     let _ = reply.send(result.map(|status| json!({"status":status,"facts":facts})));
                 }
                 OwnerMessage::PmWakeAcknowledged { result } => {
@@ -4064,6 +4143,8 @@ impl OwnerState {
                     let _ = reply.send(Err(error));
                 }
                 Ok(entry) => {
+                    let started = std::time::Instant::now();
+                    self.account_input_started(&id, incarnation);
                     self.begin_policy_input(
                         &id,
                         bytes
@@ -4083,9 +4164,9 @@ impl OwnerState {
                         ) {
                             tracing::warn!(%error, "PM wake input retention was not released");
                         }
-                        let result = match bytes {
+                        let result = match bytes.as_deref() {
                             Some(bytes) => super::agent_dispatch::write_current_raw_input(
-                                &writers, &id, &entry, &bytes,
+                                &writers, &id, &entry, bytes,
                             ),
                             None => super::agent_dispatch::write_current_pane_input(
                                 &writers,
@@ -4097,7 +4178,21 @@ impl OwnerState {
                         };
                         let result = result
                             .map(|()| super::events::OwnerInputObservation::capture(&entry.handle));
-                        let _ = sender.send(OwnerMessage::InputWritten { reply, result });
+                        let typed = bytes.is_none();
+                        let bytes =
+                            bytes.unwrap_or_else(|| text.expect("typed input").into_bytes());
+                        let input = Some(accounts::InputCapture {
+                            id,
+                            incarnation,
+                            bytes,
+                            typed,
+                            started,
+                        });
+                        let _ = sender.send(OwnerMessage::InputWritten {
+                            reply,
+                            result,
+                            input,
+                        });
                     });
                 }
             }
@@ -4158,6 +4253,8 @@ impl OwnerState {
                     let _ = reply.send(Err(error));
                 }
                 Ok((entry, permit, session, pane, output_seq)) => {
+                    let started = std::time::Instant::now();
+                    self.account_input_started(&id, incarnation);
                     self.input_jobs += 1;
                     let writers = self.pty_writers.clone();
                     let root = self.root.clone();
@@ -4204,6 +4301,7 @@ impl OwnerState {
                             facts,
                             reply,
                             result,
+                            input: (id, incarnation, delivery.prompt, started),
                         });
                     });
                 }
@@ -4247,6 +4345,7 @@ impl OwnerState {
             })),
 
             OwnerCommand::Close { id, incarnation } | OwnerCommand::Stop { id, incarnation } => {
+                self.cancel_account_switch_request(&id, incarnation);
                 if self
                     .closing
                     .get(&id)
@@ -4349,6 +4448,13 @@ impl OwnerState {
                 })
                 .map(|_| json!({"ok":true})),
             OwnerCommand::Snapshot { id, incarnation } => self.pane_snapshot(&id, incarnation),
+            OwnerCommand::SwitchExecutionAccount {
+                id,
+                incarnation,
+                deleted_account_id,
+            } => self
+                .request_account_switch(&id, incarnation, deleted_account_id.as_deref())
+                .map(|()| json!({"ok":true})),
 
             OwnerCommand::InvalidateProjectObservation { .. }
             | OwnerCommand::ProjectExecutionChoose { .. }
@@ -4428,7 +4534,15 @@ impl OwnerState {
                     let sender = self.sender.clone();
                     spawn_owner_worker(move || {
                         let mut attempted = false;
+                        let mut started = std::time::Instant::now();
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            // Issue #7701: human mobile input outranks an unconfirmed wake.
+                            super::pm_delivery::release_retained_wake(
+                                &entry,
+                                None,
+                                super::pm_delivery::RetainedWakeRelease::HumanInput,
+                                std::time::Instant::now(),
+                            )?;
                             let reservation = entry
                                 .handle
                                 .reserve_input_transaction()
@@ -4447,7 +4561,10 @@ impl OwnerState {
                                         ));
                                     }
                                     transaction.accept_native().map_err(refused)?;
-                                    commit(&mut || attempted = true)
+                                    commit(&mut || {
+                                        attempted = true;
+                                        started = std::time::Instant::now();
+                                    })
                                 })
                                 .map_err(|error| error.to_string())
                             // Reservation Drop releases the physical writer before completion.
@@ -4462,6 +4579,7 @@ impl OwnerState {
                             attempted,
                             result,
                             observation,
+                            started,
                         });
                     });
                 }
@@ -4707,6 +4825,7 @@ impl OwnerState {
                     replies: Vec::new(),
                     cancel_replies: Vec::new(),
                     cancellation_cleaned: true,
+                    stale_monitor_cleanup: None,
                     manual_predecessor_stopped: None,
                     retained_manual_failure: None,
                     pending_continue: None,
@@ -4755,6 +4874,23 @@ impl OwnerState {
             let _ = reply.send(Ok(
                 json!({"cancelled":true,"id":id,"operation_id":operation_id}),
             ));
+            return;
+        }
+        if let Some(cleanup) = operation.stale_monitor_cleanup.clone() {
+            let in_flight = !operation.cancel_replies.is_empty();
+            operation.cancel_replies.push(reply);
+            if !in_flight {
+                self.agent_dispatch_jobs += 1;
+                let sender = self.sender.clone();
+                spawn_owner_worker(move || {
+                    let cleanup = cleanup.finish(&AtomicBool::new(true)).map(|_| json!({}));
+                    let _ = sender.send(OwnerMessage::ProcessLaunchFailed {
+                        operation_id,
+                        detail: super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into(),
+                        cleanup,
+                    });
+                });
+            }
             return;
         }
         if operation.failed_session.is_some() {
@@ -5322,6 +5458,15 @@ impl OwnerState {
     }
 
     fn restore_saved_session(&mut self, command: OwnerCommand, reply: oneshot::Sender<OwnerReply>) {
+        self.restore_saved_session_with_account(command, reply, None);
+    }
+
+    fn restore_saved_session_with_account(
+        &mut self,
+        command: OwnerCommand,
+        reply: oneshot::Sender<OwnerReply>,
+        account_switch: Option<(String, gwt_agent::AccountSwitchReason)>,
+    ) {
         let request = match serde_json::to_value(&command) {
             Ok(request) => request,
             Err(error) => {
@@ -5433,6 +5578,7 @@ impl OwnerState {
             request,
             source: *expected_source,
             origin,
+            account_switch,
             registry,
             placeholders,
             worktree_reserved: reserved,
@@ -5532,6 +5678,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -5666,6 +5813,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -5802,6 +5950,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -5922,18 +6071,25 @@ impl OwnerState {
             return;
         }
         let rejection_in_progress = self.agent_operations.values().any(|operation| {
-            operation
-                .pending_monitor_rejection_issue()
-                .is_some_and(|issue| {
-                    config.linked_issue_number == Some(issue)
-                        || metadata
-                            .launch_feedback_context
+            (operation.id == id && operation.stale_monitor_cleanup.is_some())
+                || operation
+                    .pending_monitor_rejection_issue()
+                    .or_else(|| {
+                        operation
+                            .stale_monitor_cleanup
                             .as_ref()
-                            .and_then(|feedback| {
-                                feedback.issue_monitor_launch_binding_issue_number()
-                            })
-                            == Some(issue)
-                })
+                            .and_then(|cleanup| cleanup.feedback.issue_monitor_issue_number)
+                    })
+                    .is_some_and(|issue| {
+                        config.linked_issue_number == Some(issue)
+                            || metadata
+                                .launch_feedback_context
+                                .as_ref()
+                                .and_then(|feedback| {
+                                    feedback.issue_monitor_launch_binding_issue_number()
+                                })
+                                == Some(issue)
+                    })
         });
         let retry_stopped_predecessor = metadata.manual_successor.as_ref().and_then(|choice| {
             let operation = self.agent_operations.get(&operation_id)?;
@@ -6072,6 +6228,7 @@ impl OwnerState {
                         replies: Vec::new(),
                         cancel_replies: Vec::new(),
                         cancellation_cleaned: true,
+                        stale_monitor_cleanup: None,
                         manual_predecessor_stopped: None,
                         retained_manual_failure: None,
                         pending_continue: None,
@@ -6224,6 +6381,7 @@ impl OwnerState {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: retry_stopped_predecessor.clone(),
                 retained_manual_failure: None,
                 pending_continue: continuation.clone(),
@@ -7041,7 +7199,7 @@ impl OwnerState {
                 && !input.physical_spawn_started
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
-            let cancelled_cleanup = if unproved_manual_cleanup {
+            let mut cancelled_cleanup = if unproved_manual_cleanup {
                 let (worktree, binding) = manual_successor_prepared
                     .as_ref()
                     .expect("unmaterialized Manual cleanup has a captured preparation");
@@ -7083,6 +7241,7 @@ impl OwnerState {
                 }
                 Ok(())
             };
+            let mut stale_monitor_cleanup = None;
             let mut monitor_failure_committed = false;
             if let Err(error) = &result {
                 if !input.physical_spawn_started
@@ -7096,21 +7255,55 @@ impl OwnerState {
                         .as_ref()
                         .is_ok_and(|row| row.as_ref().is_none_or(|row| row.session_id.is_none()))
                 {
-                    match retry_unclaimed_monitor_capacity(
-                        &root,
-                        admission_feedback.as_ref(),
-                        &input.current,
-                        &error.detail,
+                    let stale =
+                        error.detail == super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE;
+                    if let (true, Some(feedback), Ok(registry)) = (
+                        stale,
+                        admission_feedback.as_ref().filter(|feedback| {
+                            feedback.issue_monitor_delivery_id.is_some()
+                                && !feedback.issue_monitor_review_dispatch
+                                && feedback.issue_monitor_autonomous_handoff.is_none()
+                        }),
+                        &owner_registry,
                     ) {
-                        Ok(true) => match cleanup_monitor_window_record() {
-                            Ok(()) => monitor_failure_committed = true,
-                            Err(error) => {
-                                tracing::warn!(%error, "capacity retry row cleanup remains unconfirmed");
+                        let cleanup = StaleMonitorLaunchCleanup {
+                            row: super::agent_dispatch::OwnedWindowRecordCleanup {
+                                registry: registry.clone(),
+                                registry_path: owner_registry_path.clone(),
+                                root: root.clone(),
+                                project_key: cleanup_project_key.clone(),
+                                canonical_id: id.clone(),
+                                expected_session_id: None,
+                            },
+                            feedback: feedback.clone(),
+                        };
+                        match cleanup.finish(&input.current) {
+                            Ok(committed) => {
+                                cancelled_cleanup = true;
+                                monitor_failure_committed = committed;
                             }
-                        },
-                        Ok(false) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, "capacity retry remains unconfirmed");
+                            Err(error) => {
+                                tracing::warn!(%error, "stale Monitor admission cleanup remains unconfirmed");
+                                stale_monitor_cleanup = Some(cleanup);
+                            }
+                        }
+                    } else if !stale {
+                        match retry_unclaimed_monitor_capacity(
+                            &root,
+                            admission_feedback.as_ref(),
+                            &input.current,
+                            &error.detail,
+                        ) {
+                            Ok(true) => match cleanup_monitor_window_record() {
+                                Ok(()) => monitor_failure_committed = true,
+                                Err(error) => {
+                                    tracing::warn!(%error, "capacity retry row cleanup remains unconfirmed");
+                                }
+                            },
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, "capacity retry remains unconfirmed");
+                            }
                         }
                     }
                 }
@@ -7182,6 +7375,10 @@ impl OwnerState {
                 });
                 if let Some(launch) = launch.filter(|_| {
                     !monitor_failure_committed
+                        && stale_monitor_cleanup.is_none()
+                        && restore
+                            .as_ref()
+                            .is_none_or(|restore| restore.account_switch.is_none())
                         && input.failed_launch.is_none()
                         && (!input.physical_spawn_started
                             || unspawned_runtime_retired
@@ -7327,6 +7524,7 @@ impl OwnerState {
                 retirement_reason,
                 registry_cleanup,
                 cancelled_cleanup,
+                stale_monitor_cleanup,
                 durable_candidate_removed,
                 purpose_title,
                 operation_id,
@@ -7525,6 +7723,7 @@ impl OwnerState {
             retirement_reason,
             registry_cleanup,
             cancelled_cleanup,
+            stale_monitor_cleanup,
             durable_candidate_removed,
             purpose_title,
             operation_id,
@@ -7548,6 +7747,12 @@ impl OwnerState {
                 .any(|(candidate, _)| candidate == &id);
         let success = match result {
             Err(error) => {
+                if restore
+                    .as_ref()
+                    .is_some_and(|restore| restore.account_switch.is_some())
+                {
+                    self.discard_account_switch(&id);
+                }
                 if monitor_failure_committed {
                     if self.pending.get(&id) == Some(&incarnation) {
                         self.pending.remove(&id);
@@ -7682,6 +7887,7 @@ impl OwnerState {
                         });
                 if let Some(operation) = self.agent_operations.get_mut(&operation_id) {
                     operation.cancellation_cleaned = cancelled_cleanup;
+                    operation.stale_monitor_cleanup = stale_monitor_cleanup;
                     if retained {
                         operation.retained_manual_failure =
                             Some(super::events::OwnerRetainedManualLaunchFailure {
@@ -7862,6 +8068,18 @@ impl OwnerState {
                 false,
             );
         }
+        if result.is_ok()
+            && restore
+                .as_ref()
+                .is_some_and(|restore| restore.account_switch.is_some())
+        {
+            self.runtime_monitor_heartbeat(&id, Some("ExecutionAccountSwitch"), None);
+            let _ = self.events.send(OwnerEvent::Notice {
+                level: "info".into(),
+                message: "Resumed after an execution account switch.".into(),
+                issue_number: named_assignment.linked_issue_number,
+            });
+        }
         if result.is_err()
             && self
                 .runtimes
@@ -7876,6 +8094,9 @@ impl OwnerState {
             self.start_close(id.clone(), runtime, CloseCause::ExplicitClose, reply);
         }
         if let Some(restore) = restore.as_ref().filter(|_| result.is_ok()) {
+            if restore.account_switch.is_some() {
+                self.arm_account_input_replay(&id, incarnation);
+            }
             if let Err(error) = super::installation::retire_same_session_restore_placeholders(
                 &self.root,
                 restore,
@@ -7949,6 +8170,10 @@ impl OwnerState {
                 })
             })
             .chain(
+                self.account_switch_observations()
+                    .filter(|row| row.window_id != excluded_id),
+            )
+            .chain(
                 self.agent_operations
                     .values()
                     .filter(|operation| {
@@ -7963,6 +8188,7 @@ impl OwnerState {
                                 .is_some_and(serde_json::Value::is_u64);
                         operation.result.is_none()
                             && operation.id != excluded_id
+                            && !self.is_account_switch_waiting(&operation.id)
                             && operation.request["type"] != "check_launch_permission"
                             && !preparing_monitor
                     })
@@ -8018,6 +8244,9 @@ impl OwnerState {
         cause: CloseCause,
         reply: oneshot::Sender<OwnerReply>,
     ) {
+        if !matches!(cause, CloseCause::AccountSwitch) {
+            self.discard_account_switch(&id);
+        }
         self.pm_wake_permits.cancel_mobile_for_pane(Some(&id));
         let incarnation = runtime.incarnation;
         self.close_replies
@@ -8331,6 +8560,7 @@ impl OwnerState {
                         .lock()
                         .ok()
                         .and_then(|pane| pane.last_exit().map(|exit| exit.exit_code)),
+                    hook_status: runtime.hook_status,
                 });
             }
             let pm_lifecycle = runtime
@@ -8339,6 +8569,18 @@ impl OwnerState {
                 .and_then(super::pm_delivery::PmLifecycleCommit::outcome)
                 .cloned();
             if result.is_ok() {
+                if matches!(cause, CloseCause::AccountSwitch) {
+                    let _ = self.events.send(OwnerEvent::Status {
+                        id: id.clone(),
+                        incarnation,
+                        status: WindowProcessStatus::Waiting,
+                        detail: runtime.detail.clone(),
+                        exit_confirmed: true,
+                        raw_status: WindowProcessStatus::Stopped,
+                        exit_code: None,
+                        hook_status: None,
+                    });
+                }
                 if let Some(outcome) = pm_lifecycle.as_ref() {
                     let _ = self.events.send(OwnerEvent::PmLifecycle {
                         id: id.clone(),
@@ -8373,8 +8615,13 @@ impl OwnerState {
                 );
             } else {
                 self.retirements.remove(&(id.clone(), incarnation));
+                if matches!(cause, CloseCause::AccountSwitch) && !self.stopping {
+                    self.account_switch_retired(&id, &runtime);
+                }
             }
-            if result.is_ok() && matches!(cause, CloseCause::ExplicitStop) {
+            if result.is_ok()
+                && matches!(cause, CloseCause::ExplicitStop | CloseCause::AccountSwitch)
+            {
                 for operation in self
                     .agent_operations
                     .values_mut()
@@ -8382,9 +8629,13 @@ impl OwnerState {
                 {
                     if let Some(Ok(receipt)) = operation.result.as_mut() {
                         receipt["closed"] = json!(true);
-                        receipt["explicit_stop"] = json!(true);
+                        receipt["explicit_stop"] = json!(matches!(cause, CloseCause::ExplicitStop));
                         receipt["retained_window"] = json!(true);
-                        receipt["status"] = json!(crate::WindowProcessStatus::Stopped);
+                        receipt["status"] = json!(if matches!(cause, CloseCause::AccountSwitch) {
+                            crate::WindowProcessStatus::Waiting
+                        } else {
+                            crate::WindowProcessStatus::Stopped
+                        });
                     }
                 }
             }
@@ -10512,6 +10763,10 @@ impl OwnerState {
         let Some(hook_status) = hook_status else {
             return;
         };
+        if hook_status == WindowProcessStatus::Idle && event.source_event.as_deref() == Some("Stop")
+        {
+            self.complete_account_turn(&id, now);
+        }
         let runtime = self.runtimes.get_mut(&id).expect("matched exact Session");
         runtime.policy.approval = None;
         runtime.policy.approval_settle_at = None;
@@ -10882,6 +11137,7 @@ impl OwnerState {
                     .values()
                     .filter_map(|resume| resume.due),
             )
+            .chain(self.next_account_switch_deadline(now, wall))
             .min()
     }
 
@@ -10909,6 +11165,7 @@ impl OwnerState {
             self.observe_owner_screen_policy(&id, wall, now, None);
         }
         self.sweep_policy_capacity_resumes(now);
+        self.drive_account_switches(wall);
     }
 
     fn observe_owner_screen_policy(
@@ -11001,6 +11258,9 @@ impl OwnerState {
             )
         });
         let detail = runtime.detail.clone();
+        if let (Some(failure), Some(agent)) = (&outcome.failure, runtime.agent.as_ref()) {
+            super::runtime_events::record_account_limit(&agent.snapshot, failure, now);
+        }
         if let Some(fingerprint) = outcome.permission_prompt {
             self.record_owner_permission_prompt(id, fingerprint);
         }
@@ -11011,7 +11271,9 @@ impl OwnerState {
                 }
                 _ => "Agent requires provider recovery".into(),
             });
-            self.runtime_monitor_failure(id, &message, Some(failure), false);
+            if !self.request_quota_account_switch(id, &failure, now) {
+                self.runtime_monitor_failure(id, &message, Some(failure), false);
+            }
         }
         if cancel_retry {
             self.cancel_policy_capacity_resume(id);
@@ -11427,6 +11689,18 @@ impl OwnerState {
         }
         runtime.detail = outcome.detail.clone();
         runtime.ordinary_error_detail = outcome.ordinary_error_detail;
+        if exit_confirmed
+            && outcome.quota_hold.as_ref().is_some_and(|failure| {
+                self.request_quota_account_switch(
+                    &id,
+                    failure,
+                    gwt_core::timestamp::UtcTimestamp::now(),
+                )
+            })
+        {
+            return;
+        }
+        let runtime = self.runtimes.get_mut(&id).expect("exact owner status");
         let pm_generic_crash = pm_generic_crash && outcome.quota_hold.is_none();
         let retire = pm_generic_crash
             || outcome.auto_close
@@ -11442,6 +11716,15 @@ impl OwnerState {
                     raw_status,
                     crate::WindowProcessStatus::Error | crate::WindowProcessStatus::Stopped
                 ));
+        if let (Some(failure), Some(agent)) = (&outcome.quota_hold, runtime.agent.as_ref()) {
+            if exit_confirmed {
+                super::runtime_events::record_account_limit(
+                    &agent.snapshot,
+                    failure,
+                    gwt_core::timestamp::UtcTimestamp::now(),
+                );
+            }
+        }
         if exit_confirmed && runtime.agent.is_some() {
             let failure = outcome
                 .quota_hold
@@ -11589,7 +11872,7 @@ impl OwnerState {
             },
             None,
         );
-        let (raw_status, exit_code) = self
+        let (raw_status, exit_code, hook_status) = self
             .runtimes
             .get(&id)
             .filter(|runtime| runtime.incarnation == incarnation)
@@ -11605,9 +11888,10 @@ impl OwnerState {
                     } else {
                         None
                     },
+                    runtime.hook_status,
                 )
             })
-            .unwrap_or((status, None));
+            .unwrap_or((status, None, None));
         let _ = self.events.send(OwnerEvent::Status {
             id,
             incarnation,
@@ -11616,6 +11900,7 @@ impl OwnerState {
             exit_confirmed,
             raw_status,
             exit_code,
+            hook_status,
         });
     }
     fn pane_event(&mut self, event: PaneRuntimeEvent) {
@@ -12681,6 +12966,7 @@ fn close_agent_runtime(
     runtime: &WindowRuntime,
     agent: &AgentRuntimeRecord,
     desired_restore_on_startup: Option<bool>,
+    preserve_work: bool,
 ) -> Result<bool, String> {
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let mut handled = false;
@@ -12744,6 +13030,9 @@ fn close_agent_runtime(
                 window_id = id,
                 "skipping Work cleanup after project identity changed"
             );
+        } else if preserve_work {
+            // The same window and Work are about to be continued. Do not
+            // finalize an ephemeral worktree or mark the Work as stopped.
         } else if runtime.policy.quota_hold.is_none()
             && super::workspace::session_uses_ephemeral_worktree_for_project(
                 Some(&runtime.project_root),
@@ -12899,7 +13188,13 @@ fn close_runtime_inner(
     let stopped = if let Some(source) = retained_restore_source {
         drain_retained_restore_runtime(id, runtime, source)
     } else if let Some(agent) = &runtime.agent {
-        close_agent_runtime(id, runtime, agent, cause.restore_policy())
+        close_agent_runtime(
+            id,
+            runtime,
+            agent,
+            cause.restore_policy(),
+            matches!(cause, CloseCause::AccountSwitch),
+        )
     } else if !crate::session_finalizer::kill_and_reap(&runtime.pty, id)
         .map_err(|e| e.to_string())?
     {
@@ -13115,7 +13410,7 @@ fn close_runtime_inner(
             {
                 super::pm_delivery::PmLifecycleCause::Crash
             }
-            CloseCause::DiagnosticExit | CloseCause::GuiLifetime => {
+            CloseCause::DiagnosticExit | CloseCause::GuiLifetime | CloseCause::AccountSwitch => {
                 super::pm_delivery::PmLifecycleCause::Preserve
             }
         };
@@ -13138,6 +13433,7 @@ fn retry_unclaimed_monitor_capacity(
 ) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
         (crate::issue_monitor::is_monitor_spawn_hold_refusal(detail)
+            || detail == super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE
             || detail.starts_with("Machine Agent capacity is occupied;")
             || detail.starts_with("Machine Agent capacity observation is unavailable;")
             || detail.starts_with("Machine Agent census is uncertain;"))
@@ -13221,6 +13517,7 @@ fn owner_fixture(
         test_reconciler: None,
         policy_usage_accounts: Vec::new(),
         policy_capacity_resumes: HashMap::new(),
+        account_switches: HashMap::new(),
         agent_registry: super::agent_dispatch::load_owner_registry(root),
         shared_registry_initialization: None,
         registry_projection: crate::persistence::empty_workspace_state(),
@@ -13344,6 +13641,7 @@ mod worker_tests {
                 replies: Vec::new(),
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -13397,6 +13695,53 @@ mod worker_tests {
             owner.owner_monitor_window_snapshot("current").windows.len(),
             1
         );
+    }
+
+    #[test]
+    fn issue_7817_failed_exact_cleanup_retains_the_unclaimed_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.join("home"));
+        let (owner, _, _) = owner_fixture(root);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(root);
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.pending_launch_deliveries.push(
+            serde_json::from_value(json!({
+                "delivery_id": "delivery-42", "issue_number": 42,
+                "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+                "claim_id": "claim-42", "created_at": "2026-11-25T00:00:00Z"
+            }))
+            .unwrap(),
+        );
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let blocker = root.join("blocked");
+        std::fs::write(&blocker, b"cannot create a registry below a file").unwrap();
+        let cleanup = StaleMonitorLaunchCleanup {
+            row: super::super::agent_dispatch::OwnedWindowRecordCleanup {
+                registry: owner.agent_registry.clone().unwrap(),
+                registry_path: blocker.join("registry.json"),
+                root: root.into(),
+                project_key: owner.project_key.clone(),
+                canonical_id: format!("{}::agent-1", owner.project_key),
+                expected_session_id: None,
+            },
+            feedback: serde_json::from_value(json!({
+                "client_id": "test", "title": "Issues",
+                "issue_monitor_issue_number": 42, "issue_monitor_delivery_id": "delivery-42",
+                "issue_monitor_review_dispatch": false
+            }))
+            .unwrap(),
+        };
+        let current = AtomicBool::new(true);
+        assert!(cleanup.finish(&current).is_err());
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        std::fs::remove_file(&blocker).unwrap();
+        std::fs::create_dir(&blocker).unwrap();
+        assert_eq!(cleanup.finish(&current), Ok(true));
+        let after = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(after.pending_launch_deliveries.is_empty());
+        assert!(after.autonomous_records[0].retry_not_before.is_some());
     }
 
     #[test]
@@ -14677,6 +15022,7 @@ mod tests {
                 replies: Vec::new(),
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -15096,6 +15442,7 @@ mod tests {
             .send(OwnerMessage::InputWritten {
                 reply,
                 result: Ok(None),
+                input: None,
             })
             .ok()
             .unwrap();
@@ -15211,6 +15558,7 @@ mod tests {
                 replies: vec![reply],
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,
@@ -15272,6 +15620,7 @@ mod tests {
                 registry_cleanup: None,
                 retirement_reason: None,
                 cancelled_cleanup: false,
+                stale_monitor_cleanup: None,
                 durable_candidate_removed: false,
                 purpose_title: None,
                 operation_id: "operation".into(),
@@ -15498,6 +15847,7 @@ mod tests {
             test_reconciler: None,
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
+            account_switches: HashMap::new(),
             agent_registry: super::super::agent_dispatch::load_owner_registry(root.path()),
             shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
@@ -16115,6 +16465,7 @@ mod tests {
                 replies: Vec::new(),
                 cancel_replies: Vec::new(),
                 cancellation_cleaned: false,
+                stale_monitor_cleanup: None,
                 manual_predecessor_stopped: None,
                 retained_manual_failure: None,
                 pending_continue: None,

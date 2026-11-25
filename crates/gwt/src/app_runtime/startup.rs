@@ -800,6 +800,13 @@ impl AppRuntime {
         let _phase = gwt::perf::startup::PhaseTimer::start(
             gwt::perf::startup::StartupPhase::ProjectStateLoad,
         );
+        if let Err(error) = self.blocking_tasks.try_spawn(|| {
+            if let Err(error) = gwt::execution_environments::adopt_signed_in_accounts() {
+                tracing::warn!(%error, "Could not import signed-in execution accounts");
+            }
+        }) {
+            tracing::warn!(%error, "Execution account import could not be scheduled");
+        }
         // Issue #4378 AC-1: list each project's worktrees once. The startup
         // ingest, its reconcile and the orphan intake prune plan reuse this
         // inventory instead of listing again (one `git worktree list` is

@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const CHECK_HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
@@ -89,10 +90,12 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const panel = settings.locator('[data-settings-panel="issues"]');
       await expect(panel).toBeVisible();
-      // Independent Settings controls project the same confirmed Issues state.
-      const monitoring = panel.getByRole("checkbox", { name: "Monitoring", exact: true });
+      // Settings projects the same confirmed Issues state. Issue #7728: the
+      // project stop/start reports assignment; the PM patrol stays unpaused.
+      expect(await panel.getByRole("checkbox", { name: "Monitoring", exact: true }).count()).toBe(0);
+      const monitoring = panel.locator('[data-settings-launch-action="project-autonomy"] [data-project-autonomy-state]');
       const autonomous = panel.getByRole("checkbox", { name: "Autonomous", exact: true });
-      await expect(monitoring).not.toBeChecked();
+      await expect(monitoring).toHaveText("Partly running");
       await expect(autonomous).not.toBeChecked();
 
       try {
@@ -107,7 +110,7 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
           allowed_labels: [fixture.allowed_label], update_drain: { version: "999.0.0" } });
         expect(cli("issue.monitor.status")).toMatchObject({ enabled: true, autonomous_mode: true, active_launches: [] });
         await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
-        await expect(monitoring).toBeChecked();
+        await expect(monitoring).toHaveText("Running");
         await expect(autonomous).toBeChecked();
         await info.attach(`monitor-enabled-${theme}`, { body: await settings.screenshot({ path: join(CHECK_HOME, `monitor-enabled-${theme}.png`) }), contentType: "image/png" });
 
@@ -118,7 +121,7 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
           allowed_labels: [fixture.allowed_label], update_drain: { version: "999.0.0" } });
         expect(cli("issue.monitor.status")).toMatchObject({ enabled: false, autonomous_mode: false, active_launches: [] });
         await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
-        await expect(monitoring).not.toBeChecked();
+        await expect(monitoring).toHaveText("Partly running");
         await expect(autonomous).not.toBeChecked();
         await expect(page.locator('.workspace-window[data-preset="codex"], .workspace-window[data-preset="claude"]')).toHaveCount(0);
         expect(JSON.parse(await readFile(pmPath, "utf8")).settings.auto_start).toBe(false);
@@ -192,7 +195,7 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
       await rename(machinePath + ".twelve-pty.tmp", machinePath);
       const prefs = await readPrefs();
       expect(prefs.max_active_agents).toBe(12);
-      if (prefs.agent_roster) expect(prefs.agent_roster.members.filter((member: any) => member.enabled)).toHaveLength(12);
+      if (prefs.agent_roster) expect(prefs.agent_roster.members).toHaveLength(12);
       expect(prefs.enabled).toBe(false);
       expect(prefs.autonomous_mode).toBe(false);
       // This fixture starts after remote claim acquisition. It exercises the
@@ -249,8 +252,7 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
         expect(durable.windows.filter((pane: any) => pane.agent_id === "monitor-delivery-fixture")
           .map((pane: any) => `${pane.id}/${pane.session_id}`).sort())
           .toEqual(windows.map(window => `${window.id.split("::").at(-1)}/${window.session_id}`).sort());
-        await expect(page.locator('.op-rail__surface[data-surface="works"]')).toBeVisible({ timeout: 10_000 });
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
           await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
         for (const window of windows) {

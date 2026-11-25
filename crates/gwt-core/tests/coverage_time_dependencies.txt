@@ -643,7 +643,6 @@ crates/gwt/tests/verification_lease_cli_test.rs|assert_heavy_lock_released|letde
 crates/gwt/tests/verification_lease_cli_test.rs|legacy_holder_can_still_be_observed_and_released|letdeadline=Instant::now()+Duration::from_secs(10)|1
 crates/gwt/tests/verification_lease_cli_test.rs|legacy_holder_can_still_be_observed_and_released|while!release_path.exists()&&Instant::now()<deadline|1
 crates/gwt/tests/verification_resume_cli_test.rs|admitted_waiter_notifies_once_after_its_busy_pane_becomes_idle|assert!(Instant::now()<deadline,)|2
-crates/gwt/tests/verification_resume_cli_test.rs|admitted_waiter_notifies_once_after_its_busy_pane_becomes_idle|let(session,text)=received.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt/tests/verification_resume_cli_test.rs|admitted_waiter_notifies_once_after_its_busy_pane_becomes_idle|letdeadline=Instant::now()+Duration::from_secs(60)|1
 crates/gwt/tests/verification_resume_cli_test.rs|collect|ifInstant::now()>=deadline|1
 crates/gwt/tests/verification_resume_cli_test.rs|collect|letdeadline=Instant::now()+Duration::from_secs(60)|1

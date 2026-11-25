@@ -143,6 +143,14 @@ test("only decision items handed to the surface are listed, with the waiting cou
   assert.equal(document.querySelector(".task-decisions__count").textContent, "2 decisions waiting");
 });
 
+// Issue #7742 AC-4: the heading shows the decision queue's own waiting count,
+// the same value the header and the status bar read; it is never a recount.
+test("the waiting count is the queue's value handed to the surface", async () => {
+  const { document } = await mount(feed([packetItem("d1")], { waiting: 3 }));
+  assert.equal(cards(document).length, 1);
+  assert.equal(document.querySelector(".task-decisions__count").textContent, "3 decisions waiting");
+});
+
 test("choosing an option reports the decision and the option index once", async () => {
   const { document, click, calls } = await mount(feed([packetItem("d1")]));
   const [, second] = optionButtons(cards(document)[0]);

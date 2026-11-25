@@ -30,6 +30,7 @@ pub const OPERATIONS: &[&str] = &[
     "pr.auto_merge.enable",
     "release.metadata.set",
     "repository.settings.set",
+    "repository.branch_protection.update",
     "project.execution.choose",
 ];
 

@@ -241,11 +241,7 @@ test("index.html declares Operator chrome scaffold", () => {
     "#op-strip-waiting",
     "#op-strip-error",
     "#op-briefing",
-    "#op-palette-backdrop",
-    "#op-palette-input",
-    "#op-palette-list",
     "#op-hotkey-overlay",
-    "#op-palette-button",
   ]) {
     assert.ok(document.querySelector(sel), `missing chrome element: ${sel}`);
   }
@@ -278,21 +274,11 @@ test("SPEC-3038 Command Rail retires the legacy sidebar entirely", () => {
 
 // SPEC-3245 Stage E: the deprecated Intake launch entry is removed while the
 // normal Workspace route stays available.
-test("command rail and palette omit deprecated launch entries while preserving Open Issues", () => {
+test("command rail omits deprecated launch entries while preserving Open Issues", () => {
   assert.equal(
     document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]'),
     null,
     "the Command Rail must not expose a Start Work action",
-  );
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"start-work"/,
-    "Command Palette registry must not include start-work",
-  );
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"spawn-agent"/,
-    "Command Palette registry must not include the spawn-agent alias of Start Work",
   );
   assert.doesNotMatch(
     appSource,
@@ -304,24 +290,14 @@ test("command rail and palette omit deprecated launch entries while preserving O
     null,
     "the Command Rail must not expose the deprecated Intake action",
   );
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"intake-session"/,
-    "Command Palette registry must not include the deprecated Intake action",
-  );
   assert.match(
-    operatorShellSource,
-    /id:\s*"open-branches"/,
-    "Open Issues entry must remain available",
+    appSource,
+    /case "open-branches":/,
+    "Open Issues command route must remain available",
   );
 });
 
 test("deprecated Intake command route emits no open_intake_session wire", () => {
-  assert.doesNotMatch(
-    operatorShellSource,
-    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
-    "Command Palette registry must not include the deprecated Intake entry",
-  );
   assert.doesNotMatch(
     appSource,
     /case\s+"intake-session":[\s\S]+kind:\s*"open_intake_session"/,
@@ -464,24 +440,37 @@ test("Command Rail retains navigation and direct surface entries without retired
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
+  assert.deepEqual(groups, ["Navigate", "Surfaces"]);
   for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
     assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
   }
-  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Profile"]]) {
+  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Env vars"]]) {
     const entry = document.querySelector(`.op-rail__item[data-cmd="${command}"]`);
     assert.ok(entry, `${label} must remain directly reachable`);
     assert.equal(entry.textContent.trim().endsWith(label), true);
+    if (command === "open-profile") assert.equal(entry.getAttribute("aria-label"), "Environment variables");
   }
   assert.match(componentsStyle, /\.op-rail\s*\{[^}]*overflow-y:\s*auto/s);
 });
 
-test("Command Rail System group hosts the Command Palette trigger (SPEC-3038 US-1)", () => {
-  const systemGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="System"]');
-  assert.ok(systemGroup, "expected a System group in the rail");
-  const trigger = document.getElementById("op-palette-button");
-  assert.ok(trigger, "expected op-palette-button");
-  assert.ok(systemGroup.contains(trigger), "Command Palette trigger must live in the rail");
+// #7879 / SPEC #7007 item 36: the command palette is abolished. No rail
+// trigger, palette DOM, ⌘K / ⌘P shortcut, or palette wiring may remain.
+test("command palette is removed from the rail, DOM, and shortcuts (#7879)", () => {
+  for (const sel of [
+    "#op-palette-button",
+    "#op-palette-backdrop",
+    "#op-palette-input",
+    "#op-palette-list",
+    ".op-palette",
+    ".op-rail__icon--palette",
+  ]) {
+    assert.equal(document.querySelector(sel), null, `${sel} must be removed`);
+  }
+  assert.doesNotMatch(html, /⌘K|Command palette/i);
+  assert.doesNotMatch(operatorShellSource, /wireCommandPalette|createActionRegistry/);
+  assert.doesNotMatch(operatorShellSource, /"cmd\+k"|"cmd\+p"/);
+  assert.doesNotMatch(appSource, /__operatorShell\??\.palette|palette:\s*__op/);
+  assert.doesNotMatch(componentsStyle, /\.op-palette/);
 });
 
 test("Right-bottom floating controls are removed; the canvas corner is empty (SPEC-2356)", () => {
@@ -1217,12 +1206,16 @@ test("Branches detail-check checking state uses motion without animating static 
   );
 });
 
-test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
+test("hotkey overlay lists ⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
   const text = overlay.textContent.replace(/\s+/g, " ");
-  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "Esc"]) {
+  for (const phrase of ["⌘ B", "⌘ G", "⌘ L", "⌘ ?", "Esc"]) {
     assert.ok(text.includes(phrase), `expected ${phrase} in hotkey overlay`);
+  }
+  // #7879: ⌘K / ⌘P opened the retired command palette.
+  for (const phrase of ["⌘ K", "⌘ P"]) {
+    assert.ok(!text.includes(phrase), `${phrase} must not appear in the hotkey overlay`);
   }
   // SPEC-2356 Phase 9 (FR-021/FR-032): the Layout group + "Toggle sidebar / ⌘\\"
   // row are removed in favor of the hover-reveal peek 帯.
@@ -1327,7 +1320,7 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
 test("Status Strip exposes a compact PERF cell for runtime health", () => {
   const cell = document.getElementById("op-strip-runtime-health");
   assert.ok(cell, "expected runtime health PERF cell");
-  assert.match(cell.textContent ?? "", /PERF/);
+  assert.match(cell.textContent ?? "", /Load/);
   assert.match(cell.getAttribute("aria-label") ?? "", /Runtime performance/);
   assert.match(cell.getAttribute("aria-label") ?? "", runtimeCpuUnitsPattern);
   assert.match(cell.getAttribute("title") ?? "", runtimeCpuUnitsPattern);
@@ -1391,13 +1384,13 @@ test("Status Strip omits the retired server URL cell", () => {
   assert.doesNotMatch(appSource, /kind:\s*"open_server_url"/);
 });
 
-test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () => {
+test("Status Strip labels the WebSocket connection state as Connected/Disconnected", () => {
   const strip = document.getElementById("op-status-strip");
   const connectionLabel = strip?.querySelector("[data-role='connection-label']");
   assert.ok(connectionLabel, "expected a connection label in the status strip");
-  assert.equal(connectionLabel.textContent?.trim(), "ONLINE");
+  assert.equal(connectionLabel.textContent?.trim(), "Connected");
   assert.doesNotMatch(html, />\s*LIVE\s*</);
-  assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"ONLINE"\s*:\s*"OFFLINE"/);
+  assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"Connected"\s*:\s*"Disconnected"/);
 });
 
 test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1.2)", () => {
@@ -1416,11 +1409,9 @@ test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1
   assert.match(workspace.getAttribute("title") ?? "", /⌘G/);
 });
 
-test("Board and Logs retain their rail, palette and hotkey access paths (#4777)", () => {
+test("Board and Logs retain their rail and hotkey access paths (#4777)", () => {
   assert.ok(document.querySelector('.op-rail__surface[data-surface="board"]'));
   assert.ok(document.querySelector('.op-rail__item[data-cmd="open-logs"]'));
-  assert.match(operatorShellSource, /id:\s*"open-board"/);
-  assert.match(operatorShellSource, /id:\s*"open-logs"/);
   assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/);
   assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/);
 });
@@ -1434,48 +1425,6 @@ test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
   for (const fake of ["GO", "INFO"]) {
     assert.ok(!kbdTexts.includes(fake), `pseudo kbd badge ${fake} must be removed`);
   }
-});
-
-test("Command Rail items are icon buttons with accessible names and flyout labels (SPEC-3038 AS-1.2/AS-1.3)", () => {
-  // Issue #4777 T-1: the PM and the surface entries are labelled buttons,
-  // not icon-only ones; surface-rail.test.mjs owns their contract.
-  const items = Array.from(
-    document.querySelectorAll(".op-rail .op-rail__item:not([data-surface]):not(.op-rail__surface)"),
-  );
-  // System keeps its notification and palette controls.
-  assert.equal(items.length, 2);
-  for (const item of items) {
-    assert.ok(
-      item.getAttribute("aria-label"),
-      "every rail item must carry an aria-label (icon-only button)",
-    );
-    const icon = item.querySelector(".op-rail__icon");
-    assert.ok(icon, "every rail item must render a Unicode symbol icon");
-    assert.equal(
-      icon.getAttribute("aria-hidden"),
-      "true",
-      "rail icons are decorative — aria-hidden",
-    );
-    const flyout = item.querySelector(".op-rail__flyout");
-    assert.ok(flyout, "every rail item must provide a hover flyout label");
-    assert.equal(
-      flyout.getAttribute("aria-hidden"),
-      "true",
-      "flyout labels duplicate the aria-label — keep them aria-hidden",
-    );
-    assert.ok(
-      flyout.querySelector(".op-rail__flyout-label")?.textContent?.trim(),
-      "flyout must carry a readable label",
-    );
-  }
-});
-
-test("Command Palette trigger button declares aria-keyshortcuts", () => {
-  const trigger = document.getElementById("op-palette-button");
-  assert.ok(trigger, "palette trigger exists");
-  const shortcut = trigger.getAttribute("aria-keyshortcuts") ?? "";
-  assert.ok(shortcut.includes("Meta+K"), "trigger must declare Meta+K");
-  assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
 test("Command Rail is always visible — hover-reveal chrome is fully retired (SPEC-3038 AS-1.1/AS-1.6)", () => {
@@ -1586,8 +1535,8 @@ test("Status Strip spells out WORK and drops the cryptic T clock label (SPEC-303
   assert.ok(branchesCell, "expected the Work cell");
   assert.equal(
     branchesCell.querySelector(".op-status-strip__label")?.textContent?.trim(),
-    "WORK",
-    "the WK label must spell out WORK",
+    "Work",
+    "the WK label must spell out Work",
   );
   const clockCell = document.getElementById("op-strip-clock")?.parentElement;
   assert.ok(clockCell, "expected the clock cell");
@@ -1657,13 +1606,11 @@ test("surface changes preserve mounted terminal bodies without tab chrome", () =
   );
 });
 
-test("Project Bar brand prefix wraps GWT OPERATOR with bracket flank", () => {
+test("the shared header carries the brand as an element, not a pseudo-element (Issue #7740)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  // The pseudo-element content lives only in CSS, not in the DOM, so we
-  // assert the rule itself contains the bracket-flanked brand string.
-  const projectBarBefore = css.match(/\.project-bar::before\s*\{[\s\S]*?\}/);
-  assert.ok(projectBarBefore, "expected .project-bar::before rule");
-  assert.match(projectBarBefore[0], /content:\s*"⌜ GWT · OPERATOR ⌟"/);
+  // A phone gives the brand its own row, so it has to be a real box.
+  assert.equal(document.querySelector(".project-bar.app-head > .app-head__brand").textContent, "gwt");
+  assert.doesNotMatch(css, /\.project-bar::before/);
 });
 
 test("Mission Briefing splash has dismissible affordance (pointer-events + cursor)", () => {
@@ -1913,7 +1860,7 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
   );
   assert.ok(
     overlay < modal,
-    "shared dialogs must stay above command palette overlays",
+    "shared dialogs must stay above blocking overlays",
   );
   assert.ok(modal < systemDegradation);
   assert.ok(systemDegradation < systemConnection);
@@ -1933,11 +1880,6 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
       name: "project picker and onboarding overlay",
       rule: inlineStyle.match(/\.project-picker,\s*\.project-onboarding\s*\{[^}]*\}/)?.[0],
       token: "--z-project-overlay",
-    },
-    {
-      name: "command palette overlay",
-      rule: componentsStyle.match(/\.op-palette-backdrop\s*\{[^}]*\}/)?.[0],
-      token: "--z-overlay",
     },
     {
       name: "runtime health popover",
@@ -2458,7 +2400,7 @@ test("Launch wizard omits permission choices while preserving explicit provider 
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
     launchWizardSource,
-    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;/,
     "expected renderer to derive mutually exclusive Runtime/Confirm/setup gating",
   );
   assert.match(
@@ -2468,8 +2410,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     launchWizardSource,
-    /const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
-    "expected manual setup forms to be suppressed during Runtime confirmation",
+    /const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;/,
+    "expected manual setup forms to be suppressed during Runtime confirmation and the stages of an Issue launch (Issue #7771)",
   );
   assert.match(
     launchWizardSource,
@@ -2483,8 +2425,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     launchWizardSource,
-    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
-    "expected Branch controls to be part of setup forms only",
+    /if\s*\(\s*\(showSetupForms \|\| planStage === "plan"\)\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
+    "expected Branch controls to be part of setup forms, or of the plan stage of an Issue launch (Issue #7771)",
   );
   assert.match(
     launchWizardSource,
@@ -2767,7 +2709,7 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
     { source: launchWizardSource, selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
     { source: profileWindowSurfaceSource, selector: 'keyInput\\.setAttribute\\("aria-label", `Environment variable key, row ', desc: "env var key" },
     { source: profileWindowSurfaceSource, selector: 'modeSelect\\.setAttribute\\("aria-label", `Environment variable mode, row ', desc: "env var mode" },
-    { source: profileWindowSurfaceSource, selector: 'valueInput\\.setAttribute\\("aria-label", `Profile value, row ', desc: "profile env value" },
+    { source: profileWindowSurfaceSource, selector: 'valueInput\\.setAttribute\\("aria-label", `Set value, row ', desc: "profile env value" },
     { source: launchWizardSource, selector: 'select\\.setAttribute\\("aria-label", label\\)', desc: "launch-field select reuses label" },
   ];
   for (const { source, selector, desc } of expected) {
@@ -2929,7 +2871,7 @@ test("Wizard modal manages focus on open and restores on close", () => {
 });
 
 test("Drawer modals close on Escape — keyboard parity with backdrop click", () => {
-  // The Hotkey overlay and Command Palette already had Esc-close (PR #2440).
+  // The Hotkey overlay already had Esc-close (PR #2440).
   // branch-cleanup and migration modals previously closed only on backdrop
   // click — keyboard users were trapped. app.js must wire a global keydown
   // that maps Escape to the same close path for both modals.
@@ -3018,27 +2960,6 @@ test("Hotkey overlay manages focus on open / close (modal dialog a11y)", () => {
   assert.match(operatorShellSource, /returnFocusTo\.focus/);
 });
 
-test("Command Palette implements the WAI-ARIA combobox/listbox pattern", () => {
-  // The input must be a combobox that controls the list and announces the
-  // active option via aria-activedescendant. Without these the listbox role
-  // already on the <ul> is meaningless to screen readers.
-  const paletteInput = document.querySelector("#op-palette-input");
-  assert.ok(paletteInput, "expected palette input");
-  assert.equal(paletteInput.getAttribute("role"), "combobox");
-  assert.equal(paletteInput.getAttribute("aria-controls"), "op-palette-list");
-  assert.equal(paletteInput.getAttribute("aria-autocomplete"), "list");
-  // aria-expanded starts false; operator-shell flips it on open/close.
-  assert.equal(paletteInput.getAttribute("aria-expanded"), "false");
-  assert.match(paletteInput.getAttribute("aria-label") ?? "", /command/i);
-  // operator-shell.js must wire the dynamic pieces.
-  assert.match(operatorShellSource, /input\.setAttribute\("aria-expanded",\s*"true"\)/);
-  assert.match(operatorShellSource, /input\.setAttribute\("aria-activedescendant"/);
-  assert.match(operatorShellSource, /input\.removeAttribute\("aria-activedescendant"\)/);
-  assert.match(operatorShellSource, /li\.setAttribute\("role",\s*"option"\)/);
-  assert.match(operatorShellSource, /li\.setAttribute\("aria-selected"/);
-  assert.match(operatorShellSource, /li\.id\s*=\s*`op-palette-row-\$\{idx\}`/);
-});
-
 test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-drawer modal)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // The legacy `.modal-backdrop.is-drawer .modal-shell.is-drawer-shell` already
@@ -3108,8 +3029,8 @@ test("Status Strip RUNNING / IDLE / WAITING / ERROR cells all tint with their st
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--error/);
   assert.doesNotMatch(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
   assert.doesNotMatch(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--blocked/);
-  assert.match(indexHtml, /<span class="op-status-strip__label">RUNNING<\/span>/);
-  assert.match(indexHtml, /<span class="op-status-strip__label">ERROR<\/span>/);
+  assert.match(indexHtml, /<span class="op-status-strip__label">Running<\/span>/);
+  assert.match(indexHtml, /<span class="op-status-strip__label">Errors<\/span>/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--runtime-health/);
   assert.match(css, /\.op-status-strip__cell--runtime-health\[data-state="warn"\]/);
 });
@@ -3175,24 +3096,15 @@ test("FR-044 (安心) / SPEC #3885 FR-015: fixed surface controls retain agent R
   assert.match(appSource, /updateWindowKillSwitchControls/);
 });
 
-test("#4777: STOP ALL is absent from the rail and remains in the palette with a confirm", () => {
+test("#4777: STOP ALL is absent from the rail and keeps its confirmed command route", () => {
   const railItem = document.querySelector('.op-rail__item[data-cmd="stop-all-windows"]');
   assert.equal(Boolean(railItem), false, "Stop all agents must be absent from the rail");
   assert.equal(Boolean(document.querySelector(".op-rail__item--stop-all")), false);
-  // op:command + palette both route to requestStopAllWindows, which confirms
-  // and emits stop_all_windows.
+  // op:command routes to requestStopAllWindows, which confirms and emits
+  // stop_all_windows. The palette entry retired with the palette (#7879).
   assert.match(appSource, /case "stop-all-windows":/);
-  assert.match(appSource, /id:\s*"stop-all-agents"/);
   assert.match(appSource, /kind:\s*"stop_all_windows"/);
   assert.match(appSource, /function requestStopAllWindows\(\)/);
-});
-
-test("FR-043 (安心): send-input routes to the focused agent pane via session_id", () => {
-  // The palette entry + helper inject one line into the focused agent pane
-  // using pane_send_input scoped to the window's session_id.
-  assert.match(appSource, /id:\s*"send-input-focused-agent"/);
-  assert.match(appSource, /kind:\s*"pane_send_input",\s*session_id:/);
-  assert.match(appSource, /function sendFocusedPaneInput\(/);
 });
 
 test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", () => {
@@ -3625,36 +3537,19 @@ test("hydrated Launch Wizard has no Intake-specific copy override", () => {
   );
 });
 
-test("live Launch Wizard helper reuses only visible Work surfaces and owns only new ids", () => {
+test("live Launch Wizard helper opens the wizard without addressing or owning a window", () => {
+  const start = liveGwtHelperSource.indexOf("export async function openLiveLaunchWizardForBranch");
+  assert.notEqual(start, -1, "expected the shared live Launch Wizard helper");
+  const helper = liveGwtHelperSource.slice(start, liveGwtHelperSource.indexOf("\n}\n", start));
   assert.match(
-    liveGwtHelperSource,
-    /const preexistingWorkSurfaceIds = await liveWorkSurfaceIds\(page\);/,
-    "helper must snapshot every existing Work/legacy Branches id before create_window",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /async function topmostLiveWorkSurfaceId[\s\S]{0,400}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
-    "existing wizard targets must exclude hidden other-project Work surfaces",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /\.waitForFunction\(\(selector\) => \{[\s\S]{0,300}?filter\(\(node\) => !\(node as HTMLElement\)\.hidden\)/,
-    "materialized wizard targets must exclude hidden other-project Work surfaces",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /const createdWorkWindow = !preexistingWorkSurfaceIds\.has\(id\);/,
-    "cleanup ownership must come from the returned id, not from whether create_window was sent",
+    helper,
+    /kind:\s*"open_active_work_launch_wizard",\s*branch_name:\s*branchName/,
+    "helper must use the route that needs no Work/Branches window (Issue #7766)",
   );
   assert.doesNotMatch(
-    liveGwtHelperSource,
-    /const createdWorkWindow = !id;/,
-    "a hidden existing singleton must never be treated as helper-owned",
-  );
-  assert.match(
-    liveGwtHelperSource,
-    /cleanup:\s*async \(\) => \{\s*if \(!createdWorkWindow \|\| cleaned\) return;[\s\S]{0,700}?kind:\s*"close_window"/,
-    "cleanup must gate close_window on ownership of the returned id",
+    helper,
+    /"open_launch_wizard"|"create_window"|"close_window"/,
+    "the backend refuses an Issues window id, so the helper must not select, create, or close windows",
   );
 });
 
@@ -4665,7 +4560,7 @@ test("Hidden window output is gated while PM and Agents retain their VT buffers"
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true\s*&& \(pmChatViews\.has\(windowId\)\s*\|\|\s*worksSurface\?\.contains\(windowId\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)\)/,
+    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true\s*&& \(workspaceWindowById\(windowId\)\?\.is_pm\s*\|\|\s*worksSurface\?\.contains\(windowId\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)\)/,
     "ready PM and retained Works must consume output without a visible host while missing/unfit/barrier and other hidden windows retain output gating",
   );
 
@@ -4847,30 +4742,16 @@ test("app.css must not redeclare display for the Workspace overview shell", () =
 
 // --- SPEC #3206 v2: notification center (bell + unread badge + drawer) ---
 
-test("SPEC #3206 v2: the System rail group carries the notification bell with an unread badge (FR-009)", () => {
-  const system = document.querySelector(".op-rail__group--system");
-  assert.ok(system, "System rail group exists");
-  const bell = system.querySelector('.op-rail__item[data-cmd="toggle-notifications"]');
-  assert.ok(bell, "bell lives in the System group and dispatches through data-cmd");
-  assert.equal(bell.id, "op-notifications-button");
-  assert.equal(bell.getAttribute("type"), "button");
-  assert.ok(bell.getAttribute("aria-label"), "icon-only button carries an aria-label");
-  assert.equal(bell.getAttribute("aria-controls"), "notification-center");
-  assert.equal(bell.getAttribute("aria-expanded"), "false", "drawer closed at rest");
-  const icon = bell.querySelector(".op-rail__icon");
-  assert.equal(icon?.getAttribute("aria-hidden"), "true");
-  const flyout = bell.querySelector(".op-rail__flyout");
-  assert.equal(flyout?.getAttribute("aria-hidden"), "true");
-  assert.ok(flyout.querySelector(".op-rail__flyout-label")?.textContent?.trim());
-  const badge = bell.querySelector(".op-rail__badge");
-  assert.ok(badge, "unread badge element is part of the bell");
-  assert.equal(badge.hidden, true, "badge hidden at rest (0 unread)");
-  assert.equal(badge.getAttribute("aria-hidden"), "true", "count is mirrored into the aria-label instead");
-  // FR-009 keeps the rail group order intact (no new group).
+test("SPEC #3206 v2: the notification bell lives in the shared header, not the rail (FR-009, Issue #7740)", () => {
+  // app-chrome.test.mjs owns the bell's own contract (id, count, aria state).
+  assert.equal(document.querySelector('.op-rail [data-cmd="toggle-notifications"]'), null);
+  assert.equal(document.querySelector(".op-rail #op-notifications-button"), null);
+  assert.ok(document.querySelector(".project-bar.app-head #app-head-nav"), "the header nav hosts the bell");
+  // The rail group order stays intact.
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
+  assert.deepEqual(groups, ["Navigate", "Surfaces"]);
 });
 
 test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle, Esc closes, badge is wired (FR-009 / FR-014)", () => {
@@ -4884,7 +4765,7 @@ test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle,
     /if \(notificationCenter\.isOpen\(\)\) \{\s*\n\s*notificationCenter\.close\(\);\s*\n\s*event\.preventDefault\(\);/,
     "Esc closes the drawer through the shared keydown chain",
   );
-  assert.match(appSource, /import \{ createNotificationCenter, renderNotificationBell \} from "\/notification-center\.js";/);
+  assert.match(appSource, /import \{ createNotificationCenter \} from "\/notification-center\.js";/);
   assert.match(appSource, /const notificationCenter = createNotificationCenter\(\{\s*document/);
   assert.match(
     appSource,
@@ -4893,8 +4774,8 @@ test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle,
   );
   assert.match(
     appSource,
-    /notificationCenter\.onUnreadChange\(\(count, hasError\) =>[\s\S]{0,400}renderNotificationBell\(\{/,
-    "unread changes re-render the bell badge",
+    /const syncNotificationBell = \(\) => appChrome\.setNotifications\(\{[\s\S]{0,300}notificationCenter\.onUnreadChange\(syncNotificationBell\);\s*notificationCenter\.onOpenChange\(syncNotificationBell\);/,
+    "unread and drawer changes re-render the header bell",
   );
 });
 
@@ -4907,8 +4788,8 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
       defined.add(m[1]);
     }
   }
-  const blocks = frontendStyle.match(/\.(?:notification-center|op-rail__badge)[^{}]*\{[^}]*\}/g) ?? [];
-  assert.ok(blocks.length >= 8, `expected the .notification-center / .op-rail__badge rule family (got ${blocks.length})`);
+  const blocks = frontendStyle.match(/\.(?:notification-center|app-head__count)[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 8, `expected the .notification-center / .app-head__count rule family (got ${blocks.length})`);
   for (const block of blocks) {
     assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/, `raw hex in ${block.split("\n")[0]}`);
     assert.doesNotMatch(block, /\brgba?\(/, `raw rgb in ${block.split("\n")[0]}`);
@@ -4922,7 +4803,7 @@ test("SPEC #3206 v2: notification-center / badge CSS only references defined Ope
   assert.match(frontendStyle, /\.notification-center__item\[data-severity="critical"\]\s*\{[^}]*--color-state-blocked/);
   assert.match(frontendStyle, /\.notification-center__item\[data-severity="warning"\]\s*\{[^}]*--color-state-needs-input/);
   assert.match(frontendStyle, /\.notification-center__severity\[data-severity="critical"\]\s*\{[^}]*border-radius/);
-  assert.match(frontendStyle, /\.op-rail__badge\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
+  assert.match(frontendStyle, /\.app-head__count\[data-has-error="true"\]\s*\{[^}]*--color-state-blocked/);
   // history scrolls inside the drawer body
   assert.match(frontendStyle, /\.notification-center__body\s*\{[^}]*overflow-y:\s*auto/);
   // User ruling 2026-09-04: errors are read in ONE place, so the Issue
@@ -4964,15 +4845,11 @@ test("window navigation publishes the selected pane without changing layout", ()
   assert.doesNotMatch(body, /activate_window_tab|splitSurfaces\.close|pendingFrameWindowId/);
 });
 
-// Issue #7646 AC-1: the agent ledger opens from the project header, not only
-// from the rail.
-test("Issue #7646: the project header opens the agent ledger", () => {
-  const button = document.querySelector(".project-bar .project-actions #open-agents-button");
-  assert.ok(button, "the header carries the ledger entry");
-  assert.equal(button.getAttribute("type"), "button");
-  assert.equal(button.textContent.trim(), "Ledger", "the name stays distinct from the rail's Agents entry");
-  assert.equal(button.dataset.surface, undefined, "the rail alone owns surface selection state");
-  assert.match(button.getAttribute("title"), /ledger/i);
-  assert.match(extractMediaBlocks(componentsStyle, "max-width: 900px"), /\.project-bar::before\s*\{[^}]*display:\s*none/, "the brand yields its room before the bar overflows");
-  assert.match(appSource, /getElementById\("open-agents-button"\)\?\.addEventListener\("click", \(\) => openSurface\("agents"\)\)/);
+// Issue #7646 AC-1: the agent ledger opens from the header. Issue #7740 moved
+// the entry into the shared header's nav (app-chrome.test.mjs).
+test("Issue #7646: the shared header opens the agent ledger", () => {
+  assert.equal(document.getElementById("open-agents-button"), null, "the old top-bar entry is gone");
+  assert.match(appSource, /agents: \(\) => openAgents\("ledger"\),/);
+  // Issue #7649: the rail's Agents is the project's agents screen.
+  assert.match(appSource, /surface === "agents" \? openAgents\("project"\) : openSurface\(surface\)/);
 });

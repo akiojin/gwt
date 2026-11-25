@@ -30,6 +30,7 @@ test.beforeEach(async ({ page }, info) => {
     inboxFirst: info.title.startsWith("Issue #5287"),
     includeAgent: info.title.startsWith("AC-M1/M2:") || info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
+    includeTheme: info.title.startsWith("Issue #7645"),
   });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
@@ -118,7 +119,8 @@ test.describe("Issues touch navigation", () => {
       await page.setViewportSize({ width, height: 844 });
       const measured = await sizes();
       expect(measured.map(control => control.label)).toEqual(expect.arrayContaining(["Auto-refill", "Autonomous mode", "Agent limit", "Issues settings", "Refresh cached work items"]));
-      expect(measured).toHaveLength(9);
+      // Issue #7728: the Start/Stop button left with the project stop/start.
+      expect(measured).toHaveLength(8);
       for (const control of measured) {
         expect(control.width, `${control.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
         expect(control.height, `${control.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
@@ -705,6 +707,50 @@ test("Issue #5396 lazy preview retains DOM across unchanged list and detail repl
   await expect(detail.locator(".knowledge-detail-title")).toHaveText("Refreshed issue");
 });
 
+// Issue #7728 AC-1/AC-2: Settings stops and starts the project through the
+// same confirmation and the same operation as the Hub project list.
+test("Issue #7728 Settings stops and starts the project through the shared confirmation", async ({ page }, info) => {
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  const pm = (paused: boolean) => ({ kind: "pm_status", project_key: new URL(page.url()).pathname.split("/").filter(Boolean).at(-1),
+    available: true, paused, auto_start: true, configured_agent_id: "claude", loop_interval_secs: 60, is_running: true });
+  const sent = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) => message.kind === "set_project_autonomy"));
+  await page.locator('.issue-bridge-root [data-action="monitor-settings"]').click();
+  await expect(settings).toBeVisible();
+  const controls = settings.locator("[data-settings-issues-controls]");
+  const project = controls.locator('[data-settings-launch-action="project-autonomy"]');
+  const state = project.locator("[data-project-autonomy-state]");
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toHaveCount(0);
+  await page.evaluate(event => { (window as any).__queueStatus({ enabled: true, active_count: 1 }); (window as any).__queueEvent(event); }, pm(false));
+  await expect(state).toHaveText("Running");
+
+  const dialog = page.getByRole("dialog", { name: "Stop this project?" });
+  await project.getByRole("button", { name: "Stop…" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("New assignments and the Project Manager patrol stop now");
+  await expect(dialog).toContainText("A stop cannot be cancelled");
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  const path = info.outputPath(`project-stop-settings-${info.project.name}.png`);
+  await page.screenshot({ path });
+  await info.attach(`project-stop-settings-${info.project.name}`, { path, contentType: "image/png" });
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  expect(await sent()).toEqual([]);
+  await project.getByRole("button", { name: "Stop…" }).click();
+  await dialog.getByRole("button", { name: "Stop project" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await sent()).toEqual([{ kind: "set_project_autonomy", running: false }]);
+
+  // Stop pending is one-way; the project settles as Stopped once agents finish.
+  await page.evaluate(event => { (window as any).__queueStatus({ enabled: false, active_count: 1 }); (window as any).__queueEvent(event); }, pm(true));
+  await expect(state).toHaveText("Stop pending · 1 agent finishing");
+  await expect(project.getByRole("button")).toHaveCount(0);
+  await page.evaluate(() => (window as any).__queueStatus({ enabled: false, active_count: 0 }));
+  await expect(state).toHaveText("Stopped");
+  await project.getByRole("button", { name: "Start" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect((await sent()).at(-1)).toEqual({ kind: "set_project_autonomy", running: true });
+});
+
 test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280px and 400px", async ({ page }, info) => {
   const issues = page.locator('.workspace-window[data-preset="issue"]');
   const root = issues.locator(".issue-bridge-root");
@@ -748,7 +794,8 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
     await expect(controls.getByLabel(name, { exact: true })).toHaveCount(0);
   }
   await expect(controls.getByLabel("Autonomous", { exact: true })).toBeVisible();
-  await expect(controls.getByLabel("Monitoring", { exact: true })).toBeVisible();
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toHaveCount(0);
+  await expect(controls.locator('[data-settings-launch-action="project-autonomy"]')).toBeVisible();
   await expect(settings.locator('[data-settings-panel="system"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
   await expect(settings.locator('[data-settings-panel="issues"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
@@ -964,7 +1011,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0 · 0 issues · PM 0");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle Q1 A0/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle · 1 queued · 0 of 2 active");
   await expect(row(page, 42).locator(".knowledge-row-badge")).toHaveText("Needs human");
   await expect(row(page, 42).locator('[data-key="reason"]')).toHaveText(reason);
   await row(page, 42).locator(".knowledge-row-select").click();
@@ -987,7 +1034,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(column(page, "active").locator('[data-issue-number="44"]')).toBeVisible();
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Running · 1 queued · 1 of 2 active");
 });
 
 test("Issue #6141 closed issues follow live sessions and explain cleanup, counts and errors", async ({ page }) => {
@@ -1353,7 +1400,7 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await page.mouse.move(1590, 1090);
   for (const selector of [
     '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
-    '[data-action="monitor-settings"]', '[data-action="monitor-toggle"]',
+    '[data-action="monitor-settings"]',
     '[data-action="monitor-autonomous"]',
   ]) {
     const target = page.locator(selector);
@@ -1687,6 +1734,33 @@ test("card selection keeps issue body, acceptance and provenance beside switchab
   await expect(page.locator(".issue-queue-board")).toBeVisible();
 });
 
+test("Issue #7645 shows delayed theme progress and edits issue subtasks", async ({ page }) => {
+  const detail = page.locator(".knowledge-detail-pane");
+  await row(page, 3).locator(".knowledge-row-select").click();
+  const parent = detail.getByRole("link", { name: "Project theme (#70)" });
+  await expect(parent).toHaveCount(0);
+  const title = detail.getByLabel("Subtask title");
+  await title.fill("Verify the change");
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__queueShowTheme)).toBe("function");
+  await page.evaluate(() => (window as any).__queueShowTheme());
+  await expect(row(page, 3)).toContainText("In theme Project theme");
+  await expect(parent).toHaveAttribute("href", "https://github.com/example/repo/issues/70");
+  const theme = detail.getByRole("progressbar", { name: "Theme progress done" });
+  await expect(theme).toHaveAttribute("aria-valuenow", "1");
+  await expect(theme).toHaveAttribute("aria-valuemax", "4");
+  await expect(title).toHaveValue("Verify the change");
+  await expect(title).toBeFocused();
+  await detail.getByRole("button", { name: "Add subtask" }).click();
+  await expect(detail.getByText("Verify the change", { exact: true })).toBeVisible();
+  const progress = detail.getByRole("progressbar", { name: "Subtasks done" });
+  await expect(progress).toHaveAttribute("aria-valuemax", "2");
+  await expect(progress).toHaveAttribute("aria-valuenow", "1");
+  await expect(title).toHaveValue("");
+  await detail.getByRole("button", { name: "Remove subtask Verify the change" }).click();
+  await expect(detail.getByText("Verify the change", { exact: true })).toHaveCount(0);
+  await expect(progress).toHaveAttribute("aria-valuemax", "1");
+});
+
 test("T-F2: tier raise is per-Issue, server-confirmed and retained beside body and Output", async ({page}) => {
   const facts = { issue_number: 3, tier_count: 3, next_minimum_tier: 0,
     next_launch: { tier: 1, agent_id: "claude", model: "sonnet", reasoning: "medium" } };
@@ -1919,6 +1993,21 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect(issues.getByLabel("Refill limit",{exact:true})).toHaveValue("5");
 });
 
+test("Issue #7813: empty Queued column names the Auto-refill hold", async ({ page }) => {
+  const queued = column(page,"queued");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4});
+  await expect(queued.locator(".knowledge-row")).toHaveCount(0);
+  await expect(queued).toContainText("Auto-refill adds eligible Backlog issues on the next Issues scan.");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,
+    terminal_queue_refill_hold:"limit_reached"});
+  await expect(queued).toContainText("Auto-refill is at its refill limit (4).");
+  await expect(queued).not.toContainText("next Issues scan");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,
+    terminal_queue_refill_hold:"no_candidates"});
+  await expect(queued).toContainText("The last Issues scan found no eligible Backlog issue to add.");
+  await expect(queued).not.toContainText("next Issues scan");
+});
+
 test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
   await confirm(page, [99, 3, 4]);
   await page.evaluate(() => (window as any).__queueActivity([{window_id:"tab-queue::agent-3",session_id:"session-3",
@@ -1965,9 +2054,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false } = {}) {
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false, includeTheme = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -2103,13 +2192,32 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
           if (message.kind==="load_knowledge_bridge") fixture.__queueBaseLoad=fixture.__queueLoad;
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
-        else if(message.kind==="select_knowledge_bridge_entry") {
+        else if(message.kind==="load_themes") {
+          const reply = {kind:"themes",request_id:message.request_id,view:{themes:includeTheme ? [{
+            number:70,title:"Project theme",url:"https://github.com/example/repo/issues/70",
+            issues_total:4,issues_completed:1,issues:[{number:3,in_repository:true}],
+          }] : []}};
+          if (includeTheme) fixture.__queueShowTheme = () => this.emit(reply);
+          else this.emit(reply);
+        }
+        else if(message.kind==="select_knowledge_bridge_entry" || message.kind==="edit_issue_subtask") {
           fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
+          if (includeTheme && message.number === 3) {
+            const detail = fixture.__queueLastDetail.detail;
+            fixture.__queueSubtasks ??= [{ text: "Confirm the issue", done: true, remove_at: 25 }];
+            if (message.change?.kind === "add") {
+              fixture.__queueSubtasks.push({ text: message.change.title, done: false, remove_at: 50 });
+            } else if (message.change?.kind === "remove") {
+              fixture.__queueSubtasks = fixture.__queueSubtasks.filter(item =>
+                item.remove_at !== message.change.start || item.text !== message.change.text);
+            }
+            detail.subtasks = fixture.__queueSubtasks;
+          }
           this.emit(fixture.__queueLastDetail);
         }
       }
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings});
+  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme});
 }

@@ -95,6 +95,46 @@ pub fn provider_usage_limit_failure(
     }
 }
 
+/// Issue #7841: keep a usage limit a session just hit under the pool account
+/// the session runs on, so Accounts can show when that account last hit its
+/// limit and when it said access returns. Any other failure records nothing.
+pub fn account_limit_for(
+    session: &gwt_agent::Session,
+    failure: &crate::IssueMonitorFailure,
+    detected_at: UtcTimestamp,
+) -> Option<gwt_core::usage::account_limits::AccountLimit> {
+    let crate::IssueMonitorFailure::ProviderUsageLimit { resets_at, .. } = failure else {
+        return None;
+    };
+    let provider = quota_provider(Some(session.agent_id.command()))?;
+    Some(gwt_core::usage::account_limits::AccountLimit {
+        provider,
+        account_id: session.execution_account.as_ref().map_or_else(
+            || provider.agent_command().to_string(),
+            |account| account.account_id.clone(),
+        ),
+        observation: gwt_core::usage::LimitObservation {
+            detected_at,
+            resets_at: resets_at.as_deref().and_then(UtcTimestamp::parse_rfc3339),
+        },
+    })
+}
+
+/// Record [`account_limit_for`] in the host's account limit file.
+pub fn record_account_limit(
+    session: &gwt_agent::Session,
+    failure: &crate::IssueMonitorFailure,
+    detected_at: UtcTimestamp,
+) {
+    let Some(limit) = account_limit_for(session, failure, detected_at) else {
+        return;
+    };
+    let path = gwt_core::usage::account_limits::account_limits_path();
+    if let Err(error) = gwt_core::usage::account_limits::record_account_limit(&path, limit) {
+        tracing::warn!(%error, path = %path.display(), "the account's usage limit could not be recorded");
+    }
+}
+
 /// The agent id to report as the exhausted account, falling back to the
 /// notice's hint and finally to `unknown` — never to a guess.
 pub fn provider_label(
@@ -107,11 +147,10 @@ pub fn provider_label(
     {
         return agent_id.to_string();
     }
-    match notice.provider {
-        Some(gwt_core::usage::UsageProvider::Codex) => "codex".to_string(),
-        Some(gwt_core::usage::UsageProvider::ClaudeCode) => "claude".to_string(),
-        None => "unknown".to_string(),
-    }
+    notice
+        .provider
+        .map_or("unknown", gwt_core::usage::UsageProvider::agent_command)
+        .to_string()
 }
 
 /// Classify the provider's exact late-resume writer race without promoting
@@ -687,10 +726,7 @@ pub fn observe_screen_policy(
         .screen
         .and_then(gwt_core::usage::limit_notice::detect_provider_auth_notice)
         .filter(|provider| Some(*provider) == quota_provider(input.agent_id))
-        .map(|provider| match provider {
-            gwt_core::usage::UsageProvider::Codex => "codex",
-            gwt_core::usage::UsageProvider::ClaudeCode => "claude",
-        });
+        .map(gwt_core::usage::UsageProvider::agent_command);
     if let Some(agent_id) = auth_agent {
         state.quota_hold = None;
         state.quota_candidate_since = None;
@@ -761,6 +797,43 @@ pub fn release_policy_quota(
 #[cfg(test)]
 mod tests {
     use crate as gwt;
+
+    // Issue #7841 T-301: a limit a session hit belongs to the pool account
+    // the session runs on; a session without one ran on the default account.
+    #[test]
+    fn a_usage_limit_is_kept_under_the_session_account() {
+        let detected_at =
+            gwt_core::timestamp::UtcTimestamp::parse_rfc3339("2026-11-24T02:00:00Z").unwrap();
+        let limit = crate::IssueMonitorFailure::ProviderUsageLimit {
+            provider: "claude".into(),
+            resets_at: Some("2026-11-24T06:00:00Z".into()),
+            evidence: None,
+        };
+        let mut session = gwt_agent::Session::new(
+            std::path::Path::new("/repo"),
+            "work/limit",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        let default = super::account_limit_for(&session, &limit, detected_at).unwrap();
+        assert_eq!(default.provider, gwt_core::usage::UsageProvider::ClaudeCode);
+        assert_eq!(default.account_id, "claude");
+        assert_eq!(
+            default.observation.resets_at,
+            gwt_core::timestamp::UtcTimestamp::parse_rfc3339("2026-11-24T06:00:00Z")
+        );
+
+        session.execution_account = Some(gwt_agent::ExecutionAccount {
+            account_id: "claude-2".into(),
+            env_key: "CLAUDE_CONFIG_DIR".into(),
+            credential_home: Some("/home/.gwt/accounts/claude/claude-2".into()),
+        });
+        let pooled = super::account_limit_for(&session, &limit, detected_at).unwrap();
+        assert_eq!(pooled.account_id, "claude-2");
+        assert_eq!(pooled.observation.detected_at, detected_at);
+
+        let other = crate::IssueMonitorFailure::CodexDirectoryTrustPrompt;
+        assert!(super::account_limit_for(&session, &other, detected_at).is_none());
+    }
 
     #[test]
     fn late_agent_detail_refines_final_output_from_the_original_base() {

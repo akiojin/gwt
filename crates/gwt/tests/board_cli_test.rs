@@ -114,17 +114,18 @@ fn run_board_at(home: &Path, project: &Path, session_id: &str, json: &str) -> Va
         .write_all(json.as_bytes())
         .expect("write stdin");
     let output = child.wait_with_output().expect("wait gwtd");
-    assert!(
-        output.status.success(),
-        "gwtd should exit 0 for `{json}`, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
         panic!(
             "parse gwtd JSON response: {err}; stdout={}",
             String::from_utf8_lossy(&output.stdout)
         )
-    })
+    });
+    assert_eq!(
+        Value::from(output.status.code().expect("gwtd exit code")),
+        response["exit_code"],
+        "gwtd process status must match the envelope for `{json}`"
+    );
+    response
 }
 
 fn assert_ok(value: &Value, context: &str) {
@@ -285,6 +286,99 @@ fn board_post_intent_replays_exactly_and_changed_payload_conflicts() {
     let rendered = show["output"].as_str().unwrap_or_default();
     assert_eq!(rendered.matches("durable integration payload").count(), 1);
     assert!(!rendered.contains("changed integration payload"));
+}
+
+#[test]
+fn pm_runtime_records_manual_recovery_without_a_producing_binding() {
+    use gwt::pm_registry::{save_pm_prefs, PmPrefs, PmRegistration};
+
+    let fixture = fixture();
+    let root = fixture.project.path();
+    let home = fixture.home.path();
+    let store = home
+        .join(".gwt/projects")
+        .join(gwt_core::paths::project_scope_hash(root).as_str());
+    let worktree = store.join("pm/worktree");
+    let runtime = store.join("pm/runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    assert!(hidden_command("git")
+        .current_dir(root)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(hidden_command("git")
+        .current_dir(root)
+        .args(["worktree", "add", "--detach"])
+        .arg(&worktree)
+        .arg("HEAD")
+        .status()
+        .unwrap()
+        .success());
+
+    let mut pm = Session::new(&worktree, "pm/fixture", AgentId::Codex);
+    pm.project_state_root = Some(root.to_path_buf());
+    pm.agent_name = Some("Fixture PM".into());
+    pm.save(&home.join(".gwt/sessions")).unwrap();
+    let prefs_path = store.join("project-state/pm.json");
+    let registration = PmRegistration {
+        session_id: pm.id.clone(),
+        agent_id: "codex".into(),
+        worktree_path: worktree.display().to_string(),
+        created_at: None,
+        consecutive_crashes: 0,
+        next_not_before: None,
+    };
+    save_pm_prefs(
+        &prefs_path,
+        &PmPrefs {
+            registration: Some(registration),
+            ..PmPrefs::default()
+        },
+    )
+    .unwrap();
+
+    let request = r#"{"schema_version":1,"operation":"issue.monitor.recovery.record","params":{"number":6405,"recovery_id":"fixture-recovery","recovered_at":"2026-11-14T00:00:00Z","body":"Released the stopped generation."}}"#;
+    let first = run_board_at(home, &runtime, &pm.id, request);
+    assert_ok(&first, "registered PM manual recovery");
+    assert_eq!(first["data"]["state"], "acknowledged", "{first}");
+    assert_eq!(first["data"]["worktree_form"], "ephemeral");
+
+    let replay = run_board_at(home, &runtime, &pm.id, request);
+    assert_ok(&replay, "registered PM manual recovery replay");
+    assert_eq!(replay["data"]["entry_id"], first["data"]["entry_id"]);
+    let show = run_board_at(
+        home,
+        &runtime,
+        &pm.id,
+        r#"{"schema_version":1,"operation":"board.show","params":{"all":true}}"#,
+    );
+    let board = show["output"].as_str().unwrap();
+    assert_eq!(board.matches("Released the stopped generation.").count(), 1);
+    assert!(board.contains("Fixture PM"));
+
+    let ordinary_board_post = run_board_at(
+        home,
+        &runtime,
+        &pm.id,
+        r#"{"schema_version":1,"operation":"board.post","params":{"kind":"decision","body":"unbound exact post","intent_id":"manual-recovery:6405:fixture-recovery"}}"#,
+    );
+    assert_eq!(ordinary_board_post["data"]["code"], "authority_unavailable");
+
+    save_pm_prefs(&prefs_path, &PmPrefs::default()).unwrap();
+    let refused = run_board_at(home, &runtime, &pm.id, request);
+    assert_eq!(refused["ok"], false);
+    assert_eq!(refused["data"]["state"], "refused");
+    assert_eq!(refused["data"]["code"], "authority_unavailable");
 }
 
 #[test]

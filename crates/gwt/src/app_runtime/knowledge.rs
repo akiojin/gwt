@@ -379,6 +379,8 @@ mod related_snapshot_cache_tests {
                 phase: None,
                 has_unknown_phase: false,
                 is_spec: false,
+                autonomous_target: false,
+                autonomous_target_label: String::new(),
                 parent_spec: None,
                 monitor_state: None,
                 queue_position: None,
@@ -621,6 +623,8 @@ mod monitor_snapshot_cache_tests {
             phase: None,
             has_unknown_phase: false,
             is_spec: false,
+            autonomous_target: false,
+            autonomous_target_label: String::new(),
             parent_spec: None,
             monitor_state: Some(gwt::MonitorInboxState::Launched),
             queue_position: Some(99),
@@ -1981,6 +1985,36 @@ impl AppRuntime {
         request_id: Option<u64>,
         number: u64,
     ) -> Vec<OutboundEvent> {
+        self.knowledge_detail_events(client_id, id, kind, request_id, number, None)
+    }
+
+    pub(crate) fn issue_subtask_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        request_id: u64,
+        number: u64,
+        change: gwt::knowledge_bridge::IssueSubtaskChange,
+    ) -> Vec<OutboundEvent> {
+        self.knowledge_detail_events(
+            client_id,
+            id,
+            KnowledgeKind::Issue,
+            Some(request_id),
+            number,
+            Some(change),
+        )
+    }
+
+    fn knowledge_detail_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        kind: KnowledgeKind,
+        request_id: Option<u64>,
+        number: u64,
+        subtask_change: Option<gwt::knowledge_bridge::IssueSubtaskChange>,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
                 client_id,
@@ -2017,8 +2051,25 @@ impl AppRuntime {
         let project_root = tab.project_root.clone();
         let related_snapshot = self.knowledge_related_snapshot.clone();
         let proxy = self.proxy.clone();
+        let client_factory = Arc::clone(&self.issue_client_factory);
         self.blocking_tasks.spawn(move || {
-            let event = match gwt::load_knowledge_bridge_detail(&project_root, kind, number) {
+            let detail = (|| {
+                if let Some(change) = subtask_change {
+                    let (owner, repo) =
+                        gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
+                            .map_err(|error| error.to_string())?;
+                    let client =
+                        client_factory(&owner, &repo).map_err(|error| error.to_string())?;
+                    gwt::knowledge_bridge::edit_issue_subtask(
+                        &project_root,
+                        client.as_ref(),
+                        number,
+                        &change,
+                    )?;
+                }
+                gwt::load_knowledge_bridge_detail(&project_root, kind, number)
+            })();
+            let event = match detail {
                 Ok(mut detail) => {
                     let related = related_snapshot
                         .lock()
@@ -2342,6 +2393,48 @@ impl AppRuntime {
         issue_number: u64,
         target_phase: Option<&str>,
     ) -> Vec<OutboundEvent> {
+        let target_phase = target_phase.map(str::to_string);
+        self.knowledge_label_update_events(
+            client_id,
+            id,
+            request_id,
+            issue_number,
+            move |project_root| {
+                gwt::update_knowledge_phase(project_root, issue_number, target_phase.as_deref())
+            },
+        )
+    }
+
+    /// Issue #7729 AC-1: include an Issue in, or exclude it from, autonomous
+    /// runs. The reply is the same fresh-entry event a phase change sends, so
+    /// the surface replaces its row from one authoritative shape.
+    pub(crate) fn set_issue_autonomous_target_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        request_id: u64,
+        issue_number: u64,
+        enabled: bool,
+    ) -> Vec<OutboundEvent> {
+        self.knowledge_label_update_events(
+            client_id,
+            id,
+            request_id,
+            issue_number,
+            move |project_root| {
+                gwt::set_knowledge_autonomous_target(project_root, issue_number, enabled)
+            },
+        )
+    }
+
+    fn knowledge_label_update_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        request_id: u64,
+        issue_number: u64,
+        update: impl FnOnce(&Path) -> Result<gwt::KnowledgeListItem, String> + Send + 'static,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
                 client_id,
@@ -2391,14 +2484,9 @@ impl AppRuntime {
         let client_id = client_id.to_string();
         let id_owned = id.to_string();
         let project_root = tab.project_root.clone();
-        let target_phase = target_phase.map(str::to_string);
         let monitor_snapshot = self.knowledge_monitor_snapshot.clone();
         self.blocking_tasks.spawn(move || {
-            let event = match gwt::update_knowledge_phase(
-                &project_root,
-                issue_number,
-                target_phase.as_deref(),
-            ) {
+            let event = match update(&project_root) {
                 Ok(mut fresh_entry) => {
                     apply_latest_knowledge_monitor_projection_to_entry(
                         &project_root,

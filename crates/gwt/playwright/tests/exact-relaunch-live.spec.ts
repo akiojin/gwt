@@ -15,9 +15,10 @@ import { pathToFileURL } from "node:url";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { readLatestOwnActivity, readProcessState, startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
-type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
+type RosterMember = { agent_member_id: string; agent_id: string; name: string;
   assignment: { session_id: string | null; issue_number: number | null } | null;
   active_assignments?: { project_key: string; project_name: string | null; session_id: string | null; issue_number: number | null; state: string }[];
   saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
@@ -183,7 +184,7 @@ test("Issue #7440 publishes Work and launches Codex on an existing branch linked
       })]),
       agents: expect.arrayContaining([expect.objectContaining({ session_id: pane.session_id, attached_by: "start" })]),
     })]));
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await expect(page.locator(`.work-row[data-window-id="${pane.id}"]`)).toBeVisible();
     await attachScreenshot(page, info, `existing-issue-work-${theme}`);
     expect(errors, "console and page errors during linked launch").toEqual([]);
@@ -214,7 +215,7 @@ test.describe("Issue #6767 final quota output (isolated checkout)", () => {
       const pane = await liveCodexWindow(page, sessionId);
       await expect.poll(async () => tomlString(await sessionRecord(fixture.home, sessionId), "agent_session_id"),
         { timeout: 60_000 }).toBe(launch.provider_session_id);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
       await expect(page.locator(".xterm-screen:visible")).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
@@ -268,7 +269,7 @@ test.describe("Issue #3340 explicit STOP retention (isolated checkout)", () => {
       const launch = (await fixture.launches())[0];
       const sessionId = launch.gwt_session_id!;
       const pane = await liveCodexWindow(page, sessionId);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
       const transcript = page.locator(".xterm-screen:visible");
       await expect(transcript).toBeVisible();
@@ -309,7 +310,7 @@ test.describe("Issue #3340 explicit STOP retention (isolated checkout)", () => {
       await expect.poll(() => codexWindows(page)).toEqual([]);
       expect(await fixture.launches()).toHaveLength(1);
       expect(await sessionRecord(fixture.home, sessionId)).not.toBe("");
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await attachScreenshot(page, info, `stopped-not-restored-${theme}`);
       expect(errors, "console/page errors across STOP retention and cold restart").toEqual([]);
     } finally {
@@ -580,7 +581,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     const firstIssue = 43, secondIssue = 44;
     const fixture = await startExactRelaunchFixture(info, {
       page, freshNativeIds: true,
-      monitorPreferences: { max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2 },
+      monitorPreferences: { max_active_agents: 1 },
       async prepare({ home, project, env }) {
         const origin = join(home, "project-a.git");
         execFileSync("git", ["init", "--bare", "-q", origin], { cwd: project, env, encoding: "utf8" });
@@ -609,20 +610,16 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         await mkdir(secondPreferences, { recursive: true });
         await writeFile(join(secondPreferences, "pm.json"), JSON.stringify({ settings: { auto_start: false } }));
         await writeFile(join(secondPreferences, "issue-monitor.json"), JSON.stringify({ enabled: false,
-          max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2, priority_order: [] }));
+          max_active_agents: 1, priority_order: [] }));
         await writeFile(join(home, ".gwt/session.json"), JSON.stringify({ tabs: [
           { id: "shared-a", title: "Project A", project_root: project, kind: "git" },
           { id: "shared-b", title: "Project B", project_root: second, kind: "git" },
         ], active_tab_id: "shared-a", recent_projects: [] }));
-        // Reading the fixture's initial status already creates the shared Auto
-        // policy. A project JSON seed cannot change that machine authority.
-        const configured = JSON.parse(execFileSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
-          cwd: project, env, encoding: "utf8", timeout: 30_000,
-          input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.config.set", params: { max_active: 2 } }),
-        }));
-        expect(configured.ok).toBe(true);
-        expect(JSON.parse(await readFile(join(home, ".gwt/machine-state/agent-settings.json"), "utf8")))
-          .toMatchObject({ mode: "manual", manual_limit: 2 });
+        // The two live processes share one member across distinct projects.
+        // Set the independent machine allowance without adding a second identity.
+        const machinePath = join(home, ".gwt/machine-state/agent-settings.json");
+        const machine = JSON.parse(await readFile(machinePath, "utf8"));
+        await writeFile(machinePath, JSON.stringify({ ...machine, mode: "manual", manual_limit: 2 }));
       },
     });
     const secondPage = await page.context().newPage().catch(async error => {
@@ -643,14 +640,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       }
       await gotoLiveGwt(page, liveGwtProjectUrl(fixture.url, firstKey), { enableTestBridge: true });
       await openAgents(page);
-      let before = await readRoster(page);
-      const resizeSequence = await cursor(page);
-      await sendLiveGwtEvent(page, { kind: "agent_roster", expected_revision: before.revision,
-        action: { kind: "resize", size: 1 } });
-      before = await rosterAfter(page, resizeSequence, before.revision);
+      const before = await readRoster(page);
       expect(before.error).toBeNull();
-      expect(before.members.filter(member => member.enabled)).toHaveLength(1);
-      const memberId = before.members.find(member => member.agent_id === "codex" && member.enabled)!.agent_member_id;
+      expect(before.members).toHaveLength(1);
+      const memberId = before.members.find(member => member.agent_id === "codex")!.agent_member_id;
       await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondKey), { enableTestBridge: true });
       await openAgents(secondPage);
       expect((await readRoster(secondPage)).members.some(member => member.agent_member_id === memberId)).toBe(true);
@@ -729,8 +722,14 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     expect(secondErrors).toEqual([]);
   });
 
-  test("named registration and inline rename persist their UUID through rejection, reload and native restart", async ({ page }, info) => {
-    const fixture = await startExactRelaunchFixture(info, { page });
+  test("Issue #7775 legacy member waits for work and named registrations preserve identity", async ({ page }, info) => {
+    const legacyName = "Previously resting member";
+    const fixture = await startExactRelaunchFixture(info, { page, monitorPreferences: {
+      agent_roster: { schema_version: 1, revision: 7, members: [
+        { agent_member_id: "4a796866-efb0-43af-a5db-0d0f44a34cb5", agent_id: "codex", name: "First member", enabled: true, created_at: "2026-10-01T00:00:00Z" },
+        { agent_member_id: "4e501291-cfe9-4ac0-aca2-2b328a3cd1e9", agent_id: "codex", name: legacyName, enabled: false, created_at: "2026-10-02T00:00:00Z" },
+      ] },
+    } });
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
     await page.addInitScript(theme => {
@@ -744,6 +743,14 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       const before = await readRoster(page);
+      expect(before.capacity).toBe(2);
+      const legacyMember = before.members.find(member => member.name === legacyName)!;
+      expect(legacyMember).toBeDefined();
+      expect(legacyMember).not.toHaveProperty("enabled");
+      const legacyRow = surface.locator(`[data-member-id="${legacyMember.agent_member_id}"]`);
+      await expect(legacyRow.locator(".roster-state")).toHaveText("Waiting");
+      await expect(legacyRow.locator(".roster-purpose")).toHaveText("Waiting for the next issue");
+      await expect(surface.getByRole("button", { name: /Rest member|Reactivate/ })).toHaveCount(0);
       await expect(register).toBeDisabled();
       await name.fill(" ");
       await expect(surface.locator("#roster-registration-error > span")).toHaveText("Enter a display name.");
@@ -751,28 +758,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(register).toBeDisabled();
       await name.fill(` ${before.members[0].name.toLowerCase()} `);
       await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].name);
-      await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].agent_id);
       await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(name).toHaveAttribute("aria-invalid", "true");
       await expect(register).toBeDisabled();
       await name.fill("  Maple contributor  ");
-      await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
-      const registrationModel = surface.getByRole("combobox", { name: "Model for new member", exact: true });
-      const registrationReasoning = surface.getByRole("combobox", { name: "Reasoning for new member", exact: true });
-      await registrationModel.fill("private-registration-model");
-      await registrationReasoning.fill("ultracode");
-      const invalidSequence = await cursor(page);
-      await register.click();
-      await page.waitForFunction(after => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
-        entry.sequence > after && entry.payload.kind === "agent_roster" && entry.payload.roster.error?.includes("unsupported")), invalidSequence);
-      const invalid = await readRoster(page);
-      expect(invalid.revision).toBe(before.revision);
-      expect(invalid.members).toEqual(before.members);
-      await expect(name).toHaveValue("  Maple contributor  ");
-      await expect(registrationModel).toHaveValue("private-registration-model");
-      await expect(registrationReasoning).toHaveValue("ultracode");
-      await registrationReasoning.fill("high");
-      await surface.locator(".roster-capacity").screenshot({ path: info.outputPath(`registration-model-reasoning-${theme}.png`) });
       await expect(register).toBeEnabled();
       const sequence = await cursor(page);
       await register.click();
@@ -783,7 +772,6 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
       expect(member.agent_id).toBe("codex");
       expect(member.assignment).toBeNull();
-      expect(member.saved_implementation_core).toMatchObject({ agent_id: "codex", model: "private-registration-model", reasoning: "high" });
       await expect(name).toHaveValue("");
       // A stale writer must not replace the registered identity or this draft.
       await name.fill("Retry contributor");
@@ -805,13 +793,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const retryMember = retried.members.find(member => member.name === "Retry contributor")!;
       expect(retryMember.agent_member_id).toBeTruthy();
       await surface.locator(`.roster-row[data-member-id="${retryMember.agent_member_id}"]`).click();
-      const restSequence = await cursor(page);
-      await surface.locator('.roster-detail [data-action="rest"]').click();
-      const rested = await rosterAfter(page, restSequence, retried.revision);
-      expect(rested.members.find(value => value.agent_member_id === retryMember.agent_member_id)?.enabled).toBe(false);
+      await expect(surface.locator(`[data-member-id="${retryMember.agent_member_id}"] .roster-state`)).toHaveText("Waiting");
+      await expect(surface.getByRole("button", { name: /Rest member|Reactivate/ })).toHaveCount(0);
       await name.fill("  RETRY CONTRIBUTOR  ");
       await expect(name).toHaveAttribute("aria-invalid", "true");
-      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor (codex) is resting and uses this name. ");
+      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor is already registered and uses this name. ");
       await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(register).toBeDisabled();
       await name.fill("");
@@ -819,7 +805,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const displayName = surface.getByRole("textbox", { name: "Display name", exact: true });
       const renameSequence = await cursor(page);
       await displayName.fill("Maple ");
-      const firstWord = await rosterAfter(page, renameSequence, rested.revision);
+      const firstWord = await rosterAfter(page, renameSequence, retried.revision);
       expect(firstWord.members.find(value => value.agent_member_id === member.agent_member_id)?.name).toBe("Maple");
       await expect(surface.locator(".roster-name-status")).toHaveText("Saved");
       await displayName.screenshot({ path: info.outputPath(`name-word-boundary-${theme}.png`) });
@@ -859,6 +845,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       const restored = await readRoster(page);
+      expect(restored.members.find(value => value.name === legacyName)).toEqual(legacyMember);
+      await expect(legacyRow.locator(".roster-state")).toHaveText("Waiting");
       expect(restored.members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
       expect(restored.members.find(value => value.name === "Retry contributor")?.agent_member_id)
         .toBe(retried.members.find(value => value.name === "Retry contributor")?.agent_member_id);
@@ -997,7 +985,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(secondBefore.project_key).toBe(secondProjectKey);
       expect(secondBefore.members.some(member => member.agent_member_id === memberId)).toBe(true);
       await secondSurface.getByRole("textbox", { name: "Name for new member", exact: true }).fill("Project B selected member");
-      await secondSurface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
       const beforeSpare = await cursor(secondPage);
       await secondSurface.locator('.roster-capacity [data-action="add"]').click();
       const spareRoster = await rosterAfter(secondPage, beforeSpare, secondBefore.revision);
@@ -1024,7 +1011,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(savedReply.kind, savedReply.message).toBe("issue_monitor_profiles");
       expect(savedReply.profiles).toContainEqual(expect.objectContaining(savedCandidate));
       let savedRevision: string | undefined;
-      const revisionInput = surface.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
       const assertSaved = async () => {
         const roster = await readRoster(page);
         const member = roster.members.find(value => value.agent_member_id === memberId)!;
@@ -1033,12 +1019,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         savedRevision ??= member.saved_manual_revision!;
         expect(member.saved_manual_revision).toBe(savedRevision);
         await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
-        await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
-        await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
-        await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
-        await expect(revisionInput).toHaveValue(savedRevision!);
-        await expect(revisionInput).toHaveAttribute("readonly", "");
-        expect(await revisionInput.evaluate((node: HTMLInputElement) => node.readOnly)).toBe(true);
       };
       const secondCandidatesBefore = await (async () => {
         const after = await cursor(secondPage);
@@ -1055,7 +1035,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         const source = sourceSnapshot.members.find(value => value.agent_member_id === memberId)!;
         const shared = sharedSnapshot.members.find(value => value.agent_member_id === memberId)!;
         expect(shared).toMatchObject({ agent_member_id: memberId, agent_id: source.agent_id, name: source.name,
-          enabled: source.enabled, assignment: null });
+          assignment: null });
         // Sequential reads can observe different live Session states; the
         // project-qualified assignment identity must remain the same.
         const identities = (member: RosterMember) => member.active_assignments?.map(assignment => ({
@@ -1076,27 +1056,19 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         expect(candidates).toEqual(secondCandidatesBefore);
         expect(candidates[0]).toMatchObject(secondDefaults);
         await secondSurface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
-        await expect(secondSurface.locator(".roster-saved-settings")).toContainText("Permissions: Skip prompts");
-        await expect(secondSurface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
-        await expect(secondSurface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
       };
       await assertSaved();
       await assertSharedSaved();
-      await revisionInput.focus();
-      await page.keyboard.press("End");
-      expect(await revisionInput.evaluate((node: HTMLInputElement) => node.selectionStart)).toBe(savedRevision!.length);
       const beforeTuningRoster = await readRoster(page);
       const beforeCoreRevision = (beforeTuningRoster.members.find(value => value.agent_member_id === memberId) as any)?.saved_implementation_core_revision;
       expect(beforeCoreRevision).toBeTruthy();
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-      await expect(revisionInput).toBeFocused();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
       const settings = page.locator('.workspace-window[data-preset="settings"] [data-settings-candidates]');
       await expect(settings).toBeVisible();
       await page.getByRole("button", { name: "Split view", exact: true }).click();
       await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
-      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
       await surface.evaluate(node => { (window as any).__savedCandidateRoster = node; });
       const beforeInlineSave = await cursor(page);
       const candidate = settings.locator(`fieldset[data-agent-member-id="${memberId}"]`);
@@ -1126,9 +1098,10 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(tuned.saved_implementation_core_revision).toBeTruthy();
       expect(tuned.saved_implementation_core_revision).not.toBe(beforeCoreRevision);
       // No manual read, host change or reload can mask a missing ACK invalidation.
-      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: high");
-      await expect(revisionInput).not.toHaveValue(savedRevision!);
-      savedRevision = await revisionInput.inputValue();
+      await expect.poll(async () => (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!.saved_manual_revision).not.toBe(savedRevision);
+      const retuned = (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!;
+      expect(retuned.saved_manual_profile).toMatchObject({ reasoning: "high" });
+      savedRevision = retuned.saved_manual_revision!;
       expect(savedRevision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
@@ -1136,15 +1109,19 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await assertSharedSaved();
       // Exercise the same saved core from Agents, through the actual writer.
       const detail = surface.locator(".roster-detail");
+      // Issue #7647: the ledger offers no tool, model or reasoning for an
+      // implementation member. Settings holds them for a pooled candidate.
+      const launchTuning = candidate;
       const checkCatalogRecovery = async (role: string) => {
+        const scope = role === "implementation" ? launchTuning : detail;
         const cache = join(fixture.home, ".codex/models_cache.json");
         await writeFile(cache, "{broken");
         let after = await cursor(page);
-        await detail.locator('[data-action="reload-tuning"]').click();
+        await scope.locator('[data-action="reload-tuning"]').click();
         await rosterAfter(page, after);
-        await expect(detail.locator('[data-model-catalog-status]')).toContainText("live Codex model catalog is unavailable");
+        await expect(scope.locator('[data-model-catalog-status]')).toContainText("live Codex model catalog is unavailable");
         await detail.screenshot({ path: info.outputPath(`catalog-${role}-unavailable-${theme}.png`) });
-        const input = detail.locator('[data-member-tuning-field="model"]');
+        const input = scope.locator('[data-member-tuning-field="model"]');
         const original = await input.inputValue(), writes = tuningRequests.length + pmProfileRequests.length;
         await input.evaluate(node => { (window as any).__catalogDraftInput = node; });
         await input.dispatchEvent("compositionstart");
@@ -1154,9 +1131,9 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
           supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max", "ultra"].map(effort => ({ effort })),
         })) }));
         after = await cursor(page);
-        await detail.locator('[data-action="retry-model-catalog"]').click();
+        await scope.locator('[data-action="retry-model-catalog"]').click();
         await rosterAfter(page, after);
-        await expect(detail.locator('[data-model-catalog-status]')).toBeHidden();
+        await expect(scope.locator('[data-model-catalog-status]')).toBeHidden();
         await expect(input.locator('..').locator('datalist option[value="catalog-recovered-4777"]')).toHaveCount(1);
         expect(await input.evaluate(node => node === (window as any).__catalogDraftInput)).toBe(true);
         await expect(input).toHaveValue("未確定-model");
@@ -1168,7 +1145,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         await expect.poll(() => tuningRequests.length + pmProfileRequests.length).toBe(writes + 1);
         await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
       };
-      const agentReasoning = detail.locator('[data-member-tuning-field="reasoning"]');
+      const agentReasoning = launchTuning.locator('[data-member-tuning-field="reasoning"]');
       const requestsBeforeComposition = tuningRequests.length;
       await agentReasoning.dispatchEvent("compositionstart");
       await agentReasoning.fill("ultracode");
@@ -1194,13 +1171,16 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await detail.locator('[data-action="retry-tuning"]').click();
       await expect.poll(() => tuningRequests.length).toBe(requestsBeforeComposition + 2);
       await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
-      await expect(revisionInput).not.toHaveValue(savedRevision!);
-      savedRevision = await revisionInput.inputValue();
+      await expect.poll(async () => (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!.saved_manual_revision).not.toBe(savedRevision);
+      const retunedAgain = (await readRoster(page)).members.find(value => value.agent_member_id === memberId)!;
+      expect(retunedAgain.saved_manual_profile).toMatchObject({ reasoning: "medium" });
+      savedRevision = retunedAgain.saved_manual_revision!;
       savedCandidate.reasoning = "medium";
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       await assertSharedSaved();
-      await checkCatalogRecovery("implementation");
-      const agentModel = detail.locator('[data-member-tuning-field="model"]');
+      // Issue #7647: the ledger no longer offers an implementation member a
+      // model, so its catalog recovery is exercised for the Project Manager below.
+      const agentModel = launchTuning.locator('[data-member-tuning-field="model"]');
       const requestsBeforeCustom = tuningRequests.length;
       await agentModel.fill("private-model-4777");
       await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 1);
@@ -1211,11 +1191,10 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(custom.error).toBeNull();
       expect(custom.members.find((value: any) => value.agent_member_id === memberId).saved_manual_profile.model).toBe("private-model-4777");
       await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
-      await expect(detail.locator('[data-model-unavailable]')).toContainText("an unlisted model may still be supported");
+      await expect(launchTuning.locator('[data-model-unavailable]')).toContainText("an unlisted model may still be supported");
       await agentModel.fill(savedCandidate.model);
       await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 2);
       await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
-      await expect(revisionInput).toHaveValue(savedRevision!);
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       const beforeSettings = await cursor(secondPage);
       await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_configure_profile" });
@@ -1257,7 +1236,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       const beforeLiveEdits = (await readRoster(page)).members.find(member => member.agent_member_id === memberId)!;
       const saveLiveField = async (field: string, value: string) => {
         const offset = tuningRequests.length;
-        await detail.locator(`[data-member-tuning-field="${field}"]`).selectOption(value);
+        await (["agent_id", "model", "reasoning"].includes(field) ? launchTuning : detail).locator(`[data-member-tuning-field="${field}"]`).selectOption(value);
         await expect.poll(() => tuningRequests.length).toBe(offset + 1);
         const request = tuningRequests[offset];
         const reply = await page.waitForFunction(id => ((window as any).__gwtPlaywrightMessages || []).find(entry =>
@@ -1273,8 +1252,11 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         expect(await fixture.launches()).toEqual(liveLaunches);
         await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       };
-      for (const [field, value] of [["agent_id", "claude"], ["runtime_target", "Docker"],
-        ["skip_permissions", "false"], ["agent_id", "codex"], ["runtime_target", ""], ["skip_permissions", ""]])
+      // Issue #7647: the ledger offers where a member runs and its permissions,
+      // not its tool.
+      await expect(detail.locator('[data-member-tuning-field="agent_id"]')).toBeHidden();
+      for (const [field, value] of [["runtime_target", "Docker"],
+        ["skip_permissions", "false"], ["runtime_target", ""], ["skip_permissions", ""]])
         await saveLiveField(field, value);
       const beforeLiveReset = await cursor(page);
       await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 477754, profiles: [savedCandidate] });
@@ -1299,11 +1281,9 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
       await assertSharedSaved();
       await secondPage.setViewportSize({ width: 400, height: 1000 });
-      await secondSurface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
       expect(await secondSurface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await secondPage.screenshot({ path: info.outputPath(`common-saved-project-b-${theme}.png`) });
       await page.setViewportSize({ width: 400, height: 1000 });
-      await surface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
       expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await page.screenshot({ path: info.outputPath(`saved-current-native-${theme}.png`) });
       await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_EXIT\r" });
@@ -1352,7 +1332,6 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await assertHistory();
       await assertSharedSaved();
       await expect(secondPage.locator("html")).toHaveAttribute("data-theme", theme);
-      await secondSurface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
       expect(await secondSurface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await secondPage.screenshot({ path: info.outputPath(`common-restored-project-b-${theme}.png`) });
       await page.setViewportSize({ width: 400, height: 1000 });
@@ -1363,14 +1342,10 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await page.getByRole("button", { name: "Split view", exact: true }).click();
       await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
       const preview = page.locator(".agents-surface--preview");
-      const previewRevision = preview.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
-      await expect(previewRevision).toHaveValue(savedRevision!);
-      await expect(previewRevision).toBeDisabled();
       await page.setViewportSize({ width: 400, height: 1000 });
       expect(await preview.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await page.getByRole("button", { name: "Close split", exact: true }).click();
       await page.setViewportSize({ width: 1280, height: 1000 });
-      await expect(revisionInput).toHaveValue(savedRevision!);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       // A separate registered PM preserves the original implementation candidate and its history.
       const pmSettingsPath = join(fixture.home, ".gwt/projects", firstProjectKey, "project-state/pm.json");
@@ -1405,12 +1380,11 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       };
       const beforePmAdd = await readRoster(page);
       await surface.getByRole("textbox", { name: "Name for new member", exact: true }).fill("Project A PM member");
-      await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
       await surface.getByRole("checkbox", { name: "PM eligible for new member", exact: true }).check();
       const pmRoster = await pmMutation("add", () => surface.locator('.roster-capacity [data-action="add"]').click());
       expect(pmRoster.members).toHaveLength(beforePmAdd.members.length + 1);
       const pmMember = pmRoster.members.find(member => member.name === "Project A PM member")!;
-      expect(pmMember).toMatchObject({ agent_id: "codex", enabled: true, pm_eligible: true, assignment: null });
+      expect(pmMember).toMatchObject({ agent_id: "codex", pm_eligible: true, assignment: null });
       const pmMemberId = pmMember.agent_member_id;
       expect(pmMemberId).not.toBe(memberId);
       expect(pmMemberId).not.toBe(spare.agent_member_id);
@@ -1436,7 +1410,9 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await expect.poll(async () => (await pmSettings(pmSettingsPath)).loop_interval_secs).toBe(90);
       if (!(await pmStatus(page, firstProjectKey)).paused) {
         afterPm = await cursor(page);
-        await operations.locator('[data-role="pm-pause-toggle"]').click();
+        // Issue #7728: the patrol pauses only through the one project stop.
+        await expect(operations.locator('[data-role="pm-pause-toggle"]')).toHaveCount(0);
+        await sendLiveGwtEvent(page, { kind: "set_project_autonomy", running: false });
         await pmStatus(page, firstProjectKey, afterPm, { paused: true });
       }
       await expect.poll(async () => (await pmSettings(pmSettingsPath)).paused).toBe(true);
@@ -1486,7 +1462,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await expect(operations).toBeVisible();
       await expect(interval).toHaveValue("90");
       await expect(autoStart).not.toBeChecked();
-      await expect(operations.locator('[data-role="pm-pause-toggle"]')).toHaveText("Resume");
+      await expect(operations.locator('[data-role="pm-autonomy-status"]')).toHaveText("Autonomous loop stopped with the project");
       await expect(detail.locator('[data-member-tuning-field="model"]')).toHaveValue("gpt-6.1-sol");
       await expect(detail.locator('[data-member-tuning-field="reasoning"]')).toHaveValue("low");
       expect(await pmSettings(pmSettingsPath)).toEqual(savedPm);
@@ -1499,7 +1475,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await assertSharedSaved();
       expect((await fixture.launches()).length).toBe(launchesBeforePm);
       afterPm = await cursor(page);
-      await page.locator("#op-pm-entry").click();
+      await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       const runningPm = await pmStatus(page, firstProjectKey, afterPm, { is_running: true,
         running_member_id: pmMemberId, running_model: "gpt-6.1-sol", running_reasoning: "low" });
       await expect.poll(async () => (await fixture.launches()).length).toBe(launchesBeforePm + 1);
@@ -1562,7 +1538,20 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(originalBytes);
         return member as RosterMember;
       };
-      await saveExecution("agent_id", "claude", { agent_id: "claude", model: null, reasoning: null });
+      // Issue #7647: the ledger offers no tool for a member, so the saved
+      // tool is changed through the roster operation.
+      await expect(detail.locator('[data-member-tuning-field="agent_id"]')).toBeHidden();
+      const beforeToolChange = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", project_key: firstProjectKey, request_id: "issue-7647-tool",
+        action: { kind: "set_tuning", member_id: memberId, agent_id: "claude", model: null, reasoning: null,
+          expected_core_revision: (beforeExecutionMember as any).saved_implementation_core_revision } });
+      const toolChanged = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === "issue-7647-tool" && entry.payload.kind === "agent_roster")?.payload.roster,
+      beforeToolChange).then(handle => handle.jsonValue());
+      expect(toolChanged.error).toBeNull();
+      expect(toolChanged.members.find((member: RosterMember) => member.agent_member_id === memberId).saved_implementation_core)
+        .toMatchObject({ agent_id: "claude", model: null, reasoning: null });
+      expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(originalBytes);
       await saveExecution("runtime_target", "Docker", { runtime_target: "Docker" });
       await saveExecution("skip_permissions", "false", { runtime_target: "Docker", skip_permissions: false });
       await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
@@ -1737,7 +1726,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
     };
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(surface).toHaveCSS("--works-preview-lines", "3");
       await page.locator('.op-rail__surface[data-surface="settings"]').click();
       const setting = page.getByRole("spinbutton", { name: "Works output lines", exact: true });
@@ -1746,7 +1735,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       await expect(page.locator('[data-role="system-settings-status"]')).toContainText("Saved system settings");
       expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
       await page.screenshot({ path: info.outputPath("settings-native-works-output-lines.png") });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(surface).toHaveCSS("--works-preview-lines", "10");
       await launchCodex(page, fixture.branch);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
@@ -1756,7 +1745,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(session).toBeTruthy();
       const checkOutput = async (stage: string, observedSession = session) => {
         const window = await liveCodexWindow(page, observedSession);
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         if (await surface.locator(".works-full").isVisible()) await surface.locator('[data-action="back"]').click();
         const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
         await expect(row).toBeVisible({ timeout: 60_000 });
@@ -1809,7 +1798,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect(fixture.ownedPid).not.toBe(oldPid);
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await snapshot("after-restart");
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(surface).toHaveCSS("--works-preview-lines", "10");
       expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
@@ -1922,10 +1911,22 @@ const at = new Date().toISOString();`);
       }
       if (missed) {
         phase = 'pending-proof';
+        // Issue #7270: a deadline-degraded prompt published no Running, so it
+        // has no delivery to miss. The next real tool hook publishes Running
+        // and must leave that event pending when its delivery is rejected.
+        let pendingEvent = event;
+        if (degraded) {
+          pendingEvent = 'PostToolUse';
+          const rejected = invoke(['hook','event',pendingEvent],
+            {...process.env,GWT_HOOK_FORWARD_TOKEN:'works-fixture-rejected-token'},
+            JSON.stringify({session_id:native,hook_event_name:pendingEvent,cwd:process.cwd(),
+              tool_name:'Read',tool_input:{file_path:runtimePath}}));
+          if (rejected.error || rejected.status !== 0) throw new Error('rejected tool hook failed');
+        }
         const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
         if (!journal.health.pending_runtime_state || journal.health.consecutive_failures < 1
           || journal.pending?.gwt_session_id !== process.env.GWT_SESSION_ID
-          || journal.pending?.source_event !== event || journal.pending?.status !== 'Running')
+          || journal.pending?.source_event !== pendingEvent || journal.pending?.status !== 'Running')
           throw new Error('missing real pending Running event');
         receipt('pending');
       }
@@ -2122,7 +2123,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       for (const [index, worker] of live.filter((window: any) => !window.is_pm).entries())
         await input(worker.id, index === 0 ? "GWT_FIXTURE_BEGIN_MISSED" : "GWT_FIXTURE_BEGIN");
       await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(rows).toHaveCount(5, { timeout: 60_000 });
       await expect(rows.last()).toBeInViewport({ ratio: 1 });
       expect(await rows.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.windowId)))
@@ -2184,7 +2185,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
         exit_code: 0, signal: null, shutdown_requested: true, cleanup_completed: true, backstop: false,
       });
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
       await expect(rows.first().locator(".work-name")).toHaveText(pmName);
       await expect(rows.first().locator(".work-name-host .window-role-badge")).toHaveText("PM");
@@ -2202,8 +2203,14 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       await page.screenshot({ path: info.outputPath("works-live-five-reloaded.png") });
       const images: { name: string; image: string }[] = [];
       for (const surface of ["pm", "agents", "works"]) {
-        if (surface === "pm") await page.locator("#op-pm-entry").click();
-        else await page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
+        if (surface === "pm") {
+          await page.locator("#op-pm-entry").click();
+          await page.getByRole("button", { name: "Open PM terminal" }).click();
+        } else if (surface === "works") {
+          await openWorks(page);
+        } else {
+          await page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
+        }
         await expect(main).toHaveAttribute("data-surface", surface);
         if (surface === "pm") {
           const header = main.locator('.workspace-window[data-pm="true"]');
@@ -2227,7 +2234,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
           expect(roster.members.map(member => member.agent_member_id).sort()).toEqual(expectedMemberIds);
           for (const expected of expectedMembers) {
             const member = roster.members.find(member => member.agent_member_id === expected.memberId)!;
-            expect(member).toMatchObject({ agent_id: expected.isPm ? "claude" : "codex", enabled: true });
+            expect(member).toMatchObject({ agent_id: expected.isPm ? "claude" : "codex" });
             if (expected.isPm) {
               expect(member).toMatchObject({ pm_eligible: true, pm_project_key: roster.project_key });
               await expect(main.locator(`.roster-list .roster-row[data-member-id="${expected.memberId}"] .roster-purpose`)).toHaveText("Project Manager");
@@ -2351,7 +2358,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await page.getByRole("button", { name: "Works", exact: true }).click();
+      await openWorks(page);
       if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       await launchCodex(page, fixture.branch);
@@ -2378,11 +2385,11 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       expect(saved.kind, saved.message).toBe("issue_monitor_profiles");
       expect(saved.profiles).toContainEqual(expect.objectContaining(savedCandidate));
       const identities = (roster: AgentRoster) => roster.members.map(member => ({
-        agent_member_id: member.agent_member_id, agent_id: member.agent_id, name: member.name, enabled: member.enabled,
+        agent_member_id: member.agent_member_id, agent_id: member.agent_id, name: member.name,
       })).sort((left, right) => left.agent_member_id.localeCompare(right.agent_member_id));
       const assertCapacity = async (roster: AgentRoster) => {
         expect(roster.error).toBeFalsy();
-        expect(roster.capacity).toBe(roster.members.filter(member => member.enabled).length);
+        expect(roster.capacity).toBe(roster.members.length);
         const preferences = join(fixture.home, ".gwt", "projects", roster.project_key, "project-state", "issue-monitor.json");
         await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")).max_active_agents,
           { timeout: 30_000, message: "persisted max_active equals the latest roster capacity" }).toBe(roster.capacity);
@@ -2396,7 +2403,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
         const roster = await readRoster(target);
         await assertCapacity(roster);
         const member = roster.members.find(member => member.agent_member_id === memberId)!;
-        expect(member).toMatchObject({ name: memberName, agent_id: "codex", enabled: true });
+        expect(member).toMatchObject({ name: memberName, agent_id: "codex" });
         expect(currentWindow.agent_id).toBe("codex");
         const nativeHost = target.locator(`.works-full .works-terminal[data-window-id="${currentWindow.id}"]`);
         await expect(nativeHost).toBeVisible();
@@ -2429,28 +2436,21 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       await expect(page.locator(`.works-full .works-terminal[data-window-id="${firstWindow.id}"] .xterm-helper-textarea`)).toBeVisible();
       await attachScreenshot(page, testInfo, `launched-${theme}`);
       const initialRoster = await checkMemberLinks(page, firstWindow, first.gwt_session_id!, "initial");
-      await page.getByRole("button", { name: "Agents", exact: true }).click();
-      const enabledBefore = new Set(initialRoster.members.filter(member => member.enabled).map(member => member.agent_member_id));
-      await page.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      await page.locator(".op-rail").getByRole("button", { name: "Agents", exact: true }).click();
+      const registeredBefore = new Set(initialRoster.members.map(member => member.agent_member_id));
       await page.getByLabel("Name for new member", { exact: true }).fill("Relaunch helper");
       const beforeAdd = await cursor(page);
       await page.locator('.roster-capacity [data-action="add"]').click();
       const added = await rosterAfter(page, beforeAdd, initialRoster.revision);
       expect(added.capacity).toBe(initialRoster.capacity + 1); await assertCapacity(added);
       await expect(page.locator(".roster-count")).toHaveText(String(added.capacity));
-      const addedMember = added.members.find(member => member.enabled && !enabledBefore.has(member.agent_member_id))!;
+      const addedMember = added.members.find(member => !registeredBefore.has(member.agent_member_id))!;
       expect(addedMember?.name.trim()).toBeTruthy();
       expect(addedMember.agent_id).toBe("codex");
       await page.locator(`.roster-row[data-member-id="${addedMember.agent_member_id}"]`).click();
-      const beforeRest = await cursor(page);
-      await page.locator('.roster-detail [data-action="rest"]').click();
-      const rested = await rosterAfter(page, beforeRest, added.revision);
-      expect(rested.capacity).toBe(initialRoster.capacity); await assertCapacity(rested);
-      await expect(page.locator(".roster-count")).toHaveText(String(rested.capacity));
-      expect(rested.members.find(member => member.agent_member_id === addedMember.agent_member_id))
-        .toMatchObject({ name: addedMember.name, agent_id: "codex", enabled: false });
-      const savedRosterIdentities = identities(rested);
-      await page.getByRole("button", { name: "Works", exact: true }).click();
+      await expect(page.locator(`[data-member-id="${addedMember.agent_member_id}"] .roster-state`)).toHaveText("Waiting");
+      const savedRosterIdentities = identities(added);
+      await openWorks(page);
       if (!await page.locator(".works-full:not([hidden])").isVisible()) await row.locator(".work-open").click();
 
       // Window restart: the provider exits, then an explicit runtime restart
@@ -2512,7 +2512,7 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       errors = capture(restored);
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
       await expect(restored.locator("html")).toHaveAttribute("data-theme", theme);
-      await restored.getByRole("button", { name: "Works", exact: true }).click();
+      await openWorks(restored);
       const third = await launchAt(3);
       expect(third.argv.slice(third.argv.indexOf("resume"))).toContain(native);
       expect(third.resume_session_id).toBe(native);
@@ -2535,10 +2535,10 @@ for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollo
       const restoredRoster = await checkMemberLinks(restored, thirdWindow, third.gwt_session_id!, "app-restored");
       expect(identities(restoredRoster)).toEqual(savedRosterIdentities);
       expect(restoredRoster.members.find(member => member.agent_member_id === addedMember.agent_member_id))
-        .toMatchObject({ name: addedMember.name, agent_id: "codex", enabled: false });
+        .toMatchObject({ name: addedMember.name, agent_id: "codex" });
       await testInfo.attach("agent-member-continuity", { body: JSON.stringify({ member_id: memberId, name: memberName,
         sessions: [first.gwt_session_id, second.gwt_session_id, third.gwt_session_id], capacity: restoredRoster.capacity,
-        retained_resting_member: addedMember.agent_member_id }), contentType: "application/json" });
+        retained_member: addedMember.agent_member_id }), contentType: "application/json" });
       await attachScreenshot(restored, testInfo, `app-restarted-${theme}`);
       expect(errors, "console/page errors after app restart").toEqual([]);
     } finally {
@@ -2607,7 +2607,7 @@ fs.writeFileSync(path.join(process.env.HOME, 'attachment-raw-ready.json'), JSON.
       await expect.poll(async () => JSON.parse(await readFile(readyPath, "utf8").catch(() => "{}")), { timeout: 30_000 })
         .toMatchObject({ pid: launch.pid, session, raw: true });
       const window = await liveCodexWindow(page, session);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
       await expect(row).toBeVisible();
       await row.getByRole("button", { name: "Open terminal" }).click();
@@ -2662,7 +2662,7 @@ fs.writeFileSync(path.join(process.env.HOME, 'attachment-raw-ready.json'), JSON.
       expect(afterRaw.subarray(beforeRaw.length)).toEqual(Buffer.from(`File: "${match![1]}"`, "utf8"));
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       expect((await liveCodexWindow(page, session)).id).toBe(window.id);
       await page.reload();
       expect((await liveCodexWindow(page, session)).id).toBe(window.id);

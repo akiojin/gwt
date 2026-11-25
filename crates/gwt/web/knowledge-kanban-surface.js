@@ -802,6 +802,8 @@ export function renderIssueWindowHeader(doc, model, onAction = () => {}) {
 
 export function createKnowledgeKanbanSurface({
   send,
+  parentThemeForIssue = () => undefined,
+  loadIssueThemes = () => {},
   currentProjectRoot = () => undefined,
   // Semantic search must never use the reconnect queue. This dependency
   // performs one atomic OPEN check + socket.send and reports whether the
@@ -1510,13 +1512,13 @@ export function createKnowledgeKanbanSurface({
           settings.title = lines.join("\n");
           explainIssueControl(settings, settings.title);
         }
-        const toggle = element.querySelector('[data-action="monitor-toggle"]');
-        if (toggle) {
+        // Issue #7728: monitoring has no switch here; it follows the one
+        // project stop/start in Settings and the project list.
+        const monitorState = element.querySelector('[data-role="monitor-state"]');
+        if (monitorState) {
           const enabled = Boolean(issueMonitorModel.read().status.enabled);
-          toggle.textContent = enabled ? "Stop" : "Start";
-          toggle.dataset.enabled = enabled ? "true" : "false";
-          toggle.classList.toggle("primary", !enabled);
-          toggle.classList.toggle("destructive", enabled);
+          monitorState.textContent = enabled ? "Assigning" : "Not assigning";
+          monitorState.dataset.state = enabled ? "running" : "stopped";
         }
         // Issue #3561 / #4499: each control is a WAI-ARIA switch whose label
         // names the setting and whose aria-checked + state word carry the
@@ -1558,16 +1560,18 @@ export function createKnowledgeKanbanSurface({
           summary: [count == null ? "" : `Awaiting attention ${count}`, ...parts.map(part => part.summary)].filter(Boolean).join(" | ") } };
       }
 
-      // SPEC #5016 HSK: pm-chat publishes the unanswered decisions of one PM
-      // window from its single derivation; `null` (not loaded, or closed)
-      // removes that window from the count.
+      // SPEC #5016 HSK: pm-chat publishes the waiting decisions of one PM
+      // window; `null` (not loaded, or closed) removes that window from the
+      // count. Issue #7742: the number is the gwtd decision queue's own
+      // waiting count, taken as published and never recounted here, so the
+      // header, the status bar and the Decide screen cannot disagree.
       function applyPmDecisions(windowId, decisions) {
         issueMonitorModel.update(model => {
           const byWindow = { ...model.pmDecisionAttention.byWindow };
-          if (Array.isArray(decisions?.ids)) byWindow[windowId] = [...decisions.ids];
+          if (Number.isFinite(decisions?.waiting)) byWindow[windowId] = decisions.waiting;
           else delete byWindow[windowId];
           const windows = Object.values(byWindow);
-          const count = windows.length ? windows.reduce((sum, ids) => sum + ids.length, 0) : null;
+          const count = windows.length ? windows.reduce((sum, waiting) => sum + waiting, 0) : null;
           return withDecisionAttention({ ...model, pmDecisionAttention: { count, byWindow,
             summary: count == null ? "" : `PM decisions ${count}` } });
         });
@@ -1724,14 +1728,7 @@ export function createKnowledgeKanbanSurface({
         title.dataset.role = "issue-new-title";
         title.placeholder = "Issue title";
         titleLabel.appendChild(title);
-        const autoMergeLabel = createNode("label", "issue-new-check");
-        const autoMerge = createNode("input", "");
-        autoMerge.type = "checkbox";
-        autoMerge.dataset.role = "issue-new-auto-merge";
-        autoMergeLabel.appendChild(autoMerge);
-        autoMergeLabel.appendChild(createNode("span", "", "auto-merge"));
         content.appendChild(titleLabel);
-        content.appendChild(autoMergeLabel);
 
         const footer = createNode("footer", "modal-footer");
         const cancel = createNode("button", "text-button", "Cancel");
@@ -1773,7 +1770,6 @@ export function createKnowledgeKanbanSurface({
             kind: "quick_register_issue",
             title: value,
             launch,
-            auto_merge: autoMerge.checked === true,
           });
           close();
         };
@@ -1798,7 +1794,6 @@ export function createKnowledgeKanbanSurface({
         issueNewPopover = {
           open() {
             title.value = "";
-            autoMerge.checked = false;
             returnFocus = document.activeElement;
             backdrop.classList.add("open");
             backdrop.removeAttribute("aria-hidden");
@@ -1867,14 +1862,6 @@ export function createKnowledgeKanbanSurface({
         bar.querySelector('[data-action="monitor-limit-auto"]')?.addEventListener("click", () => {
           send({kind:"set_issue_monitor_max_active_agents",max_active_agents:null});
         });
-        bar
-          .querySelector('[data-action="monitor-toggle"]')
-          ?.addEventListener("click", () => {
-            send({
-              kind: "set_issue_monitor_enabled",
-              enabled: !Boolean(issueMonitorModel.read().status.enabled),
-            });
-          });
         bar
           .querySelector('[data-action="monitor-auto-refill"]')
           ?.addEventListener("click", () => {
@@ -2935,7 +2922,7 @@ export function createKnowledgeKanbanSurface({
         windowId,
         knowledgeKind,
         number,
-        { explicit = false } = {},
+        { explicit = false, subtaskChange = null } = {},
       ) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         const previousNumber = state.selectedNumber;
@@ -2982,13 +2969,27 @@ export function createKnowledgeKanbanSurface({
         } else {
           renderKnowledgeDetailOnly(windowId, state);
         }
-        send({
+        const message = subtaskChange == null ? {
           kind: "select_knowledge_bridge_entry",
           id: windowId,
           knowledge_kind: effectiveKind,
           request_id: requestId,
           number,
-        });
+        } : {
+          kind: "edit_issue_subtask",
+          id: windowId,
+          request_id: requestId,
+          number,
+          change: subtaskChange,
+        };
+        if (subtaskChange?.kind === "add") state.subtaskDraftRequest = requestId;
+        if (send(message) === "unavailable" && subtaskChange != null) {
+          state.detailLoading = false;
+          state.error = "Could not edit the subtask. Reconnect and try again.";
+          renderKnowledgeStatusOnly(windowId, state);
+          renderKnowledgeDetailOnly(windowId, state);
+          return false;
+        }
         return true;
       }
 
@@ -3677,7 +3678,7 @@ export function createKnowledgeKanbanSurface({
               return JSON.stringify([(entry.labels || []).map(name => repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)), { ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
-                agentActivityModel?.read().byIssue[entry.number],
+                agentActivityModel?.read().byIssue[entry.number], parentThemeForIssue(entry.number)?.title,
                 phase === "active" ? issueCurrentAgentWindows(issueProjectWindows(windowId), entry) : null]);
             },
             update: (row, entry) => {
@@ -3751,10 +3752,17 @@ export function createKnowledgeKanbanSurface({
               empty = createNode("div", "knowledge-empty");
               column.appendChild(empty);
             }
-            const refill = issueMonitorModel.read().status.terminal_queue_auto_refill;
-            const stopped = !issueMonitorModel.read().status.enabled;
+            const monitorStatus = issueMonitorModel.read().status;
+            const refill = monitorStatus.terminal_queue_auto_refill;
+            const stopped = !monitorStatus.enabled;
+            // Issue #7813 AC-2: name the gate instead of promising a scan.
+            const hold = monitorStatus.terminal_queue_refill_hold;
             empty.textContent = phase === "queued"
-              ? (refill && stopped ? "Start the Issues to begin Auto-refill."
+              ? (refill && stopped ? "Start the project to begin Auto-refill."
+                : refill && hold === "limit_reached"
+                  ? `Auto-refill is at its refill limit (${monitorStatus.terminal_queue_auto_refill_limit ?? 0}). Raise the limit in Issues settings to queue more.`
+                : refill && hold === "no_candidates"
+                  ? "The last Issues scan found no eligible Backlog issue to add. Auto-refill skips held, label-excluded, and removed issues."
                 : refill ? "Auto-refill adds eligible Backlog issues on the next Issues scan."
                   : "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above.")
               : `No ${phase} items`;
@@ -4357,19 +4365,22 @@ export function createKnowledgeKanbanSurface({
 
       function renderIssueDetailAcceptance(detail) {
         const text = (detail.sections || []).map((section) => section?.body || "").join("\n");
-        const progress = issueAcceptanceProgress(text);
+        return renderIssueDetailProgress("Acceptance criteria", issueAcceptanceProgress(text));
+      }
+
+      function renderIssueDetailProgress(label, progress, onRemove) {
         if (progress.total === 0) return null;
         const block = createNode("section", "issue-detail-ac");
-        block.setAttribute("aria-label", "Acceptance criteria");
+        block.setAttribute("aria-label", label);
         const head = createNode("div", "issue-detail-ac-head");
-        head.appendChild(createNode("span", "issue-detail-ac-title", "Acceptance criteria"));
+        head.appendChild(createNode("span", "issue-detail-ac-title", label));
         head.appendChild(
           createNode("span", "issue-detail-ac-count", `${progress.done} / ${progress.total}`),
         );
         block.appendChild(head);
         const gauge = createNode("div", "issue-detail-ac-gauge");
         gauge.setAttribute("role", "progressbar");
-        gauge.setAttribute("aria-label", "Acceptance criteria done");
+        gauge.setAttribute("aria-label", `${label} done`);
         gauge.setAttribute("aria-valuemin", "0");
         gauge.setAttribute("aria-valuemax", String(progress.total));
         gauge.setAttribute("aria-valuenow", String(progress.done));
@@ -4377,13 +4388,22 @@ export function createKnowledgeKanbanSurface({
         fill.style.width = `${Math.round((progress.done / progress.total) * 100)}%`;
         gauge.appendChild(fill);
         block.appendChild(gauge);
+        if (progress.items.length === 0) return block;
         const list = createNode("ul", "issue-detail-ac-list");
         for (const item of progress.items) {
           const row = createNode("li", "issue-detail-ac-item");
+          if (!item.id) row.classList.add("issue-detail-subtask-item");
           row.dataset.done = item.done ? "true" : "false";
           row.appendChild(createNode("span", "issue-detail-ac-mark", item.done ? "✓" : "○"));
-          row.appendChild(createNode("span", "issue-detail-ac-id", item.id));
+          if (item.id) row.appendChild(createNode("span", "issue-detail-ac-id", item.id));
           row.appendChild(createNode("span", "issue-detail-ac-text", item.text));
+          if (onRemove && item.remove_at != null) {
+            const remove = createNode("button", null, "Remove");
+            remove.type = "button";
+            remove.setAttribute("aria-label", `Remove subtask ${item.text}`);
+            remove.addEventListener("click", () => onRemove(item));
+            row.appendChild(remove);
+          }
           list.appendChild(row);
         }
         block.appendChild(list);
@@ -4412,6 +4432,115 @@ export function createKnowledgeKanbanSurface({
           band.appendChild(renderIssueRowMenu(model.overflow, context));
         }
         return band;
+      }
+
+      // Issue #7729 (SPEC #7007 N-2): the operations an Issue takes from its
+      // detail, in one place whatever its state. Priority is the launch queue
+      // order (item 137), the autonomous target is the per-Issue opt-in the
+      // Monitor reads, and the terminal has two ways in: the current session
+      // and the past ones (items 137 and 193).
+      function issueOperationRow(key, title, status) {
+        const row = createNode("div", "issue-detail-operation");
+        row.dataset.operation = key;
+        const copy = createNode("div", "issue-detail-operation-copy");
+        copy.appendChild(createNode("span", "issue-detail-operation-title", title));
+        copy.appendChild(createNode("span", "issue-detail-operation-status", status));
+        row.appendChild(copy);
+        const actions = createNode("div", "issue-detail-operation-actions");
+        row.appendChild(actions);
+        return { row, actions };
+      }
+
+      function sendIssueAutonomousTarget(windowId, state, issueNumber, enabled) {
+        const requestId = nextKnowledgeLoadRequestId++;
+        state.pendingAutonomousTargets ||= new Set();
+        state.pendingAutonomousTargets.add(issueNumber);
+        send({
+          kind: "set_issue_autonomous_target",
+          id: windowId,
+          request_id: requestId,
+          issue_number: issueNumber,
+          enabled,
+        });
+        renderKnowledgeBridge(windowId);
+      }
+
+      function renderIssueDetailOperations(context, detail) {
+        const { windowId, state, entry, queue } = context;
+        const number = entry.number;
+        const section = createNode("section", "knowledge-section issue-detail-operations");
+        section.setAttribute("aria-label", `Issue #${number} operations`);
+        section.appendChild(createNode("div", "knowledge-section-title", "Operations"));
+
+        const priority = issueOperationRow("priority", "Priority", queue
+          ? `Position ${queue.index + 1} of ${queue.length} in the launch queue`
+          : "Not in the launch queue");
+        for (const action of queue ? ["move-to-top", "move-up", "move-down"] : ["queue-push"]) {
+          if (issueRowActionAvailable(action, context)) {
+            priority.actions.appendChild(issueRowActionButton(action, context));
+          }
+        }
+        section.appendChild(priority.row);
+
+        // The Monitor decides what counts as a target and names the label that
+        // carries it; this screen states the role and adds the label as a note.
+        const reported = typeof entry.autonomous_target === "boolean";
+        const included = entry.autonomous_target === true;
+        const modeOff = issueMonitorModel.read().status.autonomous_mode === false;
+        const autonomous = issueOperationRow("autonomous", "Autonomous target", [
+          !reported ? "Not reported yet" : included ? "Included" : "Not included",
+          entry.autonomous_target_label ? `Label: ${entry.autonomous_target_label}` : "",
+          modeOff ? "Autonomous mode is off for this project" : "",
+        ].filter(Boolean).join(" · "));
+        const toggle = createNode("button", "wizard-button is-compact", included ? "Exclude" : "Include");
+        toggle.type = "button";
+        toggle.dataset.action = "set-autonomous-target";
+        toggle.setAttribute("aria-label", included
+          ? `Exclude Issue #${number} from autonomous runs`
+          : `Include Issue #${number} in autonomous runs`);
+        toggle.disabled = !reported || state.pendingAutonomousTargets?.has(number) === true;
+        explainIssueControl(toggle, !reported
+          ? "Reload the Issue list to read whether this Issue is an autonomous target."
+          : included
+            ? "Stop starting and finishing this Issue without a person. It stays in the queue for a manual launch."
+            : "Let this Issue start and finish without a person when autonomous mode is on.",
+        `autonomous-target-${number}`);
+        toggle.addEventListener("click", () => {
+          if (!toggle.disabled) sendIssueAutonomousTarget(windowId, state, number, !included);
+        });
+        autonomous.actions.appendChild(toggle);
+        section.appendChild(autonomous.row);
+
+        const past = (detail.related_works || []).flatMap(work => work.agents || [])
+          .flatMap(agent => agent.sessions || []).filter(session => !session.is_active).length;
+        const live = issueRowActionAvailable("open-window", context);
+        const sessions = issueOperationRow("sessions", "Sessions",
+          `${live ? "Current session" : "No current session"} · ${past === 0 ? "No past sessions"
+            : `${past} past session${past === 1 ? "" : "s"}`}`);
+        if (live) {
+          const open = issueRowActionButton("open-window", context);
+          // Its own id: the action band above already carries "open-window".
+          open.dataset.action = "open-terminal";
+          open.textContent = "Open terminal";
+          open.setAttribute("aria-label", `Open the terminal of the current session for Issue #${number}`);
+          sessions.actions.appendChild(open);
+        }
+        if (past > 0) {
+          const show = createNode("button", "wizard-button is-compact", "Past sessions");
+          show.type = "button";
+          show.dataset.action = "show-past-sessions";
+          show.setAttribute("aria-label", `Show past sessions for Issue #${number}`);
+          show.addEventListener("click", () => {
+            const related = section.parentElement?.querySelector(".knowledge-related-works");
+            if (!related) return;
+            related.setAttribute("tabindex", "-1");
+            related.scrollIntoView?.({ block: "start" });
+            related.focus?.();
+          });
+          sessions.actions.appendChild(show);
+        }
+        section.appendChild(sessions.row);
+        return section;
       }
 
       function syncIssuePreviewVisibility(element, state) {
@@ -4456,6 +4585,7 @@ export function createKnowledgeKanbanSurface({
         const attention = work ? workAttentionFor?.(work) || null : null;
         const faces = entry ? issueRowFaces(windowId, entry, work) : {};
         const queue = canonicalQueuedKnowledgeEntries(state);
+        const parent = parentThemeForIssue(Number(number));
         const relatedWorks = state.detail?.related_works || [];
         const liveSessions = buildKnowledgeRelatedLiveSessionWindowsByConversation(relatedWorks);
         const relatedActions = relatedWorks.flatMap(relatedWork =>
@@ -4467,7 +4597,9 @@ export function createKnowledgeKanbanSurface({
         const key = JSON.stringify([
           state.detail, state.detailLoading, state.selectedNumber, state.previewHidden,
           state.issueDetailView, agentPreview, state.error, entry, work, attention,
-          relatedActions,
+          relatedActions, parent && [parent.number, parent.title, parent.url, parent.total, parent.completed],
+          state.pendingAutonomousTargets?.has(Number(number)) === true,
+          issueMonitorModel.read().status.autonomous_mode,
           agentPreview && state.issueDetailView === "output" && Boolean(isAgentsSurfaceMounted()),
           queue.findIndex(item => item.number === entry?.number), queue.length,
           [faces.inlineWindow, faces.surfaceWindow].map(target => target ? [
@@ -4497,7 +4629,14 @@ export function createKnowledgeKanbanSurface({
           }
           return;
         }
+        const activeInput = document.activeElement;
+        const restoreSubtaskFocus = activeInput?.dataset.subtaskTitle === String(number) && detailPane.contains(activeInput);
         renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview });
+        if (restoreSubtaskFocus) {
+          const input = detailPane.querySelector("[data-subtask-title]");
+          input?.focus();
+          input?.setSelectionRange(activeInput.selectionStart, activeInput.selectionEnd);
+        }
         issueDetailRenderKeys.set(detailPane, key);
         issueDetailTierRenderKeys.set(detailPane, tierKey);
       }
@@ -4668,6 +4807,53 @@ export function createKnowledgeKanbanSurface({
         if (state.detailLoading) {
           scroll.appendChild(createNode("div", "knowledge-detail-empty", "Loading detail"));
         }
+        const parent = parentThemeForIssue(number);
+        if (parent) {
+          const progress = renderIssueDetailProgress("Theme progress", {
+            items: [],
+            done: Math.min(parent.completed, parent.total),
+            total: parent.total,
+          });
+          if (progress) {
+            const link = createNode("a", null, `${parent.title} (#${parent.number})`);
+            link.href = parent.url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            progress.prepend(link);
+            scroll.appendChild(progress);
+          }
+        }
+        const items = detail.subtasks || [];
+        const editable = !entry.is_spec && detail.state?.toLowerCase() !== "closed" && !state.detailLoading && !state.error;
+        const changeSubtask = change => dispatchKnowledgeDetailRequest(windowId, "issue", number, { subtaskChange: change });
+        const children = renderIssueDetailProgress("Subtasks", {
+          items, total: items.length, done: items.filter(item => item.done).length,
+        }, editable ? item => changeSubtask({ kind: "remove", start: item.remove_at, text: item.text }) : null);
+        if (children) scroll.appendChild(children);
+        if (editable) {
+          const form = createNode("form", "knowledge-section");
+          const label = createNode("label", null, "Subtask title");
+          const input = createNode("input");
+          input.type = "text";
+          input.required = true;
+          input.maxLength = 200;
+          input.dataset.subtaskTitle = String(number);
+          input.value = state.subtaskDrafts?.get(number) || "";
+          input.addEventListener("input", () => {
+            state.subtaskDrafts ??= new Map();
+            state.subtaskDrafts.set(number, input.value);
+          });
+          label.appendChild(input);
+          const button = createNode("button", null, "Add subtask");
+          button.type = "submit";
+          form.append(label, button);
+          form.addEventListener("submit", event => {
+            event.preventDefault();
+            const title = input.value.trim();
+            if (title) changeSubtask({ kind: "add", title });
+          });
+          scroll.appendChild(form);
+        }
         (detail.sections || []).forEach((section, index) => {
           const card = createNode("details", "knowledge-section");
           card.open = index === 0;
@@ -4684,6 +4870,7 @@ export function createKnowledgeKanbanSurface({
             createNode("div", "knowledge-detail-empty", "No cached detail available"),
           );
         }
+        scroll.insertBefore(renderIssueDetailOperations(context, detail), scroll.firstChild);
         detailPane.appendChild(scroll);
       }
 
@@ -5253,6 +5440,8 @@ export function createKnowledgeKanbanSurface({
 
         const tierChips = issueTierChips(entry.number);
         const secondaryItems = [...model.secondary, ...tierChips];
+        const parent = parentThemeForIssue(entry.number);
+        if (parent) secondaryItems.push({ key: "parent-theme", kind: "theme", label: `In theme ${parent.title}` });
         if (secondaryItems.length > 0) {
           const secondary = createNode("div", "knowledge-row-secondary");
           for (const item of secondaryItems) {
@@ -5528,6 +5717,7 @@ export function createKnowledgeKanbanSurface({
       function mountKnowledgeWindow(windowData, body) {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           if (knowledgeKind !== "issue" && knowledgeKind !== "spec") return;
+        if (knowledgeKind === "issue") loadIssueThemes();
           send({ kind: "get_repository_labels", refresh: false });
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
           // Backlog / Draft / Planning / Implementation / Review / Done.
@@ -5635,11 +5825,11 @@ export function createKnowledgeKanbanSurface({
                     <label class="issue-monitor-limit">Agent limit <input type="number" min="1" step="1" data-action="monitor-limit" aria-label="Agent limit" value="1" disabled /></label>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-limit-auto" aria-label="Set Agent limit to Auto" disabled>Auto</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
-                    <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
+                    <span class="project-autonomy__state" data-role="monitor-state" role="status" data-state="stopped">Not assigning</span>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Issues details</button>
                     <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                   </div>
-                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the Issues to begin Auto-refill.</p>
+                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the project to begin Auto-refill.</p>
                 </section>
                 <div class="workspace-toolbar kanban-toolbar is-stacked">
                   <div class="workspace-toolbar-main">
@@ -5725,9 +5915,9 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
-              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the Issues to begin Auto-refill."],
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the project to begin Auto-refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
-              ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
+              ['[data-role="monitor-state"]', "Whether Issues assigns queued issues. Stop or start the project in Settings > Issues or the project list."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],
               ['[data-issue-view="split"]', "Pair issues with interactive terminal views."],
             ]) explainIssueControl(body.querySelector(selector), text);
@@ -5857,6 +6047,7 @@ export function createKnowledgeKanbanSurface({
             if (state.pendingPhaseUpdates) {
               state.pendingPhaseUpdates.delete(event.issue_number);
             }
+            state.pendingAutonomousTargets?.delete(event.issue_number);
             if (event.result?.kind === "ok") {
               const fresh = event.result.fresh_entry;
               if (fresh) {
@@ -6157,6 +6348,10 @@ export function createKnowledgeKanbanSurface({
           previousNumber = state.selectedNumber;
           const matchesLoadRequest =
             !event.request_id || event.request_id === state.loadRequestId;
+          if (state.subtaskDraftRequest === event.request_id) {
+            state.subtaskDrafts?.delete(event.detail?.number);
+            state.subtaskDraftRequest = null;
+          }
           state.detail = event.detail ? { ...event.detail,
             sections: (event.detail.sections || []).map(section => ({ ...section,
               content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;

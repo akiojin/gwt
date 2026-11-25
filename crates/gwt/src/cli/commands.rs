@@ -177,6 +177,13 @@ pub enum IssueCommand {
         issue_number: u64,
         reviewed_sha: String,
         verdict_raw: String,
+        evidence_review_token: Option<String>,
+    },
+    MonitorReviewMergedEvidence {
+        issue_number: u64,
+        pr_number: u64,
+        reviewed_sha: String,
+        evidence_revision: String,
     },
     MonitorStatus {
         project_root: Option<std::path::PathBuf>,

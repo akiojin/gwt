@@ -65,7 +65,7 @@ test.describe("Issues Agent Settings sets", () => {
       expect(roster.members.every((member: any) => member.agent_member_id && member.agent_id)).toBe(true);
       // Legacy import can expand existing people on a shared theme server.
       // Bind one explicit owner before adding people, keeping this form at1.
-      const owner = roster.members.find((member: any) => member.enabled && member.agent_id === "codex");
+      const owner = roster.members.find((member: any) => member.agent_id === "codex");
       expect(owner).toBeTruthy();
       await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 491102,
         profiles: [{ agent_member_id: owner.agent_member_id, agent_id: "codex" }] });
@@ -78,7 +78,6 @@ test.describe("Issues Agent Settings sets", () => {
       const initialCapacity = roster.capacity;
       const newMembers: string[] = [];
       for (let index = 0; index < 2; index += 1) {
-        await page.getByLabel("Tool for new member", { exact: true }).selectOption("codex");
         const cursor = await sequence();
         await page.getByLabel("Name for new member", { exact: true }).fill(`Settings member ${roster.revision}`);
         await expect(page.locator('.roster-capacity [data-action="add"]')).toBeEnabled();
@@ -89,7 +88,7 @@ test.describe("Issues Agent Settings sets", () => {
         const member = addedMembers[0];
         expect(member.agent_member_id).toBeTruthy();
         expect(member.agent_id).toBe("codex");
-        expect(member.enabled).toBe(true);
+        expect(member).not.toHaveProperty("enabled");
         expect(next.capacity).toBe(roster.capacity + 1);
         registeredIds.add(member.agent_member_id);
         newMembers.push(member.agent_member_id);

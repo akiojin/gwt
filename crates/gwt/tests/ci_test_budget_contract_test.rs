@@ -595,6 +595,13 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
         config["profile"]["ci"]["scripts"][0]["list-wrapper"].as_str(),
         Some("ci-list-deadline")
     );
+    // Issue #7724: coverage enumerates the same binaries before any per-test timeout applies.
+    let coverage = &config["profile"]["coverage"]["scripts"][0];
+    assert_eq!(coverage["list-wrapper"].as_str(), Some("ci-list-deadline"));
+    assert_eq!(
+        coverage["platform"].as_str(),
+        config["profile"]["ci"]["scripts"][0]["platform"].as_str()
+    );
     let command = &config["scripts"]["wrapper"]["ci-list-deadline"]["command"]["command-line"];
     assert_eq!(command[0].as_str(), Some("scripts/ci_nextest_list.py"));
     assert_eq!(command[1].as_str(), Some("60"));
@@ -662,6 +669,14 @@ fn required_linux_shard_runs_t94418_in_both_themes() {
             "missing T94418 requirement {argument}"
         );
     }
+    // Issue #7662: a Linux-only failure must leave its trace and backend logs.
+    let retain = position("Retain Issues operator hold evidence")
+        .expect("T94418 failures must retain trace and backend log evidence");
+    assert!(browser < retain);
+    assert_eq!(steps[retain]["if"], "${{ failure() && matrix.shard == 1 }}");
+    let paths = steps[retain]["with"]["path"].as_str().unwrap();
+    assert!(paths.contains("crates/gwt/playwright/test-results/"));
+    assert!(paths.contains("linux-operator-hold-headed.json"));
     let gate = &jobs["test-rust-required"];
     assert!(gate["needs"]
         .as_sequence()

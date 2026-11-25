@@ -90,6 +90,9 @@ fn private_launch_env_key(key: &str) -> bool {
             | gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV
             | gwt_agent::GWT_SESSION_ID_ENV
             | gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
+            | crate::account_homes::COPILOT_TOKEN_ENV
+            | "GH_TOKEN"
+            | "GITHUB_TOKEN"
     )
 }
 

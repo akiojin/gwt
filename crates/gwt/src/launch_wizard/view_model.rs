@@ -127,8 +127,10 @@ impl LaunchWizardState {
         let show_manual_setup = self.show_manual_setup();
         let show_runtime_confirmation = self.show_runtime_confirmation();
         let fast_mode = self.fast_mode_enabled_for_current_agent();
-        let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
-        let show_opencode_options = show_manual_setup && self.current_agent_is_opencode();
+        // Issue #7771: the assignee stage stands where the settings form was.
+        let show_setup_form = show_manual_setup && !self.issue_plan_active();
+        let show_hermes_options = show_setup_form && self.current_agent_supports_hermes_options();
+        let show_opencode_options = show_setup_form && self.current_agent_is_opencode();
         LaunchWizardView {
             title: match self.wizard_mode {
                 LaunchWizardMode::StartWork => "Start Work".to_string(),
@@ -169,6 +171,7 @@ impl LaunchWizardState {
             selected_reasoning: self.reasoning.clone(),
             runtime_target_options: runtime_target_options_view(),
             selected_runtime_target: runtime_target_value(self.runtime_target).to_string(),
+            runtime_target_note: show_runtime_confirmation.then(|| self.runtime_target_note()),
             windows_shell_options: windows_shell_options_view(),
             selected_windows_shell: self
                 .windows_shell_for_launch()
@@ -183,13 +186,13 @@ impl LaunchWizardState {
             ),
             selected_execution_mode: self.mode.clone(),
             skip_permissions: self.effective_skip_permissions(),
-            show_agent_settings: show_manual_setup && self.launch_target_is_agent(),
-            show_reasoning: show_manual_setup
+            show_agent_settings: show_setup_form && self.launch_target_is_agent(),
+            show_reasoning: show_setup_form
                 && self.launch_target_is_agent()
                 && self.agent_uses_reasoning_step(),
             show_runtime_target: show_runtime_confirmation && self.has_docker_workflow(),
             show_windows_shell: self.runtime_context_resolved
-                && show_manual_setup
+                && show_setup_form
                 && self.show_windows_shell_selection(),
             show_docker_service: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
                 && show_runtime_confirmation
@@ -198,20 +201,22 @@ impl LaunchWizardState {
                 && show_runtime_confirmation,
             show_execution_mode: false,
             show_skip_permissions: false,
-            show_fast_mode: show_manual_setup && self.effective_agent_id() == "claude",
-            show_codex_speed: show_manual_setup && self.agent_is_codex(),
+            show_fast_mode: show_setup_form && self.effective_agent_id() == "claude",
+            show_codex_speed: show_setup_form && self.agent_is_codex(),
             codex_speed: self.codex_speed,
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
             opencode_needs_setup: show_opencode_options
                 && self.agent_needs_configuration("opencode"),
-            agent_setup: self.agent_setup_view(show_manual_setup),
+            agent_setup: self.agent_setup_view(show_setup_form),
             // Issue #4079 AC-2: only the app runtime knows the saved candidate
             // pool, so it fills this in when the wizard is Issues
             // Agent Settings form.
             issue_monitor_pool_impact: None,
             issue_monitor_pool: None,
+            execution_environment: None,
+            issue_plan: self.issue_plan_view(),
             hermes_provider: self.hermes_provider.clone(),
             hermes_provider_options: self.hermes_choices.providers.clone(),
             hermes_model_options: self.hermes_choices.models_for(&self.hermes_provider),
@@ -223,7 +228,12 @@ impl LaunchWizardState {
             hermes_skill_options: self.hermes_choices.skills.clone(),
             hermes_max_turns: self.hermes_max_turns.clone(),
             hermes_safe_mode: self.hermes_safe_mode,
-            show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
+            show_branch_controls: self.wizard_mode == LaunchWizardMode::Branch
+                && if self.issue_plan_active() {
+                    show_runtime_confirmation
+                } else {
+                    show_manual_setup
+                },
             show_start_methods,
             show_back_button,
             show_manual_setup,
@@ -396,6 +406,26 @@ impl LaunchWizardState {
                 .is_none()
                 .then(|| "No running session".to_string()),
         });
+        if self.issue_plan_enabled() {
+            // Issue #7771: "Configure and start" plans the Issue's agent, so
+            // a plain shell gets its own way in.
+            methods[0].summary = "Choose the assignee and plan the launch".to_string();
+            methods.push(LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::OpenShell.value().to_string(),
+                label: "Open a shell".to_string(),
+                badge: "Shell".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::OpenShell,
+                    true,
+                    recommended_method,
+                ),
+                recommended: false,
+                summary: "Plain shell on this branch".to_string(),
+                detail: None,
+                enabled: true,
+                disabled_reason: None,
+            });
+        }
         methods
     }
 
@@ -527,8 +557,31 @@ impl LaunchWizardState {
             .collect()
     }
 
+    /// Issue #7652 (SPEC #7007 item 197): say whether the place the session
+    /// runs is the one this project used last, or a change made here.
+    fn runtime_target_note(&self) -> String {
+        if !self.has_docker_workflow() {
+            return "This project has no Docker setup, so the session runs on the host."
+                .to_string();
+        }
+        match self.previous_profiles.repo_local() {
+            Some(previous) if previous.runtime_target == self.runtime_target => {
+                "Inherited from the last launch in this project.".to_string()
+            }
+            Some(previous) => format!(
+                "Changed from the last launch in this project ({}).",
+                match previous.runtime_target {
+                    gwt_agent::LaunchRuntimeTarget::Host => "Host",
+                    gwt_agent::LaunchRuntimeTarget::Docker => "Docker",
+                }
+            ),
+            None => "No earlier launch in this project, so this is the default.".to_string(),
+        }
+    }
+
     fn launch_summary_view(&self) -> Vec<LaunchWizardSummaryView> {
-        let mut summary = if self.wizard_mode == LaunchWizardMode::StartWork {
+        let mut summary = self.issue_plan_summary_view();
+        summary.extend(if self.wizard_mode == LaunchWizardMode::StartWork {
             vec![LaunchWizardSummaryView {
                 label: "Workspace".to_string(),
                 value: "Current project".to_string(),
@@ -538,7 +591,7 @@ impl LaunchWizardState {
                 label: "Branch".to_string(),
                 value: self.branch_name.clone(),
             }]
-        };
+        });
         summary.push(LaunchWizardSummaryView {
             label: "Target".to_string(),
             value: match self.launch_target {
@@ -692,6 +745,9 @@ impl LaunchWizardState {
         if self.show_start_methods() {
             return "Choose start method".to_string();
         }
+        if let Some(label) = self.issue_plan_primary_action_label() {
+            return label.to_string();
+        }
         match self.launch_path {
             LaunchWizardLaunchPath::FocusSession => "Focus".to_string(),
             LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup
@@ -734,11 +790,14 @@ impl LaunchWizardState {
             LaunchWizardLaunchPath::FocusSession => self
                 .selected_live_session_index
                 .is_some_and(|index| self.context.live_sessions.get(index).is_some()),
-            LaunchWizardLaunchPath::ManualSetup => true,
+            LaunchWizardLaunchPath::ManualSetup => !self.issue_plan_blocks_submit(),
         }
     }
 
     fn progress_steps_view(&self) -> Vec<LaunchWizardProgressStepView> {
+        if self.issue_plan_rail() {
+            return self.issue_plan_progress_steps_view();
+        }
         let path_label = match self.launch_path {
             LaunchWizardLaunchPath::QuickStart => "Quick Start",
             LaunchWizardLaunchPath::ManualSetup => "Setup",
@@ -2393,6 +2452,65 @@ mod tests {
             },
             other => panic!("expected quick start launch completion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_runtime_step_says_where_the_place_to_run_comes_from() {
+        let previous = |target| {
+            LaunchWizardPreviousProfiles::default().with_repo_local(Some(
+                LaunchWizardPreviousProfile {
+                    agent_id: "codex".to_string(),
+                    model: None,
+                    reasoning: None,
+                    session_mode: Default::default(),
+                    skip_permissions: false,
+                    fast_mode: false,
+                    codex_speed: Default::default(),
+                    runtime_target: target,
+                    docker_service: None,
+                    docker_lifecycle_intent: Default::default(),
+                    windows_shell: None,
+                    hermes: Default::default(),
+                },
+            ))
+        };
+        let note = |docker: bool, profiles: LaunchWizardPreviousProfiles| {
+            let mut ctx = context(branch("feature/current"), "feature/current");
+            if docker {
+                ctx.docker_context = Some(DockerWizardContext {
+                    services: vec!["app".to_string()],
+                    suggested_service: Some("app".to_string()),
+                });
+            }
+            let mut state = LaunchWizardState::open_with_previous_profiles(
+                ctx,
+                sample_agent_options(),
+                Vec::new(),
+                profiles,
+            );
+            let before = state.view();
+            assert!(
+                before.show_runtime_confirmation || before.runtime_target_note.is_none(),
+                "the note belongs to the runtime step"
+            );
+            state.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+            state.runtime_target_note()
+        };
+
+        // Item 197 (1): without a Docker setup the host is the only place.
+        assert!(
+            note(false, previous(gwt_agent::LaunchRuntimeTarget::Docker))
+                .contains("no Docker setup")
+        );
+        // Item 197 (3): the project's last value is inherited ...
+        assert!(note(true, previous(gwt_agent::LaunchRuntimeTarget::Host)).contains("Inherited"));
+        // ... and a different choice is named as a change from it.
+        let changed = note(true, previous(gwt_agent::LaunchRuntimeTarget::Docker));
+        assert!(
+            changed.contains("Changed") && changed.contains("Docker"),
+            "{changed}"
+        );
+        assert!(note(true, Default::default()).contains("default"));
     }
 
     #[test]

@@ -1917,6 +1917,18 @@ _SEARCH_WORKER_QOS: Optional[str] = None
 _MODEL_LOAD_MS = 0
 _model_load_clock = time.monotonic
 _SEARCH_WORKER_ENDPOINT: Optional[Path] = None
+# Issue #7493: set when an interactive caller left while this worker's first
+# model load was still running. The load finishes so the retry finds a warm
+# worker, but no embedding may follow on the abandoned request.
+_SEARCH_WORKER_ABANDONED: Optional[threading.Event] = None
+_MODEL_LOADING = False
+# A load that still has not settled this long after its caller left is stuck
+# rather than warming.
+_COLD_START_GRACE_SECONDS = 120.0
+
+
+class _SearchCallerGone(RuntimeError):
+    """The caller dropped its heavy lease before the model was ready."""
 
 
 def _publish_search_model_state(state: str) -> None:
@@ -1958,12 +1970,20 @@ def _background_default_model_revision() -> Optional[str]:
 
 
 def _get_embedding_model(revision: Optional[str] = None) -> Any:
+    """Return the retained model unless this request's caller already left."""
+    model = _load_embedding_model(revision)
+    if _SEARCH_WORKER_ABANDONED is not None and _SEARCH_WORKER_ABANDONED.is_set():
+        raise _SearchCallerGone("search caller disconnected during model load")
+    return model
+
+
+def _load_embedding_model(revision: Optional[str] = None) -> Any:
     """Lazily load and retain each model revision for this process.
 
     Honors GWT_INDEX_FAKE_EMBEDDING=1 to substitute a deterministic
     hash-based fake. Otherwise loads ``intfloat/multilingual-e5-base``.
     """
-    global _MODEL_CACHE, _MODEL_LOAD_MS
+    global _MODEL_CACHE, _MODEL_LOAD_MS, _MODEL_LOADING
     if _MODEL_CACHE is None:
         _MODEL_CACHE = {}
     if revision in _MODEL_CACHE:
@@ -1971,6 +1991,7 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
         return _MODEL_CACHE[revision]
 
     _publish_search_model_state("warming")
+    _MODEL_LOADING = True
     try:
         model_revision = revision
         if (_SEARCH_WORKER_QOS == "background" and revision is None
@@ -2014,6 +2035,8 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
     except Exception:
         _publish_search_model_state("cold")
         raise
+    finally:
+        _MODEL_LOADING = False
     _publish_search_model_state("warm")
     return model
 
@@ -10999,6 +11022,34 @@ def _clear_search_worker_read_clients() -> None:
             _close_chroma_client(client)
 
 
+def _spawn_search_worker(worker_dir: Path, qos: str) -> subprocess.Popen:
+    """Start a resident worker; an interactive one outlives its first caller.
+
+    Issue #7493: the caller's deadline kills its whole process tree. A cold
+    interactive worker inside that tree lost its model load on every attempt
+    and never became warm, so it leaves the tree. Background workers stay
+    inside it: their index work must end with the caller's lease.
+    """
+    command = [sys.executable, str(Path(__file__).resolve()),
+               "--action", "serve-search-worker", "--worker-dir", str(worker_dir),
+               "--qos", qos]
+    options: Dict[str, Any] = dict(
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    detached = qos == "interactive"
+    if os.name != "nt":
+        return subprocess.Popen(command, start_new_session=detached, **options)
+    hidden = subprocess.CREATE_NO_WINDOW
+    if detached:
+        try:
+            return subprocess.Popen(
+                command, creationflags=hidden | subprocess.CREATE_BREAKAWAY_FROM_JOB, **options)
+        except OSError:
+            pass  # The enclosing Job forbids breakaway; stay inside it.
+    return subprocess.Popen(command, creationflags=hidden, **options)
+
+
 def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
     """Reuse one model process while Rust retains the request's heavy lease."""
     qos = args.qos or default_qos_for_action(args.action)
@@ -11030,16 +11081,7 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
         try:
             connection, token = connect()
         except (OSError, ValueError, KeyError, TypeError):
-            process = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()),
-                 "--action", "serve-search-worker", "--worker-dir", str(worker_dir),
-                 "--qos", qos],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
+            process = _spawn_search_worker(worker_dir, qos)
             deadline = time.monotonic() + 10
             while True:
                 try:
@@ -11082,6 +11124,7 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
 def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300, qos: str = "interactive") -> int:
     """Serve searches or background index requests; release models after idle expiry."""
     global _SEARCH_WORKER_ENDPOINT, _SEARCH_WORKER_QOS, emit_progress, _FILE_INDEX_V2_YIELDED
+    global _SEARCH_WORKER_ABANDONED
     _SEARCH_WORKER_QOS = qos
     worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     worker_dir.chmod(0o700)
@@ -11131,15 +11174,28 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300, qos: str =
                             raise ValueError("invalid search worker request")
                         connection.settimeout(None)
 
-                        def cancel_on_disconnect(connection=connection, completed=completed):
+                        abandoned = threading.Event()
+                        _SEARCH_WORKER_ABANDONED = None if index_request else abandoned
+
+                        def cancel_on_disconnect(connection=connection, completed=completed,
+                                                 abandoned=abandoned, cold_search=not index_request):
                             try:
                                 connection.recv(1)
                             except OSError:
                                 pass
-                            if not completed.is_set():
-                                # A killed/timed-out Rust caller has dropped its
-                                # heavy lease. No embedding may outlive it.
-                                os._exit(1)
+                            if completed.is_set():
+                                return
+                            # A killed/timed-out Rust caller has dropped its
+                            # heavy lease. No embedding may outlive it.
+                            abandoned.set()
+                            if cold_search and _MODEL_LOADING:
+                                # Issue #7493: only a model load in progress
+                                # may finish; `_get_embedding_model` then
+                                # refuses the abandoned request before it can
+                                # embed.
+                                if completed.wait(_COLD_START_GRACE_SECONDS):
+                                    return
+                            os._exit(1)
 
                         disconnect_watcher = threading.Thread(target=cancel_on_disconnect, daemon=True)
                         disconnect_watcher.start()
@@ -11171,6 +11227,7 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300, qos: str =
                     except Exception as error:
                         payload = {"ok": False, "error_code": "RUNTIME_ERROR", "error": str(error)}
                     finally:
+                        _SEARCH_WORKER_ABANDONED = None
                         emit_progress = previous_progress
                         if index_request:
                             _clear_search_worker_read_clients()

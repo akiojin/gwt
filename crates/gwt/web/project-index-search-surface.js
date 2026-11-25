@@ -97,6 +97,8 @@ export function createProjectIndexSearchSurface({
         }));
       }
 
+      // Issue #7729 AC-3 (SPEC #7007 item 15): the nine scopes, in the order
+      // of INDEX_SCOPE_IDS, which the health summary counts over.
       const INDEX_SEARCH_SCOPES = Object.freeze([
         { id: "issues", label: "Issues" },
         { id: "specs", label: "SPECs" },
@@ -106,9 +108,9 @@ export function createProjectIndexSearchSurface({
         // so similar prior work can be found before starting duplicate work.
         { id: "works", label: "Work" },
         { id: "reports", label: "Reports" },
+        { id: "memory", label: "Memory" },
         { id: "files", label: "Files" },
         { id: "files-docs", label: "Docs" },
-        { id: "memory", label: "Memory" },
       ]);
       const INDEX_SEARCH_DEFAULT_SCOPES = Object.freeze([
         "issues",
@@ -488,16 +490,16 @@ export function createProjectIndexSearchSurface({
         if (!summaryNode) return;
         clearChildren(summaryNode);
         const summary = buildIndexHealthSummary(status);
-        const { readyCount, degradedScopes } = summary;
-        summaryNode.classList.toggle("is-degraded", degradedScopes.length > 0);
+        const attentionScopes = summary.available ? summary.attentionScopes : [];
+        summaryNode.classList.toggle("is-degraded", attentionScopes.length > 0);
         summaryNode.classList.toggle("is-unavailable", !summary.available);
         summaryNode.classList.toggle("is-refreshing", !summary.available && statusRefreshPending);
-        summaryNode.classList.toggle("is-ready", summary.available && degradedScopes.length === 0);
+        summaryNode.classList.toggle("is-ready", summary.available && attentionScopes.length === 0);
 
         const inline = makeEl("div", { className: "index-search-health-inline" });
         inline.appendChild(makeEl("strong", {
           text: summary.available
-            ? `${readyCount} ready`
+            ? `Ready ${summary.scopeReadyCount}/${summary.scopeTotal}`
             : statusRefreshPending
               ? "Refreshing status"
               : "Status unavailable",
@@ -516,16 +518,18 @@ export function createProjectIndexSearchSurface({
           summaryNode.appendChild(inline);
           return;
         }
-        if (degradedScopes.length === 0) {
-          inline.appendChild(makeEl("span", { text: `${summary.totalCount} scopes indexed` }));
+        if (attentionScopes.length === 0) {
+          inline.appendChild(makeEl("span", { text: "All search scopes are indexed" }));
           summaryNode.appendChild(inline);
           return;
         }
 
-        inline.appendChild(makeEl("span", { text: `${summary.degradedCount} degraded` }));
+        inline.appendChild(makeEl("span", {
+          text: `${summary.scopeTotal - summary.scopeReadyCount} need attention`,
+        }));
         inline.appendChild(makeEl("span", {
           className: "index-search-health-scopes",
-          text: degradedScopes.map((scope) => scope.label).join(", "),
+          text: attentionScopes.map((scope) => scope.label).join(", "),
         }));
         inline.appendChild(makeEl("button", {
           className: "index-health-cta",

@@ -542,7 +542,6 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
             "failed genesis must not strand its member assignment"
         );
         assert_eq!(member_after.name, member_before.name);
-        assert_eq!(member_after.enabled, member_before.enabled);
         assert_eq!(member_after.agent_id, member_before.agent_id);
     });
 }

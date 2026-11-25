@@ -3,10 +3,10 @@ import { relative, isAbsolute } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
-async function paletteCommand(page: Page, label: string) {
-  await page.locator("#op-palette-button").click();
-  await page.locator("#op-palette-input").fill(label);
-  await page.getByRole("option", { name: label, exact: true }).click();
+// #7879: the command palette is retired; UI trace stays a developer
+// diagnostic reachable from the devtools console.
+async function uiTrace(page: Page, action: "start" | "stop") {
+  await page.evaluate(action => { (window as any).__operatorShell.uiTrace[action](); }, action);
 }
 
 test("UI trace feedback follows live save, repeated errors, and recovery", async ({ page }, testInfo) => {
@@ -23,12 +23,13 @@ test("UI trace feedback follows live save, repeated errors, and recovery", async
     await dialog.accept();
   });
   await gotoLiveGwt(page, base!, { enableTestBridge: true });
-  await expect(page.locator("#op-palette-button")).toBeVisible();
+  await expect(page.locator(".op-rail")).toBeVisible();
+  await expect(page.locator("#op-palette-button")).toHaveCount(0);
 
-  await paletteCommand(page, "Stop UI Trace");
+  await uiTrace(page, "stop");
   await expect.poll(() => alerts.slice()).toEqual(["UI trace is not running."]);
-  await paletteCommand(page, "Start UI Trace");
-  await paletteCommand(page, "Stop UI Trace");
+  await uiTrace(page, "start");
+  await uiTrace(page, "stop");
   await expect.poll(() => alerts.length).toBe(2);
   const saved = await page.evaluate(() => (window as any).__gwtPlaywrightMessages
     .findLast((entry: any) => entry.payload.kind === "ui_trace_saved")?.payload);
@@ -47,15 +48,11 @@ test("UI trace feedback follows live save, repeated errors, and recovery", async
     expect(alerts[2 + index]).toMatch(/^UI trace error: /);
   }
   expect(alerts[2]).toBe(alerts[3]);
-  await paletteCommand(page, "Start UI Trace");
-  await paletteCommand(page, "Stop UI Trace");
+  await uiTrace(page, "start");
+  await uiTrace(page, "stop");
   await expect.poll(() => alerts.length).toBe(5);
   expect(alerts[4]).toMatch(/^UI trace saved\n.+\nentries: \d+$/);
 
-  await page.locator("#op-palette-button").click();
-  await page.locator("#op-palette-input").fill("UI Trace");
-  await expect(page.getByRole("option", { name: "Start UI Trace", exact: true })).toBeVisible();
-  await expect(page.getByRole("option", { name: "Stop UI Trace", exact: true })).toBeVisible();
   const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await testInfo.attach(`ui-trace-feedback-${theme}`, {

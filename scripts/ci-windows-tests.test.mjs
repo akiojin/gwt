@@ -43,6 +43,37 @@ test("Windows fixture process queries outlast a saturated runner's CIM startup",
   assert.throws(() => queryWindowsProcess("$PID", () => ({ error: timedOut })), { code: "ETIMEDOUT" });
 });
 
+test("a refused fixture operation fails with its name and refusal, not a JSON parse error", async () => {
+  // Issue #7752: `JSON.parse(envelope.output)` on a refusal threw `"undefined" is not valid JSON`.
+  const { operationOutput } = await import("../crates/gwt/playwright/tests/_helpers/operation-envelope.mjs");
+  assert.deepEqual(operationOutput("issue.monitor.status", { ok: true, output: '{"inbox":[]}' }), { inbox: [] });
+  assert.deepEqual(operationOutput("issue.monitor.status", { ok: true, output: { inbox: [] } }), { inbox: [] });
+  const refusal = { ok: false, error: "status read timeout after 200ms", error_code: "API_ERROR", operation: "issue.monitor.status" };
+  assert.throws(() => operationOutput("issue.monitor.status", refusal), error =>
+    error.message.startsWith("Fixture issue.monitor.status failed: ")
+      && error.message.includes("status read timeout after 200ms") && error.message.includes("API_ERROR"));
+  assert.throws(() => operationOutput("issue.monitor.status", { ok: true }), /^Error: Fixture issue\.monitor\.status failed: /);
+});
+
+test("a refused fixture read is retried within a bound and every refusal is reported", async () => {
+  const { readOperationOutput } = await import("../crates/gwt/playwright/tests/_helpers/operation-envelope.mjs");
+  const refusal = { ok: false, error: "status read timeout after 200ms" };
+  const replies = [refusal, { ok: true, output: '{"inbox":[1]}' }];
+  const refusals = [];
+  let waits = 0;
+  const options = { attempts: 2, wait: async () => { waits++; }, onRefusal: refusal => refusals.push(refusal) };
+  assert.deepEqual(await readOperationOutput("issue.monitor.status", async () => replies.shift(), options), { inbox: [1] });
+  assert.equal(waits, 1);
+  assert.equal(refusals.length, 1);
+  assert.equal(refusals[0].attempt, 1);
+  assert.match(refusals[0].error, /Fixture issue\.monitor\.status failed: .*status read timeout after 200ms/);
+  let runs = 0;
+  await assert.rejects(readOperationOutput("issue.monitor.status", async () => { runs++; return refusal; }, options),
+    /Fixture issue\.monitor\.status failed: .*status read timeout after 200ms/);
+  assert.equal(runs, 2, "the bound stops the retries");
+  assert.equal(refusals.length, 3);
+});
+
 test("required Windows CI builds and runs the gate lifecycle regressions", () => {
   assert.ok(targets("default").some(([pkg, kind, name]) =>
     pkg === "gwt-terminal" && kind === "test" && name === "pty_start_gate_test"));

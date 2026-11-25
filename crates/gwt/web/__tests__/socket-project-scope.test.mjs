@@ -425,19 +425,34 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
     getWorkspaceWindows: () => windows, scheduleFrame: run => { run(); return () => {}; },
   });
   t.after(() => { for (const id of ["knowledge", "offline", "closing", "foreign"]) knowledge.clearKnowledgeBridgeState(id); });
+  const themeConnections = [];
+  const executionEnvironmentsModel = createUiStateStore({});
   Object.assign(context, {
     handleKnowledgeTransportChange: knowledge.handleKnowledgeTransportChange,
+    updateThemeConnection: connected => themeConnections.push(connected),
     knowledgeBridgeStateMap: knowledge.knowledgeBridgeStateMap,
     resyncKnowledge: knowledge.resyncKnowledge,
     clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
     tuningController: { disconnectTuning() {} },
     handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
+    executionEnvironments: { connectionLost() {}, refreshVisibleAccounts() {} },
+    requestDecisionCounts() {},
+    executionEnvironmentsModel: {
+      read: executionEnvironmentsModel.read,
+      // The actual handlers run in the VM, but the store belongs to this realm.
+      update: change => executionEnvironmentsModel.update(state => structuredClone(change(state))),
+    },
+    rosterHost: {},
   });
   context.connectionOverlay.setConnected = () => {};
   context.document.getElementById = () => null;
+  vm.runInContext(functionSource("failAgentEnvironmentPriority"), context);
+  vm.runInContext(functionSource("setAgentEnvironmentPriority"), context);
   vm.runInContext(functionSource("setConnectionState"), context);
   context.connectSocket();
   sockets[1].open();
+  context.setAgentEnvironmentPriority("m-1", ["codex"]);
+  assert.equal(executionEnvironmentsModel.read().agentPriorityPending, "m-1");
   knowledge.requestKnowledgeBridge("knowledge", "issue");
   const oldRead = sockets[1].sent.find(message => message.kind === "load_knowledge_bridge");
   const foreign = knowledge.ensureKnowledgeBridgeState("foreign", "issue");
@@ -447,6 +462,8 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   knowledge.requestKnowledgeBridge("closing", "issue");
   const closingRead = context.pendingMessages.find(entry => entry.message.id === "closing").message;
   sockets[1].close();
+  assert.equal(executionEnvironmentsModel.read().agentPriorityPending, null);
+  assert.equal(executionEnvironmentsModel.read().agentPriorityError.memberId, "m-1");
   knowledge.requestKnowledgeBridge("offline", "issue");
   const queuedRead = context.pendingMessages.find(entry => entry.message.id === "offline").message;
   t.mock.timers.tick(5000);
@@ -460,6 +477,9 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
   assert.equal(context.pendingMessages.length, 2, "Refresh is coalesced into each existing unsent owner");
   context.reconnectCallbacks.at(-1)(); // reports offline for a second time
   sockets.at(-1).open();
+  assert.deepEqual(themeConnections.slice(-3), [false, false, true]);
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "get_execution_environments").length, 1);
+  assert.equal(sockets.at(-1).sent.some(message => message.kind === "set_agent_execution_environments"), false);
   const reads = sockets.at(-1).sent.filter(message => message.kind === "load_knowledge_bridge");
   assert.equal(reads.filter(message => message.id === "knowledge").length, 1,
     "normal close/timer/open replaces the interrupted read");
@@ -648,7 +668,6 @@ test("window reveal forces only its visible Reports snapshot and preserves termi
     document: { hidden: false }, socket: { readyState: 1 }, WebSocket: { OPEN: 1 },
     socketProjectKey: "project", activeProjectKey: () => "project",
     activeWorkspace: () => ({ windows: [pm, { id: "other", is_pm: true }] }),
-    pmChatViews: new Map([["pm", { logHost: { hidden: true } }], ["other", { logHost: { hidden: true } }]]),
     visibleWindowData: () => true,
     requestPmReports: (id, force) => { requests.push([id, force]); return { kind: "load_pm_reports", id }; },
     send: request => sent.push(request.id),
@@ -660,9 +679,8 @@ test("window reveal forces only its visible Reports snapshot and preserves termi
   assert.deepEqual(requests, [["pm", true]]);
   assert.deepEqual(sent, ["pm"]);
   assert.deepEqual(activated, ["terminal"]);
-  context.pmChatViews.get("pm").logHost.hidden = false;
   context.activateTerminalOnReveal("pm");
-  assert.deepEqual(sent, ["pm"], "Execution log keeps its existing hydration path");
+  assert.deepEqual(sent, ["pm", "pm"], "PM attention stays fresh with the terminal visible");
 });
 
 test("foreground recovery replaces the native backlog without replaying mutations", () => {
@@ -935,4 +953,18 @@ test("close choices, Task mutations and view receipts belong to their exact live
     assert.doesNotThrow(() => assert.equal(context.send({ kind }), 'unavailable'));
   }
   assert.deepEqual(context.pendingMessages, []);
+});
+
+test("account login input belongs to its current connection and is never replayed", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  const input = { kind: "pool_account_login_input", login_id: "fixture-login", data: "fixture" };
+  const copilot = { kind: "save_copilot_account", login: "fixture-user", token: "github_pat_FIXTURE_ONLY" };
+  assert.equal(context.send(input), "unavailable");
+  assert.equal(context.send(copilot), "unavailable");
+  assert.deepEqual(context.pendingMessages, []);
+  sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.some(event => [input.kind, copilot.kind].includes(event.kind)), false);
+  assert.equal(context.send(input), "sent");
+  assert.deepEqual(sockets.at(-1).sent.at(-1), input);
 });

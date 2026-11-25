@@ -2196,6 +2196,13 @@ mod tests {
             "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
         })
         .to_string();
+        // Issue #7785: the provider's paste envelope must not hide the marker.
+        let pasted = serde_json::json!({
+            "prompt": format!(
+                "\n\n<pasted_content id=\"c676\">\n{body} [gwt-delivery:{operation_id}:{body_sha256}]\n</pasted_content id=\"c676\">\n"
+            )
+        })
+        .to_string();
         {
             let _wrong_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "wrong-session");
             handle_delivery_acknowledgement(&repo, &input);
@@ -2211,6 +2218,16 @@ mod tests {
             .expect("load receipt")
             .iter()
             .any(|receipt| receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified));
+
+        handle_delivery_acknowledgement(&repo, &pasted);
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Verified,
+            "a pasted delivery acknowledges its exact operation"
+        );
     }
 
     /// The brakes: a floor between continuations and a cap without user

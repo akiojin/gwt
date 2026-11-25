@@ -13346,7 +13346,7 @@ fn obligation_revival_diagnosis(
     session_id: &str,
     warnings: &mut Vec<String>,
 ) -> Option<ExecutionObligationRevivalDiagnosis> {
-    use crate::cli::action_obligation::ObligationRevivalOutcome;
+    use crate::cli::action_obligation::{ObligationRevivalOutcome, RevivalRecordCheck};
     match crate::cli::action_obligation::load_revival_record(worktree, session_id) {
         Ok(Some(record)) => {
             match &record.result {
@@ -13363,10 +13363,20 @@ fn obligation_revival_diagnosis(
         Ok(None) => None,
         Err(error) => {
             let validation =
-                crate::cli::action_obligation::revival_record_validation_failure(&error).cloned();
+                crate::cli::action_obligation::revival_record_validation_failure(&error);
+            // A worktree can retain the previous session's intact revival record.
+            if validation.is_some_and(|failure| {
+                failure.check == RevivalRecordCheck::Identity
+                    && failure.expected_content_hash == failure.actual_content_hash
+            }) {
+                return None;
+            }
             let error = error.to_string();
             warnings.push(format!("obligation revival status is unreadable: {error}"));
-            Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable { error, validation })
+            Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable {
+                error,
+                validation: validation.cloned(),
+            })
         }
     }
 }
@@ -23878,8 +23888,8 @@ mod tests {
 
     /// Issue #5072 AC-1..AC-4: the checkout-side and owner-side diagnoses
     /// report the same obligation/settlement facts. A clean tree with a valid
-    /// record reports nothing; a foreign revival record carries a structured
-    /// reason; a stale `path_dirty` is dropped, and a real one names its path.
+    /// record reports nothing; an intact predecessor revival record is ignored;
+    /// a stale `path_dirty` is dropped, and a real one names its path.
     #[test]
     fn checkout_and_owner_diagnosis_share_structured_obligation_and_settlement_facts() {
         use crate::cli::verification_record::{
@@ -23935,30 +23945,17 @@ mod tests {
         assert_eq!(relevant(&local.warnings), relevant(&remote.warnings));
         assert_eq!(local.obligation_revival, remote.obligation_revival);
 
-        // A continuation predecessor's record: identity failure, structured.
+        // A continuation predecessor's intact record is outside the holder's status.
         crate::cli::action_obligation::revive_deferred(
             worktree.path(),
             "diagnosis-parity-predecessor",
             &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
         );
         let (local, remote) = both();
-        let Some(ExecutionObligationRevivalDiagnosis::StatusUnreadable {
-            validation: Some(ref validation),
-            ..
-        }) = local.obligation_revival
-        else {
-            panic!("structured revival failure: {:?}", local.obligation_revival);
-        };
-        assert_eq!(
-            validation.check,
-            crate::cli::action_obligation::RevivalRecordCheck::Identity
-        );
-        assert_eq!(validation.expected_session_id, session_id);
-        assert_eq!(validation.actual_session_id, "diagnosis-parity-predecessor");
-        assert!(!validation.path.is_empty());
-        assert_eq!(local.obligation_revival, remote.obligation_revival);
-        assert!(!relevant(&local.warnings).is_empty());
-        assert_eq!(relevant(&local.warnings), relevant(&remote.warnings));
+        assert!(local.obligation_revival.is_none());
+        assert!(remote.obligation_revival.is_none());
+        assert!(relevant(&local.warnings).is_empty());
+        assert!(relevant(&remote.warnings).is_empty());
 
         // A persisted path_dirty while `git status --porcelain` is clean.
         let mut event = gwt_core::workspace_projection::WorkEvent::new(

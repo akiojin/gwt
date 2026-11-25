@@ -255,7 +255,28 @@ pub(super) fn run_with_data<E: CliEnv>(
             issue_number,
             reviewed_sha,
             verdict_raw,
-        } => run_monitor_review_verdict(env, issue_number, &reviewed_sha, &verdict_raw, out),
+            evidence_review_token,
+        } => run_monitor_review_verdict(
+            env,
+            issue_number,
+            &reviewed_sha,
+            &verdict_raw,
+            evidence_review_token.as_deref(),
+            out,
+        ),
+        IssueCommand::MonitorReviewMergedEvidence {
+            issue_number,
+            pr_number,
+            reviewed_sha,
+            evidence_revision,
+        } => run_monitor_review_merged_evidence(
+            env,
+            issue_number,
+            pr_number,
+            &reviewed_sha,
+            &evidence_revision,
+            out,
+        )?,
         IssueCommand::MonitorStatus { project_root } => {
             run_monitor_status(env, project_root.as_deref(), out)?
         }
@@ -6361,6 +6382,220 @@ fn run_monitor_wait_invalidate<E: CliEnv>(
     Ok(0)
 }
 
+fn verify_merged_review_target<E: CliEnv>(
+    env: &mut E,
+    pr_number: u64,
+    reviewed_sha: &str,
+) -> Result<(), SpecOpsError> {
+    let (owner, repo) = env.github_repository().map_err(io_as_api_error)?;
+    let state = gwt_git::pr_status::fetch_pr_auto_merge_remote_state_in_repository(
+        env.repo_path(),
+        &format!("github.com/{owner}/{repo}"),
+        pr_number,
+    );
+    if !matches!(state, Some(gwt_git::pr_status::PrAutoMergeRemoteState::Merged { head_sha }) if head_sha == reviewed_sha)
+    {
+        return Err(SpecOpsError::Operation(
+            "PR is not merged at the requested HEAD".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_merged_review_issue<E: CliEnv>(
+    env: &mut E,
+    issue_number: u64,
+) -> Result<IssueSnapshot, SpecOpsError> {
+    match env.client().fetch(IssueNumber(issue_number), None)? {
+        gwt_github::client::FetchResult::Updated(issue) if issue.state == IssueState::Open => {
+            Ok(issue)
+        }
+        _ => Err(SpecOpsError::Operation(
+            "fresh open Issue readback unavailable".into(),
+        )),
+    }
+}
+
+fn merged_review_acceptance_matches(
+    record: &crate::AutonomousIssueRecord,
+    issue: &IssueSnapshot,
+) -> bool {
+    let comments = issue
+        .comments
+        .iter()
+        .map(|comment| Comment {
+            id: comment.id.0,
+            body: comment.body.clone(),
+        })
+        .collect::<Vec<_>>();
+    let body = SpecBody::parse(&issue.body, &comments)
+        .map(|spec| crate::issue_monitor_worker::acceptance_source_text(&issue.body, &spec))
+        .unwrap_or_else(|_| issue.body.clone());
+    let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(&body);
+    criteria.machine_checkable
+        && record
+            .acceptance_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.matches(&criteria))
+}
+
+fn run_monitor_review_merged_evidence<E: CliEnv>(
+    env: &mut E,
+    issue_number: u64,
+    pr_number: u64,
+    reviewed_sha: &str,
+    evidence_revision: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let resident_pm = super::pm::ambient_session_id()
+        .filter(|_| super::pm::caller_is_registered_pm(env.repo_path()))
+        .ok_or_else(|| {
+            SpecOpsError::Validation("merged evidence review requires the registered PM".into())
+        })?;
+    let writer = env
+        .github_writer()
+        .filter(|writer| {
+            writer.role == crate::session_launch::GithubWriterRole::Pm
+                && writer.session_id == resident_pm
+        })
+        .ok_or_else(|| {
+            SpecOpsError::Validation("registered PM comment identity is unavailable".into())
+        })?;
+    if issue_number == 0
+        || pr_number == 0
+        || reviewed_sha.len() != 40
+        || !reviewed_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !crate::issue_monitor::valid_merged_evidence_revision(evidence_revision)
+    {
+        return Err(SpecOpsError::Validation(
+            "expected an Issue, PR, full HEAD SHA and comment:<id>, board:<id> or verify:<attempt-id> evidence revision".into(),
+        ));
+    }
+    let root = issue_monitor_project_root(env, None)?;
+    let issue = read_merged_review_issue(env, issue_number)?;
+    let prefs =
+        crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
+            .map_err(io_as_api_error)?;
+    let record = prefs
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == issue_number)
+        .filter(|record| {
+            record.pr_number == Some(pr_number)
+                && record.review_passed == Some(false)
+                && record.review_attempts.as_ref().is_some_and(|attempts| {
+                    attempts.verdict_failed && attempts.reviewed_sha == reviewed_sha
+                })
+                && !record.merged_evidence_reviews.iter().any(|review| {
+                    review.reviewed_sha == reviewed_sha
+                        && review.evidence_revision == evidence_revision
+                })
+        })
+        .ok_or_else(|| {
+            SpecOpsError::Validation(
+                "no matching failed review or this evidence revision was already used".into(),
+            )
+        })?;
+    if !merged_review_acceptance_matches(record, &issue) {
+        return Err(SpecOpsError::Validation(
+            "Issue acceptance criteria differ from the failed review".into(),
+        ));
+    }
+    verify_merged_review_target(env, pr_number, reviewed_sha)?;
+    let commit = format!("{reviewed_sha}^{{commit}}");
+    let has_head = || {
+        gwt_core::process::run_git_logged_scrubbed(
+            &["cat-file", "-e", &commit],
+            Some(env.repo_path()),
+        )
+        .is_ok_and(|output| output.status.success())
+    };
+    if !has_head() {
+        let reference = format!("refs/pull/{pr_number}/head");
+        let output = gwt_core::process::run_git_logged_scrubbed(
+            &[
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "origin",
+                &reference,
+            ],
+            Some(env.repo_path()),
+        )
+        .map_err(io_as_api_error)?;
+        if !output.status.success() || !has_head() {
+            return Err(SpecOpsError::Operation(
+                "the merged PR HEAD could not be materialized for independent review".into(),
+            ));
+        }
+    }
+    let (owner, repo) = env.github_repository().map_err(io_as_api_error)?;
+    let diff = gwt_git::pr_status::try_fetch_pr_diff_in_repository(
+        env.repo_path(),
+        &format!("github.com/{owner}/{repo}"),
+        pr_number,
+        200_000,
+    )
+    .map_err(|error| SpecOpsError::Operation(error.to_string()))?
+    .ok_or_else(|| SpecOpsError::Operation("merged PR diff is unavailable".into()))?;
+    let dispatch = crate::AutonomousReviewDispatch {
+        issue_number,
+        pr_number,
+        reviewed_sha: reviewed_sha.to_string(),
+        required_criteria: record
+            .acceptance_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.ids.clone())
+            .unwrap_or_default(),
+        diff,
+        merged_evidence: None,
+        linked_issue_kind: if issue
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+        {
+            crate::LinkedIssueKind::Spec
+        } else {
+            crate::LinkedIssueKind::Issue
+        },
+    };
+    let body = crate::session_launch::stamp_github_body(
+        &crate::issue_monitor::merged_evidence_authorization_text(
+            pr_number,
+            reviewed_sha,
+            evidence_revision,
+        ),
+        Some(&writer),
+    );
+    let comment = env
+        .client()
+        .create_comment(IssueNumber(issue_number), &body)?;
+    let payload = serde_json::json!({"merged_evidence_review": {
+        "resident_pm_session": resident_pm,
+        "dispatch": dispatch,
+        "authorization_comment_id": comment.id.0,
+        "evidence_revision": evidence_revision,
+    }});
+    let payload =
+        crate::runtime_daemon_events::issue_monitor_payload("control", payload, std::process::id());
+    crate::daemon_publisher::publish_issue_monitor_control_with_timeout(
+        &root,
+        payload,
+        std::time::Duration::from_secs(20),
+    )
+    .map_err(|error| {
+        SpecOpsError::Operation(format!(
+            "PM comment {} was published; review admission failed: {error}",
+            comment.id.0
+        ))
+    })?;
+    out.push_str(&format!(
+        "authorized merged evidence review in comment {}\n",
+        comment.id.0
+    ));
+    Ok(0)
+}
+
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
 /// Monitor daemon's control channel. The daemon re-judges the raw verdict
 /// (SHA-bound) — this only transports it.
@@ -6369,6 +6604,7 @@ fn run_monitor_review_verdict<E: CliEnv>(
     issue_number: u64,
     reviewed_sha: &str,
     verdict_raw: &str,
+    evidence_review_token: Option<&str>,
     out: &mut String,
 ) -> i32 {
     let readiness = (|| -> Result<bool, String> {
@@ -6391,6 +6627,15 @@ fn run_monitor_review_verdict<E: CliEnv>(
         let pr_number = record
             .pr_number
             .ok_or("reviewed PR number is unavailable")?;
+        if evidence_review_token.is_some() {
+            let issue =
+                read_merged_review_issue(env, issue_number).map_err(|error| error.to_string())?;
+            if !merged_review_acceptance_matches(record, &issue) {
+                return Err("Issue acceptance criteria differ from the evidence review".into());
+            }
+            verify_merged_review_target(env, pr_number, reviewed_sha)
+                .map_err(|error| error.to_string())?;
+        }
         let (owner, repo) = env.github_repository().map_err(|error| error.to_string())?;
         crate::issue_monitor_review::review_submission_ci_ready(
             env.repo_path(),
@@ -6413,22 +6658,19 @@ fn run_monitor_review_verdict<E: CliEnv>(
         out.push('\n');
         return 0;
     }
-    let payload = crate::runtime_daemon_events::issue_monitor_payload(
-        "control",
-        serde_json::json!({
-            "review_verdict": {
-                "issue_number": issue_number,
-                "reviewed_sha": reviewed_sha,
-                "verdict_raw": verdict_raw,
-            }
-        }),
-        std::process::id(),
-    );
-    match crate::daemon_publisher::publish_event(
-        env.repo_path(),
-        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
-        payload,
-    ) {
+    let payload = serde_json::json!({
+        "review_verdict": {
+            "issue_number": issue_number,
+            "reviewed_sha": reviewed_sha,
+            "verdict_raw": verdict_raw,
+            "evidence_review_token": evidence_review_token,
+        }
+    });
+    let payload =
+        crate::runtime_daemon_events::issue_monitor_payload("control", payload, std::process::id());
+    let result =
+        crate::daemon_publisher::publish_durable_issue_monitor_control(env.repo_path(), payload);
+    match result {
         Ok(()) => {
             out.push_str(&format!(
                 "review verdict published for Issue #{issue_number} at {reviewed_sha}\n"
@@ -8849,7 +9091,8 @@ mod tests {
             .unwrap();
             let mut env = crate::cli::TestEnv::new(repo.clone());
             let mut out = String::new();
-            let code = run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out);
+            let code =
+                run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", None, &mut out);
             if deferred {
                 assert_eq!(code, 0, "nonterminal wait: {out}");
                 assert!(out.contains("\"status\":\"deferred\""), "{out}");
@@ -8876,7 +9119,7 @@ mod tests {
             let mut env = crate::cli::TestEnv::new(repo.clone());
             let mut out = String::new();
             assert_eq!(
-                run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+                run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", None, &mut out),
                 0
             );
             assert!(out.contains("\"status\":\"deferred\""), "{out}");
@@ -8889,7 +9132,7 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
         assert_eq!(
-            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", None, &mut out),
             0
         );
         assert!(out.contains("\"status\":\"obsolete\""), "{out}");
@@ -8898,7 +9141,7 @@ mod tests {
         let removed = fs::read(&prefs_path).unwrap();
         out.clear();
         assert_eq!(
-            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", None, &mut out),
             0
         );
         assert!(out.contains("\"status\":\"obsolete\""), "{out}");
@@ -13925,6 +14168,8 @@ mod tests {
             &gwt_core::usage::snapshot_store::provider_usage_snapshot_path(),
             &[gwt_core::usage::ProviderUsage {
                 provider: gwt_core::usage::UsageProvider::Codex,
+                pool_account_id: None,
+                last_limit: None,
                 account_id: Some("acct".to_string()),
                 account_label: None,
                 plan: Some("pro".to_string()),
@@ -14186,6 +14431,7 @@ mod tests {
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
+            sub_issue_exclusions: Vec::new(),
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
@@ -14255,6 +14501,7 @@ mod tests {
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
+            sub_issue_exclusions: Vec::new(),
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
@@ -14415,6 +14662,7 @@ mod tests {
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,
                 label_excluded_issues: Vec::new(),
+                sub_issue_exclusions: Vec::new(),
                 autonomous_mode: true,
                 has_launch_profile: true,
                 quota_hold: None,
@@ -14549,6 +14797,7 @@ mod tests {
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
+            sub_issue_exclusions: Vec::new(),
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
@@ -16816,6 +17065,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -19421,6 +19671,7 @@ command = "my-agent-cli"
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
+            sub_issue_exclusions: Vec::new(),
             autonomous_mode: true,
             has_launch_profile: true,
             quota_hold: None,
@@ -21852,6 +22103,7 @@ command = "my-agent-cli"
                     skip_permissions: true,
                     fast_mode: false,
                     codex_speed: gwt_agent::CodexSpeed::Off,
+                    runtime_inherit: false,
                     runtime_target: Default::default(),
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),

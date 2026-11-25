@@ -60,7 +60,7 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
       // Select both fixed-tool members through the normal configuration path.
       const roster = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
       const preferences = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
-      const profiles = roster.members.filter((member: any) => member.enabled).map((member: any) => ({
+      const profiles = roster.members.map((member: any) => ({
         ...preferences.launch_profiles[0], agent_id: member.agent_id, agent_member_id: member.agent_member_id,
       }));
       expect(profiles).toHaveLength(2);

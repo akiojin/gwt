@@ -26,22 +26,36 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
     onReviewAttention: items => reviews.push(items),
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
+    onAnswerDecision: (id, answer) => { const request = model.requestPmDecisionAnswer('pm', id, answer); if (request) sent.push(request); return Boolean(request); },
+    onDeferDecision: id => { const request = model.requestPmDecisionDefer('pm', id); if (request) sent.push(request); return Boolean(request); },
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
   model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
   let revision = 0;
-  const update = (reports = [], error = null, current = null, current_error = undefined) => {
+  // `decisions` is the gwtd decision queue snapshot; omitted, the event
+  // carries none and the last applied queue stays.
+  const update = (reports = [], error = null, current = null, current_error = undefined, decisions = undefined) => {
     const request = model.requestPmReports('pm');
     const event = { kind: 'pm_reports', id: 'pm', request_id: request.request_id,
       version: { epoch: 'fixture', revision: ++revision }, snapshot: request.version === null,
       session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current,
-      ...(current_error === undefined ? {} : { current_error }) };
+      ...(current_error === undefined ? {} : { current_error }),
+      ...(decisions === undefined ? {} : { decisions }) };
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, sent, waiting, reviews, update };
+  const queue = (items, current = null, waiting_count = items.length) =>
+    update([], null, current, undefined, { waiting_count, items });
+  // Settle the last decision request the way gwtd answers it.
+  const settle = (ok, items, error = null) => {
+    const request = sent.filter(entry => ['answer_decision', 'defer_decision'].includes(entry.kind)).at(-1);
+    model.applyPmWindowReceiveEvent({ kind: 'decision_result', id: 'pm', request_id: request.request_id,
+      decision_id: request.decision_id, action: request.kind === 'answer_decision' ? 'answer' : 'defer', ok, error,
+      decisions: items ? { waiting_count: items.length, items } : null });
+  };
+  return { root, model, view, visibility, copied, sent, waiting, reviews, update, queue, settle };
 }
 
 test('Chat opens its bound PM terminal in Works without losing the draft', () => {
@@ -694,7 +708,8 @@ test('Reports never lists a decision report and leaves its stored body unchanged
   assert.deepEqual([...transcript.querySelectorAll('article')].map(row => row.dataset.reportId), ['progress-1']);
   assert.equal(transcript.querySelector('.pm-chat__decision-controls'), null, 'Reports offers no answer controls');
   assert.doesNotMatch(transcript.textContent, /Which recovery\?/);
-  assert.equal(root.querySelectorAll('.task-decisions__card').length, 1, 'the decision waits in Decide');
+  assert.equal(root.querySelectorAll('.task-decisions__card').length, 0,
+    'a decision report alone is not a waiting decision: gwtd bridges it into the queue');
   const stored = model.readPmWindowState().windows.pm.reports[1];
   assert.equal(stored.body, incoming.body);
   assert.equal(stored.content.body, 'Ready\nNext: Check delivery\nDecision: Which recovery?\nRecommended: Retry (The work is saved)\n1. Retry — run again\n2. Wait — keep state\n3. Inspect <logs> — gather evidence\n4. Cancel — stop\nReply with the option number, or Other: your own answer.');
@@ -948,6 +963,7 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
 
 test('Reports rejects file-drop input while Execution log keeps the attachment bridge', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -986,8 +1002,10 @@ test('Reports rejects file-drop input while Execution log keeps the attachment b
 });
 
 // Exercise the real token/XHR path: the uploader override bypasses both.
+let clipboardFixtureId = 0;
 async function clipboardFixture(windowId, run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL(`../attachment-upload.js?fixture=${++clipboardFixtureId}`, import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1063,6 +1081,7 @@ test('clipboard failure shows and reports the concrete upload cause', async () =
 
 test('Works full terminals own browser and native file drops and their progress', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1108,6 +1127,7 @@ test('Works full terminals own browser and native file drops and their progress'
 
 async function attachmentLifecycleFixture(run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1667,25 +1687,51 @@ test('Chat composer is Operator-styled and stays below the scrolling conversatio
   }
 });
 
-const decisionReport = (id = 'decision-1') => ({ ...structuredReport(id), kind: 'decision',
-  structured: { summary: { result: 'The launch error task is waiting for a wording choice.',
-      impact: 'The task stays stopped until you choose.', owner: 'Noah',
-      decision: { question: 'Which recovery message should the agent use?',
-        recommendation: 'Use the shorter message', reason: 'It names the next step without internal terms.',
-        options: ['Use the shorter message', 'Keep the detailed message'] } },
-    details: '', refs: [] } });
+// One item of the gwtd decision queue (Issue #7742), as `pm_reports.decisions`
+// and `decision_result.decisions` carry it.
+const queueItem = (id = 'decision-1', extra = {}) => ({ id, issue: null, kind: 'pm_decision', target: `pm-report:${id}`,
+  question: 'Which recovery message should the agent use?',
+  materials: 'The launch error task is waiting for a wording choice.',
+  options: ['Use the shorter message', 'Keep the detailed message'], recommendation: 'Use the shorter message',
+  reason: 'It names the next step without internal terms.', impact: 'The task stays stopped until you choose.',
+  owner: 'Noah', detail_text: null, source_report_id: id, deferred_seq: null, created_at: '2026-10-11T00:00:00Z',
+  status: 'open', waiters: [{ role: 'pm' }], ...extra });
+const untypedItem = (id = 'untyped') => queueItem(id, { question: 'Approve the release note wording?', materials: '',
+  options: [], recommendation: null, reason: null, impact: null, owner: null,
+  detail_text: 'Approve the release note wording?' });
 
 const chatDecision = (root, id = 'decision-1') =>
   root.querySelector(`.pm-chat__conversation .pm-chat__decision[data-decision-id="${id}"]`);
 
-// SPEC #7007 T-023 AC-1 / AC-2: a waiting decision is drawn by Decide and by
-// the PM conversation only, and both settle the same decision.
+// SPEC #7007 T-016 (Issue #7634): a decision answered elsewhere first is
+// refused by the queue. The result carries the current queue, so the stale
+// decision leaves both surfaces at once, and the notice says it was already
+// settled instead of showing the queue's internal error and identifier.
+test('a decision answered elsewhere first leaves both surfaces with a plain notice', () => {
+  const { root, view, queue, settle, sent } = fixture();
+  queue([queueItem('decision-1'), queueItem('decision-2', { question: 'Which colour marks a waiting decision?' })]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__card[data-decision-id="decision-1"] .task-decisions__option').click();
+  assert.equal(sent.at(-1).decision_id, 'decision-1');
+  settle(false, [queueItem('decision-2', { question: 'Which colour marks a waiting decision?' })],
+    'Config error: decision decision-1 is no longer open (answered)');
+  assert.equal(root.querySelectorAll('[data-decision-id="decision-1"]').length, 0,
+    'the settled decision leaves Decide and the conversation');
+  assert.equal(root.querySelectorAll('.task-decisions__card').length, 1);
+  assert.equal(root.querySelector('.task-decisions__notice').textContent,
+    'This decision was already settled elsewhere. Your answer was not recorded.');
+  assert.equal(root.querySelector('.task-decisions__send-error'), null);
+  assert.doesNotMatch(root.textContent, /Config error|no longer open|decision-1/);
+});
+
+// SPEC #7007 T-023 AC-1 / AC-2, Issue #7742: a waiting decision is drawn by
+// Decide and by the PM conversation only, both read the gwtd queue, and an
+// answer is a queue request that both settle on together.
 test('Decide and the PM conversation share answer pending, failure, retry and confirmed state', () => {
-  const { root, model, view, update, sent } = fixture();
-  const incoming = decisionReport();
-  incoming.structured.summary.decision.options = ['Use <short> wording', 'Keep the detailed message',
-    'Inspect the saved evidence', 'Wait for another report'];
-  update([incoming]);
+  const { root, view, queue, settle, sent, waiting } = fixture();
+  const item = queueItem('decision-1', { options: ['Use <short> wording', 'Keep the detailed message',
+    'Inspect the saved evidence', 'Wait for another report'] });
+  queue([item]);
   view.showChat();
   assert.equal(root.querySelector('section[aria-label="Decision reports"]'), null,
     'the separate report section is gone from Chat');
@@ -1704,53 +1750,49 @@ test('Decide and the PM conversation share answer pending, failure, retry and co
   ]);
   const chatControls = () => chatDecision(root).querySelector('.pm-chat__decision-controls');
   assert.deepEqual([...chatControls().querySelectorAll('.pm-chat__decision-option')].map(button => button.textContent),
-    incoming.structured.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
+    item.options.map((option, index) => `${index + 1}. ${option}`));
   assert.equal(chatControls().querySelector('short'), null, 'option labels are literal text');
   const draft = root.querySelector('.pm-chat__draft');
   draft.value = 'Keep my unfinished request';
   const option = chatControls().querySelectorAll('.pm-chat__decision-option')[1];
-  update([incoming]);
+  queue([item]);
   assert.equal(chatControls().querySelectorAll('.pm-chat__decision-option')[1], option,
     'unchanged polling keeps the focused choice node');
   option.click();
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].text,
-    'Answer to "Which recovery message should the agent use?": 2. Keep the detailed message\r');
+  assert.deepEqual(sent, [{ kind: 'answer_decision', id: 'pm', request_id: sent[0].request_id,
+    decision_id: 'decision-1', answer: '2. Keep the detailed message' }],
+  'the answer goes to the decision queue, not through the PM pane');
   assert.ok([...chatControls().querySelectorAll('button')].every(button => button.disabled));
   assert.match(chatControls().querySelector('[role="status"]').textContent, /Sending/);
   root.querySelector('.task-decisions__option').click();
   assert.equal(sent.length, 1, 'switching surfaces cannot duplicate an in-flight answer');
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[0].request_id,
-    ok: false, error: 'The PM pane refused the message.' });
-  assert.match(chatControls().querySelector('[role="alert"]').textContent, /The PM pane refused the message/);
+  // SPEC #7007 T-014 / T-016: the queue's own wording and identifiers stay
+  // off the surfaces; the refusal says what happened and the next step.
+  settle(false, null, 'Config error: decision decision-1 is unavailable');
+  const refusal = 'The answer was not recorded. Reload this window, then try again.';
+  assert.equal(chatControls().querySelector('[role="alert"]').textContent, refusal);
   assert.equal(chatControls().querySelector('.pm-chat__decision-option').disabled, false);
   assert.ok(chatControls().querySelectorAll('.pm-chat__decision-option')[1] === option,
     'a failed answer leaves the original option available for keyboard retry');
-  assert.match(root.querySelector('.task-decisions__card').textContent, /The PM pane refused the message/);
-  const retry = chatControls().querySelector('.pm-chat__decision-option');
-  let focused = retry;
-  Object.defineProperty(root.ownerDocument, 'activeElement', { configurable: true, get: () => focused });
-  retry.click();
+  assert.equal(root.querySelector('.task-decisions__send-error').textContent, refusal);
+  assert.doesNotMatch(root.textContent, /Config error|decision-1 is/);
+  chatControls().querySelector('.pm-chat__decision-option').click();
   assert.equal(sent.length, 2, 'an explicit choice retries the failed answer');
-  assert.doesNotMatch(chatControls().textContent, /Answer sent/);
-  const confirmedStatus = chatControls().querySelector('[role="status"]');
-  confirmedStatus.focus = () => { focused = confirmedStatus; };
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[1].request_id,
-    ok: true });
-  assert.match(chatControls().querySelector('[role="status"]').textContent, /Answer sent: Use <short> wording/);
-  assert.equal(chatControls().querySelectorAll('button').length, 0);
-  assert.match(chatDecision(root).querySelector('.pm-chat__decision-meta').textContent, /Decision answered/);
-  assert.match(root.querySelector('.task-decisions__card').textContent, /Answer sent: Use <short> wording/);
-  assert.ok(focused === confirmedStatus, 'confirmation moves focus from the removed option to its status');
-  assert.equal(draft.value, 'Keep my unfinished request', 'a choice send never clears an unrelated composer draft');
-  assert.equal(model.readPmWindowState().windows.pm.reports[0].body, incoming.body);
+  assert.equal(sent[1].answer, '1. Use <short> wording');
+  settle(true, []);
+  assert.equal(root.querySelectorAll('[data-decision-id="decision-1"]').length, 0,
+    'the answered decision leaves both surfaces with the queue the result returned');
+  assert.match(root.querySelector('.task-decisions__notice').textContent,
+    /Answer sent\. The waiting session continues with it\./);
+  assert.deepEqual(waiting.at(-1), { waiting: 0, ids: [] });
+  assert.equal(draft.value, 'Keep my unfinished request', 'a choice never clears an unrelated composer draft');
 });
 
 // A free-form reply is an answer too: it is recorded against the decision
-// it replies to, and the waiting count follows.
+// it replies to, and the waiting count follows the queue.
 test('A free-form reply answers the decision it targets and updates the waiting count', () => {
-  const { root, model, view, update, sent, waiting } = fixture();
-  update([decisionReport(), { ...report('untyped'), kind: 'decision', body: 'Approve the release note wording?' }]);
+  const { root, view, queue, settle, sent, waiting } = fixture();
+  queue([queueItem(), untypedItem()]);
   assert.equal(waiting.at(-1).waiting, 2);
   const draft = root.querySelector('.pm-chat__draft');
   draft.value = 'My own unfinished answer';
@@ -1758,10 +1800,8 @@ test('A free-form reply answers the decision it targets and updates the waiting 
   draft.focus = () => { focused = true; };
   const chip = root.querySelector('.pm-chat__reply-target');
   assert.equal(chip.hidden, true, 'the composer starts without a reply target');
-  for (const id of ['untyped']) {
-    assert.equal(chatDecision(root, id).querySelectorAll('.pm-chat__decision-option').length, 0,
-      'a report without a typed packet never invents options');
-  }
+  assert.equal(chatDecision(root, 'untyped').querySelectorAll('.pm-chat__decision-option').length, 0,
+    'a decision without options never invents them');
   view.showDecisions();
   const card = root.querySelector('.task-decisions__card[data-decision-id="decision-1"]');
   [...card.querySelectorAll('button')].find(button => button.textContent === 'Reply in chat').click();
@@ -1774,17 +1814,18 @@ test('A free-form reply answers the decision it targets and updates the waiting 
   const submit = () => root.querySelector('.pm-chat__composer')
     .dispatchEvent(new root.ownerDocument.defaultView.Event('submit'));
   submit();
-  assert.equal(sent[0].text,
-    'Answer to "Which recovery message should the agent use?": My own unfinished answer\r');
+  assert.deepEqual(sent[0], { kind: 'answer_decision', id: 'pm', request_id: sent[0].request_id,
+    decision_id: 'decision-1', answer: 'My own unfinished answer' });
   assert.equal(draft.value, 'My own unfinished answer', 'the reply stays in the draft until confirmed');
+  assert.equal(draft.readOnly, true, 'the travelling answer is frozen');
   assert.equal(waiting.at(-1).waiting, 2, 'an unconfirmed reply does not settle the decision');
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', request_id: sent[0].request_id, ok: true });
-  assert.match(chatDecision(root).textContent, /Answer sent: My own unfinished answer/);
-  assert.match(card.textContent, /Answer sent: My own unfinished answer/);
+  settle(true, [untypedItem()]);
+  assert.equal(chatDecision(root), null, 'the answered decision left the conversation');
   assert.equal(waiting.at(-1).waiting, 1, 'the free-form answer leaves one decision waiting');
   assert.deepEqual(waiting.at(-1).ids, ['untyped']);
   assert.equal(chip.hidden, true, 'the reply target clears with the answer');
   assert.equal(draft.value, '');
+  assert.equal(draft.readOnly, false);
   [...chatDecision(root, 'untyped').querySelectorAll('button')]
     .find(button => button.textContent === 'Other: write a reply').click();
   assert.match(chip.textContent, /Replying to: Approve the release note wording\?/);
@@ -1792,15 +1833,17 @@ test('A free-form reply answers the decision it targets and updates the waiting 
   assert.equal(chip.hidden, true, 'Cancel reply returns the composer to a plain message');
   draft.value = 'A new request';
   submit();
+  assert.equal(sent[1].kind, 'pane_send_input', 'a plain message still travels the PM chat send');
   assert.equal(sent[1].text, 'A new request\r');
   assert.equal(waiting.at(-1).waiting, 1, 'a plain message answers nothing');
 });
 
-// "Decide later" postpones without settling: the decision keeps waiting at
-// the end of the queue on both surfaces and the waiting count is unchanged.
+// "Decide later" postpones without settling: the queue keeps the decision
+// waiting at its tail on both surfaces and the waiting count is unchanged.
 test('Decide later moves a decision to the end of the queue without changing the waiting count', () => {
-  const { root, model, view, update, sent, waiting } = fixture();
-  update([decisionReport('decision-1'), decisionReport('decision-2')]);
+  const { root, view, queue, settle, sent, waiting } = fixture();
+  const first = queueItem('decision-1'), second = queueItem('decision-2');
+  queue([second, first]);
   view.showDecisions();
   const decideOrder = () => [...root.querySelectorAll('.task-decisions__card')].map(card => card.dataset.decisionId);
   const chatOrder = () => [...root.querySelectorAll('.pm-chat__conversation .pm-chat__decision')]
@@ -1809,7 +1852,9 @@ test('Decide later moves a decision to the end of the queue without changing the
   assert.deepEqual(chatOrder(), ['decision-2', 'decision-1']);
   const later = card => [...card.querySelectorAll('button')].find(button => button.textContent === 'Decide later');
   later(root.querySelector('.task-decisions__card')).click();
-  assert.equal(sent.length, 0, 'deferring sends nothing to the PM');
+  assert.deepEqual(sent, [{ kind: 'defer_decision', id: 'pm', request_id: sent[0].request_id, decision_id: 'decision-2' }]);
+  assert.deepEqual(decideOrder(), ['decision-2', 'decision-1'], 'the order is the queue\'s, so it waits for the result');
+  settle(true, [first, { ...second, deferred_seq: 1 }]);
   assert.deepEqual(decideOrder(), ['decision-1', 'decision-2'], 'the next decision comes first in Decide');
   assert.deepEqual(chatOrder(), ['decision-1', 'decision-2'], 'the conversation follows the same queue');
   assert.equal(waiting.at(-1).waiting, 2, 'a deferred decision is still waiting');
@@ -1818,22 +1863,24 @@ test('Decide later moves a decision to the end of the queue without changing the
   assert.match(root.querySelector('.task-decisions__card[data-decision-id="decision-2"] .task-decisions__chip').textContent, /Deferred/);
   assert.match(chatDecision(root, 'decision-2').querySelector('.pm-chat__decision-meta').textContent, /Deferred/);
   later(chatDecision(root, 'decision-1')).click();
+  assert.equal(sent[1].decision_id, 'decision-1');
+  settle(true, [{ ...second, deferred_seq: 1 }, { ...first, deferred_seq: 2 }]);
   assert.deepEqual(decideOrder(), ['decision-2', 'decision-1'], 'deferring from the conversation reorders Decide too');
   assert.equal(waiting.at(-1).waiting, 2);
   root.querySelector('.task-decisions__card[data-decision-id="decision-1"] .task-decisions__option').click();
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  settle(true, [{ ...second, deferred_seq: 1 }]);
   assert.equal(waiting.at(-1).waiting, 1, 'a deferred decision can still be answered');
   assert.deepEqual(waiting.at(-1).ids, ['decision-2']);
   assert.equal(root.querySelector('.task-decisions__count').textContent, '1 decision waiting');
   later(root.querySelector('.task-decisions__card[data-decision-id="decision-2"]')).click();
+  settle(true, [{ ...second, deferred_seq: 3 }]);
   assert.match(root.querySelector('.task-decisions__notice').textContent, /No other decision is waiting/);
   assert.equal(waiting.at(-1).waiting, 1);
 });
 
-test('Decision messages follow same-report updates and reset on PM rebind while native messages keep their order', () => {
-  const { root, model, update } = fixture();
-  const incoming = decisionReport();
-  update([incoming]);
+test('Decision messages follow queue updates and a PM rebind while native messages keep their order', () => {
+  const { root, model, queue } = fixture();
+  queue([queueItem()]);
   const message = chatDecision(root);
   assert.ok(message, 'the decision is part of the conversation');
   model.applyPmWindowReceiveEvent(conversation([{ id: 'a1', role: 'assistant', text: 'Native PM message' },
@@ -1841,19 +1888,14 @@ test('Decision messages follow same-report updates and reset on PM rebind while 
   assert.equal(chatDecision(root), message, 'native conversation updates keep the decision message attached');
   assert.deepEqual([...root.querySelectorAll('.pm-chat__conversation > *')]
     .map(node => node.dataset.messageId || node.dataset.decisionId), ['a1', 'u1', 'decision-1']);
-  const changed = decisionReport();
-  changed.structured.summary.decision.options.push('Ask the reviewer');
-  update([changed]);
+  queue([queueItem('decision-1', { options: ['Use the shorter message', 'Keep the detailed message', 'Ask the reviewer'] })]);
   assert.equal(chatDecision(root).querySelectorAll('.pm-chat__decision-option').length, 3);
-  chatDecision(root).querySelector('.pm-chat__decision-option').click();
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
   model.bindPmWindowState('pm', 'replacement');
   assert.equal(root.querySelector('.pm-chat__conversation [data-decision-id]'), null,
-    'a rebind removes the previous decisions');
-  update([incoming]);
-  assert.doesNotMatch(chatDecision(root).textContent, /Answer sent/);
+    'a rebind shows nothing until the new session receives the queue');
+  queue([queueItem()]);
   assert.equal(chatDecision(root).querySelectorAll('.pm-chat__decision-option').length, 2,
-    'the same report is actionable in its new Session');
+    'the queue does not belong to a PM session: the same decision is waiting for the new one');
   assert.equal(root.querySelectorAll('.pm-chat__bubble[data-message-id]').length, 0);
 });
 
@@ -1870,55 +1912,62 @@ test('Decision message controls use Operator layout tokens and wrap long option 
   }
 });
 
-test('Decide lists only decision reports and answers through the chat reply path', () => {
-  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
-  update([report(), decisionReport(), { ...report('blocker-1'), kind: 'blocker' }]);
+test('Decide lists the gwtd decision queue and answers through it', () => {
+  const { root, view, update, queue, settle, sent, waiting } = fixture({ tasksDefault: true });
+  const agent = queueItem('agent-1', { issue: 7742, kind: 'product', owner: null, source_report_id: null });
+  update([report(), { ...report('blocker-1'), kind: 'blocker' }], null, null, undefined,
+    { waiting_count: 2, items: [queueItem(), agent] });
   view.showDecisions();
   const decide = root.querySelector('.task-decisions');
   assert.ok(decide, 'a Decide surface exists');
   assert.equal(root.querySelector('.pm-chat__tasks').hidden, true);
   const cards = root.querySelectorAll('.task-decisions__card');
-  assert.equal(cards.length, 1, 'progress and blocker reports are not promoted to decisions');
-  assert.match(decide.textContent, /1 decision/);
+  assert.equal(cards.length, 2, 'only queue items are decisions; reports are never promoted');
+  assert.match(decide.textContent, /2 decisions waiting/);
+  assert.match(cards[1].querySelector('.task-decisions__meta').textContent, /Issue #7742/,
+    'an agent-registered decision names its issue');
+  update([report()]);
+  assert.equal(root.querySelectorAll('.task-decisions__card').length, 2,
+    'a snapshot without a readable queue keeps the last applied one');
   const options = [...cards[0].querySelectorAll('.task-decisions__option')];
   assert.equal(options.length, 2);
   options[1].click();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, 'pane_send_input');
-  assert.match(sent[0].text,
-    /^Answer to "Which recovery message should the agent use\?": 2\. Keep the detailed message/);
+  assert.equal(sent[0].kind, 'answer_decision');
+  assert.equal(sent[0].answer, '2. Keep the detailed message');
   options[0].click();
   assert.equal(sent.length, 1, 'no second answer is sent while the first is in flight');
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
-  const card = root.querySelector('.task-decisions__card');
-  assert.match(card.textContent, /Answer sent: Keep the detailed message/);
-  assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
-    'a confirmed answer cannot be answered again');
+  settle(true, [agent]);
+  assert.deepEqual([...root.querySelectorAll('.task-decisions__card')].map(card => card.dataset.decisionId), ['agent-1'],
+    'a confirmed answer leaves the queue and cannot be answered again');
+  // Issue #7742 AC-4: the count is the queue's own value, never a recount.
+  queue([agent], null, 5);
+  assert.equal(root.querySelector('.task-decisions__count').textContent, '5 decisions waiting');
+  assert.equal(waiting.at(-1).waiting, 5);
 });
 
-test('Decide keeps a decision actionable and shows the error when the answer send fails', () => {
-  const { root, model, view, update, sent } = fixture({ tasksDefault: true });
-  update([decisionReport()]);
+test('Decide keeps a decision actionable and shows the error when the answer is refused', () => {
+  const { root, view, queue, settle, sent } = fixture({ tasksDefault: true });
+  queue([queueItem()]);
   view.showDecisions();
   root.querySelector('.task-decisions__option').click();
   assert.equal(sent.length, 1);
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: false,
-    error: 'The PM pane refused the message.' });
+  settle(false, null, 'The decision queue is unreadable.');
   const card = root.querySelector('.task-decisions__card');
-  assert.match(card.textContent, /The PM pane refused the message\./);
+  assert.match(card.textContent, /The answer was not recorded\. Reload this window, then try again\./);
   const options = card.querySelectorAll('.task-decisions__option');
-  assert.equal(options.length, 2, 'the decision stays actionable after a failed send');
+  assert.equal(options.length, 2, 'the decision stays actionable after a refused answer');
   assert.equal(options[0].disabled, false);
 });
 
-test('Decide offers the chat reply path for a decision report without a typed packet', () => {
-  const { root, view, update, sent } = fixture({ tasksDefault: true });
-  update([{ ...report('plain-decision'), kind: 'decision', body: 'Approve the release note wording?' }]);
+test('Decide offers the chat reply path for a decision without options', () => {
+  const { root, view, queue, sent } = fixture({ tasksDefault: true });
+  queue([untypedItem('plain-decision')]);
   view.showDecisions();
   const card = root.querySelector('.task-decisions__card');
-  assert.ok(card, 'an untyped decision report is still listed');
+  assert.ok(card, 'a decision without options is still listed');
   assert.equal(card.querySelectorAll('.task-decisions__option').length, 0,
-    'no options are invented without a typed packet');
+    'no options are invented');
   const reply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Reply in chat');
   assert.ok(reply);
   reply.click();
@@ -1927,8 +1976,8 @@ test('Decide offers the chat reply path for a decision report without a typed pa
 });
 
 test('Home Review decisions opens the Decide surface', async () => {
-  const { root, update } = fixture({ tasksDefault: true });
-  update([decisionReport()], null, { request_tasks: taskOverview([]) });
+  const { root, queue } = fixture({ tasksDefault: true });
+  queue([queueItem()], { request_tasks: taskOverview([]) });
   // Home renders through the store's frame batching; wait for the frame to
   // land instead of assuming a synchronous render.
   let review = null;
@@ -1943,40 +1992,22 @@ test('Home Review decisions opens the Decide surface', async () => {
   assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
 });
 
-// SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once,
-// so answering a decision in Decide cannot leave Home still asking for it.
-test('Home and Decide read one waiting-decision count after an answer', async () => {
-  const { root, model, view, update } = fixture({ tasksDefault: true });
-  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
+// SPEC #5016 AC-HS1 / AC-HS2, Issue #7742 AC-4: Home, Decide and the shared
+// attention model (header and status bar) read the queue's one waiting count.
+test('Home, Decide and the published attention read one waiting-decision count after an answer', async () => {
+  const { root, model, view, waiting, queue, settle } = fixture({ tasksDefault: true });
+  queue([queueItem('decision-2'), queueItem('decision-1')], { request_tasks: taskOverview([]) });
+  assert.deepEqual(waiting.at(-1), { waiting: 2, ids: ['decision-2', 'decision-1'] });
   view.showDecisions();
   root.querySelector('.task-decisions__option').click();
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  settle(true, [queueItem('decision-1')]);
   const home = () => root.querySelector('.task-home')?.textContent ?? '';
   for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   assert.match(home(), /1 decision needs your attention/, 'Home does not count the answered decision');
-  const actionable = [...root.querySelectorAll('.task-decisions__card')]
-    .filter(card => card.querySelector('.task-decisions__option'));
-  assert.equal(actionable.length, 1, 'Decide leaves the same one decision actionable');
-});
-
-// SPEC #5016 HSK: the shared attention model receives the same waiting
-// decisions that Home counts, never a recount of the raw reports.
-test('PM decisions waiting are published from the one derivation Home reads', async () => {
-  const { root, model, view, waiting, update } = fixture({ tasksDefault: true });
-  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
-  assert.deepEqual(waiting.at(-1), { waiting: 2, ids: ['decision-2', 'decision-1'] });
-  view.showDecisions();
-  root.querySelector('.task-decisions__option').click();
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
-  const home = () => root.querySelector('.task-home')?.textContent ?? '';
-  for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 25));
-  }
-  assert.equal(waiting.at(-1).waiting, 1);
-  assert.equal(waiting.at(-1).ids.length, 1);
-  assert.match(home(), /1 decision needs your attention/, 'Home shows the published count');
+  assert.equal(root.querySelector('.task-decisions__count').textContent, '1 decision waiting');
+  assert.deepEqual(waiting.at(-1), { waiting: 1, ids: ['decision-1'] });
   const published = waiting.length;
   view.update(model.readPmWindowState().windows.pm);
   assert.equal(waiting.length, published, 'an unchanged waiting set is not republished');
@@ -1996,21 +2027,6 @@ test('PM current review attention is published from the facts the PM window rece
   assert.equal(reviews.length, published, 'an unchanged observation is not republished');
   update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: [] } });
   assert.deepEqual(reviews.at(-1), [], 'an observed empty list clears the count');
-});
-
-test('Decide forgets session answers when the PM session changes', () => {
-  const { root, model, view, update } = fixture({ tasksDefault: true });
-  update([decisionReport()]);
-  view.showDecisions();
-  root.querySelector('.task-decisions__option').click();
-  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
-  assert.match(root.querySelector('.task-decisions__card').textContent, /Answer sent/);
-  model.bindPmWindowState('pm', 'other-session');
-  update([decisionReport()]);
-  const card = root.querySelector('.task-decisions__card');
-  assert.doesNotMatch(card.textContent, /Answer sent/);
-  assert.equal(card.querySelectorAll('.task-decisions__option').length, 2,
-    'the same decision is actionable again in the new session');
 });
 
 // --- SPEC #7007 T-012/T-013: Progress and Log views in the PM pane ---
@@ -2066,29 +2082,53 @@ test('Progress View task details switches to the Tasks view and requests the det
   view.dispose();
 });
 
-test('Log view renders fed notification groups and routes the drawer action', async () => {
+// Issue #7650 (SPEC #7007 T-032): the structured Logs window is the only log
+// surface. The PM view no longer re-renders the notification history as a
+// Log tab; PM execution output stays on the terminal (Execution log).
+test('PM view carries no Log tab that re-renders notification history', () => {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const viewed = [];
-  const view = createPmChat({ document, root, sessionId: 'session',
-    onLogVisibility: () => {}, onViewNotification: entry => viewed.push(entry) });
-  view.receiveLog([{ id: 7, key: 'window-command:agent-1:input', category: 'action',
-    title: 'Input failed', message: 'Your input was not delivered to the window.',
-    details: 'owner identity mismatch', count: 2, latestAt: new Date().toISOString(),
-    resolved: false, activatable: false }]);
-  view.showTaskLog();
-  const card = await waitForPm(() => root.querySelector('.task-log__card'), 'a Log group card');
-  assert.match(card.textContent, /Input failed/);
-  assert.match(card.textContent, /Action required/);
-  assert.match(card.textContent, /Repeated 2 times/);
-  const logButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
-    .find(button => button.textContent === 'Log');
-  assert.ok(logButton, 'the toolbar carries a Log view button distinct from Execution log');
-  assert.equal(logButton.getAttribute('aria-pressed'), 'true');
-  const viewButton = [...card.querySelectorAll('button')]
-    .find(node => node.textContent === 'View in Notifications');
-  viewButton.click();
-  assert.equal(viewed.length, 1);
-  assert.equal(viewed[0].key, 'window-command:agent-1:input');
+  const view = createPmChat({ document, root, sessionId: 'session', onLogVisibility: () => {} });
+  const labels = [...root.querySelectorAll('.pm-chat__toolbar button')].map(button => button.textContent);
+  assert.equal(labels.includes('Log'), false, 'no Log tab beside Execution log');
+  assert.ok(labels.includes('Execution log'), 'PM execution output stays on the terminal view');
+  assert.equal(root.querySelector('.task-log'), null);
+  assert.equal(typeof view.showTaskLog, 'undefined');
+  assert.equal(typeof view.receiveLog, 'undefined');
+  view.dispose();
+});
+
+// Issue #7644: a theme recorded from the conversation opens the message it
+// came from, also when the conversation arrives after the request.
+test('Chat opens the message a theme came from, or says it is gone', () => {
+  const { root, model, view } = fixture();
+  view.showMessage('original');
+  assert.equal(view.isChatVisible(), true);
+  const navigation = [];
+  const bubble = () => root.querySelector('[data-message-id="original"]');
+  // linkedom has no scrollIntoView; a browser element does.
+  const proto = Object.getPrototypeOf(Object.getPrototypeOf(root));
+  const hadScroll = Object.hasOwn(proto, 'scrollIntoView');
+  proto.scrollIntoView = function () { navigation.push(`arrived:${this.dataset.messageId}`); };
+  try {
+    model.applyPmWindowReceiveEvent(conversation([
+      { id: 'original', role: 'user', text: 'Add search to the log screen', source_key: 'source' },
+    ]));
+  } finally {
+    if (!hadScroll) delete proto.scrollIntoView;
+  }
+  assert.ok(bubble(), 'the conversation rendered the target');
+  assert.deepEqual(navigation.splice(0), ['arrived:original']);
+  view.showReports();
+  bubble().scrollIntoView = () => navigation.push('scroll');
+  bubble().focus = () => navigation.push('focus');
+  view.showMessage('original');
+  assert.deepEqual(navigation, ['scroll', 'focus']);
+  const notice = root.querySelector('[data-pm-message-target-notice]');
+  assert.equal(notice.hidden, true);
+
+  view.showMessage('gone');
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /no longer in the conversation/);
   view.dispose();
 });

@@ -309,18 +309,7 @@ pub(crate) fn fetch(
             "complete deliverable remote source surface is unprovable",
         ));
     }
-    let mut changed_files = Vec::new();
-    for file in files {
-        changed_files.push(
-            file["filename"]
-                .as_str()
-                .ok_or_else(|| refused("remote filename is unreadable"))?
-                .into(),
-        );
-        if let Some(previous) = file["previous_filename"].as_str() {
-            changed_files.push(previous.into());
-        }
-    }
+    let changed_files = remote_changed_files(files)?;
     Ok(CiSnapshot {
         repository: repository.into(),
         repository_id,
@@ -466,6 +455,32 @@ fn target_context(
         ));
     }
     Ok((target, session, owner))
+}
+
+/// Paths the remote compare changed, both endpoints of a rename included.
+/// Issue #7305 (#5954): a byte-identical rename between UI paths changes no
+/// rendered surface, so it is left out; any other rename keeps both paths.
+fn remote_changed_files(files: &[Value]) -> io::Result<Vec<String>> {
+    let mut changed_files = Vec::new();
+    for file in files {
+        let filename = file["filename"]
+            .as_str()
+            .ok_or_else(|| refused("remote filename is unreadable"))?;
+        let previous = file["previous_filename"].as_str();
+        let unchanged_ui_move = file["status"].as_str() == Some("renamed")
+            && file["changes"].as_u64() == Some(0)
+            && previous.is_some_and(|previous| {
+                crate::cli::verify_derivation::is_unchanged_ui_move(previous, filename)
+            });
+        if unchanged_ui_move {
+            continue;
+        }
+        changed_files.push(filename.into());
+        if let Some(previous) = previous {
+            changed_files.push(previous.into());
+        }
+    }
+    Ok(changed_files)
 }
 
 fn unchanged_gates(
@@ -824,6 +839,33 @@ fn create<E: crate::cli::CliEnv>(
 pub(super) mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Issue #7305 (#5954): GitHub reports a byte-identical move as
+    /// `renamed` with zero changes. Between UI paths it is not a UI change;
+    /// edited renames and moves out of the UI surface still are.
+    #[test]
+    fn remote_byte_identical_ui_moves_are_not_ui_changes() {
+        let files = vec![
+            json!({"filename":"mocks/a.html","previous_filename":"wireframes/a.html","status":"renamed","changes":0}),
+            json!({"filename":"styles/globals.css","previous_filename":"app/globals.css","status":"renamed","changes":0}),
+            json!({"filename":"crates/gwt/src/lib.rs","status":"modified","changes":3}),
+        ];
+        assert_eq!(
+            remote_changed_files(&files).unwrap(),
+            vec!["crates/gwt/src/lib.rs".to_string()]
+        );
+        let edited = vec![
+            json!({"filename":"mocks/b.html","previous_filename":"wireframes/b.html","status":"renamed","changes":2}),
+        ];
+        assert_eq!(remote_changed_files(&edited).unwrap().len(), 2);
+        let archived = vec![
+            json!({"filename":"archive/c.txt","previous_filename":"wireframes/c.html","status":"renamed","changes":0}),
+        ];
+        assert_eq!(
+            remote_changed_files(&archived).unwrap(),
+            vec!["archive/c.txt".to_string(), "wireframes/c.html".to_string()]
+        );
+    }
 
     pub(in crate::cli::pr) fn request() -> CiCreateRequest {
         CiCreateRequest {

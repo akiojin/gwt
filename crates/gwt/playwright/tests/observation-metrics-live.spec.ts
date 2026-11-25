@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -42,7 +43,7 @@ test("Issue #7524 displays measured verification slots and only connected Works 
         === `${slots.running} of ${slots.capacity} · ${slots.available} available`;
     })).toBe(true);
     await page.screenshot({ path: info.outputPath(`verification-${theme}.png`) });
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     const today = page.locator(".works-surface:not(.works-surface--preview) .works-today");
     await expect(today).toBeVisible();
     await expect(today).toContainText("Tokens");

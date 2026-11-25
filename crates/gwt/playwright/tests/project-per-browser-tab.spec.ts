@@ -26,6 +26,7 @@ import {
   sendLiveGwtEvent,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 useManagedBrowserSource(test);
 
@@ -177,14 +178,14 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         // Hub links open Projects in new browser tabs.
         // Park each A client's auxiliary Shell before removing it; an empty
         // Settings host otherwise requests a replacement Settings window.
-        for (const current of [page, mirror]) await current.locator('.op-rail__surface[data-surface="works"]').click();
+        for (const current of [page, mirror]) await openWorks(current);
         await sendLiveGwtEvent(page, { kind: "close_window", id: aWindow });
         created.shift();
         await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
         await expect(page.locator("#project-home-link")).toHaveCount(0);
         const hubTab = await context.newPage();
-        await hubTab.goto(new URL("/", base!).href);
+        await hubTab.goto(liveGwtProjectsUrl(base!));
         await expect(hubTab.locator("[data-hub]")).toBeVisible();
         const projectPopup = hubTab.waitForEvent("popup");
         await hubTab.locator(`[data-hub-list="open"] a[href="/p/${projectB.project_key}"]`).click();
@@ -195,7 +196,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
       } finally {
         for (const current of pages) if (!current.isClosed())
-          await current.locator('.op-rail__surface[data-surface="works"]').click().catch(() => {});
+          await openWorks(current).catch(() => {});
         for (const window of created) {
           await sendLiveGwtEvent(window.page, { kind: "close_window", id: window.id }).catch(() => {});
         }
@@ -220,7 +221,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         const hub = page.locator("[data-hub]");
         await expect(hub).toBeVisible();
         await expectTheme(page, theme);
-        await expect(page).toHaveTitle("gwt — Hub");
+        await expect(page).toHaveTitle("gwt — Home");
         for (const selector of ["#app", "#project-tabs", "#op-rail", ".workspace-window"]) {
           await expect(page.locator(selector)).toHaveCount(0);
         }

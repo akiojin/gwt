@@ -3942,8 +3942,9 @@ pub fn active_profile_grok_home_for_continuation(
     source_session: &gwt_agent::Session,
     launch_cwd: &Path,
 ) -> Option<PathBuf> {
-    let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+    let (effective_env, _) = gwt_agent::LaunchEnvironment::for_project(
         profile_config_path,
+        launch_cwd,
         source_session.runtime_target,
     )
     .ok()?

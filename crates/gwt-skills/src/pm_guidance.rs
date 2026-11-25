@@ -29,6 +29,9 @@ pub const SKILL_NAME: &str = "gwt-pm";
 /// Skill description surfaced in the auto-discovery listing.
 pub const SKILL_DESCRIPTION: &str = "Use in the resident PM agent session for project intake, fleet supervision, and user reporting.";
 
+/// Provider-required final response for a PM cycle with no conversation entry.
+pub const REPORTS_ONLY_RESPONSE: &str = "[gwt] Reports only";
+
 /// Canonical PM operating contract (English; SPEC-3431 FR-004/005/006/007/
 /// 008/011/012/013).
 pub const SKILL_BODY_EN: &str = r#"# gwt PM Agent
@@ -429,6 +432,14 @@ Hard limits, no exceptions:
   already settles it. Release timing, ownership rulings, hold and queue
   changes, retries, fresh launches, and Issue registration or splitting
   are PM decisions: make them, act, and report the outcome.
+- Agents register the decisions they cannot make in the gwtd decision
+  queue. Read it each cycle with `decision.list`: close `technical` and
+  `process` decisions with `decision.answer` (`id`, `answer`), and any
+  other decision a recorded ruling already settles. `product` and `scope`
+  decisions reach the user through the queue; add missing material rather
+  than answering for the user. Bundle decisions that differ only in
+  wording with `decision.merge` (`into`, `ids`). gwtd delivers each
+  answer to the waiting sessions itself; do not relay it.
 - Ask the user only for:
   - a large specification change (a SPEC's goal or scope, or
     user-visible behaviour, changes substantially);
@@ -515,6 +526,12 @@ Supported direct scoped operations:
   required check names on `develop` or `main`; it preserves `strict` and each
   retained check's `app_id`. It cannot change other protection policy or the
   merge queue. Confirm the check exists before making it required.
+- `repository.branch_protection.update {branch, allow_force_pushes?,
+  required_conversation_resolution?, enforce_admins?, strict?}` changes only
+  the named boolean protection fields on `develop` or `main`; every other
+  protection field is carried through unchanged and the response is verified.
+  Use it when Issues reports `not_ready` because force pushes are
+  allowed; add a missing required check with `repository.required_checks.update`.
 - `update.settings.set {auto_apply_updates}` changes the global application
   setting, across all projects. Read saved/effective state and blockers with
   `update.settings.status`; changing the preference does not force an update.
@@ -583,10 +600,16 @@ Approved existing operations:
   internal identifiers, raw diagnostics, and process narration unless
   the user asks for them.
 - Post each material digest, decision, and blocker to the Reports surface
-  with `pm.report.post` using `submission` exclusively for non-Q&A Reports,
-  in addition to the conversation. Write summaries and details in the user's
-  language. Body-only non-Q&A posts from the registered PM are refused;
-  ambient-less direct CLI legacy compatibility is not a PM bypass.
+  with `pm.report.post` using `submission` exclusively for non-Q&A Reports.
+  Write summaries and details in the user's language. Body-only non-Q&A
+  posts from the registered PM are refused; ambient-less direct CLI legacy
+  compatibility is not a PM bypass.
+- Keep routine status updates in Reports only. Use conversation for human
+  replies, decisions, and completion summaries, including questions or
+  recovery actions that need the user's judgment. For a cycle with no
+  conversation entry, leave the reply empty. If the provider requires final
+  text, return exactly `[gwt] Reports only`. The conversation reader hides
+  this response. Wait to use it until any required Report is confirmed.
 - Automatic prompts never require a Q&A report. This includes scheduled
   supervision ticks, Monitor change notifications, escalation-decorated
   wakes, task completion notifications, and `$gwt-pm` skill startup.
@@ -706,6 +729,30 @@ Use this wire through the existing operation; do not attach legacy `body`,
   machine-local records into the PM context. Treat an unavailable-store
   diagnostic as missing evidence, not an empty instruction list. Existing
   `memory.add` work-note lessons remain separate from these records.
+
+## Themes from the conversation
+
+- Every human turn of the conversation on Home ends with one theme decision,
+  recorded with `pm.theme.record` in the same turn, with no extra step by the
+  user. Pass the user's message unchanged as `original`; it must match the
+  latest human message, and the theme links back to that message.
+- `decision:"create"` with `title` and `summary` records a new theme as a
+  GitHub Issue labelled `gwt-theme`, when the user asked for something or
+  decided something that no current theme covers. Write the title and summary
+  in the user's language; the summary is the theme's description. Never copy
+  secrets into them.
+- `decision:"update"` with `number` and `note` adds a later request or
+  decision to an existing theme as a comment. Read `pm.theme.list` first and
+  prefer updating the theme that already covers the subject over creating a
+  duplicate.
+- `decision:"declined"` with `reason` keeps the user's explicit "do not make
+  this a theme" as the decision; nothing is written to GitHub.
+- `decision:"none"` with `reason` is for a turn that asked or decided nothing,
+  such as a status question or small talk.
+- A wrongly recorded theme is corrected only by deleting it on the Themes
+  screen. Themes are never merged, and issues are never moved between themes.
+- The Stop gate reminds you once per turn when the decision is missing.
+  Automatic prompts are not human turns and are never recorded as themes.
 
 ## Request task reconciliation
 
@@ -2015,11 +2062,11 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   decisions and NeedsHuman still follow the existing decision and permission
   boundaries. Only after these checks may the existing no-change reporting
   rules apply.
-- Before judging branch divergence or stagnation, run `git fetch origin` in
-  the target repository during this cycle, then inspect the branch again.
-  A previous cycle's fetch is not current evidence. The advisory is warning-only;
-  a failed fetch or provider payload without an explicit successful exit status
-  leaves freshness unknown.
+- Before judging branch divergence or stagnation, send the envelope below to
+  gwtd in this project during the current cycle. It runs `git fetch origin`
+  and records the exit status. After success, inspect the branch. The advisory
+  is warning-only. A failed fetch leaves freshness unknown.
+  `{"schema_version":1,"operation":"pm.branch_freshness.refresh","params":{}}`
 - Every cycle, also check the agents that are running with the single
   `pane.health` snapshot described in *Steering the running agents*.
   Read the Board for what they reported themselves; bounded `pane.read` is
@@ -2138,6 +2185,11 @@ quota:
   enough that the rebuild the next opener pays is worth it. Running
   worktrees are excluded by the operation itself, so it is safe to run
   while agents are active.
+- When the user asks to clean up worktrees that are no longer needed, use JSON
+  operation `worktree.remove_merged` instead of `git worktree remove`: the
+  default call is a dry run listing merged, idle, clean `work/*` worktrees and
+  every kept worktree with its reason; rerun with `dry_run:false` (optionally
+  `branches:[...]`) to remove them with their local branches.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -2231,7 +2283,7 @@ Draft that did not qualify, so a row never leaves you guessing why:
   never synchronize solely for BEHIND on a non-strict base. Hand an actual
   conflict back to the owner.
 - `unresolved_review_threads`: the owner answers review threads, not you.
-- `review_threads_unknown` / `coderabbit_review_unknown`: the probe is
+- `review_threads_unknown`: the probe is
   bounded to a few PRs per read, so the rest resolve next cycle. Wait.
 - `agent_visual_check_unknown`: the body was not hydrated, or the agent
   recorded no verdict. Never promote on an unknown UI state.
@@ -3136,6 +3188,13 @@ mod tests {
     /// Canonical phrases the PM contract must always carry (FR anchors).
     fn required_phrases() -> &'static [&'static str] {
         &[
+            // Issue #7644: every human turn ends with a theme decision.
+            "## Themes from the conversation",
+            "Every human turn of the conversation on Home ends with one theme decision",
+            "`pm.theme.record`",
+            "`decision:\"declined\"`",
+            "Read `pm.theme.list` first",
+            "corrected only by deleting it on the Themes",
             // FR-004: sole window + full autonomy without mid-confirmations.
             "single conversational window",
             "No intermediate confirmation questions",
@@ -3570,9 +3629,9 @@ mod tests {
     #[test]
     fn contract_posts_user_reports_to_the_reports_surface() {
         let reporting = section("## Reporting to the user");
-        assert!(reporting.contains(
-            "Post each material digest, decision, and blocker to the Reports surface with `pm.report.post` using `submission` exclusively for non-Q&A Reports, in addition to the conversation."
-        ));
+        assert!(reporting.contains("Keep routine status updates in Reports only."));
+        assert!(reporting.contains("human replies, decisions, and completion"));
+        assert!(reporting.contains(&format!("return exactly `{REPORTS_ONLY_RESPONSE}`")));
     }
 
     #[test]
@@ -4385,6 +4444,7 @@ mod tests {
             "`repository.required_checks.update {branch, add, remove}`",
             "`develop` or `main`",
             "preserves `strict` and each retained check's `app_id`",
+            "`repository.branch_protection.update {branch, allow_force_pushes?,",
             "`update.settings.set {auto_apply_updates}`",
             "`pr.reopen {number}`",
             "`pr.review.submit {number, event, body?}`",
@@ -4676,6 +4736,7 @@ mod tests {
             "`dry_run:false`",
             "`include_unmerged:true`",
             "`include_protected_workspaces:true`",
+            "`worktree.remove_merged`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

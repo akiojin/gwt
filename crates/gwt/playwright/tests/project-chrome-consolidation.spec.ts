@@ -2,11 +2,11 @@
 // Hub intake coverage lives in project-hub.spec.ts; close and keyboard
 // replacement coverage lives in project-close-detach.spec.ts.
 import { expect, test } from "@playwright/test";
-import { HUB_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { HUB_PROJECTS_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
 test("Hub has project intake without in-page project switching", async ({ page }) => {
   await installEmbeddedRoutes(page);
-  await page.goto(HUB_URL);
+  await page.goto(HUB_PROJECTS_URL);
   await expect(page.locator("[data-hub-action='open-folder']")).toBeVisible();
   await expect(page.locator("[data-hub-action='clone']")).toBeVisible();
   await expect(page.locator("#project-tabs")).toHaveCount(0);
