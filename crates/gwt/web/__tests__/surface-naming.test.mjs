@@ -68,7 +68,10 @@ test("user and agent copy uses the Issues name across shipped surfaces", () => {
     "*.rs", "*.md", "*.js", "*.mjs", "*.ts", "*.html", "*.css", "*.py", "*.ps1", "*.yml",
     // Issue #7745: design records quote the wording of their time; they are
     // not shipped copy, so they are not rewritten to the current name.
-    ":(exclude).gwt/**", ":(exclude)docs/design/**"], { cwd: root, encoding: "utf8" })
+    ":(exclude).gwt/**", ":(exclude)docs/design/**",
+    // Issue #7928: CHANGELOG.md is generated from past commit subjects at
+    // release time; it records history and is not rewritten to the current name.
+    ":(exclude)CHANGELOG.md"], { cwd: root, encoding: "utf8" })
     .split("\0")
     .filter((path) => /\.(?:rs|md|js|mjs|ts|html|css|py|ps1|yml)$/.test(path));
   const remaining = paths.filter((path) => oldName.test(readFileSync(resolve(root, path), "utf8")));
