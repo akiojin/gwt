@@ -9,8 +9,10 @@ label. Keep that same number throughout the lifecycle.
   Issues in direct mode.
 - `build.phase` with the same `params.spec:<n>` and
   `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at each TDD milestone.
-- `build.complete` with the same `params.spec:<n>` only after verification
-  passed and the Ready PR Gate is satisfied for a releaseable slice.
+- `build.complete` with the same `params.spec:<n>` and the delivered PR as
+  `params.pr:<number>` only after verification passed and the Ready PR Gate is
+  satisfied for a releaseable slice. Without `params.pr`, a head branch with
+  100 or more PRs is refused as a possibly truncated candidate list.
 - `build.abort` with the same `params.spec:<n>` and a concrete `params.reason`
   when implementation cannot proceed.
 
