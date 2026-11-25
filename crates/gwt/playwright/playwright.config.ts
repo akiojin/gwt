@@ -15,6 +15,7 @@ if (process.platform === "darwin") {
   const launch = chromium.launch.bind(chromium);
   chromium.launch = async options => {
     const browser = await launch(options);
+    if (options?.headless !== false) return browser;
     const session = await browser.newBrowserCDPSession();
     session.on("Target.targetCreated", ({ targetInfo }) => {
       if (targetInfo.type !== "page") return;
@@ -40,9 +41,10 @@ export default defineConfig({
   use: {
     baseURL: process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/",
     trace: "on-first-retry",
+    screenshot: process.env.GWT_HEADED_E2E_SCREENSHOTS === "1" ? "on" : "off",
     colorScheme: "dark",
-    // verify.run always adds --headed; open the window off screen so it does
-    // not cover or steal focus from the developer's work (#6977). Do not start it
+    // For explicit headed runs, open the window off screen where supported.
+    // Do not start it
     // minimized: a minimized page reports visibilityState "hidden".
     launchOptions: { args: ["--window-position=-32000,-32000"] },
   },

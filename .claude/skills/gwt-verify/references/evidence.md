@@ -82,7 +82,10 @@ Rules:
   quality bar on its own, so a missing or failing Agent Visual Check is
   `Overall: FAIL` even when the launch waives the human handoff. An autonomous
   UI Ready handoff also requires measured passing headed Chromium results for
-  dark and light themes in the same fresh `verify.run` record.
+  dark and light themes. Record them in the fresh `verify.run` record for
+  local headed verification. For [protected gwt PRs](agent-visual.md), a
+  matching CI artifact and exact-attempt PR comment are the visual evidence.
+  `pending (CI headed)` records the state before the CI check can pass.
 - Every acceptance boundary in scope must map to either a reachable manual
   checkbox or an Automated-only Evidence item that names the exact command and
   test. An Automated-only Evidence item must match a `PASS` entry under

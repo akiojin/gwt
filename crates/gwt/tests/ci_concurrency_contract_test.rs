@@ -12,7 +12,7 @@
 //! Two GitHub Actions features contain this: a per-PR `concurrency` group with
 //! `cancel-in-progress` so a product push supersedes the previous run, and a
 //! path filter that keeps docs-only changes off the heavy Windows jobs and the
-//! WebView E2E job. These tests pin both, plus the property that the filter
+//! WebView E2E job (before it became required). These tests pin both, plus the property that the filter
 //! never touches a required status check.
 //!
 //! Issue #4872 removes the cause rather than containing it: develop lands
@@ -47,6 +47,7 @@ const REQUIRED_CHECKS: &[&str] = &[
     "Build",
     "Test (Python runner)",
     "Test (Rust, Windows)",
+    "Test (Frontend + WebView E2E)",
     "Cargo Deny (advisories + sources)",
     "Check (Windows)",
     "Check (macOS)",
@@ -57,11 +58,11 @@ const REQUIRED_CHECKS: &[&str] = &[
 ];
 
 /// Heavy, non-required jobs in `test.yml` that a documentation edit cannot
-/// affect: the Windows agent launch E2E job and the WebView E2E job. The
+/// affect: the Windows agent launch E2E job. The
 /// three-pass Windows default-parallel job used to be listed here; Issue #4134
 /// AC-1 moved it out of the pull-request path into `nightly.yml`, where a
 /// per-PR path filter has nothing to skip.
-const DOCS_SKIPPABLE_JOBS: &[&str] = &["test-windows-agent-launch-e2e", "test-frontend"];
+const DOCS_SKIPPABLE_JOBS: &[&str] = &["test-windows-agent-launch-e2e"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -785,7 +786,7 @@ fn release_workflow_never_cancels_an_in_flight_release() {
 /// classification (for example an API error) falls open to running the jobs,
 /// never to silently skipping them.
 #[test]
-fn docs_only_changes_skip_the_heavy_windows_and_webview_jobs() {
+fn docs_only_changes_skip_the_optional_heavy_windows_jobs() {
     let doc = workflow(TEST_WORKFLOW);
     let changes = job(&doc, CHANGES_JOB);
     let output = changes

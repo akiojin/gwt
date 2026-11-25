@@ -28,6 +28,16 @@ and #7791).
 bash scripts/run-visual-tests.sh
 ```
 
+The default embedded run is headless. The two native-hide cases in
+`pm-terminal-rendering.spec.ts` need a real foreground and background
+Chromium. They run in WebView CI on Xvfb and skip in the local headless run.
+Live-backend diagnostics still require the environment described by their
+individual specs. Use `--headed` to select a local headed run explicitly.
+
+The required WebView CI job retains the measured reporter JSON, screenshots
+and traces as `webview-headed-<run-id>-<attempt>`. The artifact belongs to the
+PR's Test workflow run and is the input for the agent's visual review.
+
 ## Test layout
 
 | Spec | カバー範囲 | スタイル |

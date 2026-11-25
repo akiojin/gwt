@@ -1,4 +1,36 @@
-## Agent Visual Check (the agent's own browser-check)
+## Agent Visual Check
+
+For a new gwt PR targeting protected `develop`, use the protected WebView CI
+path after the headed workflow has landed on the base. Pass the complete
+local headless matrix through `verify.run`, leaving `headed_e2e_commands`
+unset. Create the Ready PR with these two lines in its body.
+
+```text
+Headed Evidence: CI
+Agent Visual Check: pending (CI headed)
+```
+
+The required WebView check runs Chromium on Xvfb and uploads
+`webview-headed-<run-id>-<attempt>` before it waits for review. Download that
+artifact from the PR's Test workflow. Confirm the run belongs to the exact PR
+head. Check `report.json` for passing Chromium in both themes and zero failures,
+open relevant screenshots in dark and light, and use the traces to confirm
+the executed behavior and absence of console and page errors. Publish the
+result through `pr.comment`. Include the reviewed artifact and image paths,
+and put the following acknowledgement on its own line.
+
+```text
+Agent Visual Check: pass (headed CI <run-id>/<attempt>, <PR-head-SHA>)
+```
+
+The WebView check requires that exact acknowledgement from the PR author
+before it passes. Record any defect and repair it before acknowledging a
+new head. On a re-run, inspect the new attempt's artifact and record that
+attempt. Keep the body selection `Headed Evidence: CI` for subsequent pushes.
+If the workflow is unavailable, is changed by the PR, or the target is an
+existing Draft or another repository, use explicit local headed evidence.
+
+### Explicit local headed verification
 
 The agent's own headed run is evidence the **agent** produced. It is recorded
 on its own line and is **never a User Verification Result** — a self-reported
