@@ -51,7 +51,7 @@ the original start timestamp (`started_at`), and copies measured per-command
 headed/nextest/admission evidence. Run outstanding Light commands first,
 preserve Heavy commands' original relative order, and keep artifact restoration last.
 The full registered local matrix must pass. A protected gwt PR may collect its
-headed Chromium evidence in CI as described in [Agent Visual Check](agent-visual.md).
+required headed Chromium evidence in CI, as described in [Agent Visual Check](agent-visual.md).
 In that mode the Ready PR starts CI and the required WebView check stays pending
 until both themes pass and the agent reviews the matching run's images.
 
