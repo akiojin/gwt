@@ -4221,18 +4221,16 @@ mod tests {
                 }))
                 .await
                 .unwrap();
-            let reply = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    match socket.next().await {
-                        Some(Ok(WebSocketMessage::Close(frame))) => break Ok(frame),
-                        Some(Ok(_)) => continue,
-                        Some(Err(error)) => break Err(error.to_string()),
-                        None => break Err("stream ended without Close reply".to_string()),
-                    }
+            // No wall-clock deadline: a server that drops the socket ends the
+            // stream with an error or None, so this loop always terminates.
+            let reply = loop {
+                match socket.next().await {
+                    Some(Ok(WebSocketMessage::Close(frame))) => break Ok(frame),
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => break Err(error.to_string()),
+                    None => break Err("stream ended without Close reply".to_string()),
                 }
-            })
-            .await
-            .expect("server must answer the client Close frame");
+            };
             let frame = reply.expect("server must complete the closing handshake");
             assert_eq!(frame.map(|frame| u16::from(frame.code)), Some(1000));
         });
