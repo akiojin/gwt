@@ -15,9 +15,8 @@ const errors = new WeakMap<Page, string[]>();
 // event the frontend sends. Asserts the FR-040..044 controls:
 //   - FR-041/3885: STOP is in the Issue menu; window chrome has no STOP
 //   - FR-044: a stopped window exposes RESTART -> restart_window
-//   - FR-042: the stop-all-windows command confirms then sends stop_all_windows
-//     (its palette entry and the FR-043 send-input entry retired with the
-//     command palette, #7879)
+//   - FR-042 STOP ALL and the FR-043 send-input entry are retired
+//     (#7879 / #7882, SPEC #7007 item 179)
 //   - FR-040: a needs_input transition pops an in-app attention toast that
 //     frames the window on click
 test.describe("Anshin Phase 1 kill-switch + attention", () => {
@@ -152,27 +151,39 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     expect(sent.find((e) => e.kind === "restart_window").id).toBe("agent-1");
   });
 
-  test("STOP ALL confirms then sends stop_all_windows", async ({ page }) => {
+  test("#7882: UI trace stays a developer diagnostic and retired commands send nothing", async ({ page }) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
+    const alerts: string[] = [];
+    page.on("dialog", async (dialog) => {
+      alerts.push(dialog.message());
+      await dialog.accept();
+    });
     await page.goto(appUrl);
-
     await expect(page.locator('.workspace-window[data-id="agent-1"]')).toBeAttached({
       timeout: 10_000,
     });
 
-    await expect(page.locator('.op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
-    await expect(page.locator("#op-palette-button")).toHaveCount(0);
-    page.once("dialog", (dialog) => dialog.accept());
-    await page.evaluate(() => document.dispatchEvent(
-      new CustomEvent("op:command", { detail: { id: "stop-all-windows" } }),
-    ));
+    await page.evaluate(() => {
+      for (const id of ["stop-all-windows", "open-recovery-center"]) {
+        document.dispatchEvent(new CustomEvent("op:command", { detail: { id } }));
+      }
+    });
+    await expect(page.locator("#recovery-center-modal")).toHaveCount(0);
 
-    await expect
-      .poll(() => page.evaluate(() => window.__sentKinds))
-      .toContain("stop_all_windows");
+    await page.evaluate(() => {
+      window.__operatorShell.uiTrace.start();
+      window.__operatorShell.uiTrace.stop();
+    });
+    await expect.poll(() => page.evaluate(() => window.__sentKinds)).toContain("save_ui_trace");
+    await page.evaluate(() => window.__emit({
+      kind: "ui_trace_saved", path: "/fixture/ui-trace.jsonl", entries: 3,
+    }));
+    await expect.poll(() => alerts.slice()).toEqual(["UI trace saved\n/fixture/ui-trace.jsonl\nentries: 3"]);
+    const kinds = await page.evaluate(() => window.__sentKinds);
+    expect(kinds).not.toContain("stop_all_windows");
+    expect(kinds).not.toContain("load_recovery_center");
   });
-
 
   test("manual and Issues-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
     if (!liveBase) await installEmbeddedRoutes(page);

@@ -104,7 +104,6 @@ root_js_modules! {
     "hotkey.js" => "createHotkeyManager",
     "operator-shell.js" => "initOperatorShell",
     "focus-trap.js" => "createFocusTrap",
-    "recovery-center-modal.js" => "createRecoveryCenterController",
     // SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
     "index-settings-panel.js" => "renderIndexSettingsPanel",
     "hook-center-panel.js" => "renderHookCenterPanel",

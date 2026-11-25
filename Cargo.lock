@@ -1509,6 +1509,7 @@ dependencies = [
  "gwt-core",
  "libc",
  "notify",
+ "pulldown-cmark",
  "semver",
  "serde",
  "serde_json",
