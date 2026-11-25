@@ -4890,7 +4890,32 @@ pub(crate) struct WorkspaceUpdateApplicabilityFailure {
 /// Read-only classification for the same target resolver used by
 /// `workspace.update`. Stable reasons let `execution.status` distinguish
 /// provenance failures without weakening the mutation authority check.
+///
+/// A Docker Session's `workspace.update` is forwarded to the authenticated
+/// Host gateway, which revalidates the claim; the native refusal only means
+/// "no local route". A complete gateway capability therefore makes the update
+/// applicable, while a missing or malformed one keeps `host_bridge_required`
+/// (Issue #7854).
 pub(crate) fn diagnose_session_work_mutation_target(
+    invocation_cwd: &Path,
+    session_id: &str,
+) -> std::result::Result<(), WorkspaceUpdateApplicabilityFailure> {
+    let result = diagnose_native_session_work_mutation_target(invocation_cwd, session_id);
+    match result {
+        Err(failure)
+            if failure.reason == WorkspaceUpdateApplicabilityReason::HostBridgeRequired
+                && matches!(
+                    crate::daemon_runtime::HookForwardTarget::from_env_strict(),
+                    Ok(Some(_))
+                ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn diagnose_native_session_work_mutation_target(
     invocation_cwd: &Path,
     session_id: &str,
 ) -> std::result::Result<(), WorkspaceUpdateApplicabilityFailure> {
@@ -13428,6 +13453,64 @@ mod tests {
             failures.is_empty(),
             "Session provenance mismatches must fail closed:\n{}",
             failures.join("\n")
+        );
+    }
+
+    /// Issue #7854: a Docker Session's `workspace.update` is forwarded to the
+    /// authenticated Host gateway, so applicability must follow that route
+    /// instead of the native resolver that always refuses Docker Sessions.
+    #[test]
+    fn docker_session_applicability_follows_authenticated_host_gateway() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let branch = "work/docker-gateway";
+        let repo = init_git_repo(
+            temp.path(),
+            "repo",
+            "https://example.invalid/acme/docker-gateway.git",
+            branch,
+        );
+        let mut session = session_fixture("docker-gateway", &repo, branch);
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        save_session_fixture(&session);
+
+        let no_gateway = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+        ];
+        assert_eq!(
+            diagnose_session_work_mutation_target(&repo, &session.id)
+                .expect_err("Docker Session without a gateway cannot update Work")
+                .reason,
+            WorkspaceUpdateApplicabilityReason::HostBridgeRequired,
+        );
+        drop(no_gateway);
+
+        let _url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            "http://127.0.0.1:9/internal/hook-live",
+        );
+        let _token =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "t");
+        diagnose_session_work_mutation_target(&repo, &session.id)
+            .expect("the authenticated Host gateway is the canonical workspace.update route");
+        assert!(
+            probe_session_work_mutation_target(&repo, &session.id).advertise(),
+            "workspace.update must be an available recovery, not relaunch only"
+        );
+
+        let _partial =
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        assert_eq!(
+            diagnose_session_work_mutation_target(&repo, &session.id)
+                .expect_err("an incomplete gateway capability is unusable")
+                .reason,
+            WorkspaceUpdateApplicabilityReason::HostBridgeRequired,
         );
     }
 
