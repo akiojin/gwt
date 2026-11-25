@@ -7463,10 +7463,17 @@ mod bounded_cache_merge_tests {
             wire["projection"]["local_agent_activity"]["observed_at"],
             observed_at
         );
-        assert!(
-            tasks.lock().unwrap().is_empty(),
-            "the current watcher patch is accepted"
-        );
+        let dispose_previous_snapshot = {
+            let mut tasks = tasks.lock().unwrap();
+            assert_eq!(
+                tasks.len(),
+                1,
+                "an accepted patch only queues disposal of the previous snapshot"
+            );
+            tasks.pop().unwrap()
+        };
+        dispose_previous_snapshot();
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]
