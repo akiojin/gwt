@@ -2825,6 +2825,7 @@ fn issue_monitor_autonomous_record(
         attempts,
         non_agent_attempts: 0,
         acceptance_snapshot: None,
+        review_criteria: None,
         retry_not_before: None,
         retry_hold_reason: None,
         retry_hold_provider: None,

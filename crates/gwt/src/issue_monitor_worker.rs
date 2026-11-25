@@ -3957,6 +3957,28 @@ fn advance_one_autonomous_issue(
                         .find(|issue| issue.number == issue_number)
                         .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
                         .unwrap_or_default();
+                    // Issue #7942 AC-1: a SPEC slice PR is reviewed against the
+                    // slice section its body names, not the parent SPEC's AC.
+                    let slice = if linked_issue_kind == crate::LinkedIssueKind::Spec {
+                        let pr_body = run_budgeted_readback_stage(
+                            IssueMonitorScanStage::PrDiffReadback,
+                            || gwt_git::pr_status::try_fetch_pr_body(repo_path, pr),
+                        )?;
+                        issues
+                            .iter()
+                            .find(|issue| issue.number == issue_number)
+                            .and_then(|issue| issue.body.as_deref())
+                            .zip(pr_body.as_deref())
+                            .and_then(|(spec, pr_body)| {
+                                crate::issue_monitor_review::slice_review_scope(spec, pr_body)
+                            })
+                    } else {
+                        None
+                    };
+                    let criteria = match &slice {
+                        Some(scope) => vec![scope.slice_id.clone()],
+                        None => criteria,
+                    };
                     // Issue #4117: `dispatch_review` binds the PR (`begin_review`),
                     // enters the review window into its own ledger, and queues
                     // the GUI spawn — or refuses and records why.
@@ -3969,6 +3991,7 @@ fn advance_one_autonomous_issue(
                             diff,
                             merged_evidence: None,
                             linked_issue_kind,
+                            slice,
                         },
                         now,
                     ) {

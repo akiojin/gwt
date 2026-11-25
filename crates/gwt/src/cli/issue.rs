@@ -6558,6 +6558,7 @@ fn run_monitor_review_merged_evidence<E: CliEnv>(
         } else {
             crate::LinkedIssueKind::Issue
         },
+        slice: None,
     };
     let body = crate::session_launch::stamp_github_body(
         &crate::issue_monitor::merged_evidence_authorization_text(

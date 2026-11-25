@@ -3753,6 +3753,7 @@ mod tests {
             diff: "diff --git a/a b/a".to_string(),
             merged_evidence: None,
             linked_issue_kind: gwt::LinkedIssueKind::Issue,
+            slice: None,
         };
         let review_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "review_dispatch",
