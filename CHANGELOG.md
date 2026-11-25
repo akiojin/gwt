@@ -1,6 +1,183 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.174.0] - 2026-11-25
+
+### Bug Fixes
+
+- **gui:** テーマ詳細の見出しが React バンドルの自己完結チェックに一致しないようにする
+- **gui:** Keep issue selection cache backed
+- **gui:** Reconcile theme updates and subtask edits
+- **config:** Preserve unrelated settings during environment migration
+- **gui:** Keep the environment variables rail entry compact
+- **gui:** ステータスバーとタブタイトルを平易な言葉で表示する
+- **gui:** 判断の回答が拒否されたとき内部IDと内部文言を出さない
+- **gui:** Reflect the designated PM avatar on home (#7638)
+- **gui:** Retain PM avatar on a failed identity read
+- **gui:** Preserve PM terminal and Home conversation state
+- **accounts:** Scope directory builder mutation to Unix
+- **accounts:** Assemble the child environment before launch
+- **issue-monitor:** Auto-refill 提案を rebase で失わず、ラベル無し sub-issue を親経由で受け付ける
+- **gui:** レビュー窓を Agents と Works 間で開く
+- **pm:** 更新直後の一時的な capacity 拒否で PM を再試行し、pm.refresh の network git に期限を付ける
+- **gui:** 再接続時の優先度設定と起動通知を検証する
+- **gui:** Keep Home attachments within frontend contracts
+- **gui:** Keep chat history within render contracts
+- **gui:** Keep hydration reads off the event loop and coalesce resends
+- **accounts:** Hold sessions when only other tools remain
+- **monitor:** 消えた窓の終了済み runtime sidecar で queue の Issue が止まらないようにする
+- **pm:** Record branch freshness through gwtd fetch
+- **pm:** Fleet.inventory が workspace-home の pane snapshot を別 project として拒否しないようにする
+- **gui:** プロジェクト画面の判断待ち件数を判断キューから数える
+- **gui:** LoadDecisionCounts を GUI envelope parity ledger に登録する
+- **skill:** Browser-check で no-tray の再接続猶予を越えてセッションを保持する
+- **skills:** Route gwt-agent Board posts through mentions
+- **gui:** 廃止済みのコマンドパレット（⌘K）の導線とパレット本体を撤去する
+- **verify:** Report the command waiting for admission
+- **verify:** Keep host details out of shared wait notices
+- **pr:** Pr.view が再検証後の canonical 記録を PR 本文の旧マーカーより優先する
+- **gui:** 廃止済みの Works 画面のレール入口を撤去する
+- **monitor:** Allow PM-authorized review of merged evidence
+- **build:** Distinguish workspace contention during completion
+- **build:** Construct static authority error directly
+- **verify:** Cargo.toml の無い checkout で verify.plan derive が cargo コマンドを導出しない
+- **verify:** Preserve arrival when a live waiter's reservation expires
+- **pr:** Byte-identical UI file moves no longer require headed evidence
+- **hook:** Trust 登録中に出現した Codex hooks コピーも同じ判定で信頼する
+- **build:** Ignore superseded cancelled checks in completion
+- **execution:** Ignore intact predecessor revival records
+- **pm:** Use the Issues name in branch protection guidance
+- **hooks:** Allow completed sessions to stop after verification follow-up
+- **verify:** Stop admitted resume notice once the attempt completes
+- **execution:** Select newest inherited merged PR after relaunch
+- **monitor:** Exclude explicitly historical SPEC tasks
+- **verify:** Report a missing own attempt instead of refusing it as foreign
+- **monitor:** Preserve independent review failure evidence
+- **process:** Gwt の git 実行で optional index.lock を取らない
+- **verify:** 初回 Ready PR 前に既知 flake を typed quarantine できるようにする
+- **skills:** Clarify verify plan command combinations
+- **workspace:** 応答消失後に Host の公開完了を待って receipt を確認する
+- **monitor:** Recover committed controls after lost acknowledgments
+- **skills:** Bootstrap order で identity 設定を checkout build より先に置く
+- **hooks:** Recognize resolved gwtd workspace identity command
+- **hooks:** Validate identity heredoc body and redirects
+- **skills:** Build.complete の完了手順で params.pr を案内する
+- **issue-spec:** Restore legacy artifact comment readback
+- **monitor:** Record manual recovery from the resident PM
+- **register:** Register.phase が SPEC-0 placeholder から作成済み SPEC へ bind できるようにする
+- **monitor:** Retain waits for live sessions across merges
+- **pr:** Keep post-merge Work metadata refreshes local
+- **server:** クライアント起点の正常 close で WebSocket の closing handshake を完了する
+- **monitor:** 起動の再試行を待機させ配信済みの確認待ちを除外する
+- **workspace:** 応答消失した workspace.update を not_applied で確定できるようにする
+
+### Documentation
+
+- #7007 項目253 モバイル体験の基準を Muse アプリと同等とする
+- **gui:** エージェントの優先度設定を操作台帳に記載する
+- T-036 の実装の形を設計正本に記録する
+
+### Features
+
+- **pm:** 会話で頼まれたこと・決まったことをテーマとして自動で記録する
+- **gui:** Show issue subtasks and parent theme progress
+- **pm:** PM の報告を掲示板に時系列の記録として必ず載せる
+- **gui:** エージェントのアバター属性とプリセット選択を追加 (#7635)
+- **gui:** PM ビューの Log タブを撤去しログ面を Logs に一本化する
+- **gui:** Assign environment variable sets per project
+- **gui:** 画像アップロードによるエージェントのアバター設定を追加 (#7636)
+- **gui:** Retire PM tabs and move decisions to Home
+- **accounts:** Preserve provider accounts on launch and resume
+- **gui:** Show when the Project Manager is replying
+- **gui:** プロジェクト停止・開始を Issue Monitor と PM 巡回を束ねる1操作として新設する
+- **gui:** 一覧と Settings の停止・開始を共有の確認と1操作に統合し、独立した止める操作を撤去する
+- **accounts:** エージェントごとの実行環境の優先度を設定する
+- **gui:** Attach files to Project Manager chat
+- **gui:** Page Project Manager conversation history
+- **accounts:** アカウント単位の使用量・制限表示と「不明」の明示
+- **accounts:** Add login terminals and switch pooled accounts
+- **accounts:** Enroll Copilot accounts with macOS Keychain
+- **pm:** Add repository.branch_protection.update for Monitor protection gaps
+- **worktree:** マージ済み idle worktree を削除する worktree.remove_merged を追加
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7813 の Work イベントを記録する
+- **work:** Record Issue #7844 work events
+- **work:** #7845 の作業イベントを記録する
+- **work:** Record Issue #7841 work events
+- **work:** Record Issue #7841 work events
+- **work:** Record Issue #7841 work events
+- **work:** Record Issue #7841 work events
+- **work:** Record Issue #7869 work events
+- **work:** Record Issue #7869 work events
+- **work:** Record Issue #7869 work events
+- **work:** Record Issue #7349 work events
+- **work:** Record Issue #7654 work events
+- **work:** Record Issue #7654 work events
+- **work:** Record Issue #7654 work events
+- **work:** Record Issue #7879 work events
+- **work:** Record Issue #7357 work events
+- **work:** Record issue 7310 completion receipt
+- **work:** Record Issue #7311 Work events
+- **work:** Record Issue #7311 Work events
+- **work:** Record Issue #7311 Work events
+- **work:** Record issue 7313 pull request event
+- **work:** Issue #7312 の Work イベントを記録
+- **work:** Record issue 7322 PR receipt
+- **work:** Record issue 7325 PR receipt
+- **work:** Issue #7327 の Work イベントを記録
+- **work:** #7815 の完了記録を保存する
+- **work:** #7926 の関連記録を保存する
+
+### Performance
+
+- **gui:** Board 更新の通知と配信準備を GUI スレッドから移す
+
+### Refactor
+
+- **gui:** 起動プロファイル判定の入れ子 if を clippy に沿ってまとめる
+
+### Styling
+
+- **pm:** 掲示板反映テストの書式を整える
+
+### Testing
+
+- **gui:** Cover subtask and reconnect protocol contracts
+- **gui:** PM ビューのタブ数を Log タブ撤去後の 7 に合わせる
+- **gui:** Expect environment set reads after reconnect
+- **gui:** Align environment set protocol contracts
+- **gui:** タスク中心の基礎面を実 headed で回帰確認する E2E を追加する
+- **gui:** Follow PM terminal and Board search routes
+- **gui:** Verify Home links from the header and Themes
+- **gui:** Issues 窓の Start/Stop 撤去に合わせて E2E の期待を更新する
+- **gui:** SetProjectAutonomy を GUI 対応表と Issues 窓の契約テストに反映する
+- **pm:** PM base fetch の期限テストを壁時計に依存しない形にする
+- **gui:** Isolate the Home attachment staging test
+- **gui:** Drop wall-clock bounds from hydration lock tests
+- **accounts:** Verify exact resume when deleting the active account
+- **frontend:** Include the shared focus trap in the bundle fixture
+- **frontend:** Allow nullable stores in Issue Bridge fixtures
+- **pm:** Lock process environment in freshness regression
+- **pm:** Recover poisoned environment lock in freshness test
+- **gui:** V3 全画面の総合 E2E とターミナル要件の再現手順を追加する
+- **verify:** Make admission notice regression clock independent
+- **gui:** 電話幅レールの項目数をパレットと Works の撤去後に合わせる
+- **monitor:** Update persisted review fixture
+- **verify:** Give the UI-move derivation fixture a root Cargo.toml
+- **monitor:** Stale reviewed-SHA 修正通知が検証中に再注入されない回帰テストを追加
+- **verify:** UI パス間移動テストの fixture に Cargo.toml を置く
+- **verify:** Expect no admitted notice after the attempt completes
+- **verify:** Keep the resume contract inside the time-dependency ledger
+- **hooks:** Cover temporary verification log imports
+- **server:** Close handshake 回帰テストから壁時計 deadline を除去する
+- **gui:** Workspace 更新後の worker による旧キャッシュ破棄を確認する
+
+### Ci
+
+- **test:** Linux の T94418 失敗時に trace と backend log を artifact に残す
+
 ## [9.173.1] - 2026-11-23
 
 ### Bug Fixes

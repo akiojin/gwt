@@ -360,6 +360,32 @@ test.describe("Execution environment definitions", () => {
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
+  // Issue #7648 AC-6: the open project's priority list is edited on the
+  // Execution environments screen itself.
+  test("the screen edits the open project's priority list (Issue #7648 AC-6)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    const list = surface(page).locator('[data-environment-list="project"]');
+    const names = list.locator(".project-environments__name");
+    await expect(names).toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    await expect(list.getByRole("button", { name: "Manage execution environments" })).toHaveCount(0);
+    await list.getByRole("button", { name: "Move down Codex 1" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1", "2. Codex 1"]);
+    // The environment rows follow the saved order.
+    await expect(surface(page).locator('[data-environment="codex"]')).toContainText("Used by Usage Fixture");
+    await list.getByRole("button", { name: "Remove Codex 1" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1"]);
+    await expect(surface(page).locator('[data-environment="codex"]')).toContainText("Not on any project's list");
+    expect(await sent(page, "set_project_execution_environments")).toEqual([
+      { kind: "set_project_execution_environments", environment_ids: ["claude", "codex"] },
+      { kind: "set_project_execution_environments", environment_ids: ["claude"] },
+    ]);
+    await page.screenshot({ path: info.outputPath("environments-priority.png"), fullPage: true });
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("the application settings keep the Project Manager's own list, and its last entry stays (Issue #7732 AC-2)", async ({ page }, info) => {
     test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
     const errors = captureUsageErrors(page);
