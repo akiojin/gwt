@@ -963,7 +963,6 @@ exit 67
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
     const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
     await surface.getByRole("textbox", { name: "Name for new member" }).fill("Owned Codex PM");
-    await surface.getByRole("checkbox", { name: "PM eligible for new member" }).check();
     await surface.locator('.roster-capacity [data-action="add"]').click();
     const member = surface.locator(".roster-row").filter({ hasText: "Owned Codex PM" });
     await expect(member).toHaveCount(1);

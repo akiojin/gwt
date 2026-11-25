@@ -5,7 +5,8 @@
  * and every surface of the project page. Decisions are registered through
  * real `decision.*` gwtd operations, and their waiting count must read the
  * same in the header, the Decisions view, Home and the status bar, before
- * and after one is answered. The retired PM view must not be reachable, and
+ * and after answers from either view, including a bundled decision (#7641).
+ * The retired PM view must not be reachable, and
  * the run must end with no console or page error.
  */
 import { expect, test, type Page } from '@playwright/test';
@@ -54,19 +55,21 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
     for (const key of Object.keys(childEnv)) {
       if (key.startsWith('GWT_SESSION_') || key === 'GWT_PANE_WS_URL' || key === 'GWT_BIN_PATH') delete childEnv[key];
     }
-    // An agent registers each decision and waits; answers come from the page.
-    const register = (question: string) => {
+    const decisionOperation = (operation: string, params: object, sessionId = 'v3-regression-agent') => {
       const result = spawnSync(gwtd, [], {
         cwd: target.project, encoding: 'utf8', timeout: 30_000,
-        env: { ...childEnv, GWT_PROJECT_ROOT: target.project, GWT_SESSION_ID: 'v3-regression-agent' },
-        input: JSON.stringify({ schema_version: 1, operation: 'decision.register', params: {
-          issue: 7654, kind: 'product', target: question, question, materials: 'Both options keep the product working.',
-          options: ['Keep it', 'Change it'], recommendation: 'Keep it',
-        } }),
+        env: { ...childEnv, GWT_PROJECT_ROOT: target.project, GWT_SESSION_ID: sessionId },
+        input: JSON.stringify({ schema_version: 1, operation, params }),
       });
       expect(result.status, result.stderr || result.stdout).toBe(0);
-      expect(JSON.parse(result.stdout).ok, result.stdout).toBe(true);
+      const envelope = JSON.parse(result.stdout);
+      expect(envelope.ok, result.stdout).toBe(true);
+      return JSON.parse(envelope.output);
     };
+    const register = (question: string, sessionId?: string) => decisionOperation('decision.register', {
+      issue: 7654, kind: 'product', target: question, question, materials: 'Both options keep the product working.',
+      options: ['Keep it', 'Change it'], recommendation: 'Keep it',
+    }, sessionId);
     const projectKey = basename(dirname(target.preferences));
     const errors: string[] = [];
     const watchErrors = (view: Page) => {
@@ -84,7 +87,11 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
         count ? new RegExp(`: ${count} decisions? waiting$`) : /: no decisions waiting$/, { timeout: 20_000 });
     };
     try {
-      QUESTIONS.forEach(register);
+      const decisions = QUESTIONS.map(question => register(question).decision);
+      const bundled = decisions[1];
+      const duplicate = register(QUESTIONS[1], 'v3-regression-second-agent');
+      expect(duplicate).toMatchObject({ created: false, decision: { id: bundled.id } });
+      const bundledTopic = page.locator(`article[data-home-topic="${projectKey}:${bundled.id}"]`);
 
       // Project page: the header and the status bar count the project's queue
       // with no PM window open.
@@ -103,21 +110,41 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       }
       await expectWaiting(3);
 
-      // Home is the conversation with the PM and holds the same three topics.
+      // Answering the bundled queue item from Decisions schedules delivery to both agents.
+      await bundledTopic.getByRole('button', { name: 'Change it', exact: true }).click();
+      await expect(bundledTopic).toHaveCount(0);
+      await expectWaiting(2);
+
+      // Home is the conversation with the PM and reflects the same queue update.
       await page.getByRole('link', { name: 'Back to Home' }).click();
       await expect(page.getByRole('log', { name: 'Conversation with the Project Manager' })).toBeVisible();
-      for (const question of QUESTIONS) {
-        await expect(page.locator('[data-home-topic]').filter({ hasText: question })).toHaveCount(1);
-      }
+      await expect(bundledTopic).toHaveCount(0);
+      await expect(page.locator('[data-home-waitjump]')).toHaveText('2 decisions waiting');
+      await expect(page.locator('article[data-home-topic]').filter({ hasText: QUESTIONS[2] })).toHaveCount(1);
+
       // Answering one from Home resolves it everywhere.
       const answered = page.locator('[data-home-topic]').filter({ hasText: QUESTIONS[0] });
       await answered.getByRole('button', { name: 'Keep it', exact: true }).click();
-      await expectWaiting(2);
+      await expectWaiting(1);
+      const queue = decisionOperation('decision.list', { include_closed: true });
+      expect(queue.decisions).toHaveLength(3);
+      expect(queue.decisions).toContainEqual(expect.objectContaining({
+        id: bundled.id,
+        status: 'answered',
+        answer: expect.objectContaining({ text: '2. Change it' }),
+        deliveries: expect.arrayContaining([
+          expect.objectContaining({ waiter: { role: 'session', session_id: 'v3-regression-agent' } }),
+          expect.objectContaining({ waiter: { role: 'session', session_id: 'v3-regression-second-agent' } }),
+        ]),
+      }));
+      expect(queue.decisions).toContainEqual(expect.objectContaining({
+        id: decisions[0].id, status: 'answered', answer: expect.objectContaining({ text: '1. Keep it' }),
+      }));
 
       // Header destinations on the page at `/`.
       await appNav(page).getByRole('button', { name: 'Projects', exact: true }).click();
       await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
-      await expectWaiting(2);
+      await expectWaiting(1);
 
       // The project opens from the list in its own browser tab (SPEC-3287);
       // its count followed the answer.
@@ -127,8 +154,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       watchErrors(project);
       await expect(project).toHaveURL(new RegExp(`/p/${projectKey}$`));
       await expect(project.locator('html')).toHaveAttribute('data-theme', theme);
-      await expectWaiting(2, project);
-      await expect(project.locator('#op-strip-issue-monitor')).toHaveAttribute('title', /PM decisions 2/, { timeout: 20_000 });
+      await expectWaiting(1, project);
+      await expect(project.locator('#op-strip-issue-monitor')).toHaveAttribute('title', /PM decisions 1/, { timeout: 20_000 });
 
       // Header destinations on the project page.
       const header = appNav(project);

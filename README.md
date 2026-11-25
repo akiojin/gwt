@@ -32,8 +32,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Themes, Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Execution environments** — open Environments from the header to see what
-  your agents run on. Accounts shows each provider account's usage, reset
+- **Execution environments** — open Environments from the header, on a project
+  page or on the start page, to see what your agents run on. Accounts shows each provider account's usage, reset
   times, and limit state in one place; an account's detail adds every window,
   enabled Usage credits, Codex's `Using credits` balance and observed
   credits/hour, and the Claude account usage opt-in. Missing limits show `—`.
@@ -44,7 +44,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
   or OpenCode. Edit an environment to set its model, Skip permissions, and Fast
   mode — changes apply from the next session. Tools that read their own
   settings file show those values read-only. In Settings → Issues execution
-  settings, **Available execution environments** lists the ones a project
+  settings, and on the Environments screen of an open project,
+  **Available execution environments** lists the ones a project
   uses in priority order: a session starts on the first one that can be used,
   skipping one that is held by a limit or signed out. Once a project has saved
   the list, a registered agent also starts on the environment chosen this way,
@@ -2609,7 +2610,8 @@ an entry removes its copied policy on the next refresh.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
 - **Register** adds one member to the shared roster. Machine safety limits can lower the effective allocation.
-- **Agents** in the header opens the agent ledger. On each **Team** row, **▲** / **▼** change the member's position; an idle member nearer the top is assigned first. **Delete** removes a member from this machine for every project after confirmation. The current Project Manager, a member with assigned work, and a launch candidate cannot be deleted until that role or work is moved. **Settings → System → Open agent ledger** leads to the same ledger.
+- **Agents** in the header opens the agent ledger. On each **Team** row, **▲** / **▼** change the member's position; an idle member nearer the top is assigned first. **Delete** removes a member from this machine for every project after confirmation. The current Project Manager, a member with assigned work, and a launch candidate cannot be deleted until that role or work is moved. **Settings → System → Open agent ledger** leads to the same ledger. On Home, **Agents** opens the ledger on the first open project; with no project open it shows **Projects**.
+- Any idle member can be made the Project Manager: select the member and click **Select as Project Manager**. There is no separate eligibility setting. The project page's footer names the chosen member at once, and the project's Project Manager settings show it as **Project Manager for this project**. The ledger order is not used to pick the Project Manager.
 - Each member's **Traits** in the ledger are fixed for that agent on every tool. **Reasoning level** (Low / Standard / High / Max) and **Speed** (Normal / Fast / Fastest) are steps common to all tools: a session that Issues starts for the agent takes the nearest step its tool has at or below the chosen one, and **Tool default** leaves the tool's own setting in place. Speed applies to Claude Code and Codex. They apply to the agent serving as Project Manager too, over the reasoning and speed of its launch profile, from its next new conversation. **Personality** is instructions of up to 4,000 characters that the agent reads when a session starts on Claude Code, Codex or Grok. **Save traits** stores them; a launch can override a value for that session, and never changes the saved traits.
 - **Agents** in the sidebar opens the project's **Agent history & plans**: the same members with this project's work. **Agent history** lists every session in the project, the Project Manager's included, with its issue, execution environment, model, reasoning and result. **Planned assignments** lists the issue each agent starts next, as the assignment plan has it. The ledger shows neither.
 - A registered PM can send the `pm.agent.add` JSON operation with `name` and `agent_id` to add one member and receive its ID. Projects that use saved member profiles can select that ID with `issue.monitor.profiles.set`.

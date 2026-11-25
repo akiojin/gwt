@@ -46,6 +46,9 @@ test("Issue #6929: ten consecutive Start Work launches and remote inputs succeed
       }
     },
   });
+  // Version detection also invokes the recorder, without an assigned Session.
+  const launchedProviders = async () => (await fixture.launches())
+    .filter(launch => launch.gwt_session_id !== null);
   let passed = false;
   try {
     await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -75,9 +78,9 @@ test("Issue #6929: ten consecutive Start Work launches and remote inputs succeed
         }
       }
       expect(state.wizard).toBeNull();
-      await expect.poll(async () => (await fixture.launches()).length,
+      await expect.poll(async () => (await launchedProviders()).length,
         { timeout: 90_000, message: `native provider launch ${iteration}` }).toBe(iteration);
-      const launch = (await fixture.launches())[iteration - 1];
+      const launch = (await launchedProviders())[iteration - 1];
       expect(launch.gwt_session_id).toBeTruthy();
       expect(samples.map(sample => sample.session_id)).not.toContain(launch.gwt_session_id);
       await expect.poll(() => windows.find(window => window.session_id === launch.gwt_session_id
@@ -96,7 +99,7 @@ test("Issue #6929: ten consecutive Start Work launches and remote inputs succeed
       await expect.poll(() => windows.some(window => window.id === windowId), { timeout: 30_000 }).toBe(false);
     }
     expect(samples).toHaveLength(10);
-    expect(await fixture.launches()).toHaveLength(10);
+    expect(await launchedProviders()).toHaveLength(10);
     expect(errors, "zero console/page errors").toEqual([]);
     await info.attach(`consecutive-start-work-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
     passed = true;

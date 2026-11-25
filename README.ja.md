@@ -29,8 +29,8 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Themes、Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
-- **Execution environments** — ヘッダーの Environments から、エージェントが使う
-  実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
+- **Execution environments** — プロジェクトの画面と開始画面のヘッダーの
+  Environments から、エージェントが使う実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
   リセット時刻・制限状態を 1 か所で確認できます。アカウントの詳細では、全ての枠、
   有効な Usage credits、Codex の `Using credits` 残高と観測した 1 時間あたりの
   クレジット消費量、Claude アカウント枠の有効化を扱います。未提供の枠は `—` と表示します。
@@ -40,8 +40,8 @@ Agent workspace を materialize するために worktree を使いますが、�
   作られます。Hermes Agent / OpenClaw / OpenCode 経由で使う組は追加で登録できます。
   実行環境の編集では、モデル・Skip permissions・Fast mode を設定でき、次に始まる
   セッションから反映されます。自身の設定ファイルを読むツールの値は読み取り専用で
-  表示します。Settings → Issues execution settings の **Available execution
-  environments** には、プロジェクトが使う実行環境を優先度順に並べます。セッションは
+  表示します。Settings → Issues execution settings と、プロジェクトを開いた状態の
+  Environments 画面の **Available execution environments** には、プロジェクトが使う実行環境を優先度順に並べます。セッションは
   使える最初の実行環境で始まり、制限で保留中のものや未サインインのものは飛ばします。
   リストを保存したプロジェクトでは、登録済みのエージェントも、登録時のツールに
   かかわらずこの順で決まった実行環境のツールで始まります。
@@ -2369,7 +2369,8 @@ project 固有の規約を明示的に渡すには、
 - **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
 - **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
 - **Register** は共有名簿にメンバーを1人追加します。端末の安全上限により実際の割当数が少なくなる場合があります。
-- ヘッダーの **Agents** はエージェント台帳を開きます。**Team** の各行にある **▲** / **▼** でメンバーの並び順を変えられ、待機中のメンバーは上にあるほど先に割り当てられます。**Delete** は確認のうえ、そのメンバーをこの端末の全プロジェクトから削除します。現在の Project Manager、作業を担当中のメンバー、起動候補に入っているメンバーは、その役割や作業を外すまで削除できません。**Settings → System → Open agent ledger** からも同じ台帳を開けます。
+- ヘッダーの **Agents** はエージェント台帳を開きます。**Team** の各行にある **▲** / **▼** でメンバーの並び順を変えられ、待機中のメンバーは上にあるほど先に割り当てられます。**Delete** は確認のうえ、そのメンバーをこの端末の全プロジェクトから削除します。現在の Project Manager、作業を担当中のメンバー、起動候補に入っているメンバーは、その役割や作業を外すまで削除できません。**Settings → System → Open agent ledger** からも同じ台帳を開けます。Home では、ヘッダーの **Agents** が最初に開いているプロジェクトで台帳を開きます。プロジェクトが開いていないときは **Projects** を表示します。
+- 待機中のメンバーなら誰でも Project Manager にできます。メンバーを選び **Select as Project Manager** を押します。PM 適格の設定はありません。選んだメンバーは、プロジェクトページのフッターにすぐ表示されます。プロジェクトの Project Manager 設定にも **Project Manager for this project** として表示されます。台帳の並び順は Project Manager の選出に使いません。
 - 台帳の各メンバーの **Traits**（特性）は、どのツールで動くときもそのエージェントに固定です。**Reasoning level**（Low / Standard / High / Max）と **Speed**（Normal / Fast / Fastest）は全ツール共通の段階で、Issues がそのエージェントで始めるセッションは、選んだ段階以下でそのツールが持つ最も近い段階を使います。**Tool default** はツール自身の設定のままにします。Speed が効くのは Claude Code と Codex です。Project Manager を務めるエージェントにも同じ特性が効き、起動プロファイルの推論と速度より優先されます（次の新しい会話から）。**Personality** は 4,000 文字までの指示文で、Claude Code・Codex・Grok のセッション開始時にエージェントが読み込みます。**Save traits** で保存します。起動時にそのセッションだけ値を上書きできますが、保存した特性は変わりません。
 - サイドバーの **Agents** は、プロジェクトの **Agent history & plans** を開きます。同じメンバーに、このプロジェクトでの作業を添えた画面です。**Agent history** には、Project Manager を含む全員のセッションが、課題・実行環境・モデル・推論・結果とともに並びます。**Planned assignments** には、各エージェントが次に始める課題が割当計画のとおりに並びます。台帳にはどちらも表示しません。
 - 登録済みの PM は `pm.agent.add` JSON operation に `name` と `agent_id` を渡し、共有名簿にメンバーを1人追加して ID を取得できます。保存済みのメンバープロファイルを使うプロジェクトでは、`issue.monitor.profiles.set` でその ID を指定できます。

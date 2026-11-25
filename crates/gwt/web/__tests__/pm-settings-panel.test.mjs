@@ -804,3 +804,19 @@ test("PM settings shows the selected project execution separately from profile d
   for (const view of views) assert.match(view.querySelector('[data-project-execution-status]').textContent, /Waiting.*Continue/);
   assert.deepEqual(sent, []);
 });
+
+// Issue #7646 AC-6 (A-26): project settings carry a row naming the PM that
+// looks after this project, and it follows a reassignment in the ledger.
+test("PM settings name the Project Manager looking after this project and follow a reassignment", () => {
+  const { document, panel, flush } = fixture();
+  panel.applyStatus(RUNNING_STATUS);
+  const row = () => document.querySelector('[data-role="pm-watching"]');
+  assert.ok(row(), "the PM row is part of the project settings");
+  assert.match(row().textContent, /Project Manager for this project/);
+  panel.setPmMember({ name: "Hikari" }); flush();
+  assert.match(row().textContent, /Hikari is this device's Project Manager/);
+  assert.ok(row().querySelector(".roster-avatar"), "the row shows the PM's avatar");
+  panel.setPmMember({ name: "Aoi" }); flush();
+  assert.match(row().textContent, /Aoi is this device's Project Manager/);
+  assert.doesNotMatch(row().textContent, /Hikari/);
+});

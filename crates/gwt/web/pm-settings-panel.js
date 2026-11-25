@@ -7,6 +7,7 @@
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { agentAvatar } from "./agent-avatar.js";
 
 const DEFAULT_LOOP_INTERVAL_SECS = 60;
 const MIN_LOOP_INTERVAL_SECS = 10;
@@ -114,6 +115,9 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
     : (message) => Boolean(document.defaultView?.confirm?.(message));
 
   const model = createUiStateStore(emptyStatus(), { scheduleFrame });
+  // Issue #7646 AC-6 (A-26): the PM the ledger designates for this project,
+  // the same one the footer names.
+  const pmMember = createUiStateStore({ name: "", avatar: null }, { scheduleFrame });
   const canEdit = () => { const state = model.read(); return state.available && !!projectKey && state.projectKey === projectKey; };
   const mounts = new Map();
   const boundDocuments = new Set();
@@ -145,6 +149,18 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
   // Prune before notifying mounted views. Initial mount rendering also works
   // while Settings is still building its detached DOM.
   model.subscribe(state => state, pruneDetachedMounts);
+
+  function renderPmMember(view, member) {
+    const avatar = agentAvatar(member);
+    if (avatar.imageUrl) {
+      const image = document.createElement("img"); image.className = "agent-avatar-image"; image.alt = ""; image.src = avatar.imageUrl;
+      view.watchingAvatar.replaceChildren(image);
+    } else view.watchingAvatar.textContent = avatar.glyph;
+    view.watchingAvatar.hidden = !member.name;
+    view.watchingName.textContent = member.name
+      ? `${member.name} is this device's Project Manager.`
+      : "No Project Manager is designated yet.";
+  }
 
   function renderView(view, state) {
     view.heading.textContent = `Project Manager · ${projectName() || projectKey || "Unknown project"}`;
@@ -259,6 +275,17 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
     section.appendChild(heading);
     const releaseExecution = executionModel ? mountProjectExecutionStatus(section, executionModel, { projectTitle }) : null;
 
+    const watching = el("div", "settings-field pm-watching");
+    watching.dataset.role = "pm-watching";
+    const watchingAvatar = el("span", "roster-avatar");
+    watchingAvatar.setAttribute("aria-hidden", "true");
+    const watchingText = el("div");
+    watchingText.appendChild(el("span", "settings-label", "Project Manager for this project"));
+    const watchingName = el("p", "settings-help");
+    watchingText.appendChild(watchingName);
+    watching.append(watchingAvatar, watchingText);
+    section.appendChild(watching);
+
     const runningLine = el("p", "settings-status");
     runningLine.dataset.role = "pm-running-as";
     section.appendChild(runningLine);
@@ -339,7 +366,7 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
     const explanations = bindControlExplanations({ document, root: container, id: `pm-control-explanation-${intervalError.id}` });
 
     const view = {
-      heading, navigate, profileStatus, openMember, reload,
+      heading, navigate, profileStatus, openMember, reload, watchingAvatar, watchingName,
       releaseExecution,
       autoStartInput,
       autonomyStatus,
@@ -402,7 +429,8 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
       releaseMount(container);
       const view = build(container);
       mounts.set(container, view);
-      const subscriptions = [model.subscribeFrame(state => state, state => renderView(view, state))];
+      const subscriptions = [model.subscribeFrame(state => state, state => renderView(view, state)),
+        pmMember.subscribeFrame(state => state, member => renderPmMember(view, member))];
       view.unsubscribe = () => subscriptions.forEach(unsubscribe => unsubscribe());
       return this;
     },
@@ -411,6 +439,9 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
       return this;
     },
     applyStatus: applyPmSettingsReceiveEvent,
+    setPmMember({ name = "", avatar = null } = {}) {
+      pmMember.update(() => ({ name: String(name || "").trim(), avatar: avatar || null }));
+    },
     bindEntryPoints({ document: entryDocument = document } = {}) {
       if (!entryDocument || boundDocuments.has(entryDocument)) return this;
       boundDocuments.add(entryDocument);

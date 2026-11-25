@@ -1,6 +1,46 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.175.0] - 2026-11-25
+
+### Bug Fixes
+
+- **test:** リリースで生成される CHANGELOG.md を旧名チェックの対象から外す
+- **agents:** 台帳の PM 指名で端末の PM 指名を上書きしない
+
+### Documentation
+
+- **readme:** 実行環境の画面を開始画面から開けることと優先度リストの置き場所を追記する
+
+### Features
+
+- **gui:** 実行環境の画面でプロジェクトの優先度リストを編集し Hub からも開けるようにする
+- **agents:** 台帳から PM 適格を外し、PM 表示を指名に追随させ Hub から台帳を開けるようにする
+
+### Miscellaneous Tasks
+
+- **work:** #7836 の検証記録を保存する
+- **work:** #7929 の関連記録を保存する
+- **work:** Record PR #7737 delivery event
+- **work:** Issue #7648 の Work イベントを記録する
+- **work:** Issue #7648 の Work イベントを記録する
+- **work:** Issue #7641 の作業状態を記録
+- **work:** Issue #7641 の後続スライスの作業状態を記録
+- **work:** Issue #7641 の配信作業の状態を記録
+- **work:** Issue #7646 の作業状態記録を保存する
+- **work:** Issue #7646 の作業状態記録を保存する
+- **work:** Issue #7646 の作業状態記録を保存する
+
+### Performance
+
+- **gui:** 変更のない owner 棚卸しの再配信を省く
+
+### Testing
+
+- **gui:** 復旧テストで Session を持つプロバイダー起動だけを数える
+- **gui:** Verify bundled decisions resolve across home views
+- **hub:** ヘッダーの無効項目の説明確認を Hub でも無効な通知で行う
+
 ## [9.174.0] - 2026-11-25
 
 ### Bug Fixes
