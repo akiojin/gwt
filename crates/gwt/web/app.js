@@ -45,7 +45,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
       import { createExecutionEnvironments } from "/execution-environments.js";
       import { createProjectThemes } from "/project-themes.js";
-      import { createAppChrome } from "/app-chrome.js";
+      import { createAppChrome, projectPm } from "/app-chrome.js";
       import { renderPmExecutionEnvironments, renderProjectExecutionEnvironments } from "/project-execution-environments.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
@@ -5892,12 +5892,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // Issue #7740: the header's PM entry and the footer name the PM (the
       // running window, else the ledger's designated PM) and count the
       // decisions waiting for the user.
+      // Issue #7646 AC-6: the project settings' PM row follows the same PM.
       function syncAppChromePm() {
         const pmWindow = (pmLauncherModel.read().workspace?.windows || []).find(windowData => windowData?.is_pm);
-        const name = String(pmWindow?.agent_name || rosterModel.read().members.find(member => member.is_pm)?.name || "").trim();
-        // Issue #7635: names are unique in the ledger, so the PM's avatar is its member's.
-        const avatar = name ? rosterModel.read().members.find(member => member.name === name)?.avatar : null;
+        const { name, avatar } = projectPm(rosterModel.read(), pmWindow);
         appChrome.setPm({ name, avatar, decisions: decisionCountsModel.read().total });
+        pmSettingsPanel.setPmMember({ name, avatar });
       }
 
       // A reply older than the newest one applied changes nothing.
@@ -5990,14 +5990,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
       agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, executionEnvironmentsModel, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onReloadProfile: () => requestAgentRoster(),
-        onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
         onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
         onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
-        onAddMember: (name, pmEligible) => {
+        onAddMember: name => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
-          requestAgentRoster({ kind: "add", name, pm_eligible: pmEligible });
+          requestAgentRoster({ kind: "add", name });
         },
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
         onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
@@ -6146,6 +6145,17 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       pmLauncherModel.subscribe(state => state, () => {
         if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
       });
+      // Issue #7646 AC-7: the Hub's header opens this page on the ledger. It
+      // runs once the surfaces exist, before the initial window is restored,
+      // which it supersedes.
+      {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get("view") === "agents") {
+          url.searchParams.delete("view");
+          window.history?.replaceState?.(null, "", `${url.pathname}${url.search}${url.hash}`);
+          openAgents("ledger");
+        }
+      }
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {

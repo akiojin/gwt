@@ -47,11 +47,11 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 
 export function createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onSetEnvironmentPriority = () => {}, onSetAvatar = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {}, onOpenPmTerminal = () => {} }) {
+  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onSetEnvironmentPriority = () => {}, onSetAvatar = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {}, onOpenPmTerminal = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span><button type="button" class="wizard-button" data-action="pm-terminal">Open PM terminal</button></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> registered members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Registered members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> registered members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Registered members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
     <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. Sessions use the project's available execution environments in the agent's order, when set. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" data-project-only hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
@@ -63,8 +63,6 @@ export function createAgentsSurface({ document, storage, executionModel, executi
     } });
   }
   const nameInput = element.querySelector('[aria-label="Name for new member"]');
-  const registrationEligible = element.querySelector('[aria-label="PM eligible for new member"]');
-  registrationEligible.checked = false;
   let nameTouched = false, registeredDraft = null;
   const registrationComposing = new Set();
   const registrationError = element.querySelector("#roster-registration-error");
@@ -85,7 +83,6 @@ export function createAgentsSurface({ document, storage, executionModel, executi
     if (registeredDraft && roster.members.some(member => !registeredDraft.ids.has(member.member_id)
       && member.name === registeredDraft.name)) {
       if (!registrationComposing.has(nameInput) && name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
-      if (registrationEligible.checked === registeredDraft.pm_eligible) registrationEligible.checked = false;
       registeredDraft = null;
     }
     const draft = nameInput.value.trim();
@@ -474,11 +471,8 @@ export function createAgentsSurface({ document, storage, executionModel, executi
       input.addEventListener("input", event => {
         if (selectedId === member.member_id && input.isConnected) edit(field.composing || event.isComposing === true);
       });
-      const eligibleLabel = document.createElement("label"); eligibleLabel.className = "settings-field";
-      const eligible = document.createElement("input"); eligible.type = "checkbox"; eligible.className = "settings-checkbox"; eligible.dataset.action = "pm-eligible";
-      eligible.addEventListener("change", () => { if (!eligible.disabled) onSetPmEligibility(member.member_id, eligible.checked); }); eligibleLabel.append(eligible, document.createTextNode("PM eligible"));
       const selectPm = document.createElement("button"); selectPm.type = "button"; selectPm.dataset.action = "select-pm";
-      selectPm.addEventListener("click", () => { const latest = rosterModel.read().members.find(item => item.member_id === member.member_id); if (latest?.pm_project_key && latest.pm_project_key !== rosterModel.read().project_key) onNavigateProject(latest.pm_project_key); else if (latest?.pm_eligible && !holdsPmRole(latest)) onSelectPm(member.member_id); });
+      selectPm.addEventListener("click", () => { const latest = rosterModel.read().members.find(item => item.member_id === member.member_id); if (latest?.pm_project_key && latest.pm_project_key !== rosterModel.read().project_key) onNavigateProject(latest.pm_project_key); else if (latest && !holdsPmRole(latest)) onSelectPm(member.member_id); });
       const tuning = document.createElement("section"); tuning.dataset.memberTuning = "";
       const traits = document.createElement("section"); traits.className = "roster-traits"; traits.dataset.memberTraits = ""; traits.setAttribute("aria-label", "Traits");
       traits.innerHTML = `<h4>Traits</h4><p class="settings-help">Fixed for this agent on every tool. A launch can override a value once; it never changes what is saved here.</p>${
@@ -548,7 +542,7 @@ export function createAgentsSurface({ document, storage, executionModel, executi
       });
       avatarChoices.append(upload);
       avatarPicker.append(avatarTitle, avatarChoices, file, avatarError); field.avatarPicker = avatarPicker; field.showAvatarError = showAvatarError;
-      label.append(input); who.append(name, meta, label, status, retry, avatarPicker, eligibleLabel, selectPm, traits, tuning);
+      label.append(input); who.append(name, meta, label, status, retry, avatarPicker, selectPm, traits, tuning);
       if (field.environmentPriority) who.append(field.environmentPriority);
       field.avatar = avatar(member); head.append(field.avatar, who);
     }
@@ -566,14 +560,10 @@ export function createAgentsSurface({ document, storage, executionModel, executi
     field.status.hidden = !field.status.textContent;
     field.retry.hidden = !edit?.blocked;
     field.retry.disabled = edit?.composing || edit?.status === "invalid" || !!rosterModel.read().pending_name;
-    const pending = rosterModel.read().pending_roster?.action;
-    const eligible = field.head.querySelector('[data-action="pm-eligible"]');
-    eligible.checked = pending?.kind === "set_pm_eligibility" && pending.member_id === member.member_id ? pending.eligible === true : member.pm_eligible === true;
-    eligible.disabled = !rosterReady(rosterModel.read()) || holdsPmRole(member);
     const selectPm = field.head.querySelector('[data-action="select-pm"]');
     const foreign = member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key;
     selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";
-    selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
+    selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster || holdsPmRole(member) || !!member.assignment);
     const saved = savedTraits(member), same = draft => !!draft && Object.keys(saved).every(name => (name === "personality" ? draft[name].trim() : draft[name]) === saved[name]);
     // A draft stays until the ledger holds the same values, so a refused save loses nothing.
     if (same(field.traitsDraft)) field.traitsDraft = null;
@@ -831,10 +821,9 @@ export function createAgentsSurface({ document, storage, executionModel, executi
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => {
     nameTouched = true; syncRegistration();
     if (button.disabled) return;
-    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked, ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
-    onAddMember(registeredDraft.name, registeredDraft.pm_eligible);
+    registeredDraft = { name: nameInput.value.trim(), ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
+    onAddMember(registeredDraft.name);
   });
-  registrationEligible.addEventListener("change", syncPreview);
   for (const input of [nameInput]) {
     input.addEventListener("compositionstart", () => { registrationComposing.add(input); syncRegistration(); });
     input.addEventListener("compositionend", () => { registrationComposing.delete(input); syncRegistration(); syncPreview(); });

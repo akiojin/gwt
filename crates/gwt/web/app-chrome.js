@@ -123,6 +123,18 @@ function chromeView(state, handlers) {
   };
 }
 
+// Issue #7646 AC-6 (A-26, items 44 and 100): the PM a project page names in
+// its footer and its settings. The ledger's designation for this project
+// decides it, so a reassignment shows at once; the running PM window names
+// it only until the ledger has loaded.
+export function projectPm(roster, pmWindow) {
+  const designated = (roster?.members || []).find(member => member.pm_project_key && member.pm_project_key === roster.project_key);
+  if (designated) return { name: String(designated.name || "").trim(), avatar: designated.avatar };
+  const name = String(pmWindow?.agent_name || "").trim();
+  // Issue #7635: names are unique in the ledger, so the PM's avatar is its member's.
+  return { name, avatar: (name && (roster?.members || []).find(member => member.name === name)?.avatar) || null };
+}
+
 // `handlers` maps a destination id to the function that opens its screen.
 // A page without a project passes none, which disables every such entry.
 export function createAppChrome({ document, handlers = {} }) {
