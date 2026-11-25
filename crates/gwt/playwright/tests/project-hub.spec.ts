@@ -701,6 +701,18 @@ test.describe("shared header and footer", () => {
     expect(errors).toEqual([]);
   });
 
+  // Issue #7646 AC-7: the Hub's header leads to the agent ledger, served by
+  // the first open project's page.
+  test("the Hub's Agents opens the agent ledger on an open project", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, "/");
+    await expect(entry(page, "agents")).not.toHaveAttribute("aria-disabled", "true");
+    await entry(page, "agents").click();
+    await expect(page).toHaveURL(new RegExp(`/p/${projectA.project_key}$`));
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "agents");
+    await page.screenshot({ path: testInfo.outputPath("hub-agents-ledger.png") });
+    expect(errors).toEqual([]);
+  });
+
   test("the Hub and the not-found page carry the same header and footer (AC-1, AC-2)", async ({ page }, testInfo) => {
     const errors = await openRoute(page, testInfo, "/");
     for (const path of ["/", "/p/aaaaaaaaaaaaaaaa"]) {
@@ -710,12 +722,14 @@ test.describe("shared header and footer", () => {
         nodes.map(node => (node as HTMLElement).dataset.destination))).toEqual(destinations);
       await expect(page.locator("footer.app-foot .app-foot__pm")).toHaveText("PM: —");
       // No project is open here: the entries that need one stay, disabled,
-      // with the reason. Home and Projects need none (Issue #7639).
-      for (const id of ["notifications", "agents", "environments"]) {
+      // with the reason. Home and Projects need none (Issue #7639); the Hub
+      // also leads to the agent ledger (Issue #7646).
+      const hub = path === "/";
+      for (const id of ["notifications", "environments", ...(hub ? [] : ["agents"])]) {
         await expect(entry(page, id)).toHaveAttribute("aria-disabled", "true");
       }
-      for (const id of ["pm", "projects"]) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
-      await entry(page, "agents").click({ force: true });
+      for (const id of ["pm", "projects", ...(hub ? ["agents"] : [])]) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
+      await entry(page, "environments").click({ force: true });
       await expect(page.locator('.app-head-popover[role="status"]')).toHaveText("Open a project to use this.");
       await entry(page, "menu").click();
       const settings = page.getByRole("menu").getByRole("menuitem", { name: /Settings/ });
@@ -725,11 +739,11 @@ test.describe("shared header and footer", () => {
       await page.setViewportSize({ width: 390, height: 844 });
       // A disabled entry still explains itself on a phone, inside the viewport.
       // Scrolling the row dismisses the popover, so bring the entry into view first.
-      await entry(page, "agents").scrollIntoViewIfNeeded();
+      await entry(page, "environments").scrollIntoViewIfNeeded();
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      await entry(page, "agents").click({ force: true });
+      await entry(page, "environments").click({ force: true });
       await expect(page.locator('.app-head-popover[role="status"]')).toBeInViewport({ ratio: 1 });
-      await entry(page, "agents").click({ force: true });
+      await entry(page, "environments").click({ force: true });
       await page.locator(".app-head__row").evaluate(row => { row.scrollLeft = 0; });
       const header = (await page.locator(".app-head").boundingBox())!;
       const row = (await page.locator(".app-head__row").boundingBox())!;

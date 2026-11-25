@@ -593,18 +593,27 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
 
   render();
   showView("home");
-  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, showView, home, setup, homeUrl: HUB_URL_PATH };
+  // Issue #7646 AC-7: the agent ledger is served by a project page, so the
+  // header's Agents opens it on the first open project. With none open, the
+  // Projects view is where one is opened; nothing is opened on the user's behalf.
+  function openLedger() {
+    const project = catalog.projects.find(entry => entry?.project_key);
+    if (!project) { showView("projects"); return; }
+    win.location.assign(`${projectUrlPath(project.project_key)}?view=agents`);
+  }
+  return { root, cloneModal, openLedger, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, showView, home, setup, homeUrl: HUB_URL_PATH };
 }
 
 export function mountHubApp({ window: win, document: doc }) {
   doc.title = "gwt — Home";
   // Issue #7740: this page shares the header and footer; the version lives in
   // the footer. Issue #7639: the header's PM entry is Home and its Projects
-  // entry is the picker.
+  // entry is the picker. Issue #7646: its Agents entry is the agent ledger.
   let app = null;
   const chrome = createAppChrome({ document: doc, handlers: {
     pm: () => app?.showView("home"),
     projects: () => app?.showView("projects"),
+    agents: () => app?.openLedger(),
   } });
   const page = chrome.mountPage();
   app = createHubApp({ window: win, document: doc, setVersion: chrome.setVersion,

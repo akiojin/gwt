@@ -1564,9 +1564,8 @@ pub(crate) fn mutate_pm_selection(
                 return Err(invalid("Choose another PM before removing PM eligibility"));
             }
             AgentRosterAction::SelectPm { .. } => {
-                if !member.pm_eligible {
-                    return Err(invalid("Choose a PM-eligible Agent"));
-                }
+                // Issue #7646 (items 44 and 100): eligibility is not an
+                // attribute; the user's designation alone decides the PM.
                 if member
                     .pm_project_key
                     .as_deref()
@@ -1675,6 +1674,7 @@ pub(crate) fn mutate_pm_selection(
         }
     }
     let before = project_roster(&registry, &key);
+    let mut device_pm = None;
     let mut roster = before.clone().expect("checked roster");
     match action {
         AgentRosterAction::SetPmEligibility {
@@ -1692,6 +1692,13 @@ pub(crate) fn mutate_pm_selection(
             for member in &mut roster.members {
                 if member.agent_member_id == member_id {
                     member.pm_project_key = Some(key.clone());
+                    // The stored flag stays the invariant every PM path
+                    // checks; the ledger no longer shows or edits it.
+                    member.pm_eligible = true;
+                    device_pm = Some(crate::first_run_setup::PmDesignation {
+                        member_id: Some(member.agent_member_id.clone()),
+                        name: member.name.clone(),
+                    });
                 } else if member.pm_project_key.as_deref() == Some(&key) {
                     member.pm_project_key = None;
                 }
@@ -1733,6 +1740,12 @@ pub(crate) fn mutate_pm_selection(
             core.reasoning = reasoning;
         }
         save(&registry)?;
+    }
+    // Issue #7646 AC-6 (item 100): a reassignment in the ledger is the user's
+    // designation of the device PM, which Home names. It is written once the
+    // ledger itself is saved.
+    if let Some(designation) = device_pm {
+        crate::first_run_setup::save_designation(&designation)?;
     }
     let source = registry
         .sources
@@ -7339,6 +7352,39 @@ mod tests {
         )
         .unwrap_err();
         assert!(stale.contains("reload"), "{stale}");
+    }
+
+    // Issue #7646 AC-5 / AC-6 (items 44 and 100): eligibility is not an
+    // attribute; any member can be designated, and the designation is the
+    // device's PM that Home's footer names.
+    #[test]
+    fn ledger_designates_any_member_as_pm_and_records_the_device_pm() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, _, _) = source();
+        ensure_active_for_project(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = ledger_add(&root, "Dogwood", false);
+        let dogwood = roster.members.last().unwrap().agent_member_id.clone();
+        let selected = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::SelectPm {
+                member_id: dogwood.clone(),
+            },
+            Some(roster.revision),
+        )
+        .expect("any member can be designated as PM");
+        let member = selected.members.last().unwrap();
+        assert!(member.pm_project_key.is_some());
+        let designation = crate::first_run_setup::load_designation()
+            .unwrap()
+            .expect("the designation is the device PM");
+        assert_eq!(designation.member_id.as_deref(), Some(dogwood.as_str()));
+        assert_eq!(designation.name, "Dogwood");
     }
 
     #[test]

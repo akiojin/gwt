@@ -37,8 +37,9 @@ function fixture(action = "", popupBlocked = false) {
   }
   const timers = [];
   const tabs = [];
+  const assigned = [];
   const win = Object.assign(window, {
-    location: { href: `http://127.0.0.1:4545/${action}`, pathname: "/" },
+    location: { href: `http://127.0.0.1:4545/${action}`, pathname: "/", assign: url => assigned.push(url) },
     WebSocket: FakeSocket,
     setTimeout: (callback) => { timers.push(callback); return timers.length; },
     clearTimeout() {},
@@ -54,7 +55,7 @@ function fixture(action = "", popupBlocked = false) {
     },
   });
   const app = mountHubApp({ window: win, document });
-  return { app, document, sockets, timers, tabs };
+  return { app, document, sockets, timers, tabs, assigned };
 }
 
 function hubState(projects, recent = []) {
@@ -520,4 +521,27 @@ test("Hub retries an observed draining project with an opaque single-use token w
   assert.match(detailStyle, /font-size:\s*var\(--type-sm\)/);
   document.querySelector('[data-hub-action="refresh-orphans"]').click();
   assert.deepEqual(socket.sent.at(-1), { kind: "refresh_orphan_daemons" });
+});
+
+// Issue #7646 AC-7: the Hub's header leads to the agent ledger. The ledger
+// is served by a project page, so it opens on an open project; with none
+// open, the Projects view is where one is opened.
+test("the header's Agents opens the agent ledger from the Hub", async () => {
+  const { document, sockets, assigned } = fixture();
+  const agents = () => document.querySelector('header.app-head [data-destination="agents"]');
+  const settle = async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); };
+  await settle();
+  assert.notEqual(agents().getAttribute("aria-disabled"), "true", "Agents is available on the Hub");
+  agents().click(); await settle();
+  assert.deepEqual(assigned, [], "with no open project nothing is navigated");
+  assert.equal(document.querySelector("[data-hub]").dataset.hubView, "projects");
+  sockets[0].open();
+  sockets[0].deliver(hubState([projectA, projectB]));
+  agents().click(); await settle();
+  assert.deepEqual(assigned, ["/p/0123456789abcdef?view=agents"]);
+});
+
+test("a project page opened with ?view=agents shows the agent ledger and drops the query", () => {
+  const appJs = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(appJs, /searchParams\.get\("view"\) === "agents"[\s\S]{0,400}replaceState(?:\?\.)?\([\s\S]{0,200}openAgents\("ledger"\)/);
 });
