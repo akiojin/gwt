@@ -780,11 +780,11 @@ test.describe("shared header and footer", () => {
       await page.setViewportSize({ width: 390, height: 844 });
       // A disabled entry still explains itself on a phone, inside the viewport.
       // Scrolling the row dismisses the popover, so bring the entry into view first.
-      await entry(page, "environments").scrollIntoViewIfNeeded();
+      await entry(page, "notifications").scrollIntoViewIfNeeded();
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      await entry(page, "environments").click({ force: true });
+      await entry(page, "notifications").click({ force: true });
       await expect(page.locator('.app-head-popover[role="status"]')).toBeInViewport({ ratio: 1 });
-      await entry(page, "environments").click({ force: true });
+      await entry(page, "notifications").click({ force: true });
       await page.locator(".app-head__row").evaluate(row => { row.scrollLeft = 0; });
       const header = (await page.locator(".app-head").boundingBox())!;
       const row = (await page.locator(".app-head__row").boundingBox())!;
