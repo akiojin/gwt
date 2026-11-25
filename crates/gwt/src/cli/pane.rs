@@ -619,6 +619,13 @@ async fn send_pm_pane_input(
     let operation_id = requested_operation_id
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string());
+    // PM delivery uses CR as its transport terminator. A trailing LF belongs
+    // to the prompt body, just like any other embedded line break.
+    let payload = if text.ends_with('\r') {
+        text.to_string()
+    } else {
+        format!("{text}\r")
+    };
     let mut expected_window_id = None::<String>;
     let result = tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
         let mut response_loss = None::<String>;
@@ -655,7 +662,7 @@ async fn send_pm_pane_input(
                     "kind": "pm_pane_send_input",
                     "operation_id": operation_id,
                     "window_id": window_id,
-                    "text": ensure_trailing_submit(text),
+                    "text": payload,
                 }),
             )
             .await
@@ -5253,11 +5260,12 @@ mod tests {
                 &format!("ws://{address}/internal/pane-ws"),
                 None,
                 "codex-1",
-                "same operation body",
+                "same operation\nbody\n",
                 None,
             )
             .await;
             let mutations = server.await.expect("PM replay mock task");
+            assert_eq!(mutations[0]["text"], "same operation\nbody\n\r");
 
             let output = result.expect("replayed delivery succeeds");
             assert!(output.contains("pm message delivered to tab::codex-1"));
