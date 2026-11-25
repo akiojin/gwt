@@ -75,36 +75,6 @@ test("Project hub catalog receiver commits shared state and rejects bypass rende
   }
 });
 
-test("Recovery Center Board receiver commits shared state and rejects bypass rendering", () => {
-  const file = 'crates/gwt/web/app.js';
-  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-  const findings = source => scanModule(source, file).filter(finding =>
-    finding.root === 'receive' && finding.context === '/recovery_center_board_entry');
-  assert.deepEqual(findings(app), []);
-  for (const bypass of ['document.body.textContent = event.error;',
-    'recoveryCenterController?.handleBoardEntry(event);']) {
-    const mutated = app.replace('case "recovery_center_board_entry":',
-      `case "recovery_center_board_entry": ${bypass}`);
-    assert.notEqual(mutated, app);
-    assert.ok(findings(mutated).length > 0);
-  }
-});
-
-test("Recovery Center state receiver commits shared state and rejects bypass rendering", () => {
-  const file = 'crates/gwt/web/app.js';
-  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-  const findings = source => scanModule(source, file).filter(finding =>
-    finding.root === 'receive' && finding.context === '/recovery_center_state');
-  assert.deepEqual(findings(app), []);
-  for (const bypass of ['document.body.textContent = event.status;',
-    'recoveryCenterController?.handleState(event);']) {
-    const mutated = app.replace('case "recovery_center_state":',
-      `case "recovery_center_state": ${bypass}`);
-    assert.notEqual(mutated, app);
-    assert.ok(findings(mutated).length > 0);
-  }
-});
-
 test("Launch wizard state receiver commits shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';
@@ -210,21 +180,6 @@ test("Continue work outcome receiver commits shared state and rejects bypass ren
     const mutated = app.replace('case "continue_work_outcome":', `case "continue_work_outcome": ${bypass}`);
     assert.notEqual(mutated, app);
     assert.ok(findings(mutated).length > 0);
-  }
-});
-
-test("Work Projection Prune receivers commit shared state and reject bypass alerts", () => {
-  const file = 'crates/gwt/web/app.js';
-  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-  const findings = source => scanModule(source, file).filter(finding =>
-    finding.root === 'receive' && /^\/workspace_projection_prune_(result|error)$/.test(finding.context));
-  assert.deepEqual(findings(app), []);
-  for (const kind of ['workspace_projection_prune_result', 'workspace_projection_prune_error']) {
-    for (const bypass of ['window.alert(event.message);', 'renderWorkspaceProjectionPruneFeedback(event);']) {
-      const mutated = app.replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
-      assert.notEqual(mutated, app);
-      assert.ok(findings(mutated).length > 0);
-    }
   }
 });
 

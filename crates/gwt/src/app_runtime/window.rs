@@ -701,32 +701,6 @@ impl AppRuntime {
         self.queue_remote_runtime_command(id, command, super::RemoteRuntimeCommandKind::Stop)
     }
 
-    /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's
-    /// runtime, keeping all windows in its surface. Iterates the open windows
-    /// and applies the per-window [`Self::stop_window_events`] stop to each
-    /// window that currently has a live runtime, so the confirm-on-frontend
-    /// "stop all" button resolves to the same kept-but-stopped state as the
-    /// single-window kill switch.
-    pub(crate) fn stop_all_windows_events(
-        &mut self,
-        context: &super::ProjectContext,
-    ) -> Vec<OutboundEvent> {
-        if !self.project_context_is_current(context) {
-            return Vec::new();
-        }
-        let running_ids: Vec<String> = self
-            .runtimes
-            .keys()
-            .filter(|id| self.project_key_for_window(id) == Some(&context.project_key))
-            .cloned()
-            .collect();
-        let mut events = Vec::new();
-        for window_id in running_ids {
-            events.extend(self.stop_window_events(&window_id));
-        }
-        events
-    }
-
     /// SPEC-2356 安心 Addendum (FR-044): relaunch a window's agent in place. The
     /// window id and Issue association are preserved; the prior terminal
     /// output is appended to (never wiped) because the window record — and the
