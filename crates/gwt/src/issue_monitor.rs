@@ -17883,7 +17883,56 @@ impl IssueMonitorState {
         }
     }
 
+    /// Issue #7936: a delivered owner settled as `ContinueWork` whose Issue
+    /// was later revised so only external verification remains has nothing
+    /// left to implement. Only a revision newer than the settlement counts,
+    /// so an operator's explicit return to the queue still wins.
+    fn upgrade_delivered_verification_waits(&mut self) {
+        if !self.autonomous_mode {
+            return;
+        }
+        let upgrades = self
+            .inbox
+            .iter()
+            .filter(|item| {
+                item.issue.state == IssueMonitorIssueState::Open
+                    && item.state == MonitorInboxState::Queued
+            })
+            .filter_map(|item| {
+                let settlement = self.merged_issue_settlements.get(&item.issue.number)?;
+                let delivered = settlement.pr_number != 0
+                    && settlement
+                        .merge_sha
+                        .as_deref()
+                        .is_some_and(|sha| !sha.trim().is_empty());
+                let revised = parse_rfc3339_utc(item.issue.updated_at.as_deref()?)?
+                    > parse_rfc3339_utc(&settlement.settled_at)?;
+                if !delivered
+                    || !revised
+                    || !matches!(
+                        settlement.action,
+                        MergedIssueSettlementAction::ContinueWork { .. }
+                    )
+                {
+                    return None;
+                }
+                let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                    item.issue.body.as_deref().unwrap_or(""),
+                );
+                criteria
+                    .only_external_verification_remaining()
+                    .then_some((item.issue.number, criteria.unchecked))
+            })
+            .collect::<Vec<_>>();
+        for (number, unmet) in upgrades {
+            if let Some(settlement) = self.merged_issue_settlements.get_mut(&number) {
+                settlement.action = MergedIssueSettlementAction::AwaitVerification { unmet };
+            }
+        }
+    }
+
     fn enforce_measurement_waits(&mut self) {
+        self.upgrade_delivered_verification_waits();
         for item in &mut self.inbox {
             if !self.autonomous_mode
                 || item.issue.state != IssueMonitorIssueState::Open
@@ -52817,6 +52866,77 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2, 3].map(|number| (number, IssueMonitorRefillExemption::AwaitingVerification))
         );
+    }
+
+    #[test]
+    fn issue_7936_delivered_owner_tagged_after_settlement_awaits_verification() {
+        let merged_at = "2026-11-20T00:00:00Z";
+        let now = "2026-11-25T16:50:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 1);
+        let revision = |number, tag: &str, updated_at: &str| {
+            let mut candidate = issue(number);
+            candidate.body = Some(format!(
+                "## Acceptance Criteria\n- [x] AC-1: fix\n- [ ] AC-2: {tag}confirm on main\n"
+            ));
+            candidate.updated_at = Some(updated_at.into());
+            candidate
+        };
+        monitor.terminal_queue_push(&[1, 2], "operator", merged_at);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[revision(1, "", merged_at), revision(2, "", merged_at)],
+            merged_at,
+        );
+        for number in [1, 2] {
+            monitor.record_merged_issue_settlement(
+                number,
+                number + 100,
+                Some("aaa".into()),
+                MergedIssueSettlementAction::ContinueWork {
+                    unmet: vec!["AC-2".into()],
+                },
+                merged_at,
+            );
+        }
+        // #1 is tagged after delivery; #2 shows the tag only in a revision
+        // no newer than its settlement, which cannot override that decision.
+        let candidates = [
+            revision(1, "[main-verification] ", "2026-11-25T16:48:00Z"),
+            revision(2, "[main-verification] ", merged_at),
+            issue(3),
+        ];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+
+        assert_eq!(
+            monitor.inbox_item(1).unwrap().state,
+            MonitorInboxState::AwaitingVerification
+        );
+        assert_eq!(
+            monitor.merged_issue_settlement(1).unwrap().action,
+            MergedIssueSettlementAction::AwaitVerification {
+                unmet: vec!["AC-2".into()],
+            }
+        );
+        assert_eq!(
+            monitor.inbox_item(2).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.queue.contains(&1));
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(
+            refill
+                .uncounted
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            vec![(1, IssueMonitorRefillExemption::AwaitingVerification)]
+        );
+        assert_eq!(refill.counted, vec![2]);
     }
 
     #[test]
