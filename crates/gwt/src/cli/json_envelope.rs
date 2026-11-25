@@ -1029,6 +1029,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let key = format!("{number}:{recovery_id}");
             CliCommand::Board(BoardCommand::RecoveryPost {
                 intent_id: format!("manual-recovery:{key}"),
+                manual_recovery: true,
                 command: Box::new(BoardPostCommand {
                     kind: "decision".into(),
                     body: Some(body),
@@ -2699,7 +2700,11 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
         broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
     });
     Ok(CliCommand::Board(match intent_id {
-        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        Some(intent_id) => BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery: false,
+        },
         None => BoardCommand::Post(command),
     }))
 }
@@ -7493,7 +7498,7 @@ mod tests {
             }),
         );
         assert!(matches!(command,
-            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command })
+            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command, manual_recovery: true })
             if intent_id == "manual-recovery:5876:incident-a"
                 && command.kind == "decision"
                 && command.owners == ["5876"]
