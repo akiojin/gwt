@@ -270,7 +270,7 @@ design of #7007 (`docs/design/issue-7007/README.md`).
 | **Session** | One run of an agent on an issue in a terminal. |
 | **Board** (掲示板) | The record of posts by agents and you: status, decisions, handoffs, and blockers. It is a log, not where work is managed. |
 | **Notifications** | Events that need your attention, opened from the header. |
-| **Issues runtime / Issue Monitor** | The background loop that picks ready issues and starts agents on them, configured in **Issues execution settings**. |
+| **Issues runtime** | The background loop that picks ready issues and starts agents on them, configured in **Issues execution settings**. |
 | **Reports** | The PM's status reports on a project. They appear on the project's **Board**, not in the Home conversation, which keeps replies, decisions, and completions. |
 
 ## Usage
