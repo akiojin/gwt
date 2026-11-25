@@ -27,8 +27,12 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator workspace** — ホームで PM に相談し、ヘッダーの Projects からプロジェクトを開きます。
-  プロジェクトのレールから Themes、Issues、Agents、Board、Settings などを切り替えられます。
+- **ホームとプロジェクトのページ** — 開始ページ（**Home**）は Project Manager との
+  会話の場所で、各プロジェクトはそれぞれのブラウザタブで開きます。共通ヘッダーから
+  PM、Notifications、Projects、Agents、Environments へ移動でき、Settings は
+  **Menu** の中にあります。プロジェクトのページでは、レールから Themes、Issues、
+  Agents、Board、Settings、診断用の画面を開きます。[画面構成](#画面構成) と
+  [用語集](#用語集) を参照してください。
 - **Execution environments** — プロジェクトの画面と開始画面のヘッダーの
   Environments から、エージェントが使う実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
   リセット時刻・制限状態を 1 か所で確認できます。アカウントの詳細では、全ての枠、
@@ -228,6 +232,30 @@ Claude native と Hermes は実効更新チャネルを検証できないため�
 | Hermes Agent | `hermes` |
 | GitHub Copilot | `gh copilot` |
 
+## 用語集
+
+gwt の画面では次の用語を使います。括弧内は #7007 の GUI 設計
+（`docs/design/issue-7007/README.md`）での用語です。GUI の表示は英語です。
+
+| 用語 | 意味 |
+| --- | --- |
+| **Home**（ホーム） | `/` の開始ページ。Project Manager との会話の場所で、判断待ちに答えます。プロジェクトの内容は表示しません。 |
+| **Project**（プロジェクト） | gwt が管理するリポジトリ。プロジェクトごとに固有の URL とブラウザタブを持ち、**Projects** 一覧から開く・複製する・閉じる操作をします。 |
+| **Theme**（テーマ） | 1 つの目的に向けた Issue のまとまり。sub-issue を持つ GitHub Issue として保持し、PM が Home の会話から記録します。階層は プロジェクト → テーマ → Issue（課題）→ 子課題 です。 |
+| **Issue**（課題） | 作業の単位で、GitHub Issue として保持します。エージェントが実行するのは Issue です。この意味での旧称「Work」は使いません。 |
+| **Sub-issue**（サブ Issue／子課題） | テーマや別の Issue の配下にある Issue（GitHub の sub-issue）。子の完了は親の進捗に集計します。 |
+| **SPEC** | 設計が必要な Issue で、`gwt-spec` ラベルを付けます。spec・plan・tasks の各 section が設計の正本です。 |
+| **Agent**（エージェント） | 名前とアバター、特性を持ち、Issue を担当するメンバー。共有の台帳（**Agents**）に載ります。 |
+| **Project Manager / PM** | プロジェクトを運営するエージェント。Home であなたと会話し、テーマを記録し、Issue の順番を決めます。待機中のどのエージェントでも PM に選べます。 |
+| **Tool**（ツール） | この端末に導入したエージェント本体（Claude Code、Codex など）。**Tool management** で導入・更新します。 |
+| **Account**（アカウント） | ツールが使うサインイン済みのプロバイダーアカウント。使用率・リセット時刻・制限状態とともに **Accounts** に並びます。 |
+| **Execution environment**（実行環境） | アカウントと、そこへ到達するツールの組。プロジェクトは実行環境を優先順に並べ、使える最初のものでセッションを始めます。 |
+| **Session**（セッション） | ある Issue でエージェントを 1 回ターミナル上で動かしたもの。 |
+| **Board**（掲示板） | エージェントとあなたの投稿（状況・判断・引き継ぎ・詰まり）の記録。作業を管理する場所ではなく記録です。 |
+| **Notifications**（通知） | 対応が必要な出来事。ヘッダーから開きます。 |
+| **Issues runtime / Issue Monitor** | 準備のできた Issue を選んでエージェントを起動する背景の仕組み。**Issues execution settings** で設定します。 |
+| **Reports** | プロジェクトについての PM の状況報告。ホームの会話ではなくプロジェクトの **Board** に並び、会話には返答・判断・完了の要点だけを残します。 |
+
 ## 使い方
 
 `gwt` を起動するとタスクトレイ (macOS は menubar、Windows は notification
@@ -249,7 +277,7 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 プロジェクトのブラウザタブには、エージェントの件数を言葉で表したタイトル（例：
 `gwt — 3 running · 1 blocked — gwt`）と状態別 favicon を表示します。Blocked は
 待機・停止・エラーを含み、シェルは集計しません。ステータスバー（Running / Idle /
-Blocked / Errors）と Works 見出しは、タブタイトルと同じ件数を表示します。
+Blocked / Errors）は、タブタイトルと同じ件数を表示します。
 ステータスバーの Auto-run 欄は `Running · 9 queued · 3 of 6 active` のように表示します。
 未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
 Hub のタイトルと favicon は固定です。
@@ -284,6 +312,45 @@ GitHub、Recent projects、開いているプロジェクトの一覧を表示�
 プロジェクト URL をブックマークやタブ復元で開くと、Recent のプロジェクトは自動で
 開き直され、未知のプロジェクト URL は Hub へのリンク付きの「Project not found」を
 表示します。Hub はトレイの **Open in browser**、または引数なしの `gwt open` で開けます。
+
+### 画面構成
+
+すべてのページに同じヘッダーとフッターがあります。ヘッダーの入口は次の順に並びます。
+
+| ヘッダーの入口 | 開く先 |
+| --- | --- |
+| **PM** | Home（Project Manager との会話）の判断待ち。PM の名前とアバター、判断待ちの件数を表示します。 |
+| **Notifications** | 通知のドロワー。未読バッジ付きです。プロジェクトのページで使えます。 |
+| **Projects** | プロジェクト一覧（`/?view=projects`）。 |
+| **Agents** | エージェント台帳（**Agents**：**Team** / **Past**）。Home では最初に開いているプロジェクトで開き、開いているプロジェクトが無ければ **Projects** を表示します。 |
+| **Environments** | **Execution environments**（エージェントが動く実行環境）。**Manage** の下に **Accounts** と **Tool management** があります。 |
+| **Menu ▾** | **Settings**。プロジェクトのページで使えます。 |
+
+開いているプロジェクトが必要な入口は、Home では無効の状態で表示し、その理由を
+説明します。フッターには gwt のバージョンと `PM: <名前>`（不明な間は `PM: —`）を
+表示します。
+
+- **Home**（`/`） — 上で説明した Project Manager との会話です。プロジェクトの内容は
+  表示しません。
+- **Projects** — Open Folder…、Clone from GitHub…、検索欄、**Open**・**Recent**・
+  **Projects awaiting shutdown** の一覧があります。プロジェクトは新しいブラウザタブで
+  開きます。
+- **プロジェクトのページ**（`/p/<project-hash>`） — レールで **Themes**、
+  **Issues**、**Agents**、**Board**、**Settings** を選び、その下に **Logs**、**Index**、
+  **Env vars** があります。レールの PM ボタンはエージェント台帳を開き、隣の歯車から
+  Project Manager の設定を開けます。**Themes** はテーマと
+  その配下の Issue を一覧します。**Issues** は Issue のボードで、Issue ごとの詳細と
+  エージェントの出力を表示します。ここでの **Agents** は、このプロジェクトの
+  **Agent history & plans** です。**Board** はエージェント・PM・あなたの投稿の記録で、PM の報告もここに並びます。
+  **Split view** ではこれらを 2 つ並べて表示でき、稼働中のエージェント端末の一覧
+  **Works** も選べます。
+- **Execution environments** — プロジェクトのセッションが起動する実行環境です。
+  **Accounts** は登録済みのプロバイダーアカウントごとに、使用率・リセット時刻・
+  制限状態を表示します。**Tool management** はツール本体の導入と更新を扱います
+  （Settings → **Supported Agents**）。アカウントを追加してもツールは導入されません。
+- **Settings** — **Application settings**（System、Supported Agents、Custom Agents、
+  Agent Backends、Usage & Limits）と、開いているプロジェクトの **Project settings**
+  （Issues execution settings、Hook Center）があります。
 
 Autostart は **Settings > System > Launch GWT at login** で切り替えます。
 有効にすると `auto-launch` crate 経由で macOS LaunchAgent / Windows HKCU
@@ -833,7 +900,7 @@ signal で停止できます。
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
   Work Item view を開きます。Issues が自動起動した Agent は、
   独立した Issues 面の右ペインに読み取り専用でミラー表示されます。入力
-  したいときは `Windowize` で同じセッションを Works のネイティブ端末に開けます。各行には対応する Work
+  したいときは `Windowize` で同じセッションをネイティブ端末に開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
@@ -888,8 +955,8 @@ Agents の共有編集欄で、メンバーのツール・モデル・推論・�
 Issue に対する新規の Launch Agent は、**Configure and start** を選んだあと 3 段で進みます。**Issue & assignee**（登録済みエージェントを選びます。推論・速度・性格を表示し、保存値は変わりません）、**Launch plan**（担当・実行環境・ブランチ・実行場所・権限）、**Confirm** の順です。セッションは選んだエージェントとして、プロジェクトの実行環境で始まります。再開、前回の設定での開始、既存ブランチを開く操作、**Open a shell** は最初の画面に残ります。Issue の無い起動と、登録済みエージェントがいないプロジェクトは、従来の設定フォームのままです。
 既存名簿は project runtime 起動時または Agents 読み取り時に移行され、旧バージョンから新形式の設定は編集できません。
 移行元で名前が同じ人物も別メンバーとして保持します。
-復元や再起動でもメンバー ID と名前を維持します。Works、Agents、Fleet、Kanban、Board、
-Issue コメント、PR の担当者表示に名前が現れます。常駐 PM は PM・Works・Agents の各面で、
+復元や再起動でもメンバー ID と名前を維持します。Agents、エージェント端末、Kanban、Board、
+Issue コメント、PR の担当者表示に名前が現れます。常駐 PM は PM・ヘッダー・Agents の各面で、
 割り当てられた名前と PM バッジをあわせて表示します。
 
 Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
@@ -964,7 +1031,7 @@ Kanban は既定で全幅です。カードを選ぶとプレビューが開き�
 その Issue の次回起動の最低段だけを一段上げます。実行中のエージェントの設定は変わりません。
 変更はサーバーで受理された後に反映され、最上段では上げられない理由を表示します。
 次回段の候補は起動時の検証で変わることがあります。
-**Windowize** でエージェントを Works のネイティブ端末に開けます。**Close preview** または Escape で
+**Windowize** でエージェントをネイティブ端末に開けます。**Close preview** または Escape で
 全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
 従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
@@ -2288,12 +2355,12 @@ project 固有の規約を明示的に渡すには、
 
 ## サーフェス操作
 
-- レールから **Themes**、**Issues**、**Agents**、**Board**、**Settings** を選びます。
+- プロジェクトのページでは、レールから **Themes**、**Issues**、**Agents**、**Board**、**Settings** を選びます。ヘッダーの **PM**、**Projects**、**Agents**、**Environments**、**Menu ▾ → Settings** はどのページでも同じです（[画面構成](#画面構成) を参照）。
 - **Themes** は、プロジェクトのテーマ（sub-issue を持つ GitHub Issue と、ホームの会話から PM が記録したテーマ）を一覧します。依頼や決定をすると、PM が追加の操作なしにテーマ（`gwt-theme` ラベル付きの GitHub Issue）として記録するか、既存のテーマに追記します。テーマにしたくないものは PM にそう伝えてください。記録されたテーマには **Source of this theme** が表示され、**Show in conversation** で元のメッセージを PM の会話で開けます。各行には、テーマ配下の課題数と完了数を GitHub の集計どおりに表示します。テーマを選ぶと配下の課題が並び、課題を選ぶと Issues で開きます。**Issues completed today** は、gwt が今日取り込んだ Close の件数です。**Delete theme** は確認のあとで、テーマの GitHub Issue を not planned で閉じます。配下の課題は残り、GitHub で Issue を開き直すとテーマが戻ります。
 - **Logs**・**Index**・**Env vars** はサイドバーの各項目から直接開けます。高さが足りないときはサイドバーを縦にスクロールします。個別エージェントの停止・再起動は既存の操作から実行できます。
 - プロジェクトのフッターに Project Manager の名前が表示されます。レールの PM ボタンは
   エージェント台帳を開きます。隣の歯車からは Project Manager の設定を開けます。
-- **Works** は端末上で稼働する Agent を1人1行で表示し、直近の出力を載せます。**Settings → System → Works output lines** で3〜10行（既定3行）を選べ、読み取り専用の一覧にも即時反映し、再読み込み・アプリ再起動後も保持します。出力は選択・スクロールでき、端末を開きません。出力欄以外の行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
+- エージェント端末の一覧 **Works** は **Split view** で開きます（レールの入口ではありません）。端末上で稼働する Agent を1人1行で表示し、直近の出力を載せます。**Settings → System → Works output lines** で3〜10行（既定3行）を選べ、読み取り専用の一覧にも即時反映し、再読み込み・アプリ再起動後も保持します。出力は選択・スクロールでき、端末を開きません。出力欄以外の行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
 - 台帳の **Team** でメンバーを登録し、表示名や特性を編集できます。プロジェクトのレールの **Agents** で、そのプロジェクトの履歴や担当予定を確認できます。
 - **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
 - **Register** は共有名簿にメンバーを1人追加します。端末の安全上限により実際の割当数が少なくなる場合があります。
@@ -2304,7 +2371,7 @@ project 固有の規約を明示的に渡すには、
 - 登録済みの PM は `pm.agent.add` JSON operation に `name` と `agent_id` を渡し、共有名簿にメンバーを1人追加して ID を取得できます。保存済みのメンバープロファイルを使うプロジェクトでは、`issue.monitor.profiles.set` でその ID を指定できます。
 - **Split view** では左右の面を独立して選び、**Close split** で選択中の面を残します。Shell は補助端末として開け、メンバー人数や稼働 Agent 数へ含めません。
 
-プロジェクトのブラウザタブのタイトル、ステータスバー、Works、Agents の **Running** は、
+プロジェクトのブラウザタブのタイトル、ステータスバー、エージェント端末の一覧、Agents の **Running** は、
 同じプロジェクトの Agent ウィンドウ状態から集計します。PM の Agent ウィンドウも対象です。
 シェルは集計対象外です。
 
@@ -2318,7 +2385,7 @@ project 固有の規約を明示的に渡すには、
 **Team** は設定済み PM を含む有効な登録メンバー数です。**Busy** は稼働中の実装メンバーを数え、同時実行数から PM ロール保持者を除きます。メンバー ID・有効人数・確定した担当予定の再割当は、
 アプリの再起動後も保持します。
 
-Works には Session に帰属する入力・キャッシュ・出力、直近30分の活動グラフ、
+エージェント端末の一覧には Session に帰属する入力・キャッシュ・出力、直近30分の活動グラフ、
 ブランチと検証の状態を表示します。取得できない値は **—** とし、コンテキスト残量は
 provider の直接報告がある場合だけ表示します。Today はこのプロジェクトの実測会話を集計し、
 アカウント全体の使用量を転用しません。個別 PR 情報は表示しません。

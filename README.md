@@ -30,9 +30,12 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator workspace** — talk to the Project Manager on Home, then open a
-  project from Projects in the header. The project rail opens Themes, Issues,
-  Agents, Board, Settings, and diagnostics.
+- **Home and project pages** — the start page (**Home**) is your conversation
+  with the Project Manager; every project opens in its own browser tab. A
+  common header leads to the PM, Notifications, Projects, Agents, and
+  Environments, with Settings in its **Menu**. On a project page, the rail
+  opens Themes, Issues, Agents, Board, Settings, and diagnostics. See
+  [Screens](#screens) and the [Glossary](#glossary).
 - **Execution environments** — open Environments from the header, on a project
   page or on the start page, to see what your agents run on. Accounts shows each provider account's usage, reset
   times, and limit state in one place; an account's detail adds every window,
@@ -246,6 +249,30 @@ finishes. Missing agents are never installed automatically.
 | Hermes Agent | `hermes` |
 | GitHub Copilot | `gh copilot` |
 
+## Glossary
+
+gwt's screens use these terms. The words in parentheses are the terms of the GUI
+design of #7007 (`docs/design/issue-7007/README.md`).
+
+| Term | Meaning |
+| --- | --- |
+| **Home** (ホーム) | The start page at `/`: the conversation with the Project Manager. It answers waiting decisions and shows no project contents. |
+| **Project** (プロジェクト) | A repository gwt manages. Each project has its own URL and browser tab; the **Projects** list opens, clones, and closes them. |
+| **Theme** (テーマ) | A group of issues toward one goal, kept as a GitHub Issue with sub-issues. The PM records themes from the Home conversation. Hierarchy: project → theme → issue → child issue. |
+| **Issue** (課題) | One unit of work, kept as a GitHub Issue. Issues are the work agents execute; the older word "Work" for this is retired. |
+| **Sub-issue** (サブ Issue / 子課題) | An issue under a theme or under another issue (GitHub sub-issues). Completion of children rolls up into the parent's progress. |
+| **SPEC** | A design-required issue labelled `gwt-spec`, whose spec, plan, and tasks sections are the source of truth for its design. |
+| **Agent** (エージェント) | A named member that takes issues, with an avatar and traits. Agents are listed in the shared ledger (**Agents**). |
+| **Project Manager / PM** | The agent chosen to run a project: it talks with you on Home, records themes, and orders issues. Any idle agent can be selected as PM. |
+| **Tool** (ツール) | The agent program installed on this machine, such as Claude Code or Codex. Install and update it in **Tool management**. |
+| **Account** (アカウント) | A signed-in provider account a tool uses, with its usage, reset times, and limit state, listed in **Accounts**. |
+| **Execution environment** (実行環境) | An account plus the tool that reaches it. A project lists its environments in priority order, and a session starts on the first usable one. |
+| **Session** | One run of an agent on an issue in a terminal. |
+| **Board** (掲示板) | The record of posts by agents and you: status, decisions, handoffs, and blockers. It is a log, not where work is managed. |
+| **Notifications** | Events that need your attention, opened from the header. |
+| **Issues runtime / Issue Monitor** | The background loop that picks ready issues and starts agents on them, configured in **Issues execution settings**. |
+| **Reports** | The PM's status reports on a project. They appear on the project's **Board**, not in the Home conversation, which keeps replies, decisions, and completions. |
+
 ## Usage
 
 Launching `gwt` installs a system-tray icon (macOS menubar / Windows
@@ -269,8 +296,8 @@ the tray menu:
 Project browser tabs show agent counts in plain words in their titles (for
 example `gwt — 3 running · 1 blocked — gwt`) and a status favicon. Blocked
 includes waiting, stopped, and error states; shell windows are excluded. The
-status strip (Running / Idle / Blocked / Errors) and the Works heading show the
-same counts as the tab title. The strip's Auto-run cell reads like
+status strip (Running / Idle / Blocked / Errors) shows the same counts as the
+tab title. The strip's Auto-run cell reads like
 `Running · 9 queued · 3 of 6 active`. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
@@ -304,6 +331,46 @@ the same project URL share its live workspace. Bookmarking or restoring a
 project URL reopens a recent project automatically; an unknown project URL
 shows "Project not found" with a link back to the Hub. Open the Hub through
 **Open in browser** in the tray menu or `gwt open` without arguments.
+
+### Screens
+
+Every page has the same header and footer. The header entries, in order:
+
+| Header entry | Opens |
+| --- | --- |
+| **PM** | The decisions waiting on Home, the conversation with the Project Manager. Shows the PM's name and avatar and the number of decisions waiting. |
+| **Notifications** | The notification drawer, with an unread badge. Available on a project page. |
+| **Projects** | The project list (`/?view=projects`). |
+| **Agents** | The agent ledger (**Agents**: **Team** / **Past**). On Home it opens on the first open project, or shows **Projects** when none is open. |
+| **Environments** | **Execution environments**: what agents run on, with **Accounts** and **Tool management** under **Manage**. |
+| **Menu ▾** | **Settings**. Available on a project page. |
+
+An entry that needs an open project stays visible but disabled on Home and
+explains why. The footer shows the gwt version and `PM: <name>` (`PM: —` while
+unknown).
+
+- **Home** (`/`) — the conversation with the Project Manager, described above.
+  It shows no project contents.
+- **Projects** — Open Folder…, Clone from GitHub…, a search box, and the
+  **Open**, **Recent**, and **Projects awaiting shutdown** lists. A project
+  opens in a new browser tab.
+- **Project page** (`/p/<project-hash>`) — the rail selects **Themes**,
+  **Issues**, **Agents**, **Board**, and **Settings**; **Logs**, **Index**, and
+  **Env vars** sit below them. The rail's PM button opens the agent ledger, and
+  the gear beside it opens Project Manager settings. **Themes** lists themes
+  and the issues under each.
+  **Issues** is the issue board with each issue's detail and agent output.
+  **Agents** here shows **Agent history & plans** for this project. **Board**
+  is the record of what agents, the PM, and you posted, including PM reports. **Split view** shows two of
+  these side by side, including **Works**, the list of live agent terminals.
+- **Execution environments** — the environments a project's sessions start on.
+  **Accounts** lists each registered provider account with its usage, reset
+  times, and limit state. **Tool management** installs and updates the tools
+  themselves (Settings → **Supported Agents**); adding an account does not
+  install a tool.
+- **Settings** — **Application settings** (System, Supported Agents, Custom
+  Agents, Agent Backends, Usage & Limits) and **Project settings** (Issues
+  execution settings, Hook Center) for the open project.
 
 Autostart lives in **Settings > System > Launch GWT at login**. Enabling it
 installs an OS-native per-user entry (macOS LaunchAgent / Windows HKCU Run /
@@ -897,7 +964,7 @@ Common windows include:
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
   open this same Work Item view. Issues agents are mirrored read-only in
   the Issue window's right pane,
-  and `Windowize` opens the same session in its native terminal in Works for input.
+  and `Windowize` opens the same session in its native terminal for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
@@ -955,9 +1022,9 @@ Saved member settings apply to the next NEW saved-profile candidate launch. Laun
 A new Launch Agent on an Issue is planned in three stages after you choose **Configure and start**: **Issue & assignee** (pick a registered agent; its reasoning, speed and personality are shown and stay as saved), **Launch plan** (assignee, execution environment, branch, where the session runs, permissions) and **Confirm**. The session starts as the agent you picked, on the project's execution environment. Resuming, starting with the last settings, opening an existing branch and **Open a shell** stay on the first screen. A launch without an Issue, and a project with no registered agent, keep the settings form.
 Existing rosters migrate when the project runtime starts or Agents is read; older releases cannot edit the new preference format.
 Imported people remain distinct even when their old names match.
-Restoration and restart preserve the member identity. Names appear in Works, Agents, Fleet,
-Kanban, Board, Issue comments, and PR attribution. The resident PM shows its assigned name
-alongside a PM badge in PM, Works, and Agents.
+Restoration and restart preserve the member identity. Names appear in Agents, the agent
+terminals, Kanban, Board, Issue comments, and PR attribution. The resident PM shows its
+assigned name alongside a PM badge in PM, the header, and Agents.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -1038,7 +1105,7 @@ tier or the current next-tier selection. The preview shows provider, model and
 effort in both tabs. **Raise one tier** raises only this Issue's minimum for its
 next launch; a running agent keeps its profile. Changes appear after the server
 accepts them, and the highest tier explains why it cannot be raised. Next-tier
-previews remain subject to launch-time checks. **Windowize** opens the agent in its native terminal in Works.
+previews remain subject to launch-time checks. **Windowize** opens the agent in its native terminal.
 **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.
@@ -2511,13 +2578,13 @@ an entry removes its copied policy on the next refresh.
 
 ## Surface Navigation
 
-- Select **Themes**, **Issues**, **Agents**, **Board**, or **Settings** from the rail.
+- On a project page, select **Themes**, **Issues**, **Agents**, **Board**, or **Settings** from the rail. The header's **PM**, **Projects**, **Agents**, **Environments**, and **Menu ▾ → Settings** stay the same on every page (see [Screens](#screens)).
 - **Themes** lists the themes of the project: GitHub Issues that have sub-issues, and the themes the PM records from your conversation on Home. When you ask for something or decide something, the PM records it as a theme (a GitHub Issue labelled `gwt-theme`) or adds it to an existing one, with no extra step from you; tell the PM when something should not become a theme. A recorded theme shows **Source of this theme**, and **Show in conversation** opens the PM on that message. Each row shows how many issues are under the theme and how many are completed, as GitHub reports them. Select a theme to see its issues, and select an issue to open it in Issues. **Issues completed today** counts the closes gwt took in today. **Delete theme** asks for confirmation, then closes the theme's GitHub Issue as not planned. The issues under it are kept, and reopening the Issue on GitHub brings the theme back.
 - Open **Logs**, **Index**, and **Env vars** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Individual agent stop/restart remain available through the existing controls.
 - The project footer shows the assigned Project Manager. The PM button in the
   project rail opens the agent ledger. Use the gear beside it to open Project
   Manager settings.
-- **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
+- **Works**, the list of agent terminals, opens in **Split view**; it is not a rail entry. It lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
 - Use **Team** in the agent ledger to register members and edit their display names and traits. Use **Agents** in the project rail for its assignment plans and session history.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
 - **Register** adds one member to the shared roster. Machine safety limits can lower the effective allocation.
@@ -2528,7 +2595,7 @@ an entry removes its copied policy on the next refresh.
 - A registered PM can send the `pm.agent.add` JSON operation with `name` and `agent_id` to add one member and receive its ID. Projects that use saved member profiles can select that ID with `issue.monitor.profiles.set`.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
-The project browser tab title, status bar, Works, and Agents show the same **Running**
+The project browser tab title, status bar, agent terminal list, and Agents show the same **Running**
 count from the project's agent-window status snapshot, including PM agent windows. Shells
 are excluded. The status mapping is:
 
@@ -2542,7 +2609,7 @@ are excluded. The status mapping is:
 **Team** counts enabled registered members, including the configured PM. **Busy** counts active implementation members; concurrent capacity excludes members holding a PM role. Member identities, enabled capacity, and confirmed
 planned-issue reassignments survive an app restart.
 
-Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
+The agent terminal list shows session-attributed input, cache and output usage, a thirty-minute activity graph,
 branch and verification facts. Unavailable measurements display **—**, including context remaining
 unless the provider reports it directly. Today totals use this project's measured conversations;
 account-wide usage is not copied into them. Individual PR information is not shown here.
