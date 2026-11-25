@@ -161,7 +161,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       const header = appNav(project);
       await header.getByRole('button', { name: 'Agents', exact: true }).click();
       await expect(project.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible();
-      await expect(project.getByText('registered members')).toBeVisible();
+      const registeredMembers = project.getByRole('meter', { name: 'Registered members', exact: true });
+      await expect(registeredMembers).toBeVisible();
       await header.getByRole('button', { name: 'Environments', exact: true }).click();
       await expect(project.getByRole('heading', { name: 'Execution environments', exact: true })).toBeVisible();
       await project.getByRole('button', { name: 'Accounts', exact: true }).click();
@@ -189,7 +190,7 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       // The PM view (design decision 29) is retired: no PM chat window, no
       // tab of it, and the rail's PM entry opens the Agents ledger.
       await project.locator('#op-pm-entry').click();
-      await expect(project.getByText('registered members')).toBeVisible();
+      await expect(registeredMembers).toBeVisible();
       await expect(project.locator('.pm-chat')).toHaveCount(0);
       await expect(project.getByRole('tab', { name: /^(Reports|Chat|Log|Progress|Decide)$/ })).toHaveCount(0);
 
