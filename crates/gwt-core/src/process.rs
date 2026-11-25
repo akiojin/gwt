@@ -420,9 +420,12 @@ pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     // The one sanctioned raw constructor; every other call site must go
     // through this helper (enforced via clippy.toml disallowed-methods).
     #[allow(clippy::disallowed_methods)]
-    let mut command = Command::new(program);
+    let mut command = Command::new(program.as_ref());
     configure_hidden_command(&mut command);
     scrub_git_env(&mut command);
+    if is_git_program(program.as_ref()) {
+        command.env(GIT_OPTIONAL_LOCKS, "0");
+    }
     // Test subprocesses can fetch through production code as well as through
     // fixture helpers. Set their defaults at the common boundary (Issue #4426).
     #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
@@ -456,6 +459,9 @@ pub fn resolved_command(
     let plan = resolve_process_plan(request)?;
     let mut command = hidden_command(&plan.program);
     apply_resolved_std_plan(&mut command, &plan);
+    if is_git_program(plan.program.as_os_str()) && !plan_sets_env(&plan, GIT_OPTIONAL_LOCKS) {
+        command.env(GIT_OPTIONAL_LOCKS, "0");
+    }
     Ok(command)
 }
 
@@ -475,7 +481,30 @@ pub fn resolved_tokio_command(
     #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     command.envs(noninteractive_git_environment());
     apply_resolved_tokio_plan(&mut command, &plan);
+    if is_git_program(plan.program.as_os_str()) && !plan_sets_env(&plan, GIT_OPTIONAL_LOCKS) {
+        command.env(GIT_OPTIONAL_LOCKS, "0");
+    }
     Ok(command)
+}
+
+/// Issue #7327: gwt runs Git in managed worktrees concurrently with the
+/// agent's own `git add` / `git commit`. Read-only scans such as `git status`
+/// otherwise take `index.lock` to write refreshed stat info back, and the
+/// agent's commit then fails with "Unable to create index.lock: File exists".
+/// `GIT_OPTIONAL_LOCKS=0` disables only those optional locks; writes that need
+/// the index lock still take it.
+const GIT_OPTIONAL_LOCKS: &str = "GIT_OPTIONAL_LOCKS";
+
+fn is_git_program(program: &OsStr) -> bool {
+    std::path::Path::new(program)
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("git"))
+}
+
+fn plan_sets_env(plan: &ResolvedProcessPlan, key: &str) -> bool {
+    plan.env
+        .iter()
+        .any(|(name, _)| name.as_os_str() == OsStr::new(key))
 }
 
 fn apply_resolved_std_plan(command: &mut Command, plan: &ResolvedProcessPlan) {
@@ -712,6 +741,61 @@ mod tests {
                 "async test subprocess default: {key}"
             );
         }
+    }
+
+    /// Issue #7327 / #6214: a gwt read-only Git scan (`git status`) must not
+    /// take the optional `index.lock` to refresh stat info, or a concurrent
+    /// user `git commit` in the same managed worktree fails with
+    /// "Unable to create index.lock: File exists".
+    #[test]
+    fn gwt_git_scans_do_not_take_the_optional_index_lock() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        // An inherited opt-in must not leak into gwt's own scans.
+        let _optional = crate::test_support::ScopedEnvVar::set("GIT_OPTIONAL_LOCKS", "1");
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let output = hidden_command("git")
+                .args(args)
+                .current_dir(repo)
+                .env("GIT_OPTIONAL_LOCKS", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.join("tracked.txt"), "content\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&[
+            "-c",
+            "user.name=gwt",
+            "-c",
+            "user.email=gwt@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "seed",
+        ]);
+        // Same content, new mtime: the cached stat info is stale, so a
+        // status scan with optional locks enabled rewrites the index.
+        let file = std::fs::File::options()
+            .write(true)
+            .open(repo.join("tracked.txt"))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        drop(file);
+        let index_before = std::fs::read(repo.join(".git/index")).unwrap();
+
+        let output = run_git_logged(&["status", "--porcelain=v1"], Some(repo)).unwrap();
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(
+            std::fs::read(repo.join(".git/index")).unwrap(),
+            index_before,
+            "gwt's read-only git status refreshed the index under index.lock"
+        );
     }
 
     #[test]

@@ -988,6 +988,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         detail: Some("owner exit".into()),
         exit_confirmed: true,
         exit_code: Some(0),
+        hook_status: None,
     };
     assert!(!runtime
         .handle_project_owner_event(&a, 2, &identity, status)

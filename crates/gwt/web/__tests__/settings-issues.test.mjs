@@ -8,6 +8,7 @@ import { createInteractionGuard } from "../interaction-guard.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 import * as uiContent from "../ui-content.js";
 import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "../first-run-setup.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 const candidateChoices = {
@@ -122,6 +123,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
       terminal_queue_auto_refill_limit: 3, allowed_labels: ["auto-merge"] },
     catalog: { loaded: true, labels: [{ name: "auto-merge", color: "008800" }, { name: "bug", color: "ff0000" }] },
     send: message => sent.push(message),
+    autonomyControl: { element: Object.assign(document.createElement("span"), { textContent: "Running" }) },
   });
   assert.match(panel.textContent, /Project settings.*Project A/);
   assert.deepEqual([...panel.querySelectorAll("legend")].map(el => el.textContent), ["Launch control", "Refill", "Target"]);
@@ -132,7 +134,10 @@ test("Issues Settings keeps labels and values together and sends existing projec
   assert.equal(panel.querySelector(".settings-issues-capacity"), null);
   assert.equal(panel.querySelector('[aria-label="Auto-refill"]').closest("fieldset").querySelector("legend").textContent, "Refill");
   assert.equal(panel.querySelector('[aria-label="Allowed labels"]').closest("fieldset").querySelector("legend").textContent, "Target");
-  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Monitoring"]);
+  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Project", "Autonomous"]);
+  // Issue #7728 AC-2: monitoring has no switch of its own; the project stop/start replaces it.
+  assert.equal(panel.querySelector('[aria-label="Monitoring"]'), null);
+  assert.match(panel.querySelector('[data-settings-launch-action="project-autonomy"] > span:last-child').getAttribute("aria-description") || "", /Stopping halts new Issue assignments and the Project Manager patrol together/);
   const change = (name, value) => {
     const control = panel.querySelector(`[aria-label="${name}"]`);
     assert.ok(control, name);
@@ -150,10 +155,8 @@ test("Issues Settings keeps labels and values together and sends existing projec
   ]);
   change("Autonomous", true);
   assert.equal(panel.querySelector('[aria-label="Autonomous"]').checked, false, "wait for the confirmed server status");
-  change("Monitoring", false);
-  assert.deepEqual(sent.slice(-2), [
+  assert.deepEqual(sent.slice(-1), [
     { kind: "set_issue_monitor_autonomous_mode", enabled: true },
-    { kind: "set_issue_monitor_enabled", enabled: false },
   ], "Settings owns independent controls connected to the same project model");
 });
 
@@ -165,10 +168,10 @@ test("Settings launch controls retain their nodes and save once across status re
   render(panel, options);
   const launchControls = [...panel.querySelectorAll('[data-action]')];
   render(panel, { ...options, launchControls });
-  assert.equal(panel.querySelector('[aria-label="Monitoring"]'), launchControls[1]);
-  launchControls[1].checked = false;
-  launchControls[1].dispatchEvent(new Event("change"));
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_enabled", enabled: false }]);
+  assert.equal(panel.querySelector('[aria-label="Autonomous"]'), launchControls[0]);
+  launchControls[0].checked = true;
+  launchControls[0].dispatchEvent(new Event("change"));
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_autonomous_mode", enabled: true }]);
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
@@ -199,7 +202,8 @@ test("Project settings never writes capacity when opened, remounted or updated",
       launchControls: [...panel.querySelectorAll("[data-action]")] });
     assert.equal(panel.querySelectorAll('[aria-label^="Max active"], [aria-label="Apply Max active"], .settings-issues-capacity').length, 0);
     assert.doesNotMatch(panel.textContent, /This project allocation|Measuring capacity|All projects on this machine/);
-    assert.equal(panel.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]').length, 2);
+    assert.equal(panel.querySelectorAll('[data-action="monitor-autonomous"]').length, 1);
+    assert.equal(panel.querySelectorAll('[data-action="monitor-toggle"]').length, 0);
   }
   assert.deepEqual(sent, []);
 });
@@ -212,7 +216,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
-    ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
+    ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i],
     ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*default limit of 3/i],
     ["Allowed labels", /matching issues/i],
   ]) {
@@ -431,8 +435,9 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
     return () => { if (active) { active = false; activeTuning--; unsubscribe(); } };
   };
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", "createRepositoryLabelChip", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason, uiContent.createRepositoryLabelChip);
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", "createRepositoryLabelChip", "SETUP_REVIEW_STEPS", "firstRunSetupUrlPath", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason, uiContent.createRepositoryLabelChip,
+    SETUP_REVIEW_STEPS, firstRunSetupUrlPath);
   const surface = factory({ send: message => sent.push(message), rosterModel, tuningController: { model: tuningModel },
     scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); },
     createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },
@@ -479,7 +484,7 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A");
   assert.equal(document.querySelector('[aria-label="bug"]').checked, false, "server status replaces an unconfirmed selection");
   assert.equal(document.querySelector('[aria-label="Autonomous"]').checked, false);
-  assert.equal(document.querySelector('[aria-label="Monitoring"]').checked, false);
+  assert.equal(document.querySelector('[aria-label="Monitoring"]'), null);
   const rosterReads = () => sent.filter(message => message.kind === "agent_roster");
   const beforeProfileAck = rosterReads().length;
   const ack = { project_root: "/A", request_id: 701, profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices };
@@ -703,7 +708,7 @@ test("Agents Settings binds registered members and keeps tool choices fixed", ()
   assert.equal(panel.querySelector('[aria-label="Move up Birch"]').textContent, "Move up Birch");
   assert.ok(panel.querySelector('[aria-label="Remove Birch"]'));
 
-  assert.deepEqual(sent.at(-1).profiles[0], { agent_member_id: "b", agent_id: "codex", docker_service: null, prefer_for: [], session_mode: "Normal", runtime_target: "Host", windows_shell: null, skip_permissions: false, fast_mode: false });
+  assert.deepEqual(sent.at(-1).profiles[0], { agent_member_id: "b", agent_id: "codex", docker_service: null, docker_lifecycle_intent: "Connect", prefer_for: [], session_mode: "Normal", runtime_target: "Host", runtime_inherit: false, windows_shell: null, skip_permissions: false, fast_mode: false });
   selectValue(member, "c"); member.dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(sent.at(-1).profiles[0].agent_id, "claude");
   assert.equal(Object.hasOwn(sent.at(-1).profiles[0], "model"), false);
@@ -715,17 +720,65 @@ test("Agents Settings binds registered members and keeps tool choices fixed", ()
   assert.equal(sent.at(-1).profiles[1].agent_id, "codex");
 });
 
-test("Agents Settings preserves unavailable and resting members without provider substitution", () => {
+test("Agents Settings preserves unavailable and legacy members without provider substitution", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, { choices: candidateChoices,
-    availableMembers: [{ member_id: "rest", name: "Resting member", agent_id: "codex", enabled: false }],
+    availableMembers: [{ member_id: "rest", name: "Legacy member", agent_id: "codex", enabled: false }],
     profiles: [{ agent_member_id: "rest", agent_id: "codex" }, { agent_member_id: "missing", agent_id: "claude", model: "saved-model" }],
     send: () => assert.fail("rendering must not substitute a member") });
-  assert.match(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Resting/);
+  assert.match(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Legacy member/);
+  assert.doesNotMatch(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Resting/);
   assert.match(panel.querySelector('[data-agent-member-id="missing"]').textContent, /unavailable/i);
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="agent_member_id"]').value, "missing");
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-member-tuning-field="model"]').disabled, true);
+});
+
+test("Issue #7729 AC-4: a candidate names Inherit, Host or Docker, its service and its lifecycle", () => {
+  const { document, Event } = parseHTML('<section id="docker"></section><section id="plain"></section>');
+  const panel = document.getElementById("docker"), plain = document.getElementById("plain"), sent = [];
+  const render = load("renderAgentsSettingsPanel");
+  const change = (control, value) => { selectValue(control, value); control.dispatchEvent(new Event("change", { bubbles: true })); };
+  render(panel, { profiles: [{ agent_member_id: "m-codex", agent_id: "codex", runtime_target: "Docker", docker_service: "worker", docker_lifecycle_intent: "Restart" }],
+    choices: candidateChoices, send: message => sent.push(message) });
+  const runtime = panel.querySelector('[data-profile-field="runtime_target"]');
+  assert.equal(runtime.getAttribute("aria-label"), "Runs on codex");
+  assert.deepEqual([...runtime.options].map(option => [option.value, option.textContent]),
+    [["Inherit", "Inherit (this project's last launch)"], ["Host", "Host"], ["Docker", "Docker"]]);
+  assert.equal(runtime.value, "Docker");
+  const service = panel.querySelector('[data-profile-field="docker_service"]');
+  const lifecycle = panel.querySelector('[data-profile-field="docker_lifecycle_intent"]');
+  assert.deepEqual([...lifecycle.options].map(option => [option.value, option.textContent]), [
+    ["Connect", "Connect only"], ["Start", "Start then launch"], ["Restart", "Restart then launch"],
+    ["Recreate", "Recreate then launch"], ["CreateAndStart", "Create and start then launch"],
+  ]);
+  assert.equal(lifecycle.value, "Restart");
+  assert.equal(service.closest("label").hidden, false);
+  assert.equal(lifecycle.closest("label").hidden, false);
+
+  change(lifecycle, "Recreate");
+  assert.deepEqual([sent.at(-1).profiles[0].runtime_target, sent.at(-1).profiles[0].runtime_inherit,
+    sent.at(-1).profiles[0].docker_service, sent.at(-1).profiles[0].docker_lifecycle_intent], ["Docker", false, "worker", "Recreate"]);
+
+  change(runtime, "Inherit");
+  assert.equal(sent.at(-1).profiles[0].runtime_inherit, true);
+  assert.equal(sent.at(-1).profiles[0].runtime_target, "Docker", "the place it last named is kept for the day it stops inheriting");
+  assert.equal(service.closest("label").hidden, true, "an inheriting candidate names no service");
+  assert.equal(lifecycle.closest("label").hidden, true);
+  assert.match(panel.querySelector("[data-profile-runtime-note]").textContent, /where this project's last launch ran/);
+
+  // Item 197 (1): without a Docker setup, Docker is not offered at all.
+  render(plain, { profiles: [{ agent_member_id: "m-codex", agent_id: "codex", runtime_inherit: true, runtime_target: "Host" },
+    { agent_member_id: "m-claude", agent_id: "claude", runtime_target: "Docker", docker_service: "gone" }],
+    choices: { ...candidateChoices, docker_services: [], default_docker_service: null }, send: message => sent.push(message) });
+  const [inherit, saved] = plain.querySelectorAll('[data-profile-field="runtime_target"]');
+  assert.deepEqual([...inherit.options].map(option => option.value), ["Inherit", "Host"]);
+  assert.equal(inherit.value, "Inherit");
+  assert.equal(plain.querySelector('[data-profile-field="docker_service"]').closest("label").hidden, true);
+  // Item 197 (2): a saved Docker choice is shown as saved, and the fallback is named.
+  assert.deepEqual([...saved.options].map(option => option.value), ["Inherit", "Host", "Docker"]);
+  assert.equal(saved.value, "Docker");
+  assert.match(plain.querySelectorAll("[data-profile-runtime-note]")[1].textContent, /no Docker setup.*host/i);
 });
 
 test("candidate vector omits implementation tuning even when inherited from its saved profile", () => {

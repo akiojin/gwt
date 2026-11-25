@@ -58,7 +58,9 @@ pub use tiers::{
     IssueMonitorTierProfileProjection, IssueMonitorTierRecord, IssueMonitorTierSelection,
     IssueMonitorTierSelectionProjection,
 };
+mod environments;
 mod quota;
+pub use environments::{normalize_project_execution_environments, ProjectExecutionEnvironment};
 pub(crate) use quota::provider_quota_reset_label;
 use quota::{PROVIDER_QUOTA_UNKNOWN_RESET_AT, PROVIDER_QUOTA_UNKNOWN_RESET_LABEL};
 
@@ -1103,6 +1105,11 @@ pub struct IssueMonitorPrefs {
     pub terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     #[serde(default)]
     pub terminal_queue_auto_refill_limit: usize,
+    /// Issue #7741: the execution environments this project may use, in
+    /// priority order. Empty means the list was never saved; launches then
+    /// choose exactly as they did before the list existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_environments: Vec<ProjectExecutionEnvironment>,
     /// One-shot, project-scoped migration marker. The serde default is
     /// intentionally the numeric default (0) for pre-migration JSON, while
     /// [`Default`] uses the current version for genuinely fresh projects.
@@ -1439,6 +1446,7 @@ impl Default for IssueMonitorPrefs {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            execution_environments: Vec::new(),
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
@@ -1563,6 +1571,7 @@ impl IssueMonitorPrefs {
             "launch_tiers": self.launch_tiers,
             "terminal_queue_auto_refill": self.terminal_queue_auto_refill,
             "terminal_queue_auto_refill_limit": self.terminal_queue_auto_refill_limit,
+            "execution_environments": self.execution_environments,
             "urgent_queue_limit": self.urgent_queue.limit,
             "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
                 "version": drain.version,
@@ -1589,19 +1598,23 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
-    /// Planned members and exact deliveries use their own registered tool;
-    /// an unplanned Issue uses the primary's tool.
+    /// Candidates for one Issue. Registered agents start with the project's
+    /// environment in priority order (Issue #7647); a project that never
+    /// saved a list keeps each agent on the tool it was registered with, the
+    /// planned agent's tool or else the primary's.
     pub fn registered_launch_profiles_for_issue(
         &self,
         issue_number: u64,
     ) -> Vec<IssueMonitorLaunchProfile> {
+        self.registered_launch_profiles_with_tool_filter(issue_number, |_| true)
+    }
+
+    pub fn registered_launch_profiles_with_tool_filter(
+        &self,
+        issue_number: u64,
+        usable: impl Fn(&str) -> bool,
+    ) -> Vec<IssueMonitorLaunchProfile> {
         let pool = self.launch_profile_pool();
-        let Some(primary) = pool
-            .first()
-            .filter(|profile| profile.agent_member_id.is_some())
-        else {
-            return pool;
-        };
         let host = crate::process::current_hostname();
         let delivery_member = self
             .pending_launch_deliveries
@@ -1615,52 +1628,74 @@ impl IssueMonitorPrefs {
             .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
         let scheduled =
             delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
+        if let Some(roster) = &self.agent_roster {
+            let Ok(store) = crate::execution_environments::load() else {
+                return Vec::new();
+            };
+            let project_order = self.environment_tools().is_some();
+            if project_order
+                || roster.members.iter().any(|member| {
+                    store.agent_priority_ids(&member.agent_member_id).is_some()
+                        && self.registered_member_can_take(member, scheduled, issue_number)
+                })
+            {
+                return roster
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        self.registered_member_can_take(member, scheduled, issue_number)
+                    })
+                    .filter_map(|member| {
+                        let candidate =
+                            self.member_candidate_with_store(&store, &pool, member, &usable)?;
+                        (project_order
+                            || scheduled.is_some()
+                            || store.agent_priority_ids(&member.agent_member_id).is_some()
+                            || pool.first().is_some_and(|primary| {
+                                primary.agent_member_id.is_some()
+                                    && primary.agent_id == candidate.agent_id
+                            }))
+                        .then_some(candidate)
+                    })
+                    .collect();
+            }
+        }
+        let Some(primary) = pool
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some())
+        else {
+            return self.environment_candidates(pool);
+        };
         // Issue #7027: every planned member launches with its own registered
         // tool, so an idle member of another pooled tool can take queued work.
-        let tool = normalize_issue_monitor_provider(
-            &scheduled
-                .and_then(|id| {
-                    pool.iter()
-                        .find(|profile| profile.agent_member_id.as_deref() == Some(id))
-                })
-                .unwrap_or(primary)
-                .agent_id,
-        );
-        pool.iter()
+        let primary_tool = normalize_issue_monitor_provider(&primary.agent_id);
+        self.agent_roster
+            .iter()
+            .flat_map(|roster| &roster.members)
+            .filter(|member| self.registered_member_can_take(member, scheduled, issue_number))
+            .filter_map(|member| self.legacy_member_candidate(&pool, member))
             .filter(|profile| {
-                normalize_issue_monitor_provider(&profile.agent_id) == tool
-                    && scheduled.is_none_or(|scheduled| {
-                        profile.agent_member_id.as_deref() == Some(scheduled)
-                    })
-                    && self.agent_roster.as_ref().is_some_and(|roster| {
-                        roster.members.iter().any(|member| {
-                            profile.agent_member_id.as_deref()
-                                == Some(member.agent_member_id.as_str())
-                                && member.implementation_eligible()
-                                && (member.enabled
-                                    || member.assignment.as_ref().is_some_and(|assignment| {
-                                        assignment.issue_number == Some(issue_number)
-                                            && assignment.project_key.as_deref().is_none_or(|key| {
-                                                self.agent_registry_project_key.as_deref()
-                                                    == Some(key)
-                                            })
-                                    }))
-                                && member
-                                    .agent_id
-                                    .as_deref()
-                                    .and_then(normalize_issue_monitor_provider)
-                                    == tool
-                                && member.assignment.as_ref().is_none_or(|assignment| {
-                                    assignment.issue_number == Some(issue_number)
-                                        && assignment.project_key.as_deref().is_none_or(|key| {
-                                            self.agent_registry_project_key.as_deref() == Some(key)
-                                        })
-                                })
-                        })
-                    })
+                scheduled.is_some()
+                    || normalize_issue_monitor_provider(&profile.agent_id) == primary_tool
             })
-            .cloned()
             .collect()
+    }
+
+    fn registered_member_can_take(
+        &self,
+        member: &crate::agent_names::AgentMember,
+        scheduled: Option<&str>,
+        issue_number: u64,
+    ) -> bool {
+        scheduled.is_none_or(|id| id == member.agent_member_id)
+            && member.implementation_eligible()
+            && member.assignment.as_ref().is_none_or(|assignment| {
+                assignment.issue_number == Some(issue_number)
+                    && assignment
+                        .project_key
+                        .as_deref()
+                        .is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))
+            })
     }
 
     /// SPEC #3914 FR-001: replace the pool and keep `launch_profile` in sync
@@ -2325,6 +2360,8 @@ struct IssueMonitorLaunchProfileRepr {
     #[serde(default)]
     codex_fast_mode: bool,
     #[serde(default)]
+    runtime_inherit: bool,
+    #[serde(default)]
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
     docker_service: Option<String>,
@@ -2355,6 +2392,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
             skip_permissions: repr.skip_permissions,
             fast_mode: repr.fast_mode || legacy_fast_mode,
             codex_speed: repr.codex_speed,
+            runtime_inherit: repr.runtime_inherit,
             runtime_target: repr.runtime_target,
             docker_service: repr.docker_service,
             docker_lifecycle_intent: repr.docker_lifecycle_intent,
@@ -2388,6 +2426,13 @@ pub struct IssueMonitorLaunchProfile {
     /// Explicit Codex speed; old boolean settings intentionally remain Off.
     #[serde(default)]
     pub codex_speed: gwt_agent::CodexSpeed,
+    /// Issue #7729 AC-4 (SPEC #7007 item 197 (4)): the candidate does not
+    /// name where it runs. A launch then runs where this project's last
+    /// launch ran, and the three fields below are only what the form last
+    /// showed. See [`Self::resolve_inherited_runtime`]. Always written, so a
+    /// sparse `profiles.set` can carry the saved choice over like any field.
+    #[serde(default)]
+    pub runtime_inherit: bool,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -2418,11 +2463,38 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             // decide a Claude profile's Fast Mode.
             fast_mode: config.fast_mode,
             codex_speed: config.codex_speed,
+            runtime_inherit: false,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
             windows_shell: config.windows_shell,
             prefer_for: Vec::new(),
+        }
+    }
+}
+
+impl IssueMonitorLaunchProfile {
+    /// Issue #7729 AC-4 (item 197 (3) and (4)): settle where an inheriting
+    /// candidate runs before it starts a session. `previous` is this
+    /// project's last launch; with none, the candidate runs on the host. A
+    /// candidate that names its place is left as it is. The launch still
+    /// falls back to the host when it asks for Docker in a project that has
+    /// no Docker setup (item 197 (2)).
+    pub fn resolve_inherited_runtime(&mut self, previous: Option<&LaunchWizardPreviousProfile>) {
+        if !self.runtime_inherit {
+            return;
+        }
+        match previous {
+            Some(previous) => {
+                self.runtime_target = previous.runtime_target;
+                self.docker_service = previous.docker_service.clone();
+                self.docker_lifecycle_intent = previous.docker_lifecycle_intent;
+            }
+            None => {
+                self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+                self.docker_service = None;
+                self.docker_lifecycle_intent = Default::default();
+            }
         }
     }
 }
@@ -2610,7 +2682,7 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 14] = [
     "agent_member_id",
     "model",
     "reasoning",
@@ -2619,6 +2691,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 13] = [
     "skip_permissions",
     "fast_mode",
     "codex_speed",
+    "runtime_inherit",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -4040,6 +4113,7 @@ fn usage_state_label(state: &gwt_core::usage::UsageState) -> &'static str {
         UsageState::NoData => "no_data",
         UsageState::Unavailable { .. } => "unavailable",
         UsageState::Stale { .. } => "stale",
+        UsageState::Unknown { .. } => "unknown",
     }
 }
 
@@ -4173,6 +4247,10 @@ pub struct IssueMonitorStatusView {
     pub terminal_queue_auto_refill: bool,
     #[serde(default)]
     pub terminal_queue_auto_refill_limit: usize,
+    /// Issue #7813 AC-2: why Auto-refill adds nothing now, as in
+    /// `terminal_queue_refill.hold`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_queue_refill_hold: Option<IssueMonitorRefillHold>,
     #[serde(default)]
     pub unqueued_open_count: usize,
     #[serde(default)]
@@ -4378,6 +4456,9 @@ pub struct IssueMonitorAgentStatus {
     pub label_excluded_count: usize,
     #[serde(default)]
     pub label_excluded_issues: Vec<u64>,
+    /// Issue #7845 AC-3: open sub-issues the inbox did not admit, and why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_issue_exclusions: Vec<IssueMonitorSubIssueExclusion>,
     /// Issue #4413 AC-1: where these numbers came from. See
     /// [`IssueMonitorStatusSource`]; absent in pre-#4413 publications, which
     /// only a live monitor could have written.
@@ -4612,6 +4693,13 @@ pub struct IssueMonitorAgentStatus {
     /// instead of the queue head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_occupancy: Option<IssueMonitorSlotOccupancy>,
+    /// Issue #7733 AC-2: how this host's terminal queue is measured against
+    /// the Auto-refill limit. `counted` and `uncounted` together are exactly
+    /// the membership `issue.monitor.queue.list` reports, so an empty `queue`
+    /// next to a populated terminal queue is explained member by member.
+    /// Absent from a publisher that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_queue_refill: Option<IssueMonitorTerminalQueueRefill>,
 }
 
 impl IssueMonitorAgentStatus {
@@ -4621,6 +4709,61 @@ impl IssueMonitorAgentStatus {
             view.needs_human_count = self.needs_human_count;
         }
     }
+}
+
+/// Issue #7733 AC-2: the terminal queue measured against the Auto-refill limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTerminalQueueRefill {
+    pub enabled: bool,
+    pub limit: usize,
+    /// Members that use Auto-refill capacity, in queue order.
+    pub counted: Vec<u64>,
+    /// Members that cannot launch and therefore use no capacity.
+    pub uncounted: Vec<IssueMonitorRefillUncounted>,
+    /// Why Auto-refill adds nothing now, or `null` while it has capacity.
+    pub hold: Option<IssueMonitorRefillHold>,
+}
+
+/// Issue #7733 AC-2: one terminal queue member outside the Auto-refill count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorRefillUncounted {
+    pub issue_number: u64,
+    pub reason: IssueMonitorRefillExemption,
+}
+
+/// Issue #7733: why a terminal queue member uses no Auto-refill capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorRefillExemption {
+    /// Issue #7813: launched or launching; it holds a slot, not a queue place.
+    Active,
+    LabelExcluded,
+    /// Issue #7508: delivery is parked on an open PR.
+    OpenPrHold,
+    AwaitingMeasurement,
+    AwaitingVerification,
+    NeedsHuman,
+}
+
+/// Issue #7733 AC-2: the gate that keeps Auto-refill from adding an Issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorRefillHold {
+    Disabled,
+    /// `counted` already fills `limit`.
+    LimitReached,
+    /// Issue #7813: the last Issues scan left capacity but found no eligible
+    /// Backlog issue to add.
+    NoCandidates,
+}
+
+/// Issue #7845 AC-3: an open sub-issue without the queue label that the
+/// inbox did not admit through its parent, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorSubIssueExclusion {
+    pub issue_number: u64,
+    pub parent_number: u64,
+    pub reason: String,
 }
 
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
@@ -5194,7 +5337,7 @@ pub fn provider_reauthentication_required_message(agent_id: &str) -> String {
     let provider = match usage_provider_for_agent(agent_id) {
         Some(gwt_core::usage::UsageProvider::Codex) => "Codex",
         Some(gwt_core::usage::UsageProvider::ClaudeCode) => "Claude Code",
-        None => agent_id,
+        _ => agent_id,
     };
     format!(
         "{provider} reauthentication required; sign in to the provider CLI, then retry the Issue."
@@ -5404,6 +5547,12 @@ fn attempt_count_is_zero(attempts: &u32) -> bool {
     *attempts == 0
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousReviewFailure {
+    pub reviewed_sha: String,
+    pub criteria: Vec<crate::issue_monitor_review::FailedReviewCriterion>,
+}
+
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousIssueSummary {
@@ -5436,6 +5585,12 @@ pub struct AutonomousIssueSummary {
     /// its current head has no PASS verdict from the independent review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_hold: Option<String>,
+    /// Independent review evidence for the currently reviewed SHA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_failure: Option<AutonomousReviewFailure>,
+    /// Issue #7810 AC-2: the inputs keeping the reviewed PR's gate closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_hold: Option<AutonomousGateHold>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -5477,6 +5632,13 @@ pub struct IssueMonitorState {
     allowed_labels: Vec<String>,
     #[serde(default)]
     label_excluded_issues: BTreeSet<u64>,
+    /// Issue #7845: GitHub's sub-issue parent of each Issue in the last live
+    /// list. A scan observation, never stored in prefs.
+    #[serde(skip)]
+    issue_parents: BTreeMap<u64, u64>,
+    /// Issue #7845 AC-3: open sub-issues the last scan left out of the inbox.
+    #[serde(skip)]
+    sub_issue_exclusions: Vec<IssueMonitorSubIssueExclusion>,
     pub config: IssueMonitorConfig,
     #[serde(default)]
     max_active_agents_mode: IssueMonitorMaxActiveMode,
@@ -5546,6 +5708,11 @@ pub struct IssueMonitorState {
     #[serde(default)]
     terminal_queue_exclusions: BTreeMap<String, BTreeSet<u64>>,
     terminal_queue_auto_refill_limit: usize,
+    /// Issue #7813: the last refill pass left capacity with nothing to add.
+    #[serde(skip)]
+    terminal_queue_refill_starved: bool,
+    #[serde(default)]
+    execution_environments: Vec<ProjectExecutionEnvironment>,
     /// SPEC #3914 FR-001: the ordered launch candidate pool (see
     /// [`IssueMonitorPrefs::launch_profile_pool`]).
     #[serde(default)]
@@ -6052,7 +6219,7 @@ pub fn autonomous_eligibility(
             gwt_git::branch_protection::BranchProtectionStatus::Unreadable(detail) => {
                 format!("branch protection could not be verified (permissions): {detail}")
             }
-            _ => "branch protection absent or structurally insufficient".to_string(),
+            _ => "branch protection absent or structurally insufficient: the base branch needs at least one required status check (repository.required_checks.update) and force pushes disabled (repository.branch_protection.update with allow_force_pushes:false)".to_string(),
         };
         return EligibilityDecision::NotReady(reason);
     }
@@ -6258,7 +6425,30 @@ pub struct AutonomousIssueRecord {
     /// off. A new head SHA starts the count over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_attempts: Option<AutonomousReviewAttempts>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_evidence_reviews: Vec<MergedEvidenceReview>,
+    /// Issue #7810 AC-2: the gate inputs that kept a reviewed PR unmerged on
+    /// the last consecutive scans. Cleared when the gate opens or a new
+    /// review binds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_hold: Option<AutonomousGateHold>,
 }
+
+/// Issue #7810 AC-2: consecutive gate evaluations that kept a reviewed PR
+/// unmerged, and the inputs that closed the gate on the last one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousGateHold {
+    pub reason: String,
+    /// RFC3339 of the first evaluation in this closed run.
+    pub since: String,
+    /// Closed evaluations in a row, this one included.
+    pub scans: u32,
+}
+
+/// Issue #7810 AC-2: closed gate evaluations in a row before the Issue is
+/// parked for a human. A gate re-reads at most once a minute while CI runs,
+/// so this is at least two hours of a closed gate.
+pub const AUTONOMOUS_GATE_HOLD_MAX_SCANS: u32 = 120;
 
 /// Issue #4815: the review-dispatch half of the retry ladder, keyed by the
 /// reviewed SHA.
@@ -6277,6 +6467,8 @@ pub struct AutonomousReviewAttempts {
     /// verdict, so the SHA is not reviewed again until the PR head moves.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub verdict_failed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_criteria: Vec<crate::issue_monitor_review::FailedReviewCriterion>,
 }
 
 /// Issue #4815: what recording a failed review window did.
@@ -6674,10 +6866,64 @@ pub struct AutonomousReviewDispatch {
     pub reviewed_sha: String,
     pub required_criteria: Vec<String>,
     pub diff: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_evidence: Option<MergedEvidenceReviewDispatch>,
     /// SPEC #3200 Option A: the work branch kind, so the GUI spawns the review
     /// agent in the implementation agent's existing work-branch worktree.
     #[serde(default)]
     pub linked_issue_kind: LinkedIssueKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergedEvidenceReviewDispatch {
+    pub review: MergedEvidenceReview,
+    pub verdict_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergedEvidenceReview {
+    pub authorization_comment_id: u64,
+    pub evidence_revision: String,
+    pub reviewed_sha: String,
+    pub previous_fail_id: String,
+    verdict_token_hash: String,
+    pub outcome: MergedEvidenceReviewOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergedEvidenceReviewOutcome {
+    Pending,
+    Interrupted,
+    Fail,
+    Pass,
+}
+
+pub(crate) fn valid_merged_evidence_revision(revision: &str) -> bool {
+    let Some((kind, id)) = revision.split_once(':') else {
+        return false;
+    };
+    match kind {
+        "comment" => id
+            .parse::<u64>()
+            .is_ok_and(|number| number > 0 && number.to_string() == id),
+        "board" => uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id),
+        "verify" => id.strip_prefix("vat-").is_some_and(|id| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        }),
+        _ => false,
+    }
+}
+
+pub(crate) fn merged_evidence_authorization_text(
+    pr_number: u64,
+    sha: &str,
+    revision: &str,
+) -> String {
+    format!("I authorize one fresh independent evidence review of merged PR #{pr_number} at HEAD `{sha}`, using updated evidence revision `{revision}`.")
 }
 
 /// Issue #4117: one independent review window the monitor dispatched or
@@ -6774,15 +7020,40 @@ pub enum AutonomousFailureOutcome {
 }
 
 impl AutonomousIssueRecord {
-    fn is_wait_control_tombstone_only(&self) -> bool {
-        self.wait_control.as_ref().is_some_and(|control| {
-            control.ended
-                && self
-                    == &Self {
-                        wait_control: Some(control.clone()),
-                        ..Self::new(self.issue_number)
-                    }
-        })
+    fn pending_merged_evidence_review(&self) -> Option<&MergedEvidenceReview> {
+        self.merged_evidence_reviews
+            .last()
+            .filter(|review| review.outcome == MergedEvidenceReviewOutcome::Pending)
+    }
+
+    pub(crate) fn failed_review_veto(&self) -> bool {
+        self.review_passed == Some(false)
+            || self
+                .merged_evidence_reviews
+                .last()
+                .is_some_and(|review| review.outcome != MergedEvidenceReviewOutcome::Pass)
+    }
+
+    fn end_merged_evidence_review(&mut self, outcome: MergedEvidenceReviewOutcome) {
+        if let Some(review) = self.merged_evidence_reviews.last_mut() {
+            if review.outcome == MergedEvidenceReviewOutcome::Pending {
+                review.outcome = outcome;
+            }
+        }
+    }
+    fn is_autonomous_history_only(&self) -> bool {
+        let has_history = self.wait_control.is_some() || !self.merged_evidence_reviews.is_empty();
+        has_history
+            && self
+                .wait_control
+                .as_ref()
+                .is_none_or(|control| control.ended)
+            && self
+                == &Self {
+                    wait_control: self.wait_control.clone(),
+                    merged_evidence_reviews: self.merged_evidence_reviews.clone(),
+                    ..Self::new(self.issue_number)
+                }
     }
 
     fn mark_cancelled_claim_phase(&mut self, authority_epoch: u64) {
@@ -6881,6 +7152,8 @@ impl AutonomousIssueRecord {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
+            gate_hold: None,
             cancelled_claim_phase: None,
         }
     }
@@ -6892,8 +7165,14 @@ pub const AUTO_MERGE_LABEL: &str = "auto-merge";
 
 /// Whether `issue` carries the [`AUTO_MERGE_LABEL`] (case-insensitive).
 pub fn issue_has_auto_merge_label(issue: &IssueMonitorIssue) -> bool {
-    issue
-        .labels
+    labels_opt_into_autonomy(&issue.labels)
+}
+
+/// The per-Issue half of the two-stage autonomy opt-in, read from a label
+/// list. The Monitor's gate and the Issue detail (Issue #7729 AC-1) both ask
+/// this one function, so the screen can never name a different mark.
+pub fn labels_opt_into_autonomy(labels: &[String]) -> bool {
+    labels
         .iter()
         .any(|label| label.eq_ignore_ascii_case(AUTO_MERGE_LABEL))
 }
@@ -7156,12 +7435,9 @@ fn finish_issue_monitor_prefs_load(
         roster
             .validate()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if roster.enabled_count() != prefs.max_active_agents {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Agent roster and project capacity disagree",
-            ));
-        }
+        // The old limit counted only enabled members. All registered members
+        // now contribute to capacity, including those saved as resting.
+        prefs.max_active_agents = roster.enabled_count();
     }
     if machine_managed_monitor_prefs(path) {
         // Cache only project bytes. The machine policy may change without any
@@ -8908,6 +9184,8 @@ impl IssueMonitorState {
             active_launches: Vec::new(),
             allowed_labels: Vec::new(),
             label_excluded_issues: BTreeSet::new(),
+            issue_parents: BTreeMap::new(),
+            sub_issue_exclusions: Vec::new(),
             priority_order: Vec::new(),
             priority_launch_now: None,
             priority_reason_note: None,
@@ -8922,6 +9200,8 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: false,
             terminal_queue_exclusions: BTreeMap::new(),
             terminal_queue_auto_refill_limit: 0,
+            terminal_queue_refill_starved: false,
+            execution_environments: Vec::new(),
             launch_profiles: Vec::new(),
             launch_auto: false,
             launch_tiers: Vec::new(),
@@ -9030,6 +9310,7 @@ impl IssueMonitorState {
         state.terminal_queue_auto_refill = prefs.terminal_queue_auto_refill;
         state.terminal_queue_exclusions = prefs.terminal_queue_exclusions;
         state.terminal_queue_auto_refill_limit = prefs.terminal_queue_auto_refill_limit;
+        state.execution_environments = prefs.execution_environments;
         state.last_scan_at = prefs.last_scan_at;
         state.last_scan_error = prefs.last_scan_error;
         state.agent_blackout_since = prefs.agent_blackout_since;
@@ -9226,6 +9507,7 @@ impl IssueMonitorState {
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
             terminal_queue_exclusions: self.terminal_queue_exclusions.clone(),
             terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
+            execution_environments: self.execution_environments.clone(),
             legacy_git_launch_failure_migration_version: self
                 .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profiles.first().cloned(),
@@ -9862,7 +10144,14 @@ impl IssueMonitorState {
                 pr_number,
             );
         }
-        self.autonomous_records.remove(&issue_number);
+        if self
+            .autonomous_record(issue_number)
+            .is_some_and(|record| !record.merged_evidence_reviews.is_empty())
+        {
+            self.clear_autonomous_record(issue_number);
+        } else {
+            self.autonomous_records.remove(&issue_number);
+        }
         self.autonomous_handoffs.retain(|handoff| {
             handoff.issue_number != issue_number
                 || (handoff.state == AutonomousHandoffState::Resumed
@@ -10247,15 +10536,29 @@ impl IssueMonitorState {
     /// SPEC #3200 T-016/T-022: reset attempt state once work merges or resolves.
     /// Keep an ended typed control so an old writer cannot restore its wait.
     pub fn clear_autonomous_record(&mut self, issue_number: u64) {
-        let Some(record) = self.autonomous_records.remove(&issue_number) else {
+        let Some(record) = self.autonomous_records.get(&issue_number) else {
             return;
         };
-        if let Some(mut control) = record.wait_control {
+        if record.failed_review_veto()
+            && !record.merged_evidence_reviews.is_empty()
+            && !self.issue_is_closed(issue_number)
+        {
+            return;
+        }
+        let Some(mut record) = self.autonomous_records.remove(&issue_number) else {
+            return;
+        };
+        record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+        let mut wait_control = record.wait_control;
+        if let Some(control) = &mut wait_control {
             control.ended = true;
+        }
+        if wait_control.is_some() || !record.merged_evidence_reviews.is_empty() {
             self.autonomous_records.insert(
                 issue_number,
                 AutonomousIssueRecord {
-                    wait_control: Some(control),
+                    wait_control,
+                    merged_evidence_reviews: record.merged_evidence_reviews,
                     ..AutonomousIssueRecord::new(issue_number)
                 },
             );
@@ -10409,11 +10712,14 @@ impl IssueMonitorState {
     /// backoff keeps the retry off the scan that just saturated the host.
     /// Applies in every mode: the failure is about the host, not the Issue.
     pub fn record_transient_launch_retry(&mut self, issue_number: u64, message: String, now: &str) {
-        let backoff = autonomous_retry_backoff_secs(
+        let mut backoff = autonomous_retry_backoff_secs(
             1,
             self.autonomous_tuning.retry_backoff_base_secs,
             self.autonomous_tuning.retry_backoff_cap_secs,
         );
+        if message == crate::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE {
+            backoff = backoff.max(crate::project_runtime::installation::MONITOR_STALE_RETRY_SECS);
+        }
         self.push_autonomous_notice(
             "info",
             issue_number,
@@ -10465,6 +10771,20 @@ impl IssueMonitorState {
             (Ok(now_t), Ok(nb_t)) => now_t >= nb_t,
             _ => true,
         }
+    }
+
+    fn spawn_admission_retry_held_at(&self, issue_number: u64, now: &str) -> bool {
+        self.spawn_admission_retry(issue_number) && !self.retry_ready(issue_number, now)
+    }
+
+    fn spawn_admission_retry(&self, issue_number: u64) -> bool {
+        self.autonomous_record(issue_number).is_some_and(|record| {
+            record.retry_not_before.is_some()
+                && record.last_failure_message.as_deref()
+                    == Some(
+                        crate::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE,
+                    )
+        })
     }
 
     /// Whether `issue_number` may relaunch at `now` on the saved pool: its
@@ -10939,8 +11259,14 @@ impl IssueMonitorState {
                     .get(&record.issue_number)
                     .is_some_and(|startup_record| &*record == *startup_record)
             {
-                record.phase = AutonomousPhase::Implementing;
-                record.review_passed = None;
+                if record.pending_merged_evidence_review().is_some() {
+                    record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+                    record.review_passed = Some(false);
+                    record.phase = AutonomousPhase::Idle;
+                } else {
+                    record.phase = AutonomousPhase::Implementing;
+                    record.review_passed = None;
+                }
                 record.last_heartbeat = Some(now.to_string());
                 resumed.push(record.issue_number);
             }
@@ -11040,6 +11366,61 @@ impl IssueMonitorState {
         // the authentication diagnosis or admit an automatic retry.
         record.retry_hold_provider = None;
         true
+    }
+
+    /// Issue #7810 AC-2: count one gate evaluation that kept `issue_number`'s
+    /// reviewed PR unmerged, recording which inputs closed it (shown in
+    /// `issue.monitor.status`). A changed reason raises a notice; reaching
+    /// [`AUTONOMOUS_GATE_HOLD_MAX_SCANS`] parks the Issue for a human, since
+    /// the gate has shown it will not open by itself. Returns whether it did.
+    pub fn record_gate_closed(
+        &mut self,
+        issue_number: u64,
+        reason: impl Into<String>,
+        now: &str,
+    ) -> bool {
+        let reason = reason.into();
+        let record = self.autonomous_record_mut(issue_number);
+        let previous = record.gate_hold.take();
+        let changed = previous.as_ref().is_none_or(|hold| hold.reason != reason);
+        let hold = AutonomousGateHold {
+            reason: reason.clone(),
+            since: previous
+                .as_ref()
+                .map_or_else(|| now.to_string(), |hold| hold.since.clone()),
+            scans: previous.map_or(0, |hold| hold.scans).saturating_add(1),
+        };
+        let scans = hold.scans;
+        let since = hold.since.clone();
+        record.gate_hold = Some(hold);
+        let pr = record
+            .pr_number
+            .map_or_else(|| "the PR".to_string(), |pr| format!("PR #{pr}"));
+        if changed {
+            self.push_autonomous_notice(
+                "warn",
+                issue_number,
+                format!("Issue #{issue_number} gate closed for {pr}: {reason}"),
+            );
+        }
+        if scans < AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            return false;
+        }
+        self.escalate_to_needs_human(
+            issue_number,
+            NeedsHumanKind::UserChoiceRequired,
+            format!(
+                "the autonomous gate kept {pr} unmerged for {scans} scans since {since}: {reason}; fix the closed input or merge it by hand"
+            ),
+        );
+        true
+    }
+
+    /// Issue #7810 AC-2: the gate opened or routed elsewhere.
+    pub fn clear_gate_hold(&mut self, issue_number: u64) {
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.gate_hold = None;
+        }
     }
 
     /// Issue #3944 AC-2: ask the PM to steer `issue_number` — a live launch the
@@ -12611,7 +12992,13 @@ impl IssueMonitorState {
     /// Refresh the user-configured fields from the latest committed snapshot.
     /// Explicit GUI/control mutations run after rebase, so they still win their
     /// transaction while stale scan writers cannot roll a newer config back.
-    fn refresh_disk_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
+    /// Returns the Auto-refill proposals to re-apply once the caller has
+    /// restored every inbox wait (Issue #7845): before that, a waiting member
+    /// still counts against the limit and would discard the proposal.
+    fn refresh_disk_owned_prefs(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+    ) -> Vec<IssueMonitorTerminalQueueEntry> {
         let urgent_proposals = self
             .terminal_queues
             .get(&crate::process::current_hostname())
@@ -12660,13 +13047,11 @@ impl IssueMonitorState {
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
         self.terminal_queue_auto_refill_limit = disk.terminal_queue_auto_refill_limit;
+        self.execution_environments = disk.execution_environments.clone();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.apply_terminal_queue_retirements();
         for entry in urgent_proposals {
             self.admit_observed_urgent(entry.number, &entry.queued_at);
-        }
-        for entry in refill_proposals {
-            self.auto_refill_terminal_queue(&[entry.number], &entry.queued_at);
         }
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
@@ -12730,6 +13115,7 @@ impl IssueMonitorState {
         // Issue #3478: the hook (and the answer operation) write handoffs from
         // outside this process, so disk is the inbound source for them.
         self.absorb_autonomous_handoffs(disk.autonomous_handoffs.iter().cloned());
+        refill_proposals
     }
 
     fn merge_provider_quota_holds_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
@@ -12949,9 +13335,11 @@ impl IssueMonitorState {
         let Some(account_id) = account.account_id.as_deref() else {
             return false;
         };
+        // Provider quota holds are kept for Codex and Claude only.
         let provider = match account.provider {
             gwt_core::usage::UsageProvider::Codex => "codex",
             gwt_core::usage::UsageProvider::ClaudeCode => "claude",
+            _ => return false,
         };
         // A queued snapshot from another GUI must not roll an account switch
         // back. Identity-only changes are confirmed by the local scan instead.
@@ -13924,6 +14312,18 @@ impl IssueMonitorState {
             .collect::<BTreeSet<_>>();
         self.merge_inflight_launches_from_disk_excluding(disk, &reopened_fences);
         let rejected_terminal_companions = self.rejected_disk_terminal_failure_companions(disk);
+        let merged_evidence_audit = self
+            .autonomous_records
+            .values()
+            .filter(|record| !record.merged_evidence_reviews.is_empty())
+            .map(|record| (record.issue_number, record.merged_evidence_reviews.clone()))
+            .chain(
+                disk.autonomous_records
+                    .iter()
+                    .filter(|record| !record.merged_evidence_reviews.is_empty())
+                    .map(|record| (record.issue_number, record.merged_evidence_reviews.clone())),
+            )
+            .collect::<Vec<_>>();
         match autonomous_policy {
             AutonomousRecordRebasePolicy::DiskAuthoritative => {
                 let protected_local_records = rejected_terminal_companions
@@ -13983,6 +14383,20 @@ impl IssueMonitorState {
             if !reopened_fences.contains(&number) {
                 if let Some(record) = self.autonomous_records.get_mut(&number) {
                     *record = cancellation;
+                }
+            }
+        }
+        for (issue, reviews) in merged_evidence_audit {
+            let audit = &mut self.autonomous_record_mut(issue).merged_evidence_reviews;
+            for review in reviews {
+                match audit.binary_search_by_key(&review.authorization_comment_id, |entry| {
+                    entry.authorization_comment_id
+                }) {
+                    Ok(index) if audit[index].outcome == MergedEvidenceReviewOutcome::Pending => {
+                        audit[index] = review
+                    }
+                    Ok(_) => {}
+                    Err(index) => audit.insert(index, review),
                 }
             }
         }
@@ -14057,7 +14471,7 @@ impl IssueMonitorState {
         // evidence, so join it before refreshing disk-owned replacement fields.
         self.merge_provider_quota_holds_from_prefs(disk);
         self.adopt_compensated_launch_deliveries(disk);
-        self.refresh_disk_owned_prefs(disk);
+        let refill_proposals = self.refresh_disk_owned_prefs(disk);
         self.enforce_provider_quota_hold_releases();
         for issue_number in restarted {
             if !self.merged_issues.contains(&issue_number) && !self.issue_is_closed(issue_number) {
@@ -14163,6 +14577,12 @@ impl IssueMonitorState {
         }
         self.reconcile_delivered_failures();
         self.enforce_measurement_waits();
+        // Issue #7845: re-apply the scan's Auto-refill proposals only now that
+        // every waiting member is exempt from the limit again.
+        for entry in refill_proposals {
+            self.auto_refill_terminal_queue(&[entry.number], &entry.queued_at);
+        }
+        self.apply_priority_order_to_queue();
         self.reconcile_terminal_queue();
     }
 
@@ -15932,6 +16352,7 @@ impl IssueMonitorState {
             terminal_queue: self.urgent_queue_projection(&host).entries,
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
             terminal_queue_auto_refill_limit: self.terminal_queue_auto_refill_limit,
+            terminal_queue_refill_hold: self.terminal_queue_refill().hold,
             unqueued_open_count,
             other_terminal_queue_count,
             active_count: self.active_count(),
@@ -15988,6 +16409,20 @@ impl IssueMonitorState {
                         steering: record.steering.clone(),
                         review_dispatch_hold: record.review_dispatch_hold.clone(),
                         merge_hold: record.merge_hold_reason(),
+                        review_failure: record
+                            .review_attempts
+                            .as_ref()
+                            .filter(|attempts| {
+                                record.review_passed == Some(false)
+                                    && record.reviewed_sha.as_deref()
+                                        == Some(attempts.reviewed_sha.as_str())
+                                    && !attempts.failed_criteria.is_empty()
+                            })
+                            .map(|attempts| AutonomousReviewFailure {
+                                reviewed_sha: attempts.reviewed_sha.clone(),
+                                criteria: attempts.failed_criteria.clone(),
+                            }),
+                        gate_hold: record.gate_hold.clone(),
                         pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
                             handoff_id: handoff.handoff_id.clone(),
                             question: handoff.question.clone(),
@@ -16258,6 +16693,7 @@ impl IssueMonitorState {
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
             label_excluded_issues: self.label_excluded_issues.iter().copied().collect(),
+            sub_issue_exclusions: self.sub_issue_exclusions.clone(),
             // Issue #4413: this is the live driver talking about itself. Only
             // a reader that failed to reach one may downgrade the provenance.
             source: IssueMonitorStatusSource::Daemon,
@@ -16544,6 +16980,7 @@ impl IssueMonitorState {
                 Some(IssueMonitorStallReason::MaxActiveSaturated)
             )
             .then(|| self.slot_occupancy()),
+            terminal_queue_refill: Some(self.terminal_queue_refill()),
         }
     }
 
@@ -16802,7 +17239,7 @@ impl IssueMonitorState {
         self.auto_close_merged_issues_enabled()
             && self
                 .autonomous_record(issue_number)
-                .is_none_or(|record| record.review_passed != Some(false))
+                .is_none_or(|record| !record.failed_review_veto())
     }
 
     /// A failed review vetoes completion; it does not establish a human decision.
@@ -16959,6 +17396,56 @@ impl IssueMonitorState {
                     .contains(&(criterion.id.clone(), criterion.text.clone()))
             }))
         .then_some(declaration)
+    }
+
+    fn delivered_verification_launch_held(&self, issue_number: u64) -> bool {
+        let delivered = (self.merged_deliveries.contains_key(&issue_number)
+            && self.merged_delivery_postdates_launch(issue_number))
+            || self
+                .merged_issue_settlements
+                .get(&issue_number)
+                .is_some_and(|settlement| {
+                    settlement.pr_number != 0
+                        && settlement
+                            .merge_sha
+                            .as_deref()
+                            .is_some_and(|sha| !sha.is_empty())
+                });
+        if !delivered {
+            return false;
+        }
+        let Some(item) = self.inbox_item(issue_number) else {
+            return false;
+        };
+        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+            item.issue.body.as_deref().unwrap_or(""),
+        );
+        let declaration = self.verification_declaration(issue_number);
+        !criteria.unchecked.is_empty()
+            && criteria.unchecked.iter().all(|id| {
+                let mut entries = criteria
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion, _)| criterion == id);
+                entries.next().is_some_and(|(_, text)| {
+                    let text = text.to_ascii_lowercase();
+                    let pm = text.split_once("確認主体:").is_some_and(|(_, verifier)| {
+                        verifier
+                            .trim_start()
+                            .split(['。', '、', '.', ' ', '　'])
+                            .next()
+                            == Some("pm")
+                    });
+                    text.contains("[main-verification]")
+                        || text.contains("(main-verification)")
+                        || pm
+                        || declaration.is_some_and(|declaration| {
+                            declaration.criteria.iter().any(|criterion| {
+                                criterion.id == *id && criterion.verifier.eq_ignore_ascii_case("PM")
+                            })
+                        })
+                }) && entries.next().is_none()
+            })
     }
 
     /// Issue #3917: Open rows whose work branch has a merged delivery that is
@@ -17841,6 +18328,7 @@ impl IssueMonitorState {
             IssueMonitorEffectPayload::AcquireClaim { issue_number, heartbeat_at, .. }
                 if self.launch_admission_is_held_at(heartbeat_at)
                     || self.cancelled_claim_awaits_runtime(*issue_number)
+                    || self.delivered_verification_launch_held(*issue_number)
                     || self.open_pr_launch_held(*issue_number)
                     || self.launch_source_exclusion(*issue_number).is_some()
                     || self.scan_dependency_exclusion(*issue_number).is_some()
@@ -18258,14 +18746,28 @@ impl IssueMonitorState {
         record.pr_number = Some(pr_number);
         record.reviewed_sha = Some(reviewed_sha.into());
         record.review_passed = None;
+        record.gate_hold = None;
     }
 
     /// SPEC #3200 FR-015: record the independent-review verdict for the in-flight
     /// reviewed SHA. The gate is evaluated on the next tick.
     pub fn record_review_verdict(&mut self, issue_number: u64, passed: bool) {
+        self.record_review_verdict_with_failures(issue_number, passed, Vec::new());
+    }
+
+    fn record_review_verdict_with_failures(
+        &mut self,
+        issue_number: u64,
+        passed: bool,
+        failed_criteria: Vec<crate::issue_monitor_review::FailedReviewCriterion>,
+    ) {
         let max = self.autonomous_tuning.max_attempts;
         let record = self.autonomous_record_mut(issue_number);
         record.review_passed = Some(passed);
+        // Issue #7810 AC-3: the previous attempt's failure is history once a
+        // fresh verdict arrives; the gate evaluates it anew.
+        record.last_failure_message = None;
+        record.gate_hold = None;
         let exhausted = if passed {
             // Issue #4815: a PASS ends the review ladder for this SHA.
             record.review_attempts = None;
@@ -18289,6 +18791,7 @@ impl IssueMonitorState {
                 last_failed_at: now.clone(),
                 not_before: None,
                 verdict_failed: true,
+                failed_criteria,
             });
             let pr = record
                 .pr_number
@@ -18502,6 +19005,9 @@ impl IssueMonitorState {
         if review_dispatch {
             return self.review_dispatch_exclusion_reason(issue_number);
         }
+        if self.delivered_verification_launch_held(issue_number) {
+            return Some("delivered Issue is awaiting PM or main verification".into());
+        }
         self.agent_schedule_launch_exclusion(issue_number)
             .map(|reason| format!("schedule admission: {reason}"))
     }
@@ -18657,6 +19163,17 @@ impl IssueMonitorState {
         head_sha: Option<&str>,
         now: &str,
     ) -> Option<AutonomousReviewDispatchHold> {
+        self.review_dispatch_hold_inner(issue_number, pr_number, head_sha, now, false)
+    }
+
+    fn review_dispatch_hold_inner(
+        &self,
+        issue_number: u64,
+        pr_number: u64,
+        head_sha: Option<&str>,
+        now: &str,
+        merged_evidence: bool,
+    ) -> Option<AutonomousReviewDispatchHold> {
         let reason = if let Some(reason) = self.review_dispatch_exclusion_reason(issue_number) {
             reason
         } else if let Some(drain) = self.update_drain() {
@@ -18664,8 +19181,15 @@ impl IssueMonitorState {
                 "update_drain for v{} holds new review windows; use {UPDATE_DRAIN_RELEASE_OPERATION}",
                 drain.version
             )
-        } else if let Some(reason) =
-            self.review_retry_hold_reason(issue_number, pr_number, head_sha, now)
+        } else if !merged_evidence
+            && self.autonomous_record(issue_number).is_some_and(|record| {
+                record.failed_review_veto() && !record.merged_evidence_reviews.is_empty()
+            })
+        {
+            "merged source is awaiting a passing independent evidence review".to_string()
+        } else if let Some(reason) = (!merged_evidence)
+            .then(|| self.review_retry_hold_reason(issue_number, pr_number, head_sha, now))
+            .flatten()
         {
             reason
         } else if let Some(window) = self
@@ -18804,6 +19328,15 @@ impl IssueMonitorState {
         let pr_number = record.pr_number?;
         let reviewed_sha = record.reviewed_sha.clone().unwrap_or_default();
         let message = review_failure_message(message.into());
+        if record.pending_merged_evidence_review().is_some() {
+            let record = self.autonomous_record_mut(issue_number);
+            record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+            record.review_passed = Some(false);
+            record.phase = AutonomousPhase::Idle;
+            record.last_failure_message = Some(message);
+            self.close_review_window(issue_number, IssueMonitorIdleKind::BindingDead);
+            return Some(AutonomousReviewFailureOutcome::Exhausted { attempt: 1 });
+        }
         let max = self.autonomous_tuning.max_attempts;
         let base = self.autonomous_tuning.retry_backoff_base_secs;
         let cap = self.autonomous_tuning.retry_backoff_cap_secs;
@@ -18823,6 +19356,7 @@ impl IssueMonitorState {
             last_failed_at: now.to_string(),
             not_before: not_before.clone(),
             verdict_failed: false,
+            failed_criteria: Vec::new(),
         });
         // The record returns to Implementing: the PR is still open and the
         // next scan re-detects it; the ladder decides when it is dispatched.
@@ -18941,11 +19475,102 @@ impl IssueMonitorState {
         dispatch: AutonomousReviewDispatch,
         now: &str,
     ) -> Result<(), AutonomousReviewDispatchHold> {
+        self.dispatch_review_inner(dispatch, now, false)
+    }
+
+    pub(crate) fn dispatch_merged_evidence_review(
+        &mut self,
+        mut dispatch: AutonomousReviewDispatch,
+        authorization_comment_id: u64,
+        evidence_revision: &str,
+        verdict_token: String,
+        now: &str,
+    ) -> Result<(), AutonomousReviewDispatchHold> {
+        let refused = || {
+            AutonomousReviewDispatchHold {
+            reason: "merged evidence review has no matching failed verdict or this evidence revision was already used".into(),
+            since: now.to_string(),
+        }
+        };
+        if !self.config.enabled
+            || !self.autonomous_mode()
+            || self.issue_is_closed(dispatch.issue_number)
+            || authorization_comment_id == 0
+            || !valid_merged_evidence_revision(evidence_revision)
+        {
+            return Err(refused());
+        }
+        let record = self
+            .autonomous_record(dispatch.issue_number)
+            .ok_or_else(refused)?;
+        let failed = record
+            .review_attempts
+            .as_ref()
+            .filter(|attempts| {
+                attempts.verdict_failed && attempts.reviewed_sha == dispatch.reviewed_sha
+            })
+            .ok_or_else(refused)?;
+        if record.review_passed != Some(false)
+            || record.pr_number != Some(dispatch.pr_number)
+            || record.reviewed_sha.as_deref() != Some(dispatch.reviewed_sha.as_str())
+            || record
+                .merged_evidence_reviews
+                .last()
+                .is_some_and(|review| authorization_comment_id <= review.authorization_comment_id)
+            || record.merged_evidence_reviews.iter().any(|review| {
+                review.reviewed_sha == dispatch.reviewed_sha
+                    && review.evidence_revision == evidence_revision
+            })
+        {
+            return Err(refused());
+        }
+        dispatch.required_criteria = record
+            .acceptance_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.ids.clone())
+            .unwrap_or_default();
+        let review = MergedEvidenceReview {
+            authorization_comment_id,
+            evidence_revision: evidence_revision.to_string(),
+            reviewed_sha: dispatch.reviewed_sha.clone(),
+            previous_fail_id: format!(
+                "{}:{}:{}:{}:{}",
+                dispatch.issue_number,
+                dispatch.pr_number,
+                dispatch.reviewed_sha,
+                failed.last_failed_at,
+                failed.count,
+            ),
+            outcome: MergedEvidenceReviewOutcome::Pending,
+            verdict_token_hash: format!("{:x}", Sha256::digest(verdict_token.as_bytes())),
+        };
+        let issue_number = dispatch.issue_number;
+        dispatch.merged_evidence = Some(MergedEvidenceReviewDispatch {
+            review: review.clone(),
+            verdict_token,
+        });
+        self.dispatch_review_inner(dispatch, now, true)?;
+        self.autonomous_record_mut(issue_number)
+            .merged_evidence_reviews
+            .push(review);
+        Ok(())
+    }
+
+    fn dispatch_review_inner(
+        &mut self,
+        dispatch: AutonomousReviewDispatch,
+        now: &str,
+        merged_evidence: bool,
+    ) -> Result<(), AutonomousReviewDispatchHold> {
         let issue_number = dispatch.issue_number;
         let pr_number = dispatch.pr_number;
-        if let Some(hold) =
-            self.review_dispatch_hold(issue_number, pr_number, Some(&dispatch.reviewed_sha), now)
-        {
+        if let Some(hold) = self.review_dispatch_hold_inner(
+            issue_number,
+            pr_number,
+            Some(&dispatch.reviewed_sha),
+            now,
+            merged_evidence,
+        ) {
             self.hold_review_dispatch(issue_number, hold.clone());
             return Err(hold);
         }
@@ -19010,6 +19635,21 @@ impl IssueMonitorState {
                     && record.pr_number == Some(dispatch.pr_number)
                     && record.reviewed_sha.as_deref() == Some(dispatch.reviewed_sha.as_str())
                     && record.review_passed.is_none()
+                    && match (
+                        record.pending_merged_evidence_review(),
+                        dispatch.merged_evidence.as_ref(),
+                    ) {
+                        (None, None) => true,
+                        (Some(review), Some(evidence)) => {
+                            review == &evidence.review
+                                && review.verdict_token_hash
+                                    == format!(
+                                        "{:x}",
+                                        Sha256::digest(evidence.verdict_token.as_bytes())
+                                    )
+                        }
+                        _ => false,
+                    }
             });
         let unstarted_window =
             self.review_windows
@@ -19249,6 +19889,52 @@ impl IssueMonitorState {
         reviewed_sha: &str,
         verdict_raw: &str,
     ) -> Option<bool> {
+        if self
+            .autonomous_record(issue_number)?
+            .merged_evidence_reviews
+            .iter()
+            .any(|review| review.reviewed_sha == reviewed_sha)
+        {
+            return None;
+        }
+        self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw)
+    }
+
+    pub(crate) fn apply_merged_evidence_review_verdict(
+        &mut self,
+        issue_number: u64,
+        reviewed_sha: &str,
+        verdict_token: &str,
+        verdict_raw: &str,
+    ) -> Option<bool> {
+        let record = self.autonomous_record(issue_number)?;
+        let review = record.pending_merged_evidence_review()?;
+        if record.phase != AutonomousPhase::Reviewing
+            || review.reviewed_sha != reviewed_sha
+            || review.verdict_token_hash
+                != format!("{:x}", Sha256::digest(verdict_token.as_bytes()))
+        {
+            return None;
+        }
+        let passed = self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw)?;
+        let record = self.autonomous_record_mut(issue_number);
+        record.end_merged_evidence_review(if passed {
+            MergedEvidenceReviewOutcome::Pass
+        } else {
+            MergedEvidenceReviewOutcome::Fail
+        });
+        // The source is already merged. Settlement consumes the new verdict;
+        // there is no merge to arm or implementation to requeue.
+        record.phase = AutonomousPhase::Idle;
+        Some(passed)
+    }
+
+    fn apply_bound_review_verdict(
+        &mut self,
+        issue_number: u64,
+        reviewed_sha: &str,
+        verdict_raw: &str,
+    ) -> Option<bool> {
         let record = self.autonomous_records.get(&issue_number)?;
         // Reject a verdict that is not for the SHA we are reviewing.
         if record.reviewed_sha.as_deref() != Some(reviewed_sha) {
@@ -19264,7 +19950,12 @@ impl IssueMonitorState {
             outcome,
             crate::issue_monitor_review::ReviewGateOutcome::Pass
         );
-        self.record_review_verdict(issue_number, passed);
+        let failed_criteria = if passed {
+            Vec::new()
+        } else {
+            crate::issue_monitor_review::failed_review_criteria(verdict_raw)
+        };
+        self.record_review_verdict_with_failures(issue_number, passed, failed_criteria);
         Some(passed)
     }
 
@@ -20067,6 +20758,63 @@ impl IssueMonitorState {
             })
     }
 
+    /// Issue #7845: replace the sub-issue parents with the last live list's.
+    pub fn observe_issue_parents(&mut self, parents: &BTreeMap<u64, u64>) {
+        self.issue_parents = parents.clone();
+    }
+
+    /// Issue #7845: the parent an unlabeled sub-issue is admitted through.
+    /// A parent is an autonomous target when the owner queued it (the queue
+    /// label) or ranked it in the priority order.
+    fn sub_issue_admission(
+        &self,
+        issue: &IssueMonitorIssue,
+        open_issues: &BTreeMap<u64, &IssueMonitorIssue>,
+    ) -> Option<Result<u64, IssueMonitorSubIssueExclusion>> {
+        if issue.state != IssueMonitorIssueState::Open || has_queue_label(issue) {
+            return None;
+        }
+        let parent_number = *self.issue_parents.get(&issue.number)?;
+        let exclude = |reason: String| {
+            Some(Err(IssueMonitorSubIssueExclusion {
+                issue_number: issue.number,
+                parent_number,
+                reason,
+            }))
+        };
+        let Some(parent) = open_issues.get(&parent_number) else {
+            return exclude(format!(
+                "parent #{parent_number} is not an open Issue in this scan"
+            ));
+        };
+        if !has_queue_label(parent) && !self.priority_order.contains(&parent_number) {
+            return exclude(format!(
+                "parent #{parent_number} is not an autonomous target (no gwt-queued label and not in the priority order)"
+            ));
+        }
+        if !self.allows_issue_labels(issue) {
+            return exclude("labels are outside the Issues label allowlist".to_string());
+        }
+        Some(Ok(parent_number))
+    }
+
+    /// Issue #7845: an unranked sub-issue takes its parent's place in the
+    /// owner's priority order.
+    fn refill_rank(&self, number: u64) -> usize {
+        let position = |number: u64| {
+            self.priority_order
+                .iter()
+                .position(|priority| *priority == number)
+        };
+        position(number)
+            .or_else(|| {
+                self.issue_parents
+                    .get(&number)
+                    .and_then(|parent| position(*parent))
+            })
+            .unwrap_or(usize::MAX)
+    }
+
     pub fn set_terminal_queue_auto_refill(&mut self, enabled: bool, limit: usize) {
         self.terminal_queue_auto_refill = enabled;
         self.terminal_queue_auto_refill_limit = if enabled && limit == 0 { 3 } else { limit };
@@ -20368,32 +21116,10 @@ impl IssueMonitorState {
         adopted
     }
 
-    pub fn auto_refill_terminal_queue(&mut self, candidates: &[u64], now: &str) -> usize {
-        if !self.terminal_queue_auto_refill || self.terminal_queue_auto_refill_limit == 0 {
-            return 0;
-        }
-        let mut candidates = candidates
-            .iter()
-            .copied()
-            .filter(|number| {
-                !self.issue_is_closed(*number)
-                    && !self.merged_issues.contains(number)
-                    && !self.label_excluded_issues.contains(number)
-                    && !self.open_pr_launch_held(*number)
-            })
-            .collect::<Vec<_>>();
-        let rank = |number: &u64| {
-            self.priority_order
-                .iter()
-                .position(|priority| priority == number)
-                .unwrap_or(usize::MAX)
-        };
-        candidates.sort_by_key(rank);
-        let host = crate::process::current_hostname();
-        // Reordering may replace only an unstarted automatic selection. A
-        // claim, pane, delivery, or urgent assignment retains its admission.
-        let mut protected = self
-            .active_issue_numbers()
+    /// Issues whose launch, claim, or pane is live. Auto-refill never
+    /// displaces them, and a hold recorded beside one is not yet a wait.
+    fn refill_launch_protected(&self) -> BTreeSet<u64> {
+        self.active_issue_numbers()
             .into_iter()
             .chain(self.pending_claim_issue_numbers())
             .chain(self.launched_windows.keys().copied())
@@ -20408,13 +21134,107 @@ impl IssueMonitorState {
                     .iter()
                     .map(|launch| launch.issue_number),
             )
-            .collect::<BTreeSet<_>>();
-        let parked = self
+            .collect()
+    }
+
+    /// Issue #7733: a member that cannot launch uses no Auto-refill capacity.
+    /// It keeps its membership, so its wait stays visible and an explicit
+    /// return to the queue needs no re-admission.
+    fn refill_exemption(
+        &self,
+        number: u64,
+        launch_protected: &BTreeSet<u64>,
+    ) -> Option<IssueMonitorRefillExemption> {
+        use IssueMonitorRefillExemption as Exemption;
+        if self.label_excluded_issues.contains(&number) {
+            return Some(Exemption::LabelExcluded);
+        }
+        // Issue #7813: a launch holds a slot, not a place in the queue.
+        if launch_protected.contains(&number) {
+            return Some(Exemption::Active);
+        }
+        if self
             .open_pr_observations
+            .get(&number)
+            .is_some_and(|observation| observation.hold.is_some())
+        {
+            return Some(Exemption::OpenPrHold);
+        }
+        match self.inbox_item(number)?.state {
+            MonitorInboxState::AwaitingMeasurement => Some(Exemption::AwaitingMeasurement),
+            MonitorInboxState::AwaitingVerification => Some(Exemption::AwaitingVerification),
+            MonitorInboxState::NeedsHuman => Some(Exemption::NeedsHuman),
+            _ => None,
+        }
+    }
+
+    /// Issue #7733 AC-2: the same measurement Auto-refill applies, for status.
+    fn terminal_queue_refill(&self) -> IssueMonitorTerminalQueueRefill {
+        let launch_protected = self.refill_launch_protected();
+        let mut counted = Vec::new();
+        let mut uncounted = Vec::new();
+        for issue_number in self.stored_local_terminal_queue_numbers() {
+            match self.refill_exemption(issue_number, &launch_protected) {
+                Some(reason) => uncounted.push(IssueMonitorRefillUncounted {
+                    issue_number,
+                    reason,
+                }),
+                None => counted.push(issue_number),
+            }
+        }
+        let enabled = self.terminal_queue_auto_refill && self.terminal_queue_auto_refill_limit > 0;
+        let hold = if !enabled {
+            Some(IssueMonitorRefillHold::Disabled)
+        } else if counted.len() >= self.terminal_queue_auto_refill_limit {
+            Some(IssueMonitorRefillHold::LimitReached)
+        } else if self.terminal_queue_refill_starved {
+            Some(IssueMonitorRefillHold::NoCandidates)
+        } else {
+            None
+        };
+        IssueMonitorTerminalQueueRefill {
+            enabled,
+            limit: self.terminal_queue_auto_refill_limit,
+            counted,
+            uncounted,
+            hold,
+        }
+    }
+
+    pub fn auto_refill_terminal_queue(&mut self, candidates: &[u64], now: &str) -> usize {
+        if !self.terminal_queue_auto_refill || self.terminal_queue_auto_refill_limit == 0 {
+            return 0;
+        }
+        let mut candidates = candidates
             .iter()
-            .filter_map(|(&number, observation)| {
-                (observation.hold.is_some() && !protected.contains(&number)).then_some(number)
+            .copied()
+            .filter(|number| {
+                !self.issue_is_closed(*number)
+                    && !self.merged_issues.contains(number)
+                    && !self.label_excluded_issues.contains(number)
+                    && !self.open_pr_launch_held(*number)
             })
+            .collect::<Vec<_>>();
+        let ranks = candidates
+            .iter()
+            .chain(
+                self.terminal_queues
+                    .get(&crate::process::current_hostname())
+                    .into_iter()
+                    .flat_map(|queue| queue.entries.iter().map(|entry| &entry.number)),
+            )
+            .map(|number| (*number, self.refill_rank(*number)))
+            .collect::<BTreeMap<_, _>>();
+        let rank = |number: &u64| ranks.get(number).copied().unwrap_or(usize::MAX);
+        candidates.sort_by_key(rank);
+        let host = crate::process::current_hostname();
+        // Reordering may replace only an unstarted automatic selection. A
+        // claim, pane, delivery, or urgent assignment retains its admission.
+        let mut protected = self.refill_launch_protected();
+        // Issue #7733: a member that cannot launch holds no refill capacity.
+        let exempt = self
+            .stored_local_terminal_queue_numbers()
+            .filter(|number| self.refill_exemption(*number, &protected).is_some())
             .collect::<BTreeSet<_>>();
         protected.extend(
             self.autonomous_records
@@ -20441,10 +21261,7 @@ impl IssueMonitorState {
         let mut eligible_len = queue
             .entries
             .iter()
-            .filter(|entry| {
-                !self.label_excluded_issues.contains(&entry.number)
-                    && !parked.contains(&entry.number)
-            })
+            .filter(|entry| !exempt.contains(&entry.number))
             .count();
         let mut displaced = Vec::new();
         for number in &candidates {
@@ -20461,8 +21278,7 @@ impl IssueMonitorState {
                     .filter(|(_, entry)| {
                         entry.queued_by == "auto-refill"
                             && !protected.contains(&entry.number)
-                            && !parked.contains(&entry.number)
-                            && !self.label_excluded_issues.contains(&entry.number)
+                            && !exempt.contains(&entry.number)
                             && rank(&entry.number) > rank(number)
                     })
                     .max_by_key(|(_, entry)| rank(&entry.number))
@@ -20627,6 +21443,8 @@ impl IssueMonitorState {
         let pending_claims = self.pending_claim_issue_numbers();
         let position = self.queue.iter().position(|issue| {
             !self.has_monitor_pane_for_issue(*issue)
+                && !self.delivered_verification_launch_held(*issue)
+                && !self.spawn_admission_retry_held_at(*issue, now)
                 && (!(self.autonomous_mode && self.is_launch_window_timeout_retry(*issue))
                     || (!pending_claims.contains(issue)
                         && self.retry_ready_for_saved_profile(*issue, now)))
@@ -20775,6 +21593,16 @@ impl IssueMonitorState {
 
     fn claim_candidate_exclusions_without_dependencies(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
+        if self.delivered_verification_launch_held(issue_number) {
+            reasons.push("delivered Issue is awaiting PM or main verification".into());
+        }
+        if self.autonomous_record(issue_number).is_some_and(|record| {
+            record.failed_review_veto() && !record.merged_evidence_reviews.is_empty()
+        }) {
+            reasons.push(
+                "merged source is awaiting a passing independent evidence review".to_string(),
+            );
+        }
         if let Some(reason) = self.agent_schedule_launch_exclusion(issue_number) {
             reasons.push(reason);
         }
@@ -21061,6 +21889,7 @@ impl IssueMonitorState {
         while self.config.enabled && self.gui_connected && self.occupied_slot_count() < max_active {
             let Some(issue_number) = self.queue.iter().copied().find(|issue_number| {
                 self.terminal_queue_contains(*issue_number)
+                    && !self.delivered_verification_launch_held(*issue_number)
                     && !self.cancelled_claim_awaits_runtime(*issue_number)
                     && !self.has_monitor_pane_for_issue(*issue_number)
                     && !self.open_pr_launch_held(*issue_number)
@@ -21334,8 +22163,13 @@ impl IssueMonitorState {
             {
                 // Cancellation is not a failed attempt. Queue push can resume
                 // PR discovery, while a late pane has no current review to join.
-                record.phase = AutonomousPhase::Implementing;
-                record.reviewed_sha = None;
+                if record.pending_merged_evidence_review().is_some() {
+                    record.end_merged_evidence_review(MergedEvidenceReviewOutcome::Interrupted);
+                    record.review_passed = Some(false);
+                } else {
+                    record.phase = AutonomousPhase::Implementing;
+                    record.reviewed_sha = None;
+                }
             }
         }
     }
@@ -21411,6 +22245,9 @@ impl IssueMonitorState {
         // Holding a new pane requires no cancellation authority. A cached
         // candidate exclusion must wait even before a complete Live scan
         // can compensate the claim; existing-pane ACKs above stay valid.
+        if self.delivered_verification_launch_held(delivery.issue_number) {
+            return false;
+        }
         // Cold prefs restore no candidates, so configured labels need a refresh.
         if self
             .inbox_item(delivery.issue_number)
@@ -21705,6 +22542,7 @@ impl IssueMonitorState {
             .filter(|item| {
                 item.state == MonitorInboxState::Queued
                     && !self.cancelled_claim_awaits_runtime(issue_number)
+                    && !self.delivered_verification_launch_held(issue_number)
                     && !self.launch_admission_is_held_at(now)
                     && self.retry_ready_for_saved_profile(issue_number, now)
                     && self.launch_source_exclusion(issue_number).is_none()
@@ -22943,7 +23781,7 @@ impl IssueMonitorState {
                     && self.inbox_item(**issue).map_or_else(
                         || {
                             self.autonomous_record(**issue)
-                                .is_some_and(|record| !record.is_wait_control_tombstone_only())
+                                .is_some_and(|record| !record.is_autonomous_history_only())
                         },
                         |item| {
                             item.state == MonitorInboxState::Queued
@@ -22991,7 +23829,7 @@ impl IssueMonitorState {
             if let Some(record) = self
                 .autonomous_records
                 .get_mut(&issue_number)
-                .filter(|record| !record.is_wait_control_tombstone_only())
+                .filter(|record| !record.is_autonomous_history_only())
             {
                 if matches!(
                     record.phase,
@@ -23325,7 +24163,7 @@ impl IssueMonitorState {
         // independent review before completion cleanup can erase its veto.
         if self
             .autonomous_record(issue_number)
-            .is_some_and(|record| record.review_passed == Some(false))
+            .is_some_and(AutonomousIssueRecord::failed_review_veto)
         {
             self.hold_failed_merged_review(issue_number);
             return false;
@@ -23337,9 +24175,13 @@ impl IssueMonitorState {
             .unwrap_or(IssueCompletionDecision::Unknown);
         // Both branch reconciliation and the Delivering worker enter here.
         // Session evidence also vetoes release when the canvas is unavailable.
-        if self.active_launches.contains(&issue_number)
-            && (self.process_held_issues.contains(&issue_number)
-                || (decision != IssueCompletionDecision::Complete && live_pane))
+        let tracked_launch = self.active_launches.contains(&issue_number);
+        // A wait can be admitted from runtime observations before launch
+        // tracking is restored. Require proven process liveness in that case.
+        let runtime_wait = self.autonomous_wait(issue_number).is_some()
+            && !self.process_hold_unproven_issues.contains(&issue_number);
+        if (self.process_held_issues.contains(&issue_number) && (tracked_launch || runtime_wait))
+            || (tracked_launch && decision != IssueCompletionDecision::Complete && live_pane)
         {
             tracing::info!(
                 issue_number,
@@ -23375,7 +24217,7 @@ impl IssueMonitorState {
         // autonomous loop completes (checked BEFORE the record is cleared).
         if self
             .autonomous_record(issue_number)
-            .is_some_and(|record| !record.is_wait_control_tombstone_only())
+            .is_some_and(|record| !record.is_autonomous_history_only())
         {
             self.push_autonomous_notice(
                 "done",
@@ -24141,6 +24983,9 @@ impl IssueMonitorState {
     /// healthy provider is the recovery, and it is useless if the hold still
     /// gates `retry_ready`. Returns whether a hold was actually cleared.
     pub fn clear_retry_hold(&mut self, issue_number: u64) -> bool {
+        if self.spawn_admission_retry(issue_number) {
+            return false;
+        }
         let Some(record) = self.autonomous_records.get_mut(&issue_number) else {
             return false;
         };
@@ -24803,6 +25648,9 @@ impl IssueMonitorState {
         issue_number: u64,
         now: &str,
     ) -> Option<IssueMonitorClearedRetryHold> {
+        if self.spawn_admission_retry_held_at(issue_number, now) {
+            return None;
+        }
         let max_attempts = self.autonomous_tuning.max_attempts;
         let record = self.autonomous_records.get(&issue_number)?;
         let cleared = IssueMonitorClearedRetryHold {
@@ -28019,18 +28867,43 @@ pub fn scan_issue_monitor_candidates(
         );
     }
     monitor.retire_completed_terminal_queue();
+    // Issue #7845 AC-2: a blocked Issue cannot launch, so it takes no slot.
     let refill = issues
         .iter()
         .filter(|issue| {
             issue.state == IssueMonitorIssueState::Open
                 && monitor.allows_issue_labels(issue)
                 && issue_monitor_candidate_exclusion(issue, monitor.source_repository).is_none()
+                && monitor.scan_dependency_exclusion(issue.number).is_none()
         })
         .map(|issue| issue.number)
         .collect::<Vec<_>>();
+    // Issue #7845 AC-1/AC-3: an unlabeled sub-issue is admitted through an
+    // autonomous parent; every other sub-issue is reported with its reason.
+    let open_issues = issues
+        .iter()
+        .filter(|issue| issue.state == IssueMonitorIssueState::Open)
+        .map(|issue| (issue.number, issue))
+        .collect::<BTreeMap<_, _>>();
+    let mut admitted_sub_issues = BTreeSet::new();
+    let mut sub_issue_exclusions = Vec::new();
+    for issue in issues {
+        match monitor.sub_issue_admission(issue, &open_issues) {
+            Some(Ok(_)) => {
+                admitted_sub_issues.insert(issue.number);
+            }
+            Some(Err(exclusion)) => sub_issue_exclusions.push(exclusion),
+            None => {}
+        }
+    }
+    sub_issue_exclusions.sort_by_key(|exclusion| exclusion.issue_number);
+    monitor.sub_issue_exclusions = sub_issue_exclusions;
     monitor.admit_urgent_candidates(issues, now);
     monitor.auto_refill_terminal_queue(&refill, now);
     monitor.reconcile_terminal_queue();
+    // Issue #7813 AC-2: capacity left after this scan means no candidate.
+    monitor.terminal_queue_refill_starved = false;
+    monitor.terminal_queue_refill_starved = monitor.terminal_queue_refill().hold.is_none();
     let membership = monitor
         .local_terminal_queue_numbers()
         .into_iter()
@@ -28071,6 +28944,7 @@ pub fn scan_issue_monitor_candidates(
         if !is_auto_improve_candidate(issue, membership.contains(&issue.number))
             && !observed_lifecycle
             && !has_queue_label(issue)
+            && !admitted_sub_issues.contains(&issue.number)
         {
             // A present payload can retire an observation-only row. Missing
             // entries in a partial/cache list are never delabel evidence.
@@ -29458,6 +30332,7 @@ mod tests {
                 reviewed_sha: "test-sha".into(),
                 required_criteria: vec!["reporter-supplied requirement".into()],
                 diff: String::new(),
+                merged_evidence: None,
                 linked_issue_kind: LinkedIssueKind::Issue,
             });
             assert!(
@@ -29696,6 +30571,7 @@ mod tests {
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,
                 label_excluded_issues: Vec::new(),
+                sub_issue_exclusions: Vec::new(),
                 source: IssueMonitorStatusSource::Daemon,
                 active_launches_incomplete: false,
                 queue: Vec::new(),
@@ -29813,6 +30689,13 @@ mod tests {
                 stall_reason: Some(IssueMonitorStallReason::GuiDisconnected),
                 gui_action: Some("Open the gwt window for this project".to_string()),
                 slot_occupancy: None,
+                terminal_queue_refill: Some(IssueMonitorTerminalQueueRefill {
+                    enabled: false,
+                    limit: 0,
+                    counted: vec![42],
+                    uncounted: Vec::new(),
+                    hold: Some(IssueMonitorRefillHold::Disabled),
+                }),
             }
         );
     }
@@ -30191,6 +31074,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -31745,6 +32629,7 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             codex_speed: gwt_agent::CodexSpeed::Off,
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -31773,6 +32658,8 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let disk = IssueMonitorPrefs {
@@ -31900,6 +32787,8 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         save_issue_monitor_prefs(
@@ -31973,6 +32862,8 @@ mod tests {
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..IssueMonitorPrefs::default()
@@ -32046,6 +32937,8 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let older_disk = IssueMonitorPrefs {
@@ -32108,6 +33001,8 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
+            gate_hold: None,
             cancelled_claim_phase: None,
         };
         let mut stale = test_monitor_with_prefs(
@@ -32155,6 +33050,7 @@ mod tests {
             reviewed_sha: "merged-sha".to_string(),
             required_criteria: vec!["AC-1".to_string()],
             diff: "stale review diff".to_string(),
+            merged_evidence: None,
             linked_issue_kind: LinkedIssueKind::Issue,
         });
         let disk = IssueMonitorPrefs {
@@ -32257,6 +33153,7 @@ mod tests {
                 skip_permissions: false,
                 fast_mode: false,
                 codex_speed: gwt_agent::CodexSpeed::Off,
+                runtime_inherit: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -32366,6 +33263,8 @@ mod tests {
 
         let exhausted = ProviderUsage {
             provider: UsageProvider::Codex,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,
@@ -32971,6 +33870,62 @@ mod tests {
     }
 
     #[test]
+    fn issue_7729_candidate_runtime_inherit_persists_and_resolves_from_the_last_launch() {
+        // SPEC #7007 item 197 (4): a candidate names Host, Docker, or neither.
+        let explicit = test_launch_profile("codex");
+        assert_eq!(
+            serde_json::to_value(&explicit).unwrap()["runtime_inherit"],
+            false
+        );
+        let legacy: IssueMonitorLaunchProfile =
+            serde_json::from_value(serde_json::json!({"agent_id": "codex"})).unwrap();
+        assert!(
+            !legacy.runtime_inherit,
+            "a pool saved before this field names its place"
+        );
+        let mut inherit = test_launch_profile("codex");
+        inherit.runtime_inherit = true;
+        let saved = serde_json::to_value(&inherit).unwrap();
+        assert_eq!(saved["runtime_inherit"], true);
+        let restored: IssueMonitorLaunchProfile = serde_json::from_value(saved).unwrap();
+        assert!(restored.runtime_inherit);
+
+        // Item 197 (3): it runs where the project's last launch ran.
+        let mut docker = test_launch_profile("claude");
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        docker.docker_service = Some("app".to_string());
+        docker.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        let previous: LaunchWizardPreviousProfile = docker.into();
+        let mut resolved = restored.clone();
+        resolved.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(
+            resolved.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(resolved.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            resolved.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+
+        // No earlier launch: the host, whatever the form last showed.
+        let mut first = restored;
+        first.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        first.docker_service = Some("stale".to_string());
+        first.resolve_inherited_runtime(None);
+        assert_eq!(first.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+        assert_eq!(first.docker_service, None);
+
+        // A candidate that names its place ignores the last launch.
+        let mut host = explicit;
+        host.resolve_inherited_runtime(Some(&previous));
+        assert_eq!(host.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+
+        // A reorder written without the field keeps the saved choice.
+        assert!(ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS.contains(&"runtime_inherit"));
+    }
+
+    #[test]
     fn profiles_set_patch_keeps_omitted_fields_of_the_same_provider() {
         // Issue #4079 AC-3: a reorder written as `[{agent_id}, {agent_id}]`
         // must not reset the candidates it reorders.
@@ -33120,6 +34075,8 @@ mod tests {
     ) -> gwt_core::usage::ProviderUsage {
         gwt_core::usage::ProviderUsage {
             provider,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,
@@ -46532,10 +47489,23 @@ mod tests {
             other => panic!("expected NotReady, got {other:?}"),
         }
         match autonomous_eligibility(true, true, &ok, &absent, false) {
-            EligibilityDecision::NotReady(reason) => assert!(
-                reason.contains("branch protection"),
-                "names branch protection: {reason}"
-            ),
+            EligibilityDecision::NotReady(reason) => {
+                assert!(
+                    reason.contains("branch protection"),
+                    "names branch protection: {reason}"
+                );
+                // Issue #7311: the reason names the checked conditions and the
+                // canonical operations that clear them, so the PM does not
+                // guess at unrelated protection fields.
+                for needle in [
+                    "required status check",
+                    "force pushes",
+                    "repository.required_checks.update",
+                    "repository.branch_protection.update",
+                ] {
+                    assert!(reason.contains(needle), "names {needle}: {reason}");
+                }
+            }
             other => panic!("expected NotReady, got {other:?}"),
         }
         match autonomous_eligibility(true, true, &ok, &unreadable, false) {
@@ -51368,7 +52338,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_queue_refill_retires_completed_work_but_counts_active_work() {
+    fn terminal_queue_refill_retires_completed_work_but_keeps_active_work() {
         let now = "2026-09-10T00:00:00Z";
         let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_terminal_queue_auto_refill(true, 2);
@@ -51385,8 +52355,11 @@ mod tests {
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![2, 3]);
         assert!(monitor.active_launches.contains(&2));
         assert!(monitor.prefs().terminal_queue_exclusions.is_empty());
-        // An active entry occupies capacity until a terminal fact retires it.
-        assert_eq!(monitor.auto_refill_terminal_queue(&[4], now), 0);
+        // Issue #7813: an active entry keeps its membership until a terminal
+        // fact retires it, but holds a slot rather than refill capacity.
+        assert_eq!(monitor.auto_refill_terminal_queue(&[4], now), 1);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![2, 3, 4]);
+        monitor.terminal_queue_remove(&[4], now);
         let mut concurrent =
             test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         concurrent.terminal_queue_push(&[1], "operator", "2026-09-10T00:01:00Z");
@@ -51758,10 +52731,11 @@ mod tests {
         monitor.observe_urgent_issue(&urgent, now);
         monitor.set_priority_order(vec![4]);
         scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2), urgent, issue(4)], now);
-        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 1, 2]);
+        // Nothing protected is displaced; Issue #7813: the active launch and
+        // the pending claim hold slots, so #4 takes the free queue place.
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 4, 1, 2]);
         assert_eq!(monitor.pending_claim_issue_numbers(), BTreeSet::from([2]));
         assert!(monitor.active_launches.contains(&1));
-        assert!(monitor.inbox_item(4).is_none());
     }
 
     #[test]
@@ -51785,6 +52759,291 @@ mod tests {
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2]);
         assert_eq!(monitor.auto_refill_terminal_queue(&[3], now), 0);
         assert!(monitor.open_pr_launch_held(1));
+    }
+
+    #[test]
+    fn issue_7733_external_waits_do_not_consume_auto_refill_capacity() {
+        let now = "2026-11-20T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        let waiting = |number| {
+            let mut candidate = issue(number);
+            candidate.body = Some(
+                "## Acceptance Criteria\n- [ ] AC-1: verify release [release-verification]\n"
+                    .into(),
+            );
+            candidate
+        };
+        let candidates = [waiting(1), waiting(2), waiting(3), issue(4), issue(5)];
+        monitor.terminal_queue_push(&[1, 2, 3], "launch_now", now);
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        for number in [1, 2, 3] {
+            monitor.record_merged_issue_settlement(
+                number,
+                number + 100,
+                Some("aaa".into()),
+                MergedIssueSettlementAction::AwaitVerification {
+                    unmet: vec!["AC-1".into()],
+                },
+                now,
+            );
+            assert_eq!(
+                monitor.inbox_item(number).unwrap().state,
+                MonitorInboxState::AwaitingVerification
+            );
+        }
+        let held = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(held.counted, Vec::<u64>::new());
+        assert_eq!(held.hold, None);
+
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(monitor.queue, VecDeque::from([4, 5]));
+        assert_eq!(monitor.claim_probe_plan(usize::MAX).1, vec![4, 5]);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.limit, 2);
+        assert_eq!(refill.counted, vec![4, 5]);
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::LimitReached));
+        assert_eq!(
+            refill
+                .uncounted
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [1, 2, 3].map(|number| (number, IssueMonitorRefillExemption::AwaitingVerification))
+        );
+    }
+
+    #[test]
+    fn issue_7813_auto_refill_limit_counts_queued_issues_not_active_launches() {
+        let now = "2026-11-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        monitor.terminal_queue_push(&[1, 2], "operator", now);
+        for number in [1, 2] {
+            monitor.record_candidate(issue(number));
+            monitor.complete_active_launch_at(number, format!("tab::agent-{number}"), now);
+        }
+        assert!(monitor.active_launches.contains(&1) && monitor.active_launches.contains(&2));
+
+        // AC-1: every slot is busy, yet the Queued column fills to the limit.
+        let candidates = [issue(1), issue(2), issue(3), issue(4), issue(5)];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4]);
+
+        // AC-2: only the waiting members use capacity; launches say why not.
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![3, 4]);
+        assert_eq!(
+            refill
+                .uncounted
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [1, 2].map(|number| (number, IssueMonitorRefillExemption::Active))
+        );
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::LimitReached));
+        assert_eq!(
+            monitor.status_view_at(now).terminal_queue_refill_hold,
+            Some(IssueMonitorRefillHold::LimitReached)
+        );
+    }
+
+    #[test]
+    fn issue_7813_auto_refill_reports_no_candidates_after_a_scan_adds_nothing() {
+        let now = "2026-11-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        assert_eq!(monitor.terminal_queue_refill().hold, None);
+        let mut closed = issue(1);
+        closed.state = IssueMonitorIssueState::Closed;
+        scan_issue_monitor_candidates(&mut monitor, &[closed], now);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, Vec::<u64>::new());
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::NoCandidates));
+        assert_eq!(
+            monitor.status_view_at(now).terminal_queue_refill_hold,
+            Some(IssueMonitorRefillHold::NoCandidates)
+        );
+
+        scan_issue_monitor_candidates(&mut monitor, &[issue(2)], now);
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![2]);
+        assert_eq!(refill.hold, Some(IssueMonitorRefillHold::NoCandidates));
+        scan_issue_monitor_candidates(&mut monitor, &[issue(2), issue(3)], now);
+        assert_eq!(
+            monitor
+                .agent_status_at(now)
+                .terminal_queue_refill
+                .unwrap()
+                .hold,
+            Some(IssueMonitorRefillHold::LimitReached)
+        );
+    }
+
+    fn issue_7845_sub_issue(number: u64, parent: u64) -> (IssueMonitorIssue, (u64, u64)) {
+        let mut candidate = issue(number);
+        candidate.body = Some(format!("Parent: #{parent}\n"));
+        (candidate, (number, parent))
+    }
+
+    #[test]
+    fn issue_7845_commit_rebase_keeps_refill_proposals_beside_waiting_members() {
+        let now = "2026-11-24T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 2);
+        let waiting = |number| {
+            let mut candidate = issue(number);
+            candidate.body = Some(
+                "## Acceptance Criteria\n- [ ] AC-1: verify release [release-verification]\n"
+                    .into(),
+            );
+            candidate
+        };
+        monitor.terminal_queue_push(&[1, 2, 3], "launch_now", now);
+        scan_issue_monitor_candidates(&mut monitor, &[waiting(1), waiting(2), waiting(3)], now);
+        for number in [1, 2, 3] {
+            monitor.record_merged_issue_settlement(
+                number,
+                number + 100,
+                Some("aaa".into()),
+                MergedIssueSettlementAction::AwaitVerification {
+                    unmet: vec!["AC-1".into()],
+                },
+                now,
+            );
+        }
+        // The daemon commits each scan by rebasing onto the prefs on disk,
+        // which still hold only the waiting members.
+        let disk = monitor.prefs();
+        let candidates = [waiting(1), waiting(2), waiting(3), issue(4), issue(5)];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 3, 4, 5]);
+
+        monitor.rebase_daemon_driver_prefs(&disk);
+
+        assert_eq!(
+            monitor.local_terminal_queue_numbers(),
+            vec![1, 2, 3, 4, 5],
+            "waiting members must not spend the refill capacity the scan proposed into"
+        );
+        let refill = monitor.agent_status_at(now).terminal_queue_refill.unwrap();
+        assert_eq!(refill.counted, vec![4, 5]);
+    }
+
+    #[test]
+    fn issue_7845_unlabeled_sub_issue_of_an_autonomous_parent_enters_the_inbox() {
+        let now = "2026-11-24T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        let mut queued_parent = issue(10);
+        queued_parent.labels = vec!["gwt-spec".into(), "gwt-queued".into()];
+        queued_parent.readiness = IssueMonitorReadiness::Ready;
+        let mut ranked_parent = issue(20);
+        ranked_parent.labels = vec!["gwt-spec".into()];
+        let mut idle_parent = issue(30);
+        idle_parent.labels = vec!["gwt-spec".into()];
+        monitor.set_priority_order(vec![20]);
+        let (child_of_queued, a) = issue_7845_sub_issue(11, 10);
+        let (child_of_ranked, b) = issue_7845_sub_issue(21, 20);
+        let (child_of_idle, c) = issue_7845_sub_issue(31, 30);
+        let (orphan, d) = issue_7845_sub_issue(41, 40);
+        monitor.observe_issue_parents(&BTreeMap::from([a, b, c, d]));
+
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[
+                queued_parent,
+                ranked_parent,
+                idle_parent,
+                child_of_queued,
+                child_of_ranked,
+                child_of_idle,
+                orphan,
+            ],
+            now,
+        );
+
+        // AC-1: no label on the sub-issue, but its parent is an autonomous target.
+        for admitted in [11, 21] {
+            assert_eq!(
+                monitor.inbox_item(admitted).map(|item| item.state),
+                Some(MonitorInboxState::Queued),
+                "sub-issue #{admitted}"
+            );
+        }
+        assert!(monitor.inbox_item(31).is_none());
+        assert!(monitor.inbox_item(41).is_none());
+
+        // AC-3: every sub-issue left out says why.
+        let status = monitor.agent_status_at(now);
+        assert_eq!(
+            status
+                .sub_issue_exclusions
+                .iter()
+                .map(|entry| (entry.issue_number, entry.parent_number, entry.reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    31,
+                    30,
+                    "parent #30 is not an autonomous target (no gwt-queued label and not in the priority order)"
+                ),
+                (41, 40, "parent #40 is not an open Issue in this scan"),
+            ]
+        );
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["sub_issue_exclusions"][0]["issue_number"], 31);
+    }
+
+    #[test]
+    fn issue_7845_auto_refill_launches_a_ready_sub_issue_without_the_pm() {
+        let now = "2026-11-24T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_terminal_queue_auto_refill(true, 1);
+        let mut parent = issue(7007);
+        parent.labels = vec!["gwt-spec".into()];
+        monitor.set_priority_order(vec![7007]);
+        let (blocked, a) = issue_7845_sub_issue(7654, 7007);
+        let mut blocked = blocked;
+        blocked.body = Some("Parent: #7007\nBlocked-by: #7653\n".into());
+        let blocker = issue(7653);
+        let (ready, b) = issue_7845_sub_issue(7655, 7007);
+        // A newer backlog Issue the owner never ranked.
+        let unrelated = issue(7846);
+        monitor.observe_issue_parents(&BTreeMap::from([a, b]));
+
+        // Nobody pushes or calls launch_now: the scan alone fills the slot.
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[unrelated, parent, blocker, blocked, ready],
+            now,
+        );
+
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![7655]);
+        assert_eq!(monitor.queue, VecDeque::from([7655]));
+        assert_eq!(monitor.claim_probe_plan(usize::MAX).1, vec![7655]);
     }
 
     #[test]
@@ -52162,6 +53421,62 @@ mod tests {
             monitor.autonomous_record(8).map(|record| record.phase),
             Some(AutonomousPhase::Implementing),
         );
+    }
+
+    #[test]
+    fn closed_failed_review_preserves_criterion_evidence_in_status() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::review-7",
+                Some(7),
+                WindowState::Idle,
+                true,
+            )],
+        ));
+        let verdict = serde_json::json!({
+            "schema": crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA,
+            "overall": "fail",
+            "criteria": [
+                {"id": "AC-1", "verdict": "fail", "evidence": "No restart evidence"},
+                {"id": "AC-2", "verdict": "pass", "evidence": "CI passed"},
+                {"id": "AC-3", "verdict": "fail", "evidence": "Wrong head checked"}
+            ]
+        });
+
+        assert_eq!(
+            monitor.apply_review_verdict(7, "abc123", &verdict.to_string()),
+            Some(false)
+        );
+        assert_eq!(
+            monitor.take_pending_idle_pane_closes()[0].window_id,
+            "tab-1::review-7"
+        );
+        // Restore persisted state with no live reviewer or transcript.
+        let prefs = serde_json::to_vec(&monitor.prefs()).unwrap();
+        let mut restored = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_slice(&prefs).unwrap(),
+        );
+        let status = serde_json::to_value(restored.agent_status()).unwrap();
+        assert_eq!(
+            status["gui_status"]["autonomous_issues"][0]["review_failure"],
+            serde_json::json!({
+                "reviewed_sha": "abc123",
+                "criteria": [
+                    {"id": "AC-1", "evidence": "No restart evidence"},
+                    {"id": "AC-3", "evidence": "Wrong head checked"}
+                ]
+            })
+        );
+
+        restored.begin_review(7, 99, "new-head");
+        let status = serde_json::to_value(restored.agent_status()).unwrap();
+        assert!(status["gui_status"]["autonomous_issues"][0]
+            .get("review_failure")
+            .is_none());
     }
 
     #[test]
@@ -53027,6 +54342,77 @@ mod tests {
         ));
     }
 
+    /// Issue #7810 AC-3: a fresh verdict ends the story the previous
+    /// attempt's failure told; the stale message must not outlive it.
+    #[test]
+    fn issue_7810_a_new_verdict_clears_the_previous_failure_message() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.autonomous_record_mut(7).last_failure_message =
+            Some("HEAD advanced past the reviewed SHA — re-review".to_string());
+        monitor.record_review_verdict(7, true);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().last_failure_message,
+            None
+        );
+
+        monitor.begin_review(7, 99, "def456");
+        monitor.autonomous_record_mut(7).last_failure_message = Some("stale".to_string());
+        monitor.record_review_verdict(7, false);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().last_failure_message,
+            None
+        );
+    }
+
+    /// Issue #7810 AC-2: a gate that stays closed is counted per scan and
+    /// parked for a human once the count reaches its limit; an open gate (or
+    /// a new review) starts the count over.
+    #[test]
+    fn issue_7810_a_gate_closed_for_too_many_scans_needs_a_human() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_review_verdict(7, true);
+        for scan in 1..AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            assert!(!monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T09:00:00Z"));
+            let hold = monitor
+                .autonomous_record(7)
+                .unwrap()
+                .gate_hold
+                .clone()
+                .unwrap();
+            assert_eq!(
+                (hold.scans, hold.reason.as_str()),
+                (scan, "ci: Rust (pending)")
+            );
+            assert_eq!(hold.since, "2026-11-23T09:00:00Z");
+        }
+        monitor.clear_gate_hold(7);
+        assert_eq!(monitor.autonomous_record(7).unwrap().gate_hold, None);
+
+        for _ in 1..AUTONOMOUS_GATE_HOLD_MAX_SCANS {
+            monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T10:00:00Z");
+        }
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().phase,
+            AutonomousPhase::Reviewing
+        );
+        assert!(monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T12:00:00Z"));
+        let record = monitor.autonomous_record(7).unwrap();
+        assert_eq!(record.phase, AutonomousPhase::NeedsHuman);
+        assert!(monitor
+            .failed_issues
+            .get(&7)
+            .is_some_and(|reason| reason.contains("ci: Rust (pending)")));
+
+        // A new review binding starts over.
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_gate_closed(7, "ci: Rust (pending)", "2026-11-23T09:00:00Z");
+        monitor.begin_review(7, 99, "def456");
+        assert_eq!(monitor.autonomous_record(7).unwrap().gate_hold, None);
+    }
+
     #[test]
     fn autonomous_gate_inputs_none_until_review_returns() {
         let mut monitor = autonomous_state();
@@ -53352,6 +54738,112 @@ mod tests {
             "merge clears the autonomous record",
         );
         assert_eq!(monitor.attempt_count(42), 0);
+    }
+
+    #[test]
+    fn merged_evidence_review_keeps_failed_verdict_until_fresh_pass() {
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
+        let mut candidate = checked_issue(42);
+        candidate.labels.push("gwt-spec".into());
+        scan_queued_candidates(&mut monitor, &[candidate], "2026-09-01T00:00:00Z");
+        monitor.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                "## Acceptance Criteria\n- [x] AC-1: done\n",
+            )
+            .snapshot(),
+        );
+        monitor.begin_review(42, 7, "aaa");
+        monitor.record_review_verdict(42, false);
+        let mut dispatch = review_dispatch_for(42, 7);
+        dispatch.reviewed_sha = "aaa".into();
+        let now = "2026-09-01T00:01:00Z";
+        assert!(monitor.dispatch_review(dispatch.clone(), now).is_err());
+        assert!(monitor
+            .dispatch_merged_evidence_review(
+                dispatch.clone(),
+                123,
+                "comment:456",
+                "fresh-token".into(),
+                now
+            )
+            .is_ok());
+        assert!(!monitor.merged_issue_close_allowed(42));
+        let verdict = r#"{"schema":"gwt-autonomous-review/v1","overall":"pass","criteria":[{"id":"AC-1","verdict":"pass"}]}"#;
+        assert_eq!(monitor.apply_review_verdict(42, "aaa", verdict), None);
+        let token = monitor
+            .pending_review_dispatches
+            .back()
+            .unwrap()
+            .merged_evidence
+            .as_ref()
+            .unwrap()
+            .verdict_token
+            .clone();
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", "stale", verdict),
+            None
+        );
+        let fail = r#"{"schema":"gwt-autonomous-review/v1","overall":"fail","criteria":[{"id":"AC-1","verdict":"fail"}]}"#;
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", &token, fail),
+            Some(false)
+        );
+        assert!(!monitor.merged_issue_close_allowed(42));
+        assert_eq!(monitor.apply_review_verdict(42, "aaa", verdict), None);
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            monitor.prefs(),
+        );
+        assert!(monitor
+            .dispatch_merged_evidence_review(
+                dispatch.clone(),
+                124,
+                "comment:456",
+                "other-token".into(),
+                now
+            )
+            .is_err());
+        assert!(monitor
+            .dispatch_merged_evidence_review(
+                dispatch,
+                125,
+                "comment:457",
+                "updated-token".into(),
+                now
+            )
+            .is_ok());
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", &token, verdict),
+            None
+        );
+        assert_eq!(
+            monitor.apply_merged_evidence_review_verdict(42, "aaa", "updated-token", verdict),
+            Some(true)
+        );
+        assert!(monitor.merged_issue_close_allowed(42));
+        let old_fail_id = monitor
+            .autonomous_record(42)
+            .unwrap()
+            .merged_evidence_reviews[0]
+            .previous_fail_id
+            .clone();
+        monitor.clear_autonomous_record(42);
+        let audit = &monitor
+            .autonomous_record(42)
+            .unwrap()
+            .merged_evidence_reviews;
+        assert_eq!(audit[0].previous_fail_id, old_fail_id);
+        assert_eq!(audit[0].outcome, MergedEvidenceReviewOutcome::Fail);
+        assert_eq!(audit[1].outcome, MergedEvidenceReviewOutcome::Pass);
     }
 
     #[test]
@@ -54554,9 +56046,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_7817_priority_launch_skips_delivered_main_verification() {
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        let mut candidate = checked_issue(42);
+        candidate.body = Some("## 受け入れ条件\n- [x] AC-1: 修正する\n- [ ] AC-2: [main-verification] PM が確認する\n".into());
+        let now = "2026-11-25T00:00:00Z";
+        scan_queued_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
+        monitor.record_merged_deliveries(&BTreeMap::from([(
+            "work/issue-42".into(),
+            merged_delivery(7, "aaa", now),
+        )]));
+        monitor.prioritize_launch_now(42);
+        assert!(monitor.terminal_queue_contains(42));
+        assert!(monitor
+            .claim_candidate_exclusions(42)
+            .iter()
+            .any(|reason| reason.contains("main verification")));
+        assert!(monitor.next_launch_request(now).is_none());
+
+        candidate.body = Some(
+            "## 受け入れ条件\n- [x] AC-1: 修正する\n- [ ] AC-2: 確認主体: PM。計測結果を確認する\n"
+                .into(),
+        );
+        monitor.record_candidate(candidate.clone());
+        assert!(monitor.next_launch_request(now).is_none());
+
+        candidate
+            .body
+            .as_mut()
+            .unwrap()
+            .push_str("- [ ] AC-3: 別の修正を実装する\n");
+        monitor.record_candidate(candidate);
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 42);
+    }
+
+    #[test]
+    fn issue_7817_stale_spawn_cooldown_survives_priority_launch_and_reload() {
+        let now = "2026-11-25T00:00:00Z";
+        let config = IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut monitor = test_monitor(config.clone());
+        monitor.autonomous_tuning.retry_backoff_base_secs = 1;
+        let candidate = issue(42);
+        scan_queued_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
+        monitor.record_transient_launch_retry(
+            42,
+            crate::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into(),
+            now,
+        );
+        let mut restored = test_monitor_with_prefs(config, monitor.prefs());
+        restored.set_gui_connected(true);
+        scan_queued_candidates(&mut restored, &[candidate], now);
+        restored.prioritize_launch_now(42);
+        assert!(!restored.clear_retry_hold(42));
+        assert!(restored
+            .release_retry_hold_for_operator(42, "2026-11-25T00:00:20Z")
+            .is_none());
+        assert!(restored
+            .next_launch_request("2026-11-25T00:00:20Z")
+            .is_none());
+        assert_eq!(
+            restored
+                .next_launch_request("2026-11-25T00:00:21Z")
+                .unwrap()
+                .issue_number,
+            42
+        );
+    }
+
     /// Issue #4477 AC-1: the delivered-but-open anomaly is read from the work
-    /// branch's own merged PR, never from GitHub's closing reference — which
-    /// cannot fire at all while deliveries merge into `develop`.
+    /// branch's own merged PR, never from GitHub's closing reference.
     #[test]
     fn delivered_open_row_reports_recoverable_merged_from_its_work_branch() {
         let mut monitor = test_monitor(IssueMonitorConfig::default());
@@ -55840,6 +57406,8 @@ mod tests {
 
         let healthy = ProviderUsage {
             provider: UsageProvider::Codex,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,
@@ -55887,6 +57455,8 @@ mod tests {
 
         let model_full = ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            pool_account_id: None,
+            last_limit: None,
             account_id: None,
             account_label: None,
             plan: None,
@@ -58246,6 +59816,36 @@ mod tests {
     }
 
     #[test]
+    fn issue_7343_merge_keeps_the_wait_of_a_live_runtime_without_launch_tracking() {
+        let mut monitor = runtime_only_wait_monitor();
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        assert!(monitor.apply_autonomous_wait_subject(42, &wait_subject("live")));
+        assert!(matches!(
+            monitor.declare_autonomous_wait(
+                42,
+                "delivery coordination",
+                "PM ruling",
+                "2026-06-29T00:10:00Z"
+            ),
+            AutonomousWaitOutcome::Declared { .. }
+        ));
+
+        monitor.record_merged(42);
+        let status = monitor.agent_status_at("2026-06-29T00:25:00Z");
+        assert!(status.active_launches.contains(&42));
+        let row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert!(row.waiting.as_ref().is_some_and(|wait| wait.in_force));
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_merged(42);
+        assert!(monitor.autonomous_wait(42).is_none());
+    }
+
+    #[test]
     fn issue_6972_completed_issue_waits_for_process_held_session_exit() {
         let mut monitor = launched_monitor(42, "tab-1::agent-42");
         monitor
@@ -58792,6 +60392,7 @@ mod tests {
             reviewed_sha: format!("sha-{pr_number}"),
             required_criteria: vec!["AC-1".to_string()],
             diff: "diff --git a/a b/a".to_string(),
+            merged_evidence: None,
             linked_issue_kind: LinkedIssueKind::Issue,
         }
     }
@@ -58895,6 +60496,7 @@ mod tests {
             last_failed_at: IDLE_NOW.to_string(),
             not_before: None,
             verdict_failed: false,
+            failed_criteria: Vec::new(),
         });
         let attempts = review_attempts_of(&monitor, 41);
         let bindings = monitor.prefs().launch_bindings;

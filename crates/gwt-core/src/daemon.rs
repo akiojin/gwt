@@ -531,6 +531,8 @@ pub enum ClientFrame {
     Publish { channel: String, payload: Value },
     /// Request a snapshot of the daemon's current runtime stats.
     Status,
+    /// Read back a recent committed Issues control after its ACK was lost.
+    IssueMonitorControlReceipt { id: String },
     /// Launch one verification command from the daemon instead of from the
     /// caller's process tree (Issue #4409).
     ///

@@ -1,5 +1,8 @@
-/* SPEC #2970 Phase 11 / Issue #3784 — deterministic browser contract for the
- * compact provider-usage status summary and its shared detail popover.
+/* Issue #7648 (SPEC #7007 T-030) — deterministic browser contract for the
+ * Execution environments screen: the top bar opens it, every environment's
+ * state is visible, and usage, reset times and limit state are shown once
+ * per account there and nowhere else (the SPEC #2970 status-strip summary
+ * and its hover popover are gone; Settings keeps only a link).
  * Playwright runs this spec in both Chromium dark and light projects.
  */
 import { expect, test } from "@playwright/test";
@@ -15,894 +18,388 @@ async function installUsageTheme(page: any, theme: string) {
   }, { theme, appOrigin: new URL(liveUrl || APP_URL).origin });
 }
 
-test.describe("Provider usage status summary", () => {
+test.describe("Execution environments", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
   test.beforeEach(async ({ page }, info) => {
     await installUsageTheme(page,
       info.project.name.includes("light") ? "light" : "dark");
   });
 
-  test("Usage frame subscriptions batch bursts and advance with suspended animation frames", async ({ page }, info) => {
-    const errors: string[] = [];
-    page.on("pageerror", error => errors.push(error.message));
-    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  async function open(page: any, withSettings = false, withPools = false) {
     if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page, true);
+    await installProviderUsageBackend(page, withSettings, false, withPools);
     if (liveUrl) await gotoLiveGwt(page, liveUrl);
     else await page.goto(APP_URL);
-    await page.getByRole("tab", { name: "Usage & Limits" }).click();
-    const checkbox = page.getByRole("checkbox", { name: "Show Claude Code account usage" });
-    await expect(checkbox).toBeChecked();
-    const result = await page.evaluate(async () => {
-      // Exercise the post-dispatch factory from the served checkout. Socket
-      // coalescing alone must not mask repeated synchronous model updates.
-      const modulePath = "/provider-usage-surface.js";
-      const { createProviderUsageSurface } = await import(modulePath);
-      const shell = (window as any).__operatorShell;
-      const originalRender = shell.applyProviderUsage;
-      const originalFrame = window.requestAnimationFrame;
-      const renders: number[] = [];
-      let workspaceRenders = 0;
-      shell.applyProviderUsage = (snapshot: any) => {
-        renders.push(snapshot.accounts[0].windows[0].used_percent);
-        originalRender(snapshot);
-      };
-      const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows: () => workspaceRenders++ });
-      const usage = (value: number) => ({
-        accounts: [{ provider: "claude_code", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: value }] }],
-        sessions: Array.from({ length: 5 }, (_, i) => ({ session_id: `frame-${i}`, value })), consumption: [],
-      });
-      const panel = document.querySelector<HTMLElement>('[data-settings-panel="usage"]')!;
-      try {
-        surface.renderUsagePanel(panel);
-        const control = panel.querySelector("input")!;
-        control.focus();
-        for (let value = 1; value <= 50; value++) surface.applyProviderUsageUi(usage(value));
-        const immediate = surface.usageForSession("frame-4").value;
-        const beforeFrame = renders.length;
-        await new Promise<void>(resolve => originalFrame(() => resolve()));
-        const normal = { renders: [...renders], workspaceRenders, immediate, beforeFrame };
-        window.requestAnimationFrame = () => -1;
-        const start = performance.now();
-        for (let value = 51; value <= 70; value++) surface.applyProviderUsageUi(usage(value));
-        while (renders.length < 2 && performance.now() - start < 1000) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        return { normal, renders, workspaceRenders, fallbackMs: performance.now() - start,
-          focused: document.activeElement === control, checked: control.checked };
-      } finally {
-        window.requestAnimationFrame = originalFrame;
-        shell.applyProviderUsage = originalRender;
-      }
-    });
-    expect(result.normal).toEqual({ renders: [50], workspaceRenders: 1, immediate: 50, beforeFrame: 0 });
-    expect(result.renders).toEqual([50, 70]);
-    expect(result.workspaceRenders).toBe(2);
-    expect(result.fallbackMs).toBeLessThan(1000);
-    expect(result.focused && result.checked).toBe(true);
-    await expect(checkbox).toBeFocused();
-    await expectClaudeModels(page, "—", "—");
-    await expect(page.locator('#op-strip-usage [data-provider="claude_code"]'))
-      .toHaveAttribute("data-severity", "normal");
-    await page.locator("#op-strip-usage").hover();
-    await expect(page.locator("#provider-usage-popover")).toContainText(/Weekly\s*70%/);
+  }
+  const surface = (page: any) => page.locator(".exec-env");
+
+  test("the top bar opens the screen and every environment's state is visible (AC-1)", async ({ page }, info) => {
+    const errors = captureUsageErrors(page);
+    await open(page);
     await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
-    await page.screenshot({ path: info.outputPath("usage-frame.png"), fullPage: true });
-    await info.attach("frame-results", { body: JSON.stringify(result), contentType: "application/json" });
-    expect(errors).toEqual([]);
+    const entry = page.locator(".project-bar").getByRole("button", { name: "Environments" });
+    await expect(entry).not.toHaveAttribute("aria-current", "page");
+    await entry.click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Execution environments" })).toBeVisible();
+    await expect(entry).toHaveAttribute("aria-current", "page");
+
+    const cards = surface(page).locator("[data-environment]");
+    await expect(cards).toHaveCount(2);
+    const codex = surface(page).locator('[data-environment="codex"]');
+    await expect(codex).toContainText("Available");
+    await expect(codex).toContainText("Using Codex 1 · 1 account in pool · Via Codex");
+    await expect(codex).toContainText("96% used · resets");
+    await expect(codex.locator(".exec-env__usage")).toHaveAttribute("data-severity", "danger");
+    await expect(codex.locator("time")).toHaveAttribute("datetime", "2030-01-02T03:04:05Z");
+    const claude = surface(page).locator('[data-environment="claude"]');
+    await expect(claude).toContainText("80% used");
+    await expect(claude.locator(".exec-env__usage")).toHaveAttribute("data-severity", "warning");
+
+    // A limit reported by the backend reaches the environment row as it is.
+    await emitProviderUsage(page, [{ provider: "codex", plan: "pro", limit_reached: true,
+      windows: [{ kind: "weekly", used_percent: 100, resets_at: "2030-01-06T03:04:05Z" }], state: { kind: "ok" } }]);
+    // An environment is a definition: it stays when its account stops reporting usage.
+    await expect(cards).toHaveCount(2);
+    await expect(claude).toHaveAttribute("data-availability", "unknown");
+    await expect(codex).toHaveAttribute("data-availability", "limit");
+    await expect(codex.locator(".exec-env__chip")).toHaveText("Limit reached");
+    await expect(codex).toContainText("100% used · resets");
+
+    const overflow = await page.evaluate(() =>
+      document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+    expect(overflow, "no horizontal page overflow").toBe(false);
+    await page.screenshot({ path: info.outputPath("execution-environments.png"), fullPage: true });
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
-  test("mounted Usage setting follows snapshots without replacing its focused control", async ({ page }) => {
-    const errors: string[] = [];
-    page.on("pageerror", error => errors.push(error.message));
-    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page, true);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-    await page.getByRole("tab", { name: "Usage & Limits" }).click();
-    const checkbox = page.getByRole("checkbox", { name: "Show Claude Code account usage" });
+  test("every account opens its detail with usage, reset and limit state (AC-2)", async ({ page }, info) => {
+    const errors = captureUsageErrors(page);
+    await open(page);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    await surface(page).getByRole("button", { name: "Accounts", exact: true }).click();
+    const heading = surface(page).getByRole("heading", { level: 1, name: "Accounts" });
+    await expect(heading).toBeFocused();
+    const rows = surface(page).locator("[data-account]");
+    await expect(rows).toHaveCount(2);
+    for (const row of await rows.all()) await expect(row.getByRole("button", { name: /^Details for the / })).toBeVisible();
+    await expect(surface(page).locator('[data-account="codex"]')).toContainText("Codex · pro · Signed in · Up to date");
+    await page.screenshot({ path: info.outputPath("accounts.png"), fullPage: true });
+
+    await surface(page).getByRole("button", { name: "Details for the Codex 1 account" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Codex 1 account" })).toBeFocused();
+    const card = surface(page).locator('.op-usage-card[data-provider="codex"]');
+    await expect(card).toHaveCount(1);
+    const windows = card.locator(".op-usage-win");
+    await expect(windows.nth(0)).toContainText(/5-hour\s*96%/);
+    await expect(windows.nth(0).locator(".op-usage-win__reset")).not.toBeEmpty();
+    await expect(windows.nth(0).locator(".op-usage-bar__fill")).toHaveAttribute("data-severity", "danger");
+    await expect(windows.nth(1)).toContainText(/Weekly\s*29%/);
+    await expect(surface(page).getByRole("checkbox")).toHaveCount(0);
+
+    // The open detail follows the next snapshot: limit state and sessions.
+    await emitProviderUsage(page, [{ provider: "codex", plan: "pro", limit_reached: true,
+      windows: [{ kind: "weekly", used_percent: 100, resets_at: "2030-01-06T03:04:05Z" }], state: { kind: "ok" } }],
+    [{ session_id: "sess-codex-context", provider: "codex", model: "gpt-6-astra", input_tokens: 100000,
+      output_tokens: 1000, total_tokens: 101000, context_used_tokens: 100000, context_limit_tokens: 400000,
+      context_left_pct: 75, eligible: true, state: { kind: "ok" } }]);
+    await expect(card.locator(".op-usage-card__limit")).toHaveText("Limit reached");
+    await expect(card.locator(".op-usage-win")).toContainText(/Weekly\s*100%/);
+    const session = card.locator(".op-usage-sess__row");
+    await expect(session).toHaveCount(1);
+    await expect(session.locator(".op-usage-sess__model")).toHaveText("gpt-6-astra");
+    await expect(session.locator(".op-usage-sess__ctx")).toHaveText("75% left");
+    await page.screenshot({ path: info.outputPath("account-detail.png"), fullPage: true });
+
+    await surface(page).getByRole("button", { name: "← Accounts" }).click();
+    await expect(surface(page).locator('[data-account="codex"] .exec-env__chip--limit')).toHaveText("Limit reached");
+    await surface(page).getByRole("button", { name: "← Execution environments" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Execution environments" })).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  // Issue #7841 AC-1/AC-2/AC-3: one row per account, grouped by pool, each
+  // with its own usage, sign-in and limit state; a tool without an official
+  // usage source says so and keeps the last limit gwt saw.
+  test("accounts are listed per pool with their own usage, sign-in and limits (Issue #7841)", async ({ page }, info) => {
+    const errors = captureUsageErrors(page);
+    await open(page, false, true);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    const claudeEnvironment = surface(page).locator('[data-environment="claude"]');
+    await expect(claudeEnvironment).toContainText("Using Claude Code 1 · 2 accounts in pool · Via Claude Code");
+    await emitProviderUsage(page, [
+      { provider: "codex", pool_account_id: "codex", plan: "pro",
+        windows: [{ kind: "weekly", used_percent: 29, resets_at: "2030-01-06T03:04:05Z" }], state: { kind: "ok" } },
+      { provider: "claude_code", pool_account_id: "claude", plan: "max",
+        windows: [{ kind: "weekly", used_percent: 80, resets_at: "2030-01-07T03:04:05Z" }], state: { kind: "ok" } },
+      { provider: "claude_code", pool_account_id: "claude-2", account_label: "second@example.test", plan: "pro", limit_reached: true,
+        windows: [{ kind: "five_hour", used_percent: 100, resets_at: "2030-01-02T05:00:00Z" }], state: { kind: "ok" } },
+      { provider: "grok_build", pool_account_id: "grok", windows: [], limit_reached: false,
+        state: { kind: "unknown", reason: "no official usage source" },
+        last_limit: { detected_at: "2026-11-24T02:00:00Z", resets_at: "2099-11-24T06:00:00Z" } },
+    ]);
+    await surface(page).getByRole("button", { name: "Accounts", exact: true }).click();
+    const pools = surface(page).locator("[data-pool]");
+    await expect(pools).toHaveCount(3);
+    const claudePool = surface(page).locator('[data-pool="claude"]');
+    await expect(claudePool).toContainText("2 accounts in pool, in priority order");
+    const second = claudePool.locator('[data-account="claude-2"]');
+    await expect(second).toContainText("Claude Code · second@example.test · pro · Not signed in");
+    await expect(second).toContainText("100% used · resets");
+    await expect(second.locator(".exec-env__chip--limit")).toHaveText("Limit reached");
+    await expect(claudePool.locator('[data-account="claude"]')).toContainText("In use");
+    const grok = surface(page).locator('[data-account="grok"]');
+    await expect(grok).toContainText("Usage unknown (no official usage source)");
+    await expect(grok.locator("[data-last-limit] time").first()).toHaveAttribute("datetime", "2026-11-24T02:00:00Z");
+    await expect(grok.locator(".exec-env__chip--limit")).toHaveText("Limit reached");
+    const overflow = await page.evaluate(() =>
+      document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+    expect(overflow, "no horizontal page overflow").toBe(false);
+    await page.screenshot({ path: info.outputPath("account-pools.png"), fullPage: true });
+
+    await surface(page).getByRole("button", { name: "Details for the Claude Code 2 account" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Claude Code 2 account" })).toBeFocused();
+    await expect(surface(page).locator('.op-usage-card[data-provider="claude_code"] .op-usage-win')).toContainText(/5-hour\s*100%/);
+    await surface(page).getByRole("button", { name: "← Accounts" }).click();
+    await surface(page).getByRole("button", { name: "Details for the Grok Build 1 account" }).click();
+    await expect(surface(page).locator(".op-usage-card")).toHaveCount(0);
+    await expect(surface(page)).toContainText("Usage unknown (no official usage source)");
+    await expect(surface(page)).toContainText("Last limit hit");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("Claude usage collection lives in its account detail and follows snapshots", async ({ page }) => {
+    const errors = captureUsageErrors(page);
+    await open(page);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    await surface(page).getByRole("button", { name: "Open the Claude Code 1 account" }).click();
+    const checkbox = surface(page).getByRole("checkbox", { name: "Show Claude Code account usage" });
     await expect(checkbox).toBeChecked();
     await checkbox.focus();
     await emitProviderUsage(page, [{ provider: "claude_code", windows: [], state: { kind: "disabled" } }]);
     await expect(checkbox).not.toBeChecked();
     await expect(checkbox).toBeFocused();
+    await expect(surface(page).locator(".op-usage-card__reason")).toHaveText("Usage collection is off");
     await emitProviderUsage(page, [{ provider: "claude_code", windows: [], state: { kind: "ok" } }]);
     await expect(checkbox).toBeChecked();
     await expect(checkbox).toBeFocused();
-    expect(errors).toEqual([]);
-  });
-
-  test("labels providers, exposes severity, and opens one complete popover", async ({
-    page,
-  }, testInfo) => {
-    const pageErrors: string[] = [];
-    const consoleErrors: string[] = [];
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
-
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-
-    const expectedTheme = testInfo.project.name.includes("light") ? "light" : "dark";
-    await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
-
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible({ timeout: 10_000 });
-    await expect(strip).toContainText("USAGE");
-    await expect(strip).toContainText("CX 96%");
-    await expectClaudeModels(page, "—", "—");
-    await expect(strip).not.toContainText(/[⬡◇]/);
-
-    const codex = strip.locator('[data-provider="codex"]');
-    const claude = strip.locator('[data-provider="claude_code"]');
-    await expect(codex).toHaveAttribute("data-severity", "danger");
-    await expect(claude).toHaveAttribute("data-severity", "warning");
-    await expect(strip).toHaveAttribute("aria-label", /Codex 96% danger/);
-    await expect(strip).toHaveAttribute("aria-label", /Claude Code.*Fable weekly.*not provided.*Opus weekly.*not provided/);
-    await expect(strip).toHaveAttribute("aria-label", /warning/);
-
-    const contrastRatios = await strip.evaluate((element) => {
-      const parseRgb = (value: string) =>
-        (value.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
-      const luminance = (rgb: number[]) => {
-        const channels = rgb.map((value) => {
-          const normalized = value / 255;
-          return normalized <= 0.04045
-            ? normalized / 12.92
-            : ((normalized + 0.055) / 1.055) ** 2.4;
-        });
-        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
-      };
-      const background = luminance(
-        parseRgb(getComputedStyle(element.closest(".op-status-strip")!).backgroundColor),
-      );
-      return [...element.querySelectorAll<HTMLElement>(".op-usage-sum")].map(
-        (summary) => {
-          const foreground = luminance(parseRgb(getComputedStyle(summary).color));
-          return (
-            (Math.max(foreground, background) + 0.05) /
-            (Math.min(foreground, background) + 0.05)
-          );
-        },
-      );
-    });
-    expect(contrastRatios.every((ratio) => ratio >= 4.5)).toBe(true);
-
-    await strip.hover();
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeVisible();
-    await expect(popover).toHaveAttribute("role", "region");
-    await expect(popover).toHaveAttribute("aria-label", "Usage & Limits");
-    await expect(popover).toContainText("Codex");
-    await expect(popover).toContainText(/5-hour\s*96%/);
-    await expect(popover).toContainText(/Weekly\s*29%/);
-    await expect(popover).toContainText("Claude Code");
-    await expect(popover).toContainText(/Weekly\s*80%/);
-    await expect(popover).toContainText(/1\/2/);
-    await expect(strip).toHaveAttribute("aria-expanded", "true");
-
-    // Issue #3862 — the Claude card lists its sessions (tokens + context
-    // remaining) inside the same popover, most-consumed context first.
-    const claudeSessions = popover.locator(
-      '.op-usage-card[data-provider="claude_code"] .op-usage-sess',
-    );
-    await expect(claudeSessions).toBeVisible();
-    await expect(claudeSessions).toContainText(/Sessions \(2\)/);
-    const sessionRows = claudeSessions.locator(".op-usage-sess__row");
-    await expect(sessionRows).toHaveCount(2);
-    await expect(sessionRows.nth(0)).toContainText("claude-sonnet-5");
-    await expect(sessionRows.nth(0)).toContainText("24k");
-    await expect(sessionRows.nth(0)).toContainText("12%");
-    await expect(sessionRows.nth(0).locator(".op-usage-sess__ctx")).toHaveAttribute(
-      "data-severity",
-      "warning",
-    );
-    await expect(sessionRows.nth(1)).toContainText("claude-fable-5-1");
-    await expect(sessionRows.nth(1)).toContainText("1.2M");
-    await expect(sessionRows.nth(1)).toContainText("58%");
-    await expect(
-      popover.locator('.op-usage-card[data-provider="codex"] .op-usage-sess'),
-    ).toHaveCount(0);
-    const popoverBox = await popover.boundingBox();
-    const viewport = page.viewportSize();
-    expect(popoverBox).not.toBeNull();
-    expect(viewport).not.toBeNull();
-    expect(popoverBox!.x).toBeGreaterThanOrEqual(0);
-    expect(popoverBox!.y).toBeGreaterThanOrEqual(0);
-    expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(viewport!.width);
-    expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(viewport!.height);
-
-    await page.locator(".project-bar").hover();
-    await expect(popover).toBeHidden();
-
-    await strip.focus();
-    await page.keyboard.press("ArrowDown");
-    await expect(popover).toBeVisible();
-    await expect(popover).toBeFocused();
-    await emitProviderUsage(page, [
-      {
-        provider: "codex",
-        windows: [{ kind: "weekly", used_percent: 96 }],
-        state: { kind: "ok" },
-      },
-    ]);
-    await expect(popover).toBeFocused();
-    await page.keyboard.press("Escape");
-    await expect(popover).toBeHidden();
-    await expect(strip).toBeFocused();
-
-    // Click is the non-hover fallback used by pointer and touch activation.
-    await strip.click();
-    await expect(popover).toBeVisible();
-    await expect(page.locator("#provider-usage-popover")).toHaveCount(1);
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
-  });
-
-  test("shows Codex model context estimates and clears unknown model context (Issue #3986)", async ({ page }, info) => {
-    const errors = captureUsageErrors(page);
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
-
-    // Rust parser tests cover the rollout fallback; this checks its snapshot
-    // fields remain readable through the shared provider session presentation.
-    const accounts = [{ provider: "codex", windows: [{ kind: "weekly", used_percent: 10 }], state: { kind: "ok" } }];
-    const session = {
-      session_id: "sess-codex-context", provider: "codex", model: "gpt-6-astra",
-      input_tokens: 100000, output_tokens: 1000, total_tokens: 101000,
-      context_used_tokens: 100000, context_limit_tokens: 400000, context_left_pct: 75,
-      eligible: true, state: { kind: "ok" },
-    };
-    await emitProviderUsage(page, accounts, [session]);
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible();
-    await strip.hover();
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeVisible();
-    const row = popover.locator('.op-usage-card[data-provider="codex"] .op-usage-sess__row');
-    await expect(row).toHaveCount(1);
-    await expect(row.locator(".op-usage-sess__model")).toHaveText("gpt-6-astra");
-    await expect(row.locator(".op-usage-sess__ctx")).toHaveText("75% left");
-    await expect(row.locator(".op-usage-sess__ctx")).toHaveAttribute("title", "Context remaining (approx.): 100k / 400k used");
-    await page.screenshot({ path: info.outputPath("codex-model-context.png"), fullPage: true });
-
-    await emitProviderUsage(page, accounts, [{ ...session, model: "some-future-model", context_limit_tokens: null, context_left_pct: null }]);
-    await expect(row.locator(".op-usage-sess__model")).toHaveText("some-future-model");
-    await expect(row.locator(".op-usage-sess__ctx")).toHaveText("—");
-    await expect(row.locator(".op-usage-sess__ctx")).toHaveAttribute("title", "Context limit unknown for this model");
-    await page.screenshot({ path: info.outputPath("codex-unknown-context.png"), fullPage: true });
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
-  test("labels an unknown-length window by its reported minutes (Issue #3860)", async ({
-    page,
-  }) => {
-    const pageErrors: string[] = [];
-    const consoleErrors: string[] = [];
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
-
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible({ timeout: 10_000 });
-    await emitProviderUsage(page, [
-      {
-        provider: "codex",
-        plan: "pro",
-        windows: [
-          { kind: "weekly", used_percent: 5, window_minutes: 10080 },
-          { kind: "unknown", used_percent: 40, window_minutes: 1440 },
-          { kind: "unknown", used_percent: 12 },
-        ],
-        state: { kind: "ok" },
-      },
-    ]);
-    await expect(strip).toContainText("CX 40%");
-
-    await strip.hover();
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeVisible();
-    await expect(popover).toContainText(/Weekly\s*5%/);
-    await expect(popover).toContainText(/Unknown \(1-day\)\s*40%/);
-    await expect(popover).toContainText(/Unknown\s*12%/);
-    const weekly = popover.locator(".op-usage-win__lbl", { hasText: "Weekly" });
-    await expect(weekly).toHaveAttribute("data-window-minutes", "10080");
-    await expect(weekly).toHaveAttribute("title", "Window length: 7 days");
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
-  });
-
-  test("Codex credits distinguish usable full quota and show observed credit pace", async ({ page }, info) => {
-    const errors: string[] = [];
-    page.on("pageerror", error => errors.push(error.message));
-    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible({ timeout: 10_000 });
-    const account = { provider: "codex", account_id: "credits-fixture", state: { kind: "ok" },
-      fetched_at: "2031-01-02T10:00:00Z", limit_reached: false,
-      windows: [{ kind: "weekly", used_percent: 100 }],
-      credits: { has_credits: true, unlimited: false, balance: 37679.9 } };
-    await emitProviderUsage(page, [{ ...account, credits: undefined }]);
-    await expect(strip).toContainText("CX 100%");
-    await page.screenshot({ path: info.outputPath("codex-credits-before.png"), fullPage: true });
-    await emitProviderUsage(page, [account]);
-    await expect(strip).toContainText("CX Using credits · 37,679.9 credits");
-    await strip.focus();
-    await expect(strip).toBeFocused();
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeVisible();
-    await expect(popover).toContainText("Balance: 37,679.9 credits");
-    await expect(popover).not.toContainText("credits/hour");
-    await expect(popover).not.toContainText("Limit reached");
-    account.fetched_at = "2031-01-02T10:30:00Z";
-    account.credits.balance = 37669.9;
-    await emitProviderUsage(page, [account]);
-    await expect(popover).toContainText("37,669.9 credits · 20 credits/hour (observed)");
-    for (const width of [1440, 360]) {
-      await page.setViewportSize({ width, height: 900 });
-      await expect(strip).toContainText("Using credits · 37,669.9 credits");
-      const layout = await strip.evaluate(element => {
-        const chip = element.querySelector<HTMLElement>('[data-provider="codex"]')!;
-        const box = chip.getBoundingClientRect();
-        return { clipped: chip.scrollWidth > chip.clientWidth + 1,
-          outside: box.left < 0 || box.right > innerWidth || box.bottom > innerHeight,
-          overflow: document.documentElement.scrollWidth > innerWidth + 1 };
-      });
-      expect(layout).toEqual({ clipped: false, outside: false, overflow: false });
-      await strip.focus();
-      await strip.press("ArrowDown");
-      await expect(popover).toBeVisible();
-      await expect(popover).toBeFocused();
-      await expect(popover.locator("[data-codex-credits]")).toBeInViewport();
-      const popupBox = (await popover.boundingBox())!;
-      expect(popupBox.x).toBeGreaterThanOrEqual(0);
-      expect(popupBox.x + popupBox.width).toBeLessThanOrEqual(width + 1);
-      expect(popupBox.y).toBeGreaterThanOrEqual(0);
-      expect(popupBox.y + popupBox.height).toBeLessThanOrEqual(900);
-      await page.screenshot({ path: info.outputPath(`codex-credits-${width}.png`), fullPage: true });
-    }
-    await emitProviderUsage(page, [{ ...account, state: { kind: "stale", age_secs: 420 } }]);
-    await expect(strip).toContainText("stale");
-    await expect(popover).toContainText("stale 7m");
-    await emitProviderUsage(page, [{ ...account, credits: { has_credits: true, unlimited: true, balance: null } }]);
-    await expect(strip).toContainText("Using credits · unlimited");
-    await expect(popover).not.toContainText("credits/hour");
-    await emitProviderUsage(page, [{ ...account, credits: { has_credits: false, unlimited: false, balance: 0 } }]);
-    await expect(strip).toHaveAttribute("aria-label", /limit reached/);
-    await expect(popover).toContainText("Limit reached");
-    await emitProviderUsage(page, [{ ...account, credits: undefined }]);
-    await expect(strip).toContainText("CX 100%");
-    await expect(popover.locator("[data-codex-credits]")).toHaveCount(0);
-    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
-    expect(errors).toEqual([]);
-  });
-
-  test("shows Claude Fable weekly and enabled usage credits (SPEC #2970 Phase 8)", async ({
-    page,
-  }, testInfo) => {
-    const errors: string[] = [];
-    page.on("pageerror", error => errors.push(error.message));
-    page.on("console", message => {
-      if (message.type() === "error") errors.push(message.text());
-    });
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible({ timeout: 10_000 });
-    const resetsAt = "2031-01-02T03:04:05Z";
-    const account = {
-      provider: "claude_code", plan: "max", state: { kind: "ok" },
-      windows: [{ kind: "fable_weekly", used_percent: 0, resets_at: resetsAt }],
-    };
-    const extraUsage = { is_enabled: true, used_credits: 1610, monthly_limit: 2000,
-      utilization: 80.5, currency: "USD", disabled_reason: null };
-    await emitProviderUsage(page, [{ ...account, extra_usage: extraUsage }]);
-    await expectClaudeModels(page, "0%", "—");
-    // Keep the detail open through updates without depending on the native
-    // pointer staying over the trigger in a headed browser.
-    await page.mouse.move(0, 0);
-    await strip.focus();
-    await strip.press("ArrowDown");
-    await expect(page.locator("#provider-usage-popover")).toBeFocused();
-    const card = page.locator('.op-usage-card[data-provider="claude_code"]');
-    const fable = card.locator(".op-usage-win").filter({ hasText: "Fable weekly" });
-    await expect(fable.locator(".op-usage-win__lbl")).toHaveText("Fable weekly");
-    await expect(fable.locator(".op-usage-win__pct")).toHaveText("0%");
-    await expect(fable.locator(".op-usage-bar__fill")).toHaveCSS("width", "0px");
-    const resetLabel = await page.evaluate(iso => new Date(iso).toLocaleString(undefined, {
-      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
-    }), resetsAt);
-    await expect(fable.locator(".op-usage-win__reset")).toHaveText(`↻ ${resetLabel}`);
-    const credits = card.locator('[data-usage-credits="true"]');
-    await expect(credits).toBeVisible();
-    await expect(credits.locator(".op-usage-win__lbl")).toHaveText("Usage credits");
-    await expect(credits.locator(".op-usage-win__pct")).toHaveText("81%");
-    await expect(credits.locator(".op-usage-bar__fill")).toHaveAttribute("style", "width: 81%;");
-    await expect(credits.locator(".op-usage-bar__fill")).toHaveAttribute("data-severity", "warning");
-    await expect(credits.locator(".op-usage-win__reset")).toHaveText("1610 / 2000 USD");
-    await expect(page.locator("html")).toHaveAttribute("data-theme",
-      testInfo.project.name.includes("light") ? "light" : "dark");
-    await page.screenshot({ path: testInfo.outputPath("claude-fable-usage-credits.png"), fullPage: true });
-
-    await emitProviderUsage(page, [{ ...account, extra_usage: { ...extraUsage,
-      used_credits: null, monthly_limit: null, utilization: null, currency: null } }]);
-    await expect(credits.locator(".op-usage-win__reset")).toHaveText("— / —");
-    await expect(credits.locator(".op-usage-win__pct")).toHaveText("—");
-    await expect(credits.locator(".op-usage-bar")).toHaveCount(0);
-    for (const extra of [undefined, null, { is_enabled: false, used_credits: null,
-      monthly_limit: null, utilization: null, currency: null, disabled_reason: null }]) {
-      await emitProviderUsage(page, [{ ...account, extra_usage: extra }]);
-      await expect(credits).toHaveCount(0);
-      await expect(fable.locator(".op-usage-win__pct")).toHaveText("0%");
-    }
-    expect(errors).toEqual([]);
-  });
-
-  test("keeps full Claude model windows separate from account limits (Issue #6638)", async ({ page }, info) => {
-    const errors: string[] = [];
-    page.on("pageerror", error => errors.push(error.message));
-    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-    const account = {
-      provider: "claude_code", state: { kind: "ok" }, limit_reached: false,
-      windows: [
-        { kind: "weekly", used_percent: 96 },
-        { kind: "fable_weekly", used_percent: 100, resets_at: "2031-01-02T03:04:05Z" },
-      ],
-    };
-    await emitProviderUsage(page, [account]);
-    const strip = page.locator("#op-strip-usage");
-    await expectClaudeModels(page, "100%", "—");
-    await expect(strip.locator('[data-provider="claude_code"]')).toHaveAttribute("data-severity", "danger");
-    await expect(strip).not.toHaveAttribute("data-limit", "true");
-    await page.mouse.move(0, 0);
-    await strip.focus();
-    await strip.press("ArrowDown");
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeFocused();
-    const card = popover.locator('.op-usage-card[data-provider="claude_code"]');
-    await expect(card).toContainText(/Weekly\s*96%/);
-    await expect(card).toContainText(/Fable weekly\s*100%/);
-    await expect(card.locator(".op-usage-card__limit")).toHaveCount(0);
-    await expect(card.locator(".op-usage-win").filter({ hasText: "Fable weekly" })
-      .locator(".op-usage-win__reset")).not.toBeEmpty();
-    await expect(page.locator("html")).toHaveAttribute("data-theme",
-      info.project.name.includes("light") ? "light" : "dark");
-    await page.screenshot({ path: info.outputPath("claude-model-limit.png"), fullPage: true });
-
-    await emitProviderUsage(page, [{ ...account, limit_reached: true,
-      windows: [{ kind: "five_hour", used_percent: 100 }, ...account.windows] }]);
-    await expectClaudeModels(page, "100%", "—");
-    await expect(strip.locator('[data-provider="claude_code"]')).toHaveAttribute("data-limit", "true");
-    await expect(card.locator(".op-usage-card__limit")).toHaveText("Limit reached");
-    await expect(card).toContainText(/Fable weekly\s*100%/);
-    expect(errors).toEqual([]);
-  });
-
-  test("keeps both Claude weekly models independent of the active session and shared limit (SPEC #2970 Phase 11)", async ({ page }, info) => {
+  test("usage is shown nowhere else: no status-strip summary, Settings only links to Accounts (AC-3)", async ({ page }, info) => {
     const errors = captureUsageErrors(page);
+    await open(page, true);
+    await expect(page.locator(".op-status-strip")).toBeVisible();
+    await expect(page.locator("#op-strip-usage")).toHaveCount(0);
+    await expect(page.locator(".op-status-strip")).not.toContainText(/USAGE|% used|\d+%\s*$/);
+    await expect(page.locator("#provider-usage-popover")).toHaveCount(0);
+
+    await page.getByRole("tab", { name: "Usage & Limits" }).click();
+    const panel = page.locator('[data-settings-panel="usage"]');
+    await expect(panel.getByRole("checkbox")).toHaveCount(0);
+    await expect(panel.locator(".op-usage-card")).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath("settings-usage-link.png"), fullPage: true });
+    await panel.getByRole("button", { name: "Open Accounts" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Accounts" })).toBeVisible();
+    await expect(surface(page).locator("[data-account]")).toHaveCount(2);
+
+    // Tool management stays in Settings; the screen only links to it.
+    await surface(page).getByRole("button", { name: "Tool management" }).click();
+    await expect(page.getByRole("tab", { name: "Supported Agents" })).toHaveAttribute("aria-selected", "true");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+});
+
+/* Issue #7741 (SPEC #7007 items 77-82) — the environments are definitions
+ * that can be registered through a tool, edited and deleted, and a project
+ * chooses the ones it uses in priority order. Runs in Chromium dark and light.
+ */
+test.describe("Execution environment definitions", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+  test.beforeEach(async ({ page }, info) => {
+    await installUsageTheme(page, info.project.name.includes("light") ? "light" : "dark");
+  });
+  const surface = (page: any) => page.locator(".exec-env");
+  const sent = (page: any, kind: string) =>
+    page.evaluate((kind: string) => (window as any).__sentMessages.filter((message: any) => message.kind === kind), kind);
+  async function open(page: any, withSettings = false, withPools = false) {
     if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page, false, true);
+    await installProviderUsageBackend(page, withSettings, false, withPools);
     if (liveUrl) await gotoLiveGwt(page, liveUrl);
     else await page.goto(APP_URL);
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible();
-    const account = {
-      provider: "claude_code", state: { kind: "ok" }, limit_reached: false,
-      windows: [
-        { kind: "five_hour", used_percent: 30 },
-        { kind: "weekly", used_percent: 40 },
-        { kind: "opus_weekly", used_percent: 70 },
-        { kind: "fable_weekly", used_percent: 20, resets_at: "2031-01-02T03:04:05Z" },
-      ],
-    };
-    const codex = { provider: "codex", state: { kind: "ok" }, windows: [
-      { kind: "five_hour", used_percent: 90 }, { kind: "weekly", used_percent: 10 },
-    ] };
-    const sessions = ["fable", "opus", "codex"].map(model => ({
-      session_id: `usage-${model}-session`, provider: model === "codex" ? "codex" : "claude_code",
-      project_path: "/fixture",
-      model: model === "codex" ? "gpt-5" : `claude-${model}-5`,
-      total_tokens: 1000, context_left_pct: 80, eligible: true, state: { kind: "ok" },
-    }));
-    await emitProviderUsage(page, [codex, account], sessions);
-    await expectClaudeModels(page, "20%", "70%");
-    await expect(strip.locator(".op-usage-sum")).toHaveCount(2);
-    await expect(strip.locator(".op-usage-more")).toHaveCount(0);
-    await expect(strip.locator('[data-provider="codex"]')).toHaveText("CX 90%");
-    await expect(strip).toHaveAttribute("aria-label", /Claude Code.*Fable weekly 20%.*Opus weekly 70%/);
-    await expect(page.locator("#provider-usage-popover")).toBeHidden();
+  }
 
-    await page.getByRole("button", { name: "Works", exact: true }).click();
-    for (const model of ["fable", "opus", "codex"]) {
-      await page.locator(`.work-row[data-window-id="usage-${model}"] .work-open`).click();
-      await expect(page.locator(`.works-terminal[data-window-id="usage-${model}"]`)).toBeVisible();
-      await expect(page.locator(".works-full-meta")).toContainText(model === "codex" ? "gpt-5" : `claude-${model}-5`);
-      await expectClaudeModels(page, "20%", "70%");
-      await strip.focus();
-      await expectClaudeModels(page, "20%", "70%");
-      await page.keyboard.press("Escape");
-      await page.locator('.works-full [data-action="back"]').click();
-    }
-
-    // A snapshot changes only Fable; reversing the input order must not change
-    // the fixed Fable/Opus presentation or infer values from session models.
-    account.windows[3].used_percent = 25;
-    await emitProviderUsage(page, [codex, account], [...sessions].reverse());
-    await expectClaudeModels(page, "25%", "70%");
-    await page.mouse.move(0, 0);
-    await strip.focus();
-    await strip.press("ArrowDown");
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeFocused();
-    const card = popover.locator('.op-usage-card[data-provider="claude_code"]');
-    const fable = card.locator(".op-usage-win").filter({ hasText: "Fable weekly" });
-    const opus = card.locator(".op-usage-win").filter({ hasText: "Opus weekly" });
-    await expect(fable.locator(".op-usage-win__pct")).toHaveText("25%");
-    await expect(opus.locator(".op-usage-win__pct")).toHaveText("70%");
-    const resetLabel = await page.evaluate(iso => new Date(iso).toLocaleString(undefined, {
-      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
-    }), account.windows[3].resets_at!);
-    await expect(fable.locator(".op-usage-win__reset")).toHaveText(`↻ ${resetLabel}`);
-    await expect(opus.locator(".op-usage-win__reset")).toBeEmpty();
-    await expect(card.locator(".op-usage-card__limit")).toHaveCount(0);
-
-    await emitProviderUsage(page, [codex, { ...account, windows: account.windows.map(window =>
-      window.kind === "five_hour" ? { ...window, used_percent: 100 } :
-        window.kind === "weekly" ? { ...window, used_percent: 95 } : window) }], sessions);
-    await expectClaudeModels(page, "25%", "70%");
-    await expect(strip.locator('[data-provider="claude_code"]')).toHaveAttribute("data-severity", "danger");
-    await expect(strip).toHaveAttribute("aria-label", /(?:shared|account).*100%/i);
-    await expect(card).toContainText(/5-hour\s*100%/);
-    await expect(card.locator(".op-usage-card__limit")).toHaveCount(0);
-    await expect(popover).toBeFocused();
-    await page.keyboard.press("Escape");
-    await expect(popover).toBeHidden();
-    await expect(strip).toBeFocused();
-    expect(await strip.evaluate(element => getComputedStyle(element).outlineStyle)).not.toBe("none");
-    await page.screenshot({ path: info.outputPath("claude-weekly-models.png"), fullPage: true });
-    expect(errors).toEqual([]);
-  });
-
-  test("distinguishes Claude model zero, missing, degraded and stale values (SPEC #2970 Phase 11)", async ({ page }, info) => {
+  test("an environment is registered through a tool, shown read-only, and deleted with its projects named (AC-1, AC-3, AC-4)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
     const errors = captureUsageErrors(page);
-    await page.goto("about:blank");
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-    const strip = page.locator("#op-strip-usage");
-    const modelWindows = (fable: unknown, opus: unknown) => [
-      { kind: "fable_weekly", used_percent: fable }, { kind: "opus_weekly", used_percent: opus },
-    ];
-    for (const [windows, fable, opus] of [
-      [[{ kind: "fable_weekly", used_percent: 0 }], "0%", "—"],
-      [[{ kind: "opus_weekly", used_percent: 0 }], "—", "0%"],
-      [[], "—", "—"],
-      [modelWindows(null, "invalid"), "—", "—"],
-    ] as const) {
-      await emitProviderUsage(page, [{ provider: "claude_code", state: { kind: "ok" }, windows }]);
-      await expectClaudeModels(page, fable, opus);
-      await expect(strip).toHaveAttribute("aria-label", /not provided/);
-    }
-    await page.mouse.move(0, 0);
-    await strip.focus();
-    await strip.press("ArrowDown");
-    const popover = page.locator("#provider-usage-popover");
-    const card = popover.locator('.op-usage-card[data-provider="claude_code"]');
-    await expect(popover).toBeFocused();
-    await expect(card.locator(".op-usage-win__pct")).toHaveText(["—", "—"]);
-    await expect(card.locator(".op-usage-bar")).toHaveCount(0);
-    await expect(card).not.toContainText(/0%|NaN/);
-    await page.keyboard.press("Escape");
-    for (const [kind, value] of [["disabled", "off"], ["no_data", "—"], ["unavailable", "n/a"]]) {
-      await emitProviderUsage(page, [{ provider: "claude_code", state: { kind, reason: "fixture unavailable" },
-        windows: modelWindows(20, 70) }]);
-      await expectClaudeModels(page, value, value);
-    }
-    for (const [percent, severity] of [[79, "normal"], [80, "warning"], [94, "warning"], [95, "danger"]] as const) {
-      await emitProviderUsage(page, [{ provider: "claude_code", state: { kind: "ok" },
-        windows: modelWindows(percent, 70) }]);
-      await expectClaudeModels(page, `${percent}%`, "70%");
-      const claude = strip.locator('[data-provider="claude_code"]');
-      await expect(claude.locator('[data-window-kind="fable_weekly"]')).toHaveAttribute("data-severity", severity);
-      await expect(claude.locator('[data-window-kind="opus_weekly"]')).toHaveAttribute("data-severity", "normal");
-      await expect(claude).not.toHaveAttribute("data-severity", "danger");
-    }
-    await emitProviderUsage(page, [{ provider: "claude_code", fetched_at: "2026-01-01T00:00:00Z",
-      state: { kind: "stale", age_secs: 420 }, windows: modelWindows(20, 70) }]);
-    await expectClaudeModels(page, "20%", "70%");
-    await expect(strip.locator('[data-provider="claude_code"]')).toContainText(/stale/i);
-    await expect(strip).toHaveAttribute("aria-label", /stale.*(?:420|7m|7 min)/i);
-    await strip.focus();
-    await strip.press("ArrowDown");
-    await expect(popover).toBeFocused();
-    await expect(card.locator(".op-usage-win__pct")).toHaveText(["20%", "70%"]);
-    await expect(card.locator(".op-usage-card__reason")).toHaveText("stale 7m");
+    await open(page);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    const cards = surface(page).locator("[data-environment]");
+    await expect(cards).toHaveCount(2);
+
+    // An account's own environment came with the account: Delete is there, disabled, with the reason.
+    const own = surface(page).locator('[data-environment="claude"]');
+    await expect(own).toHaveAttribute("data-kind", "set");
+    const ownDelete = own.getByRole("button", { name: "Delete Claude Code 1" });
+    await expect(ownDelete).toBeDisabled();
+    await expect(own).toContainText("It is deleted when the account is deleted.");
+    await expect(own).toContainText("Used by Usage Fixture");
+
+    await surface(page).getByRole("button", { name: "Add an execution environment" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Add an execution environment" })).toBeFocused();
+    const tool = surface(page).getByLabel("Tool to go through");
+    await expect(tool).toHaveValue("hermes");
+    await expect(tool.locator('option[value="opencode"]')).toHaveAttribute("disabled", "");
+    await expect(surface(page).locator('[data-blocked-tool="opencode"]')).toContainText("OpenCode is not installed");
+    await expect(surface(page).getByLabel("Name")).toHaveValue("Claude Code 1 (via Hermes Agent)");
+    await page.screenshot({ path: info.outputPath("environment-add.png"), fullPage: true });
+    await surface(page).getByRole("button", { name: "Register" }).click();
+
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Execution environments" })).toBeFocused();
+    await expect(cards).toHaveCount(3);
+    const through = surface(page).locator('[data-environment="claude:hermes"]');
+    await expect(through).toHaveAttribute("data-kind", "via");
+    await expect(through).toContainText("Account Claude Code 1 · Via Hermes Agent");
+    await expect(through).toContainText("Not on any project's list");
+    expect(await sent(page, "add_execution_environment")).toEqual([
+      { kind: "add_execution_environment", account_id: "claude", via_tool: "hermes", name: "Claude Code 1 (via Hermes Agent)" },
+    ]);
+
+    // Its runtime options are the tool's own: shown, never editable.
+    await through.getByRole("button", { name: "Details for Claude Code 1 (via Hermes Agent)" }).click();
+    await expect(surface(page).getByRole("checkbox")).toHaveCount(0);
+    const settings = surface(page).getByRole("region", { name: "Current settings" });
+    await expect(settings).toContainText("zai");
+    await expect(settings).toContainText("glm-4.6");
+    await expect(settings).toContainText("reads these from its own settings file");
+    await page.screenshot({ path: info.outputPath("environment-read-only.png"), fullPage: true });
+
+    // Once a project lists it, the confirmation names that project.
+    await surface(page).getByRole("button", { name: "← Execution environments" }).click();
+    await page.evaluate(() => (window as any).__setProjectEnvironments(["codex", "claude:hermes"]));
+    await expect(through).toContainText("Used by Usage Fixture");
+    await through.getByRole("button", { name: "Delete Claude Code 1 (via Hermes Agent)" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Delete this execution environment?" })).toBeFocused();
+    await expect(surface(page).locator('[data-project="Usage Fixture"]')).toContainText("priority 2");
+    await expect(surface(page)).toContainText("The Claude Code 1 account and its other environments stay.");
+    await page.screenshot({ path: info.outputPath("environment-delete.png"), fullPage: true });
+    await surface(page).getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(cards).toHaveCount(2);
+    await expect(through).toHaveCount(0);
+    const overflow = await page.evaluate(() =>
+      document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+    expect(overflow, "no horizontal page overflow").toBe(false);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("runtime options of an account's own environment are saved as they change (AC-3)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    await surface(page).getByRole("button", { name: "Edit Claude Code 1" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Edit Claude Code 1" })).toBeFocused();
+    await expect(surface(page)).toContainText("take effect from the next session");
+
+    const fast = surface(page).getByRole("checkbox", { name: "Fast mode" });
+    await fast.click();
+    await expect(surface(page).getByRole("status")).toHaveText("Saved");
+    await expect(fast).toBeChecked();
+    const model = surface(page).getByLabel("Model");
+    await model.fill("sonnet");
+    await model.press("Enter");
+    await expect(surface(page).getByRole("status")).toHaveText("Saved");
+    expect(await sent(page, "update_execution_environment")).toEqual([
+      { kind: "update_execution_environment", environment_id: "claude", runtime: { model: null, skip_permissions: false, fast_mode: true } },
+      { kind: "update_execution_environment", environment_id: "claude", runtime: { model: "sonnet", skip_permissions: false, fast_mode: true } },
+    ]);
+    await expect(surface(page).getByRole("button", { name: "Delete", exact: true })).toBeDisabled();
+    await page.screenshot({ path: info.outputPath("environment-edit.png"), fullPage: true });
+
+    // The saved values are what the screen shows when it is opened again.
+    await surface(page).getByRole("button", { name: "← Execution environments" }).click();
+    await surface(page).getByRole("button", { name: "Edit Claude Code 1" }).click();
+    await expect(surface(page).getByLabel("Model")).toHaveValue("sonnet");
+    await expect(surface(page).getByRole("checkbox", { name: "Fast mode" })).toBeChecked();
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("a project reorders, removes and adds its available execution environments (AC-2)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page, true);
+    await page.locator('[data-settings-tab="issues"]').click();
+    const list = page.locator("[data-settings-environments]");
+    const names = list.locator(".project-environments__name");
+    await expect(names).toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    await expect(list).toContainText("This is the order the project launches with today.");
+    await expect(list.getByRole("button", { name: "Move up Codex 1" })).toBeDisabled();
+    await page.screenshot({ path: info.outputPath("project-environments.png"), fullPage: true });
+
+    await list.getByRole("button", { name: "Move down Codex 1" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1", "2. Codex 1"]);
+    await expect(list).not.toContainText("launches with today");
+
+    await list.getByRole("button", { name: "Remove Codex 1" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1"]);
+    // The last one cannot be removed, and the row says why.
+    await expect(list.getByRole("button", { name: "Remove Claude Code 1" })).toBeDisabled();
+    await expect(list).toContainText("Keep at least one.");
+
+    await expect(list.getByLabel("Add an execution environment")).toHaveValue("codex");
+    await list.getByRole("button", { name: "Add to the end" }).click();
+    await expect(names).toHaveText(["1. Claude Code 1", "2. Codex 1"]);
+    await expect(list).toContainText("Every execution environment is already on the list.");
+    expect(await sent(page, "set_project_execution_environments")).toEqual([
+      { kind: "set_project_execution_environments", environment_ids: ["claude", "codex"] },
+      { kind: "set_project_execution_environments", environment_ids: ["claude"] },
+      { kind: "set_project_execution_environments", environment_ids: ["claude", "codex"] },
+    ]);
+
+    await list.getByRole("button", { name: "Manage execution environments" }).click();
+    await expect(page.locator(".exec-env").getByRole("heading", { level: 1, name: "Execution environments" })).toBeVisible();
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("the application settings keep the Project Manager's own list, and its last entry stays (Issue #7732 AC-2)", async ({ page }, info) => {
+    test.skip(Boolean(liveUrl), "uses the deterministic fixture backend");
+    const errors = captureUsageErrors(page);
+    await open(page, true);
     await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
-    await page.screenshot({ path: info.outputPath("claude-weekly-stale.png"), fullPage: true });
-    expect(errors).toEqual([]);
-  });
+    await page.locator('[data-settings-tab="system"]').click();
+    const list = page.locator("[data-settings-pm-environments]");
+    await expect(list.getByRole("group", { name: "Project Manager execution environments" })).toBeVisible();
+    const names = list.locator(".project-environments__name");
+    await expect(names).toHaveText(["1. Claude Code 1", "2. Codex 1"]);
+    await expect(list).toContainText("made from the accounts registered on this machine");
+    await expect(list).toContainText("separate from each project's list");
+    await list.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("pm-environments.png"), fullPage: true });
 
-  test("keeps both Claude models readable after narrow and 200% reflow (SPEC #2970 Phase 11)", async ({ page: initialPage, browser }, info) => {
-    const errors = captureUsageErrors(initialPage);
-    const theme = info.project.name.includes("light") ? "light" : "dark";
-    const openFixture = async (page: any) => {
-      await installUsageTheme(page, theme);
-      if (!liveUrl) await installEmbeddedRoutes(page);
-      await installProviderUsageBackend(page);
-      if (liveUrl) await gotoLiveGwt(page, liveUrl);
-      else await page.goto(APP_URL);
-    };
-    await openFixture(initialPage);
-    const accounts = [
-      { provider: "codex", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 40 }] },
-      { provider: "claude_code", state: { kind: "ok" }, windows: [
-        { kind: "fable_weekly", used_percent: 20 }, { kind: "opus_weekly", used_percent: 70 },
-      ] },
-    ];
-    for (const [width, height, zoom] of [[1440, 900, 1], [768, 900, 1], [360, 900, 1], [720, 450, 2]] as const) {
-      // Supported context sizing preserves 1440×900 screenshot pixels at the
-      // 200% equivalent of 720×450 CSS pixels and device scale factor 2.
-      const context = zoom === 2 ? await browser.newContext({
-        viewport: { width, height }, deviceScaleFactor: 2, colorScheme: theme,
-      }) : null;
-      try {
-        const page = context ? await context.newPage() : initialPage;
-        const pageErrors = context ? captureUsageErrors(page) : errors;
-        if (context) await openFixture(page);
-        else await page.setViewportSize({ width, height });
-        if (zoom === 2) {
-          expect(await page.evaluate(() => ({ width: innerWidth, height: innerHeight, scale: devicePixelRatio })))
-            .toEqual({ width: 720, height: 450, scale: 2 });
-        }
-        const strip = page.locator("#op-strip-usage");
-        await emitProviderUsage(page, accounts);
-        await expectClaudeModels(page, "20%", "70%");
-        await assertUsageLayout(page);
-        accounts[1].windows[0].used_percent = 95;
-        await emitProviderUsage(page, accounts);
-        await expectClaudeModels(page, "95%", "70%");
-        await assertUsageLayout(page);
-        await page.evaluate(() => {
-          (window as any).__emitWorkspaceStateNotice({ kind: "load_error",
-            path: "/fixture/current.json", message: "Workspace persistence is unavailable. Retry to reload." });
-        });
-        await expect(page.locator("#app > .react-island > .workspace-state-notice")).toBeVisible();
-        await expectClaudeModels(page, "95%", "70%");
-        await assertUsageLayout(page);
-        await strip.focus();
-        await strip.press("ArrowDown");
-        const popover = page.locator("#provider-usage-popover");
-        await expect(popover).toBeVisible();
-        await expect(popover).toBeFocused();
-        const box = (await popover.boundingBox())!;
-        expect(box.x).toBeGreaterThanOrEqual(0);
-        expect(box.x + box.width).toBeLessThanOrEqual(width + 1);
-        expect(box.y).toBeGreaterThanOrEqual(0);
-        expect(box.y + box.height).toBeLessThanOrEqual(height + 1);
-        await page.keyboard.press("Escape");
-        await expect(strip).toBeFocused();
-        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-        const screenshot = await page.screenshot({ path: info.outputPath(`claude-weekly-${width}-${zoom}x.png`), fullPage: true });
-        if (zoom === 2) {
-          expect(screenshot.readUInt32BE(16), "200% PNG width in physical pixels").toBe(1440);
-          expect(screenshot.readUInt32BE(20), "200% PNG height in physical pixels").toBe(900);
-        }
-        await page.evaluate(() => (window as any).__emitWorkspaceStateNotice(null));
-        await expect(page.locator(".workspace-state-notice")).toHaveCount(0);
-        accounts[1].windows[0].used_percent = 20;
-        expect(pageErrors).toEqual([]);
-      } finally {
-        await context?.close();
-      }
-    }
-    expect(errors).toEqual([]);
-  });
+    await list.getByRole("button", { name: "Move down Claude Code 1" }).click();
+    await expect(names).toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    await expect(list).not.toContainText("made from the accounts");
 
-  test("keeps weekly 100% separate from a provider refusal (Issue #5037)", async ({
-    page,
-  }, testInfo) => {
-    const pageErrors: string[] = [];
-    const consoleErrors: string[] = [];
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
+    await list.getByRole("button", { name: "Remove Claude Code 1" }).click();
+    await expect(names).toHaveText(["1. Codex 1"]);
+    // The last one cannot be removed, and the row says why.
+    const removeLast = list.getByRole("button", { name: "Remove Codex 1" });
+    await expect(removeLast).toBeDisabled();
+    await expect(list).toContainText("Keep at least one. The Project Manager cannot start a session");
+    await page.screenshot({ path: info.outputPath("pm-environments-last.png"), fullPage: true });
 
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-
-    const expectedTheme = testInfo.project.name.includes("light") ? "light" : "dark";
-    await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
-
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible({ timeout: 10_000 });
-    const account = {
-      provider: "codex",
-      plan: "pro",
-      windows: [{ kind: "weekly", used_percent: 100, window_minutes: 10080 }],
-      limit_reached: false,
-      state: { kind: "ok" },
-    };
-    await emitProviderUsage(page, [account]);
-    await expect(strip).toContainText("CX 100%");
-
-    await strip.hover();
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeVisible();
-    const codex = popover.locator('.op-usage-card[data-provider="codex"]');
-    await expect(codex).toContainText(/Weekly\s*100%/);
-    await expect(codex.locator(".op-usage-card__limit")).toHaveCount(0);
-
-    await emitProviderUsage(page, [{ ...account, limit_reached: true }]);
-    await expect(strip).toContainText("CX 100%");
-    await expect(codex).toContainText(/Weekly\s*100%/);
-    await expect(codex.locator(".op-usage-card__limit")).toBeVisible();
-    await expect(codex.locator(".op-usage-card__limit")).toHaveText("Limit reached");
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
-  });
-
-  test("keeps a stable width and compacts three providers to the critical one", async ({
-    page,
-  }) => {
-    const pageErrors: string[] = [];
-    const consoleErrors: string[] = [];
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
-
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page);
-    if (liveUrl) await gotoLiveGwt(page, liveUrl);
-    else await page.goto(APP_URL);
-
-    const strip = page.locator("#op-strip-usage");
-    await expect(strip).toBeVisible({ timeout: 10_000 });
-    const initialWidth = (await strip.boundingBox())!.width;
-
-    await emitProviderUsage(page, [
-      {
-        provider: "codex",
-        windows: [{ kind: "weekly", used_percent: 9 }],
-        state: { kind: "ok" },
-      },
-      {
-        provider: "claude_code",
-        windows: [{ kind: "weekly", used_percent: 79 }],
-        state: { kind: "ok" },
-      },
+    await list.getByRole("button", { name: "Add to the end" }).click();
+    await expect(names).toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    expect(await sent(page, "set_pm_execution_environments")).toEqual([
+      { kind: "set_pm_execution_environments", environment_ids: ["codex", "claude"] },
+      { kind: "set_pm_execution_environments", environment_ids: ["codex"] },
+      { kind: "set_pm_execution_environments", environment_ids: ["codex", "claude"] },
     ]);
-    await expect(strip.locator(".op-usage-sum")).toHaveCount(2);
-    await expect(strip.locator('[data-provider="codex"]')).toHaveAttribute(
-      "data-severity",
-      "normal",
-    );
-    const normalContrast = await strip
-      .locator('[data-provider="codex"]')
-      .evaluate((summary) => {
-        const parseRgb = (value: string) =>
-          (value.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
-        const luminance = (rgb: number[]) => {
-          const channels = rgb.map((value) => {
-            const normalized = value / 255;
-            return normalized <= 0.04045
-              ? normalized / 12.92
-              : ((normalized + 0.055) / 1.055) ** 2.4;
-          });
-          return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
-        };
-        const foreground = luminance(parseRgb(getComputedStyle(summary).color));
-        const background = luminance(
-          parseRgb(
-            getComputedStyle(summary.closest(".op-status-strip")!).backgroundColor,
-          ),
-        );
-        return (
-          (Math.max(foreground, background) + 0.05) /
-          (Math.min(foreground, background) + 0.05)
-        );
-      });
-    expect(normalContrast).toBeGreaterThanOrEqual(4.5);
-    expect((await strip.boundingBox())!.width).toBeCloseTo(initialWidth, 1);
-
-    await emitProviderUsage(page, [
-      {
-        provider: "codex",
-        windows: [
-          {
-            kind: "weekly",
-            used_percent: 40,
-            resets_at: "2031-01-02T03:04:05Z",
-          },
-        ],
-        state: { kind: "ok" },
-      },
-      {
-        provider: "claude_code",
-        windows: [
-          {
-            kind: "weekly",
-            used_percent: 70,
-            resets_at: "2031-01-03T03:04:05Z",
-          },
-        ],
-        state: { kind: "ok" },
-      },
-      {
-        provider: "custom_provider",
-        windows: [
-          {
-            kind: "weekly",
-            used_percent: 95,
-            resets_at: "2031-01-04T03:04:05Z",
-          },
-        ],
-        state: { kind: "ok" },
-      },
-    ]);
-    await expect(strip.locator(".op-usage-sum")).toHaveCount(1);
-    await expect(strip.locator('[data-provider="custom_provider"]')).toHaveText("CU 95%");
-    await expect(strip.locator(".op-usage-more")).toHaveText("+2");
-    await expect(strip).toHaveAttribute("aria-label", /Codex 40% normal/);
-    await expect(strip).toHaveAttribute("aria-label", /Claude Code.*Fable weekly.*not provided.*Opus weekly.*not provided/);
-    await expect(strip).toHaveAttribute("aria-label", /CU 95% danger/);
-    expect((await strip.boundingBox())!.width).toBeCloseTo(initialWidth, 1);
-
-    await strip.hover();
-    const popover = page.locator("#provider-usage-popover");
-    await expect(popover).toBeVisible();
-    await expect(popover).toContainText("Codex");
-    await expect(popover).toContainText("Claude Code");
-    await expect(popover).toContainText("custom_provider");
-    await expect(popover).toContainText(/Weekly\s*40%/);
-    await expect(popover).toContainText(/Weekly\s*70%/);
-    await expect(popover).toContainText(/Weekly\s*95%/);
-    await expect(popover).toContainText(/1\/4/);
-
-    // Selection still counts actual providers. A critical Claude account
-    // retains both models when it becomes the one visible provider.
-    await emitProviderUsage(page, [
-      { provider: "custom_provider", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 95 }] },
-      { provider: "claude_code", state: { kind: "ok" }, windows: [
-        { kind: "weekly", used_percent: 99 }, { kind: "opus_weekly", used_percent: 70 },
-        { kind: "fable_weekly", used_percent: 20 },
-      ] },
-      { provider: "codex", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 40 }] },
-    ]);
-    await expect(strip.locator(".op-usage-sum")).toHaveCount(1);
-    await expectClaudeModels(page, "20%", "70%");
-    await expect(strip.locator(".op-usage-more")).toHaveText("+2");
-    await expect(strip).toHaveAttribute("aria-label", /CU 95% danger.*Claude Code.*Fable weekly 20%.*Opus weekly 70%.*Codex 40% normal/);
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+    // The project's own list is a different list and did not move.
+    await page.locator('[data-settings-tab="issues"]').click();
+    await expect(page.locator("[data-settings-environments] .project-environments__name"))
+      .toHaveText(["1. Codex 1", "2. Claude Code 1"]);
+    expect(await sent(page, "set_project_execution_environments")).toEqual([]);
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 });
 
@@ -913,67 +410,14 @@ function captureUsageErrors(page: any): string[] {
   return errors;
 }
 
-async function expectClaudeModels(page: any, fable: string, opus: string): Promise<void> {
-  const models = page.locator('#op-strip-usage [data-provider="claude_code"] .op-usage-model');
-  await expect(models).toHaveCount(2);
-  await expect(models.nth(0)).toHaveAttribute("data-window-kind", "fable_weekly");
-  await expect(models.nth(1)).toHaveAttribute("data-window-kind", "opus_weekly");
-  await expect(models.nth(0)).toHaveText(new RegExp(`^Fable\\s+(?:weekly|7d)\\s+${escapeRegExp(fable)}$`));
-  await expect(models.nth(1)).toHaveText(new RegExp(`^Opus\\s+(?:weekly|7d)\\s+${escapeRegExp(opus)}$`));
-  await expect(models.nth(0)).toBeVisible();
-  await expect(models.nth(1)).toBeVisible();
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-async function assertUsageLayout(page: any): Promise<void> {
-  const violations = await page.evaluate(() => {
-    const problems: string[] = [];
-    const strip = document.querySelector<HTMLElement>("#op-strip-usage")!;
-    const models = [...strip.querySelectorAll<HTMLElement>(".op-usage-model")];
-    const fits = (inner: DOMRect, outer: DOMRect) => inner.left >= outer.left - 1 &&
-      inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
-    const overlaps = (left: DOMRect, right: DOMRect) =>
-      Math.min(left.right, right.right) - Math.max(left.left, right.left) > 1 &&
-      Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top) > 1;
-    const viewport = new DOMRect(0, 0, window.innerWidth, window.innerHeight);
-    for (const model of models) {
-      const range = document.createRange();
-      range.selectNodeContents(model);
-      for (const text of range.getClientRects()) {
-        if (!fits(text, viewport)) problems.push(`${model.dataset.windowKind}: outside viewport`);
-        for (let ancestor: HTMLElement | null = model; ancestor; ancestor = ancestor.parentElement) {
-          if ((ancestor === model || ancestor === strip || ancestor.classList.contains("op-status-strip")) &&
-              !fits(text, ancestor.getBoundingClientRect())) problems.push(`${model.dataset.windowKind}: text escapes ${ancestor.className}`);
-          const style = getComputedStyle(ancestor);
-          if (/(hidden|clip|auto|scroll)/.test(`${style.overflowX} ${style.overflowY}`) &&
-              !fits(text, ancestor.getBoundingClientRect())) problems.push(`${model.dataset.windowKind}: clipped by ${ancestor.className}`);
-        }
-      }
-      if (getComputedStyle(model).textOverflow === "ellipsis") problems.push("model ellipsis");
-    }
-    if (overlaps(models[0].getBoundingClientRect(), models[1].getBoundingClientRect())) problems.push("models overlap");
-    for (const neighbor of document.querySelectorAll<HTMLElement>(".op-status-strip__cell, .project-bar, #op-rail, .workspace-state-notice")) {
-      if (neighbor === strip || !neighbor.getClientRects().length) continue;
-      if (overlaps(strip.getBoundingClientRect(), neighbor.getBoundingClientRect())) problems.push(`overlap: ${neighbor.id || neighbor.className}`);
-    }
-    if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 ||
-        document.body.scrollWidth > document.documentElement.clientWidth + 1) problems.push("horizontal page overflow");
-    return problems;
-  });
-  expect(violations, "both full model labels and values fit without clipping or overlap").toEqual([]);
-}
-
 async function emitProviderUsage(page: any, accounts: unknown[], sessions: unknown[] = []): Promise<void> {
   await page.evaluate(({ accounts, sessions }) => {
     (window as any).__emitProviderUsage(accounts, sessions);
   }, { accounts, sessions });
 }
 
-async function installProviderUsageBackend(page: any, withSettings = false, withAgents = false): Promise<void> {
-  await page.addInitScript(({ withSettings, withAgents }) => {
+async function installProviderUsageBackend(page: any, withSettings = false, withAgents = false, withPools = false): Promise<void> {
+  await page.addInitScript(({ withSettings, withAgents, withPools }) => {
     try {
       window.sessionStorage.setItem("gwt:ui:briefing", "1");
     } catch {
@@ -1077,6 +521,123 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
       consumption: [],
     };
 
+    // Issue #7741: the execution environment definitions and this project's
+    // priority list, kept the way the backend keeps them.
+    const TOOL_NAMES: Record<string, string> = {
+      claude: "Claude Code", codex: "Codex", hermes: "Hermes Agent", openclaw: "OpenClaw", opencode: "OpenCode",
+    };
+    const environmentState = {
+      accounts: [
+        { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1", sign_in: "signed_in" },
+        { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1", sign_in: "signed_in" },
+        // Issue #7841: a second account in the Claude pool and a tool without
+        // an official usage source.
+        ...(withPools ? [
+          { id: "claude-2", tool: "claude", tool_name: "Claude Code", name: "Claude Code 2", sign_in: "signed_out" },
+          { id: "grok", tool: "grok", tool_name: "Grok Build", name: "Grok Build 1", sign_in: "signed_in" },
+        ] : []),
+      ],
+      environments: [
+        { id: "claude", name: "Claude Code 1", account_id: "claude", via_tool: "claude", runtime: {} as any },
+        { id: "codex", name: "Codex 1", account_id: "codex", via_tool: "codex", runtime: {} as any },
+      ],
+      saved: false,
+      list: ["codex", "claude"],
+      pmSaved: false,
+      pmList: ["claude", "codex"],
+    };
+    const environmentsView = () => {
+      const environments = environmentState.environments.map(environment => {
+        const own = environment.account_id === environment.via_tool;
+        const priority = environmentState.list.indexOf(environment.id);
+        return {
+          ...environment,
+          kind: own ? "set" : "via",
+          account_name: environmentState.accounts.find(account => account.id === environment.account_id)!.name,
+          via_tool_name: TOOL_NAMES[environment.via_tool],
+          tool_installed: true,
+          delete_blocked_reason: own ? "Created with the account. It is deleted when the account is deleted." : undefined,
+          runtime_read_only_reason: own ? undefined
+            : `${TOOL_NAMES[environment.via_tool]} reads these from its own settings file. Change them there.`,
+          tool_settings: own ? undefined : { path: "/home/fixture/.hermes/config.yaml",
+            values: [{ label: "Provider", value: "zai" }, { label: "Model", value: "glm-4.6" }] },
+          projects: priority < 0 ? [] : [{ project_root: "/fixture", title: "Usage Fixture", priority: priority + 1 }],
+        };
+      });
+      return {
+        kind: "execution_environments",
+        view: {
+          accounts: environmentState.accounts,
+          environments,
+          via_options: environmentState.accounts.flatMap(account => ["hermes", "openclaw", "opencode"].map(tool => {
+            const taken = environmentState.environments.find(environment => environment.via_tool === tool);
+            return {
+              account_id: account.id, via_tool: tool, via_tool_name: TOOL_NAMES[tool],
+              blocked_reason: taken ? `${TOOL_NAMES[tool]} is already registered as "${taken.name}". It uses the provider set in its own settings.`
+                : tool === "opencode" ? "OpenCode is not installed. Install it in Tool management." : undefined,
+            };
+          })),
+          pm: {
+            saved: environmentState.pmSaved,
+            entries: environmentState.pmList.map(id => {
+              const environment = environmentState.environments.find(item => item.id === id)!;
+              return { environment_id: id, tool: environment.via_tool, tool_name: TOOL_NAMES[environment.via_tool], name: environment.name };
+            }),
+          },
+          project: {
+            project_root: "/fixture", saved: environmentState.saved,
+            entries: environmentState.list.map(id => {
+              const environment = environmentState.environments.find(item => item.id === id)!;
+              return { environment_id: id, tool: environment.via_tool, tool_name: TOOL_NAMES[environment.via_tool], name: environment.name };
+            }),
+          },
+        },
+      };
+    };
+    const sentMessages: any[] = [];
+    (window as any).__sentMessages = sentMessages;
+    // Answer one execution environment request; `null` when it is not one.
+    const answerEnvironmentRequest = (message: any): unknown => {
+      switch (message?.kind) {
+        case "get_execution_environments":
+          break;
+        case "add_execution_environment":
+          environmentState.environments.push({
+            id: `${message.account_id}:${message.via_tool}`, name: message.name,
+            account_id: message.account_id, via_tool: message.via_tool, runtime: {},
+          });
+          break;
+        case "update_execution_environment": {
+          const environment = environmentState.environments.find(item => item.id === message.environment_id);
+          if (!environment) return { kind: "execution_environment_error", message: "This execution environment no longer exists." };
+          if (message.name) environment.name = message.name;
+          if (message.runtime) environment.runtime = message.runtime;
+          break;
+        }
+        case "delete_execution_environment":
+          environmentState.environments = environmentState.environments.filter(item => item.id !== message.environment_id);
+          environmentState.list = environmentState.list.filter(id => id !== message.environment_id);
+          environmentState.pmList = environmentState.pmList.filter(id => id !== message.environment_id);
+          break;
+        case "set_pm_execution_environments":
+          // The saving side refuses an empty list, whatever the screen allowed.
+          if (message.environment_ids.length === 0) {
+            return { kind: "execution_environment_error", project_root: "/fixture",
+              message: "Keep at least one execution environment. The Project Manager cannot start a session without one." };
+          }
+          environmentState.pmList = message.environment_ids;
+          environmentState.pmSaved = true;
+          break;
+        case "set_project_execution_environments":
+          environmentState.list = message.environment_ids;
+          environmentState.saved = true;
+          break;
+        default:
+          return null;
+      }
+      return environmentsView();
+    };
+
     let socketRef: FixtureWebSocket | null = null;
 
     class FixtureWebSocket extends EventTarget {
@@ -1103,6 +664,9 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
         } catch {
           return;
         }
+        sentMessages.push(message);
+        const answer = answerEnvironmentRequest(message);
+        if (answer) this.emit(answer);
         if (message?.kind === "frontend_ready") {
           this.emit(workspaceState);
           this.emit(usageSnapshot);
@@ -1140,6 +704,11 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
         consumption: [],
       });
     };
+    (window as any).__setProjectEnvironments = (ids: string[]) => {
+      environmentState.list = ids;
+      environmentState.saved = true;
+      socketRef?.emit(environmentsView());
+    };
     (window as any).__emitWorkspaceStateNotice = (notice: unknown) => {
       socketRef?.emit({ kind: "workspace_state_notice", notice });
     };
@@ -1148,5 +717,5 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, { withSettings, withAgents });
+  }, { withSettings, withAgents, withPools });
 }

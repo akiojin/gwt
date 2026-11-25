@@ -41,6 +41,20 @@ struct DurableReceipt {
     receipt: AgentWorkspaceUpdateReceipt,
 }
 
+/// Written in place of a Host receipt when the caller gives up on a lost update (#7816).
+/// Created with no-clobber at the receipt path, so exactly one of this marker or the
+/// Host reservation wins; the Host then refuses the operation id forever.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AbandonedOperation {
+    schema_version: u32,
+    operation_id: String,
+    session_id: String,
+    outcome: String,
+}
+
+const NOT_APPLIED: &str = "not_applied";
+
 #[derive(Serialize)]
 pub(crate) struct ReceiptStatus {
     schema_version: u32,
@@ -49,6 +63,12 @@ pub(crate) struct ReceiptStatus {
     reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) receipt: Option<AgentWorkspaceUpdateReceipt>,
+}
+
+impl ReceiptStatus {
+    pub(crate) fn is_not_applied(&self) -> bool {
+        self.status == NOT_APPLIED
+    }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -138,38 +158,118 @@ impl UpdateOperation {
         event: &WorkEvent,
         receipt: AgentWorkspaceUpdateReceipt,
     ) -> io::Result<()> {
-        let path = receipt_path(&self.project_state_root, &self.operation_id)?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| invalid("receipt has no parent"))?;
-        match fs::create_dir(parent) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        if !fs::symlink_metadata(parent)?.file_type().is_dir() {
-            return Err(invalid("receipt directory is not a real directory"));
-        }
-        #[cfg(unix)]
-        if let Some(project_directory) = parent.parent() {
-            fs::File::open(project_directory)?.sync_all()?;
-        }
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer(
-            &mut temp,
+        create_receipt_file(
+            &receipt_path(&self.project_state_root, &self.operation_id)?,
             &DurableReceipt {
                 operation: self.clone(),
                 event: event.clone(),
                 receipt,
             },
-        )?;
-        temp.write_all(b"\n")?;
-        temp.as_file().sync_all()?;
-        temp.persist_noclobber(&path).map_err(|error| error.error)?;
-        #[cfg(unix)]
-        fs::File::open(parent)?.sync_all()?;
-        Ok(())
+        )
     }
+}
+
+/// Atomically creates a receipt-path file; fails if the Host or a caller already claimed it.
+fn create_receipt_file(path: &Path, content: &impl Serialize) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("receipt has no parent"))?;
+    match fs::create_dir(parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+        return Err(invalid("receipt directory is not a real directory"));
+    }
+    #[cfg(unix)]
+    if let Some(project_directory) = parent.parent() {
+        fs::File::open(project_directory)?.sync_all()?;
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut temp, content)?;
+    temp.write_all(b"\n")?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// How long a lost-response update keeps waiting for the Host to finish publishing.
+const RECOVERY_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+const RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Re-reads read-only receipt evidence until it proves publication or the window ends.
+/// A response can be lost while the Host is still publishing (#7330), so a single
+/// immediate inspection reports `unconfirmed` for an update that is applied moments later.
+pub(crate) fn await_applied<T>(probe: impl FnMut() -> Option<T>) -> Option<T> {
+    await_applied_within(RECOVERY_WINDOW, RECOVERY_INTERVAL, probe)
+}
+
+fn await_applied_within<T>(
+    window: std::time::Duration,
+    interval: std::time::Duration,
+    mut probe: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        if let Some(found) = probe() {
+            return Some(found);
+        }
+        if std::time::Instant::now() + interval > deadline {
+            return None;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Host project root whose receipt directory proves this Session's operations.
+fn recovery_state_root(root: &Path, session_id: &str) -> io::Result<PathBuf> {
+    let recovery =
+        crate::agent_project_state::validated_workspace_recovery_session(root, session_id)
+            .map_err(|_| invalid("current Session authority is unavailable"))?
+            .ok_or_else(|| invalid("current Session authority is missing"))?;
+    let crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery) = recovery
+    else {
+        return Err(invalid(
+            "receipt recovery requires exact local Host authority",
+        ));
+    };
+    Ok(recovery.project_state_root)
+}
+
+/// Finalizes a lost update (#7816). A response can be lost while the Host is still
+/// publishing (#7330), so first wait out the recovery window; then claim the operation id
+/// as `not_applied`. The no-clobber claim loses to an existing Host reservation, so the
+/// Host either published first or refuses the id forever. Never contacts the bridge,
+/// takes a writer lock, or resends the update.
+pub(crate) fn settle(
+    root: &Path,
+    session_id: &str,
+    id: &str,
+    expected: Option<(&AgentWorkspaceUpdateRequest, &SessionExecutionIdentity)>,
+) -> io::Result<ReceiptStatus> {
+    validate_operation_id(id)?;
+    let settled = await_applied(|| match inspect(root, session_id, id, expected) {
+        Ok(status) if status.status == "unconfirmed" => None,
+        other => Some(other),
+    });
+    if let Some(result) = settled {
+        return result;
+    }
+    if let Ok(state_root) = recovery_state_root(root, session_id) {
+        let _ = create_receipt_file(
+            &receipt_path(&state_root, id)?,
+            &AbandonedOperation {
+                schema_version: 1,
+                operation_id: id.to_string(),
+                session_id: session_id.to_string(),
+                outcome: NOT_APPLIED.to_string(),
+            },
+        );
+    }
+    inspect(root, session_id, id, expected)
 }
 
 /// Never contacts the bridge, takes a writer lock, or repairs/reconciles state.
@@ -180,7 +280,7 @@ pub(crate) fn inspect(
     expected: Option<(&AgentWorkspaceUpdateRequest, &SessionExecutionIdentity)>,
 ) -> io::Result<ReceiptStatus> {
     validate_operation_id(id)?;
-    let proof = (|| -> io::Result<AgentWorkspaceUpdateReceipt> {
+    let proof = (|| -> io::Result<Option<AgentWorkspaceUpdateReceipt>> {
         let recovery =
             crate::agent_project_state::validated_workspace_recovery_session(root, session_id)
                 .map_err(|_| invalid("current Session authority is unavailable"))?
@@ -204,7 +304,19 @@ pub(crate) fn inspect(
         if !fs::symlink_metadata(&path)?.file_type().is_file() {
             return Err(invalid("operation receipt is not a regular file"));
         }
-        let durable: DurableReceipt = serde_json::from_slice(&fs::read(path)?)?;
+        let bytes = fs::read(path)?;
+        if let Ok(abandoned) = serde_json::from_slice::<AbandonedOperation>(&bytes) {
+            return if abandoned.schema_version == 1
+                && abandoned.operation_id == id
+                && abandoned.session_id == session_id
+                && abandoned.outcome == NOT_APPLIED
+            {
+                Ok(None)
+            } else {
+                Err(invalid("abandoned operation marker mismatch"))
+            };
+        }
+        let durable: DurableReceipt = serde_json::from_slice(&bytes)?;
         let operation = &durable.operation;
         let intent = &operation.request.intent;
         let expected_kind = match intent.status_category {
@@ -283,10 +395,11 @@ pub(crate) fn inspect(
         if pending()? {
             return Err(invalid("workspace publication changed during inspection"));
         }
-        Ok(durable.receipt)
+        Ok(Some(durable.receipt))
     })();
     let (status, reason, receipt) = match proof {
-        Ok(receipt) => ("applied", "exact durable Host publication confirmed", Some(receipt)),
+        Ok(Some(receipt)) => ("applied", "exact durable Host publication confirmed", Some(receipt)),
+        Ok(None) => (NOT_APPLIED, "the Host never reserved this operation and will refuse it; the update was not applied and may be sent again", None),
         Err(_) => ("unconfirmed", "receipt, current Host authority or completed publication is unavailable; do not resend the update", None),
     };
     Ok(ReceiptStatus {

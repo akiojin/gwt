@@ -400,9 +400,65 @@ pub(crate) fn is_ui_surface_path(path: &str) -> bool {
 pub fn has_frontend_changes(worktree: &Path) -> Result<bool, String> {
     let base = integration_merge_base(worktree)
         .ok_or_else(|| "frontend classification requires a readable git merge-base".to_string())?;
+    let moved = unchanged_ui_move_paths(worktree, &base)?;
     Ok(changed_source_paths_since(worktree, &base)?
         .iter()
-        .any(|path| is_ui_surface_path(path)))
+        .any(|path| is_ui_surface_path(path) && !moved.contains(path)))
+}
+
+/// Whether a rename with no content change still leaves the UI as it was.
+///
+/// Issue #7305 (#5954): a byte-identical move between two UI paths renders
+/// nothing a human has not already seen. A move out of (or into) the UI
+/// surface removes or adds one, so it stays a UI change.
+pub(crate) fn is_unchanged_ui_move(from: &str, to: &str) -> bool {
+    is_ui_surface_path(from) && is_ui_surface_path(to)
+}
+
+/// Both endpoints of every byte-identical rename between UI paths from `base`
+/// to the tracked worktree. An untracked file at either endpoint is new
+/// content, so that path is never exempt.
+fn unchanged_ui_move_paths(worktree: &Path, base: &str) -> Result<BTreeSet<String>, String> {
+    let output = checked_git_output(
+        worktree,
+        &[
+            "diff",
+            "--find-renames=100%",
+            "--diff-filter=R",
+            "--name-status",
+            "-z",
+            base,
+        ],
+    )?;
+    let untracked = checked_git_output(
+        worktree,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+    let untracked: BTreeSet<&[u8]> = untracked
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .collect();
+    let fields: Vec<&[u8]> = output
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect();
+    let mut moved = BTreeSet::new();
+    for entry in fields.chunks(3) {
+        let [status, from, to] = entry else {
+            return Err("git diff returned an unreadable rename record".to_string());
+        };
+        if *status != b"R100" || untracked.contains(from) || untracked.contains(to) {
+            continue;
+        }
+        let (Ok(from), Ok(to)) = (std::str::from_utf8(from), std::str::from_utf8(to)) else {
+            continue;
+        };
+        if is_unchanged_ui_move(from, to) {
+            moved.insert(from.to_string());
+            moved.insert(to.to_string());
+        }
+    }
+    Ok(moved)
 }
 
 fn is_docs_path(path: &str) -> bool {
@@ -927,6 +983,10 @@ fn derive_for_host_excluding(
     let mut skills = false;
     let mut frontend = false;
     let mut ui_surface = false;
+    // Fail-closed: an unreadable rename set exempts nothing.
+    let moved = integration_merge_base(worktree)
+        .and_then(|base| unchanged_ui_move_paths(worktree, &base).ok())
+        .unwrap_or_default();
     let mut docs_files: Vec<String> = Vec::new();
     let mut other = false;
     let mut node_tests = BTreeSet::new();
@@ -947,7 +1007,7 @@ fn derive_for_host_excluding(
             }
         } else if is_frontend_path(path) {
             frontend = true;
-            ui_surface |= is_ui_surface_path(path);
+            ui_surface |= is_ui_surface_path(path) && !moved.contains(path);
         } else if is_rust_path(path) {
             match crate_of(path) {
                 Some(name) => {
@@ -976,6 +1036,23 @@ fn derive_for_host_excluding(
     };
 
     let code_changed = !rust_crates.is_empty() || workspace_rust || skills || frontend || other;
+    // Issue #7304: the Rust matrix only means something in a Cargo
+    // workspace. Elsewhere, refuse rather than register cargo commands that
+    // can never run, and name the paths the agent must cover explicitly.
+    if code_changed && !worktree.join("Cargo.toml").is_file() {
+        let uncovered: Vec<&str> = paths
+            .iter()
+            .filter(|path| !is_docs_path(path))
+            .filter(|path| {
+                !(is_node_script_path(path) && !node_test_paths(worktree, path).is_empty())
+            })
+            .map(String::as_str)
+            .collect();
+        return Err(format!(
+            "verify.plan derive cannot cover this checkout: there is no Cargo.toml at the worktree root, so the Rust matrix does not apply, and no project-neutral runner covers {}; register this project's own verification commands with verify.plan params.commands",
+            uncovered.join(", ")
+        ));
+    }
     if code_changed {
         push_unique(&mut commands, "rustc --version".to_string());
         push_unique(&mut commands, CI_FMT_GATE.to_string());
@@ -1581,6 +1658,19 @@ mod tests {
     /// gwt launches produce).
     fn fixture(worktree: &Path) {
         crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        write(worktree, "Cargo.toml", "[workspace]\n");
+        git(worktree, &["add", "Cargo.toml"]);
+        git(worktree, &["commit", "-qm", "chore: cargo workspace"]);
+        git(
+            worktree,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(worktree, &["checkout", "-q", "-b", "work/fixture"]);
+    }
+
+    /// The same shape for a project that is not a Cargo workspace.
+    fn bare_fixture(worktree: &Path) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
         git(
             worktree,
             &["update-ref", "refs/remotes/origin/develop", "HEAD"],
@@ -1832,6 +1922,56 @@ mod tests {
         }
     }
 
+    /// Issue #7305 (#5954): a PR that only moves existing mock / stylesheet
+    /// files byte-for-byte between UI paths renders nothing new, so it must
+    /// not raise the headed visual gate. Any content change, a move out of the
+    /// UI surface, or a move with an untracked file left at the old path keeps
+    /// the fail-closed UI classification.
+    #[test]
+    fn byte_identical_moves_between_ui_paths_are_not_a_ui_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_cargo_repo_with_origin(dir.path());
+        write(dir.path(), "wireframes/home.html", "<main>home</main>\n");
+        write(dir.path(), "app/globals.css", "body { margin: 0; }\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "feat: mocks"]);
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(dir.path(), &["checkout", "-q", "-b", "work/fixture"]);
+        git(dir.path(), &["mv", "wireframes", "docs-mocks"]);
+        write(dir.path(), "styles/.keep", "");
+        git(dir.path(), &["mv", "app/globals.css", "styles/globals.css"]);
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "chore: move mocks"]);
+
+        assert!(
+            !has_frontend_changes(dir.path()).unwrap(),
+            "byte-identical moves between UI paths render nothing new"
+        );
+        assert!(
+            !derive_for_host(dir.path(), VerificationHost::Other)
+                .unwrap()
+                .surfaces
+                .contains(&"frontend".to_string()),
+            "the derived plan must not declare a UI surface for pure moves"
+        );
+
+        write(dir.path(), "app/globals.css", "body { margin: 1px; }\n");
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "an untracked file at a moved-from path is a new UI surface"
+        );
+        std::fs::remove_file(dir.path().join("app/globals.css")).unwrap();
+
+        write(dir.path(), "styles/globals.css", "body { margin: 2px; }\n");
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a moved file whose content changed is a UI change"
+        );
+    }
+
     #[test]
     fn frontend_detection_refuses_unknown_git_or_base() {
         let dir = tempfile::tempdir().unwrap();
@@ -1872,6 +2012,45 @@ mod tests {
         let plain = tempfile::tempdir().unwrap();
         let err = derive(plain.path()).unwrap_err();
         assert!(err.contains("git worktree"), "{err}");
+    }
+
+    // Issue #7304 (#5953): a checkout without a root `Cargo.toml` is not a
+    // Cargo workspace, so derivation never proposes cargo commands there.
+    // Tool-neutral surfaces still derive; anything only the Rust matrix
+    // could cover refuses instead of registering a matrix that cannot run.
+    #[test]
+    fn non_cargo_checkout_never_derives_cargo_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        bare_fixture(dir.path());
+        write(dir.path(), "package.json", "{}\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "chore: node project"]);
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(dir.path(), "README.md", "# readme\n");
+        write(dir.path(), "scripts/tool.mjs", "export {};\n");
+        write(
+            dir.path(),
+            "scripts/tool.test.mjs",
+            "import './tool.mjs';\n",
+        );
+        let plan = derive(dir.path()).unwrap();
+        assert_eq!(
+            plan.commands,
+            vec![
+                r#"node --test "scripts/tool.test.mjs""#.to_string(),
+                r#"bunx markdownlint-cli2 "README.md""#.to_string(),
+            ]
+        );
+
+        write(dir.path(), "src/app.ts", "export {};\n");
+        let err = derive(dir.path()).unwrap_err();
+        assert!(err.contains("Cargo.toml"), "{err}");
+        assert!(err.contains("src/app.ts"), "{err}");
+        assert!(err.contains("params.commands"), "{err}");
+        assert!(!err.contains("cargo test"), "{err}");
     }
 
     #[test]

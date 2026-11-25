@@ -7,6 +7,10 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/socket-project-scope.test.mjs \
   crates/gwt/web/__tests__/frontend-route.test.mjs \
   crates/gwt/web/__tests__/hub-app.test.mjs \
+  crates/gwt/web/__tests__/home-conversation.test.mjs \
+  crates/gwt/web/__tests__/first-run-setup.test.mjs \
+  crates/gwt/web/__tests__/project-themes.test.mjs \
+  crates/gwt/web/__tests__/app-chrome.test.mjs \
   crates/gwt/web/__tests__/contrast.test.mjs \
   crates/gwt/web/__tests__/theme-manager.test.mjs \
   crates/gwt/web/__tests__/theme-segmented.test.mjs \
@@ -21,6 +25,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
+  crates/gwt/web/__tests__/execution-environments.test.mjs \
   crates/gwt/web/__tests__/dynamic-import-paths.test.mjs \
   crates/gwt/web/__tests__/unused-code.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \
@@ -77,6 +82,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/launch-wizard-controls.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-model-fallback.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-pool-impact.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-issue-plan.test.mjs \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/ui-state-store.test.mjs \
   crates/gwt/web/__tests__/ui-content.test.mjs \

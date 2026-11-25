@@ -40,6 +40,17 @@ pub enum WorktreeCommand {
         /// running-process, tracked-launch or current-worktree exclusions.
         include_protected_workspaces: bool,
     },
+    /// `worktree.remove_merged` — remove merged, idle, clean `work/*`
+    /// worktrees and their local branches (Issue #7324).
+    RemoveMerged {
+        /// Report only. Defaults to `true` so an exploratory call never
+        /// deletes.
+        dry_run: bool,
+        /// Base branch the merge check runs against (`origin/<base>`).
+        base: Option<String>,
+        /// Restrict the sweep to these branches; empty means every worktree.
+        branches: Vec<String>,
+    },
 }
 
 /// Directory whose removal frees the build cache.
@@ -151,23 +162,8 @@ fn keep_reason(
     options: GcOptions,
     protected: &[ProtectedRoot],
 ) -> Option<String> {
-    if probe.is_main {
-        return Some("main worktree".to_string());
-    }
-    if let Some(guard) = protected.iter().find(|guard| guard.root == probe.root) {
-        return Some(guard.reason.clone());
-    }
-    if !probe.active_processes.is_empty() {
-        return Some(format!(
-            "active process: {}",
-            probe.active_processes.join(", ")
-        ));
-    }
-    if !probe.tracked_sessions.is_empty() {
-        return Some(format!(
-            "tracked launch: {}",
-            probe.tracked_sessions.join(", ")
-        ));
+    if let Some(reason) = in_use_reason(probe, protected) {
+        return Some(reason);
     }
     // A base-branch workspace is an ancestor of the base by definition, so
     // the merge rule alone would always select it — and on this host that is
@@ -190,6 +186,60 @@ fn keep_reason(
         )),
         Ok(_) => None,
     }
+}
+
+/// Why a worktree may not be removed at all (Issue #7324), or `None` when it
+/// is merged, idle and a gwt work branch. Uncommitted changes are checked by
+/// the caller, which only probes the worktrees that pass this filter.
+pub(crate) fn removal_keep_reason(
+    probe: &WorktreeProbe,
+    base: &str,
+    protected: &[ProtectedRoot],
+) -> Option<String> {
+    if let Some(reason) = in_use_reason(probe, protected) {
+        return Some(reason);
+    }
+    if probe.is_base_branch_workspace {
+        return Some("shared base-branch workspace".to_string());
+    }
+    if !probe
+        .branch
+        .as_deref()
+        .is_some_and(|branch| branch.starts_with("work/"))
+    {
+        return Some("not a gwt work/ branch".to_string());
+    }
+    match &probe.merged {
+        Err(error) => Some(format!("merge state unknown: {error}")),
+        Ok(false) => Some(format!("not merged into origin/{base}")),
+        Ok(true) => None,
+    }
+}
+
+/// The exclusions no option can override: the main worktree, the caller's
+/// own worktrees, and anything with a process or a live launch under it. The
+/// running-process reasons come first among the live ones: they are the ones
+/// an operator must not miss (AC-2).
+fn in_use_reason(probe: &WorktreeProbe, protected: &[ProtectedRoot]) -> Option<String> {
+    if probe.is_main {
+        return Some("main worktree".to_string());
+    }
+    if let Some(guard) = protected.iter().find(|guard| guard.root == probe.root) {
+        return Some(guard.reason.clone());
+    }
+    if !probe.active_processes.is_empty() {
+        return Some(format!(
+            "active process: {}",
+            probe.active_processes.join(", ")
+        ));
+    }
+    if !probe.tracked_sessions.is_empty() {
+        return Some(format!(
+            "tracked launch: {}",
+            probe.tracked_sessions.join(", ")
+        ));
+    }
+    None
 }
 
 pub(super) fn run<E: CliEnv>(
@@ -222,7 +272,229 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             Ok(0)
         }
+        WorktreeCommand::RemoveMerged {
+            dry_run,
+            base,
+            branches,
+        } => {
+            let base =
+                base.unwrap_or_else(|| gwt_git::pr_status::SETTLEMENT_BASE_BRANCH.to_string());
+            let repo_path = env.repo_path().to_path_buf();
+            let report = run_remove_merged(&repo_path, &base, &branches, dry_run)?;
+            out.push_str(
+                &serde_json::to_string_pretty(&report).map_err(super::serde_as_api_error)?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
     }
+}
+
+/// One worktree named in a `worktree.remove_merged` report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RemovalEntry {
+    pub worktree: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// A worktree `worktree.remove_merged` keeps or failed to remove, with why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RemovalKept {
+    pub worktree: PathBuf,
+    pub branch: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RemoveMergedReport {
+    pub dry_run: bool,
+    pub base: String,
+    pub candidates: Vec<RemovalEntry>,
+    pub kept: Vec<RemovalKept>,
+    pub removed: Vec<RemovalEntry>,
+    pub failed: Vec<RemovalKept>,
+    /// Requested branches that no listed worktree holds.
+    pub not_found: Vec<String>,
+}
+
+/// Remove merged, idle, clean `work/*` worktrees (Issue #7324). Uses the same
+/// worktree + local-branch cleanup and Codex trust revocation as the GUI
+/// cleanup, and rechecks processes, launches and uncommitted changes
+/// immediately before each removal.
+pub(crate) fn run_remove_merged(
+    repo_path: &Path,
+    base: &str,
+    branches: &[String],
+    dry_run: bool,
+) -> Result<RemoveMergedReport, SpecOpsError> {
+    let survey = survey_worktrees(repo_path, base)?;
+    let manager = gwt_git::WorktreeManager::new(&survey.git_root);
+    let mut report = RemoveMergedReport {
+        dry_run,
+        base: base.to_string(),
+        candidates: Vec::new(),
+        kept: Vec::new(),
+        removed: Vec::new(),
+        failed: Vec::new(),
+        not_found: branches
+            .iter()
+            .filter(|wanted| {
+                !survey
+                    .probes
+                    .iter()
+                    .any(|probe| probe.branch.as_deref() == Some(wanted.as_str()))
+            })
+            .cloned()
+            .collect(),
+    };
+    for probe in survey.probes {
+        if !branches.is_empty()
+            && !probe
+                .branch
+                .as_ref()
+                .is_some_and(|branch| branches.contains(branch))
+        {
+            continue;
+        }
+        let entry = RemovalEntry {
+            worktree: probe.root.clone(),
+            branch: probe.branch.clone(),
+        };
+        let reason = removal_keep_reason(&probe, base, &survey.protected)
+            .or_else(|| uncommitted_reason(&probe.root));
+        if let Some(reason) = reason {
+            report.kept.push(RemovalKept {
+                worktree: entry.worktree,
+                branch: entry.branch,
+                reason,
+            });
+            continue;
+        }
+        if !dry_run {
+            let system = process_table().map_err(unexpected)?;
+            let roots = std::slice::from_ref(&probe.root);
+            let processes = scan_processes(&system, roots);
+            let hosts = live_gwt_hosts(&system);
+            let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
+            let reason = processes
+                .get(&probe.root)
+                .map(|names| format!("active process: {}", names.join(", ")))
+                .or_else(|| {
+                    tracked
+                        .get(&probe.root)
+                        .map(|sessions| format!("tracked launch: {}", sessions.join(", ")))
+                })
+                .or_else(|| uncommitted_reason(&probe.root));
+            if let Some(reason) = reason {
+                report.kept.push(RemovalKept {
+                    worktree: entry.worktree,
+                    branch: entry.branch,
+                    reason,
+                });
+                continue;
+            }
+            let branch = probe.branch.as_deref().expect("work/ branch checked");
+            let listed_path = survey
+                .listed_paths
+                .get(&probe.root)
+                .cloned()
+                .unwrap_or_else(|| probe.root.clone());
+            let result = crate::managed_assets::cleanup_worktree_with_codex_project_trust(
+                &listed_path,
+                || {
+                    manager
+                        .cleanup_branch_at_path_with_force_filesystem_delete(
+                            branch,
+                            &listed_path,
+                            false,
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))
+                },
+            );
+            match result {
+                Ok(()) => report.removed.push(entry.clone()),
+                Err(error) => {
+                    report.failed.push(RemovalKept {
+                        worktree: entry.worktree.clone(),
+                        branch: entry.branch.clone(),
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            }
+        }
+        report.candidates.push(entry);
+    }
+    Ok(report)
+}
+
+/// `Some(reason)` when the worktree has uncommitted or untracked changes, or
+/// when its state cannot be read: removal would lose that work.
+fn uncommitted_reason(worktree: &Path) -> Option<String> {
+    match git_stdout(
+        worktree,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    ) {
+        Ok(status) if status.trim().is_empty() => None,
+        Ok(_) => Some("uncommitted changes".to_string()),
+        Err(error) => Some(format!("worktree state unknown: {error}")),
+    }
+}
+
+/// Every listed worktree probed against the same process snapshot.
+struct WorktreeSurvey {
+    repo_path: PathBuf,
+    git_root: PathBuf,
+    probes: Vec<WorktreeProbe>,
+    protected: Vec<ProtectedRoot>,
+    /// Canonical root → the path `git worktree list` reports, which is what
+    /// the git cleanup compares against.
+    listed_paths: BTreeMap<PathBuf, PathBuf>,
+}
+
+fn survey_worktrees(repo_path: &Path, base: &str) -> Result<WorktreeSurvey, SpecOpsError> {
+    let repo_path = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let git_root = git_root_for(&repo_path);
+    let worktrees = gwt_git::worktree::WorktreeManager::new(&git_root)
+        .list()
+        .map_err(|error| unexpected(format!("git worktree list failed: {error}")))?;
+    let mut listed_paths = BTreeMap::new();
+    let roots: Vec<(PathBuf, Option<String>)> = worktrees
+        .iter()
+        .filter(|info| !info.prunable)
+        .map(|info| {
+            let root = dunce::canonicalize(&info.path).unwrap_or_else(|_| info.path.clone());
+            listed_paths.insert(root.clone(), info.path.clone());
+            (root, info.branch.clone())
+        })
+        .collect();
+    let root_paths: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
+    let system = process_table().map_err(unexpected)?;
+    let processes = scan_processes(&system, &root_paths);
+    let hosts = live_gwt_hosts(&system);
+    let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
+    let probes: Vec<WorktreeProbe> = roots
+        .iter()
+        .enumerate()
+        .map(|(index, (root, branch))| WorktreeProbe {
+            root: root.clone(),
+            is_base_branch_workspace: branch.as_deref().is_some_and(gwt_git::is_protected_branch),
+            branch: branch.clone(),
+            is_main: index == 0,
+            has_build_artifacts: root.join(BUILD_ARTIFACT_DIR).is_dir(),
+            active_processes: processes.get(root).cloned().unwrap_or_default(),
+            tracked_sessions: tracked.get(root).cloned().unwrap_or_default(),
+            merged: head_is_merged_into(&git_root, root, base),
+        })
+        .collect();
+    let protected = protected_roots(&repo_path, &root_paths);
+    Ok(WorktreeSurvey {
+        repo_path,
+        git_root,
+        probes,
+        protected,
+        listed_paths,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,41 +551,12 @@ pub(crate) fn run_gc_with_pressure(
     dry_run: bool,
     pressure_probe: Option<&dyn Fn() -> crate::disk_space::DiskSpaceStatus>,
 ) -> Result<GcReport, SpecOpsError> {
-    let repo_path = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
-    let git_root = git_root_for(&repo_path);
-    let worktrees = gwt_git::worktree::WorktreeManager::new(&git_root)
-        .list()
-        .map_err(|error| unexpected(format!("git worktree list failed: {error}")))?;
-    let roots: Vec<(PathBuf, Option<String>)> = worktrees
-        .iter()
-        .filter(|info| !info.prunable)
-        .map(|info| {
-            (
-                dunce::canonicalize(&info.path).unwrap_or_else(|_| info.path.clone()),
-                info.branch.clone(),
-            )
-        })
-        .collect();
-    let root_paths: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
-    let system = process_table().map_err(unexpected)?;
-    let processes = scan_processes(&system, &root_paths);
-    let hosts = live_gwt_hosts(&system);
-    let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
-    let probes: Vec<WorktreeProbe> = roots
-        .iter()
-        .enumerate()
-        .map(|(index, (root, branch))| WorktreeProbe {
-            root: root.clone(),
-            is_base_branch_workspace: branch.as_deref().is_some_and(gwt_git::is_protected_branch),
-            branch: branch.clone(),
-            is_main: index == 0,
-            has_build_artifacts: root.join(BUILD_ARTIFACT_DIR).is_dir(),
-            active_processes: processes.get(root).cloned().unwrap_or_default(),
-            tracked_sessions: tracked.get(root).cloned().unwrap_or_default(),
-            merged: head_is_merged_into(&git_root, root, base),
-        })
-        .collect();
-    let protected = protected_roots(&repo_path, &root_paths);
+    let WorktreeSurvey {
+        repo_path,
+        probes,
+        protected,
+        ..
+    } = survey_worktrees(repo_path, base)?;
     let unmerged: BTreeSet<_> = probes
         .iter()
         .filter(|probe| probe.merged == Ok(false))
@@ -1574,6 +1817,144 @@ mod tests {
         assert_eq!(report["reclaimed_bytes"], 4096, "{out}");
         assert!(!sibling.join(BUILD_ARTIFACT_DIR).exists());
         assert!(repo.join(BUILD_ARTIFACT_DIR).is_dir());
+    }
+
+    /// Issue #7324: the PM can remove merged, idle, clean worktrees on a user
+    /// instruction without a raw `git worktree remove`. A dry run reports and
+    /// deletes nothing; the apply removes only the merged clean worktree and
+    /// its local branch, keeping the dirty and the unmerged ones with reasons.
+    #[test]
+    fn remove_merged_removes_only_merged_idle_clean_worktrees() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        git(&repo, &["init", "-q", "-b", "develop"]);
+        git(&repo, &["config", "maintenance.auto", "false"]);
+        git(&repo, &["config", "gc.auto", "0"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("README.md"), "x").expect("write");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        let add = |name: &str| {
+            let path = tmp.path().join("work").join(name);
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &format!("work/{name}"),
+                    path.to_str().expect("utf8"),
+                ],
+            );
+            path
+        };
+        let merged = add("issue-1");
+        let dirty = add("issue-2");
+        std::fs::write(dirty.join("notes.txt"), "unsaved").expect("dirty file");
+        let unmerged = add("issue-3");
+        std::fs::write(unmerged.join("feature.txt"), "y").expect("write");
+        git(&unmerged, &["add", "."]);
+        git(&unmerged, &["commit", "-q", "-m", "feature"]);
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            WorktreeCommand::RemoveMerged {
+                dry_run: true,
+                base: None,
+                branches: Vec::new(),
+            },
+            &mut out,
+        )
+        .expect("dry run");
+        let report: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(report["dry_run"], true, "{out}");
+        let candidates = report["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates.len(), 1, "{out}");
+        assert_eq!(candidates[0]["branch"], "work/issue-1", "{out}");
+        assert!(report["removed"].as_array().is_some_and(Vec::is_empty));
+        let reason = |branch: &str| {
+            report["kept"]
+                .as_array()
+                .and_then(|kept| kept.iter().find(|k| k["branch"] == branch))
+                .and_then(|k| k["reason"].as_str())
+                .unwrap_or_else(|| panic!("{branch} not kept: {out}"))
+                .to_string()
+        };
+        assert!(
+            reason("work/issue-2").contains("uncommitted changes"),
+            "{out}"
+        );
+        assert!(reason("work/issue-3").contains("not merged"), "{out}");
+        assert!(merged.is_dir(), "dry run must not delete");
+
+        // Scoping to a branch that is not a candidate removes nothing.
+        let mut out = String::new();
+        run(
+            &mut env,
+            WorktreeCommand::RemoveMerged {
+                dry_run: false,
+                base: None,
+                branches: vec!["work/issue-2".to_string()],
+            },
+            &mut out,
+        )
+        .expect("scoped apply");
+        let scoped: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(
+            scoped["removed"].as_array().is_some_and(Vec::is_empty),
+            "{out}"
+        );
+        assert!(merged.is_dir() && dirty.is_dir(), "{out}");
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            WorktreeCommand::RemoveMerged {
+                dry_run: false,
+                base: None,
+                branches: Vec::new(),
+            },
+            &mut out,
+        )
+        .expect("apply");
+        let applied: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(applied["removed"][0]["branch"], "work/issue-1", "{out}");
+        assert!(
+            applied["failed"].as_array().is_some_and(Vec::is_empty),
+            "{out}"
+        );
+        assert!(!merged.exists(), "{out}");
+        assert!(dirty.join("notes.txt").is_file());
+        assert!(unmerged.is_dir());
+        let branches = git(&repo, &["branch", "--list", "work/*"]);
+        assert!(!branches.contains("work/issue-1"), "{branches}");
+        assert!(branches.contains("work/issue-2") && branches.contains("work/issue-3"));
     }
 
     /// Issue #4566 AC-1 / AC-3: Issues hands the sweep the project

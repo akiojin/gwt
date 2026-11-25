@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -33,6 +34,7 @@ test.describe("Agent title role and worktree badges", () => {
     await installAgentTitleBadgeBackend(page, undefined, false, false, true);
     await page.goto(appUrl);
     await page.locator("#op-pm-entry").click();
+    await page.getByRole("button", { name: "Open PM terminal" }).click();
     const pane = page.locator('.workspace-window[data-id="agent-1"]');
     const title = pane.locator(".title-text");
     await expect(title).toHaveText("Project Manager · Maple — Starting");
@@ -54,7 +56,7 @@ test.describe("Agent title role and worktree badges", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, false, true);
     await page.goto(appUrl);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     const owner = page.locator('.work-row[data-window-id="agent-1"]');
     const review = page.locator('.work-row[data-window-id="agent-2"]');
     await expect(owner.locator(".work-purpose")).toHaveText("Deliver Issue #42");
@@ -103,7 +105,7 @@ test.describe("Agent title role and worktree badges", () => {
     const screenshot = info.outputPath("kanban-agent-names.png");
     await kanban.screenshot({ path: screenshot });
     await info.attach("Kanban agent names", { path: screenshot, contentType: "image/png" });
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await expect(page.locator(".work-row[data-window-id='agent-1'] .work-name")).toHaveText(assignedName);
     await expect(page.locator(".work-row[data-window-id='agent-1'] .work-purpose")).toHaveText("Fix cache");
     await expect(page.locator(".work-row[data-window-id='agent-2'] .work-purpose")).toHaveText("Intake Agent");
@@ -297,7 +299,7 @@ async function installAgentTitleBadgeBackend(
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
           this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "title-badge-fixture", observed_at: new Date().toISOString(), agents: [
-          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: pmScenario, issue_number: null },
           { window_id: 'agent-2', session_id: 'agent-2-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
           { window_id: 'agent-3', session_id: 'agent-3-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
         ] } } });

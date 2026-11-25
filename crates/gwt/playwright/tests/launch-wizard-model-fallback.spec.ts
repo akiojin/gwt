@@ -8,6 +8,8 @@
  * seam, then drives the real DOM in Chromium for both colour schemes
  * (chromium-dark / chromium-light projects).
  */
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import {
@@ -242,21 +244,37 @@ async function installWorkspaceFixture(page: any): Promise<void> {
   });
 }
 
+// Stops the wizard can offer, in the order it draws them.
+const REASONING_LADDER = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
 // AC-1/2: verify the checkout backend's actual catalog, in addition to the
-// deterministic retired-profile notice fixtures above.
+// deterministic retired-profile notice fixtures above. Since Issue #6933 the
+// picker lists what Codex itself lists: the `visibility: "list"` rows of
+// `$CODEX_HOME/models_cache.json` by priority. The expectation is read from the
+// same file, so a Codex release that adds or retires a model cannot stale it.
 test("live Codex picker exposes the current visible snapshot", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
-  test.skip(!base, "isolated live backend required");
+  const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
+  test.skip(!base || !home, "requires browser-check isolated checkout and HOME");
   test.setTimeout(120_000);
+  const cacheBody = await readFile(join(home, ".codex/models_cache.json"), "utf8").catch(() => "");
+  // Without the cache the wizard falls back to its bundled list, which this
+  // spec has no way to read.
+  test.skip(!cacheBody, "Codex has not written models_cache.json in the isolated HOME");
+  const rows: any[] = JSON.parse(cacheBody).models.filter((row: any) => row.visibility === "list")
+    .sort((a: any, b: any) => a.priority - b.priority);
+  expect(rows.length, "Codex lists at least two models").toBeGreaterThan(1);
+  const [first, second] = rows;
+  const stops = REASONING_LADDER.filter(effort =>
+    first.supported_reasoning_levels.some((level: any) => level.effort === effort));
   const errors = collectBrowserErrors(page);
   const release = await acquireLiveGwtBackendLock(base, testInfo);
-  let cleanup: (() => Promise<void>) | undefined;
   try {
     await gotoLiveGwt(page, base, { enableTestBridge: true });
     await keepLaunchWizardModalVisible(page);
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
-    cleanup = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    await openLiveLaunchWizardForBranch(page);
     // Opening and hydration are asynchronous. Hydration resets the selected
     // launch path, so wait for its final state before applying picker choices.
     await page.waitForFunction(() => {
@@ -273,30 +291,31 @@ test("live Codex picker exposes the current visible snapshot", async ({ page }, 
       action: { kind: "set_agent", agent_id: "codex" }, bounds: null,
     });
     const model = page.locator("#wizard-modal").getByRole("combobox", { name: "Model", exact: true });
-    await expect(model.locator("option")).toHaveText(CODEX_MODEL_OPTIONS.map(row => row.label));
-    await expect(model).toHaveValue("gpt-6.1-sol");
+    await expect(model.locator("option")).toHaveText(rows.map(row => row.display_name));
+    // A fresh HOME has no saved profile, so the first listed model is selected.
+    await expect(model).toHaveValue(first.slug);
     const wizard = page.locator("#wizard-modal");
     const effort = wizard.locator(".launch-range__input");
     const effortSummary = wizard.locator(".wizard-summary-item")
       .filter({ has: page.locator(".wizard-summary-label", { hasText: /^Reasoning$/ }) })
       .locator(".wizard-summary-value");
-    // Issue #4795 AC-2: the observed CLI default is Low, with six stops through Ultra.
-    await expect(effort).toHaveAttribute("max", "5");
-    await expect(effort).toHaveValue("0");
-    await expect(effortSummary).toHaveText("low");
+    // Issue #4795 AC-2: the stops and the default are the selected model's own.
+    await expect(effort).toHaveAttribute("max", String(stops.length - 1));
+    await expect(effort).toHaveValue(String(stops.indexOf(first.default_reasoning_level)));
+    await expect(effortSummary).toHaveText(first.default_reasoning_level);
     await effort.press("End");
     await effort.blur();
-    await expect(effort).toHaveValue("5");
-    await expect(effortSummary).toHaveText("ultra");
+    await expect(effort).toHaveValue(String(stops.length - 1));
+    await expect(effortSummary).toHaveText(stops.at(-1)!);
     await testInfo.attach(`codex-snapshot-${testInfo.project.name}`, {
       body: await wizard.screenshot(), contentType: "image/png",
     });
-    await model.selectOption("gpt-6-sol");
+    await model.selectOption(second.slug);
     await model.blur();
-    await expect(model).toHaveValue("gpt-6-sol");
+    await expect(model).toHaveValue(second.slug);
     expect(errors).toEqual([]);
   } finally {
     try { await clearLiveLaunchWizard(page); }
-    finally { try { await cleanup?.(); } finally { await release(); } }
+    finally { await release(); }
   }
 });

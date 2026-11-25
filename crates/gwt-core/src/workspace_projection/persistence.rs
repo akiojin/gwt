@@ -3143,10 +3143,11 @@ fn build_workspace_state_transaction_locked<T>(
             project_root,
         )?,
     };
+    let local_events_path = work_items_path.with_file_name("work-events-closed.jsonl");
     let recovered_close_events = recover_unprojected_workspace_work_events_locked(
         &mut work_items,
         work_items_path,
-        &work_items_path.with_file_name("work-events-closed.jsonl"),
+        &local_events_path,
     )?;
     let projection_before = projection.clone();
     let board_refs_before = projection_before
@@ -3162,6 +3163,13 @@ fn build_workspace_state_transaction_locked<T>(
         &events,
         allow_successor_supersession,
     )?;
+    let events_path = if matches!(events.as_slice(), [event] if work_items.is_completed_pr_merge_refresh(event))
+    {
+        validate_workspace_local_close_path(&local_events_path)?;
+        &local_events_path
+    } else {
+        events_path
+    };
 
     let mut next_work_items = work_items;
     for event in &events {
@@ -7052,7 +7060,7 @@ fn append_workspace_work_events_if_missing(path: &Path, events: &[WorkEvent]) ->
 /// The caller must hold the current owner/Session execution-binding lease
 /// throughout this call. This narrowly scoped writer does not grant generic
 /// cross-Work mutation authority or change the shared current projection.
-/// Returns the event actually written, or None when the metadata was unchanged.
+/// Returns the shared event to certify, if one was written.
 pub fn record_workspace_pr_metadata_for_execution(
     repo_path: &Path,
     owner: &str,
@@ -7102,6 +7110,17 @@ fn record_workspace_pr_metadata_for_execution_at(
     with_workspace_work_items_lock(works_path, || {
         let mut projection =
             load_workspace_work_items_from_path(works_path)?.ok_or_else(refusal)?;
+        let local_events_path = works_path.with_file_name("work-events-closed.jsonl");
+        let recovered_close_events = if container.pr_state.as_deref() == Some("MERGED") {
+            validate_workspace_local_close_path(&local_events_path)?;
+            recover_unprojected_workspace_work_events_locked(
+                &mut projection,
+                works_path,
+                &local_events_path,
+            )?
+        } else {
+            false
+        };
         let mut matches = Vec::new();
         // A discarded Work row is inert history: it keeps its containers but
         // can never receive PR metadata, so it must not make a live row ambiguous.
@@ -7152,22 +7171,28 @@ fn record_workspace_pr_metadata_for_execution_at(
         };
         let item = &projection.work_items[*index];
         let mut updated = (*existing).clone();
-        updated.pr_number = container.pr_number;
-        updated.pr_url = container.pr_url.clone();
-        updated.pr_state = container.pr_state.clone();
+        super::work_items::merge_workspace_pr_metadata(&mut updated, container);
         if **existing == updated {
+            if recovered_close_events {
+                save_workspace_work_items_projection_to_path(works_path, &projection)?;
+            }
             return Ok(None);
         }
         let mut event = WorkEvent::new(WorkEventKind::Pr, item.id.clone(), UtcTimestamp::now());
         event.agent_session_id = Some(session_id.to_string());
         event.status_category = Some(item.status_category);
         event.execution_container = Some(updated);
+        let local_refresh = projection.is_completed_pr_merge_refresh(&event);
         if projection.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Err(refusal());
         }
-        write_workspace_work_event_shards_to_dir(events_dir, std::slice::from_ref(&event))?;
+        if local_refresh {
+            append_workspace_work_events_to_path(&local_events_path, std::slice::from_ref(&event))?;
+        } else {
+            write_workspace_work_event_shards_to_dir(events_dir, std::slice::from_ref(&event))?;
+        }
         save_workspace_work_items_projection_to_path(works_path, &projection)?;
-        Ok(Some(event))
+        Ok((!local_refresh).then_some(event))
     })
 }
 

@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if ! NODE_VERSION="$(node --version 2>/dev/null)"; then
-  echo "[FAIL] The visual test runner requires Node.js 22.x. Could not run node --version. Put Node.js 22.x first on PATH." >&2
+  echo "[FAIL] The visual test runner requires Node.js 22.x or 26.x. Could not run node --version. Put one of them first on PATH." >&2
   exit 1
 fi
 case "$NODE_VERSION" in
-  v22.*) ;;
+  v22.* | v26.*) ;;
   *)
-    echo "[FAIL] The visual test runner requires Node.js 22.x. Found $NODE_VERSION. Put Node.js 22.x first on PATH." >&2
+    echo "[FAIL] The visual test runner requires Node.js 22.x or 26.x. Found $NODE_VERSION. Put one of them first on PATH." >&2
     exit 1
     ;;
 esac

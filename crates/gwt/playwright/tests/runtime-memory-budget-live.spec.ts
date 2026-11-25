@@ -12,6 +12,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   clearLiveLaunchWizard, gotoLiveGwt, sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || "";
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME || "";
@@ -315,7 +316,7 @@ async function launch(page: Page, branch: string): Promise<string> {
   };
   let roster = await rosterRequest({ kind: "read" });
   const available = () => roster.members.some((member: any) =>
-    member.agent_id === AGENT && member.enabled && !member.assignment);
+    member.agent_id === AGENT && !member.assignment);
   if (!available()) roster = await rosterRequest({ kind: "add", agent_id: AGENT }, roster.revision);
   expect(available(), "normally allocated command-tool member").toBe(true);
   const before: string[] = await page.evaluate(() => {
@@ -344,7 +345,7 @@ async function launch(page: Page, branch: string): Promise<string> {
   }, { before, agent: AGENT }, { timeout: 90_000 }).then(handle => handle.jsonValue());
   expect(pane.status, "new Agent pane launch status").not.toBe("error");
   await expect(page.locator("#wizard-modal")).toBeHidden();
-  await page.locator('.op-rail__surface[data-surface="works"]').click();
+  await openWorks(page);
   if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
     await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
   return pane.id;

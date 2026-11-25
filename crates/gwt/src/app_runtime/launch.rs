@@ -37,7 +37,6 @@ pub(super) use gwt::session_launch::{
     apply_resume_identity_to_session, resume_handle_unavailable_reason,
 };
 
-use super::agent_maintenance;
 use super::{
     active_agent_session_matches_work, combined_window_id, normalize_branch_name,
     ActiveAgentSession, AgentKanbanLaunchTarget, AppRuntime, LaunchFeedbackContext,
@@ -358,8 +357,18 @@ impl AppRuntime {
         }
         self.register_window(tab_id, raw_id);
         let window_id = combined_window_id(tab_id, raw_id);
-        if preset.is_agent_terminal() && self.agent_maintenance.busy {
-            let detail = agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string();
+        let agent = self
+            .tab(tab_id)
+            .and_then(|tab| tab.workspace.window(raw_id))
+            .and_then(|window| window.agent_id.clone());
+        if let Some(detail) = preset
+            .is_agent_terminal()
+            .then(|| {
+                self.agent_maintenance_launch_block(agent.as_deref().or(preset.command_name()))
+            })
+            .flatten()
+        {
+            let detail = detail.to_string();
             self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
             self.window_details
                 .insert(window_id.clone(), detail.clone());
@@ -485,6 +494,28 @@ impl AppRuntime {
                 agent_kanban_target: None,
                 continuation: None,
                 prepared_monitor_admission: None,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Issue #7771: a launch planned for an Issue starts as the registered
+    /// agent chosen in its first stage.
+    pub(crate) fn spawn_agent_window_as_member(
+        &mut self,
+        tab_id: &str,
+        config: gwt_agent::LaunchConfig,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        launch_feedback_context: Option<LaunchFeedbackContext>,
+        agent_member_id: String,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        self.spawn_agent_window_with_options(
+            tab_id,
+            config,
+            AgentWindowSpawnOptions {
+                selected_agent_member_id: Some(agent_member_id),
+                workspace_resume_context,
+                launch_feedback_context,
                 ..Default::default()
             },
         )
@@ -658,8 +689,9 @@ impl AppRuntime {
         permission_checked: bool,
     ) -> Result<Vec<OutboundEvent>, String> {
         use gwt::project_runtime::launch_payload::{ManualSuccessorChoice, OwnerLaunchMetadata};
-        if self.agent_maintenance.busy {
-            return Err(agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string());
+        if let Some(message) = self.agent_maintenance_launch_block(Some(config.agent_id.command()))
+        {
+            return Err(message.to_string());
         }
         let context = self
             .project_context(tab_id)

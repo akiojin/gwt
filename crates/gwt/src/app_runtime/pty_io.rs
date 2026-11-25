@@ -313,6 +313,9 @@ impl AppRuntime {
                     | OwnerCommand::Resize {
                         id, incarnation, ..
                     }
+                    | OwnerCommand::SwitchExecutionAccount {
+                        id, incarnation, ..
+                    }
                     | OwnerCommand::Close { id, incarnation }
                     | OwnerCommand::Stop { id, incarnation } => Some((id, incarnation)),
                     _ => None,
@@ -477,6 +480,7 @@ impl AppRuntime {
             super::RemoteRuntimeCommandKind::Input { .. } => "input",
             super::RemoteRuntimeCommandKind::Resize => "resize",
             super::RemoteRuntimeCommandKind::Stop => "stop",
+            super::RemoteRuntimeCommandKind::SwitchExecutionAccount => "switch_execution_account",
             super::RemoteRuntimeCommandKind::AttachmentInput(_) => {
                 unreachable!("attachment refusal returned above")
             }
@@ -818,6 +822,13 @@ impl AppRuntime {
             }
             runtime.input_in_flight = None;
             runtime.input_in_flight_reply = None;
+        }
+        if let super::RemoteRuntimeCommandKind::Input {
+            reply_client: None,
+            request_id: Some(request_id),
+        } = &kind
+        {
+            self.settle_decision_answer(*request_id, result.is_ok());
         }
         let observation = match result {
             Err(error) => {

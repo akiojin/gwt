@@ -2,18 +2,20 @@ import { useEffect, useRef } from "react";
 import { useStoreSelector } from "../store/useStoreSelector.js";
 import { focusElement, focusFirstEnabledButton } from "../hosts/focus.js";
 
-// Task-centered Decide surface (SPEC #7007 T-010). The store carries only
-// state derived by the host from the PM reports snapshot: typed decision
-// packets become numbered options, everything else keeps the existing chat
-// reply path. The surface never invents operations the backend did not
-// deliver — an answer is a chat reply, and a decision leaves this list only
-// when a later snapshot no longer hands it to the surface. "Decide later"
-// postpones without settling: the host moves the decision to the end of the
-// queue, it keeps waiting, and the waiting count does not change (T-023).
+// Task-centered Decide surface (SPEC #7007 T-010, Issue #7742). The store
+// carries only state the host derived from the gwtd decision queue: options
+// become numbered choices, a decision without options keeps the free-form
+// reply. The surface never invents operations the backend did not deliver —
+// an answer is a queue operation, and a decision leaves this list only when
+// the queue no longer hands it to the surface. "Decide later" postpones
+// without settling: the queue moves the decision to its tail, it keeps
+// waiting, and the waiting count does not change (T-023). The count shown is
+// the queue's own `waiting`, never a recount of the cards.
 const EMPTY_MODEL = Object.freeze({
   loaded: false,
   error: null,
   decisions: [],
+  waiting: null,
   sending: false,
   pendingId: null,
   sendError: null,
@@ -52,6 +54,7 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat, onDeferD
   const answered = model.answered ?? {};
   const actionable = decisions.filter(item => !answered[item.id]);
   const actionableKey = actionable.map(item => item.id).join("\n");
+  const waiting = model.waiting ?? actionable.length;
 
   // Focus placement itself is imperative DOM and belongs to the host
   // (src/hosts/focus.js); this surface only chooses the target: the next
@@ -106,9 +109,9 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat, onDeferD
         </div>
         {model.loaded && decisions.length > 0 ? (
           <p className="task-decisions__count" role="status">
-            {actionable.length === 0
+            {waiting === 0
               ? "No decisions waiting"
-              : `${actionable.length} decision${actionable.length === 1 ? "" : "s"} waiting`}
+              : `${waiting} decision${waiting === 1 ? "" : "s"} waiting`}
           </p>
         ) : null}
       </header>
@@ -125,7 +128,7 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat, onDeferD
       ) : decisions.length === 0 ? (
         <div className="task-decisions__empty">
           <h2>No decisions waiting</h2>
-          <p>When the PM needs your judgment, the decision will appear here with its reason and impact.</p>
+          <p>When a decision needs your judgment, it will appear here with its reason and impact.</p>
         </div>
       ) : (
         <>
@@ -172,7 +175,7 @@ export function TaskDecisions({ store, onAnswerDecision, onReplyInChat, onDeferD
                 ) : null}
                 {answeredText ? (
                   <p className="task-decisions__answered" role="status">
-                    {`Answer sent: ${answeredText}. The PM will continue from here.`}
+                    {`Answer sent: ${answeredText}. The waiting session continues with it.`}
                   </p>
                 ) : (
                   <div className="task-decisions__actions">

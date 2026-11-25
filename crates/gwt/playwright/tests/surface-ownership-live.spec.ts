@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { openWorks } from "./_helpers/works-entry";
 
 const controlUrl = process.env.GWT_AC11_CONTROL_URL;
 
@@ -151,7 +152,7 @@ test.describe("AC-11 real backend surface ownership", () => {
     const reopenedSettingsId = await settings.getAttribute("data-id");
     await expect.poll(async () => (await control("/state")).workspace.windows.find((data: any) => data.id === reopenedSettingsId?.split("::").at(-1))?.surface_owner).toBe("pm");
 
-    await page.locator(".op-rail__surface[data-surface='works']").click();
+    await openWorks(page);
     if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
       await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
     await expect(main).toHaveAttribute("data-surface", "works");
@@ -183,7 +184,7 @@ test.describe("AC-11 real backend surface ownership", () => {
     const shell = main.locator(`.workspace-window[data-id='${shellWindow.id}']`);
     await typeInto(shell, "printf 'AC11_SHELL_%s\\n' INPUT_OK");
     await expect(shell.locator(".xterm-rows")).toContainText("AC11_SHELL_INPUT_OK");
-    await page.locator(".op-rail__surface[data-surface='works']").click();
+    await openWorks(page);
     if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
       await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
     await expect(main.locator(`.work-row[data-window-id='${shellWindow.id}']`)).toHaveCount(0);
@@ -230,7 +231,7 @@ test.describe("AC-11 real backend surface ownership", () => {
     await expect(main).toHaveAttribute("data-surface", "settings");
     await expect(main.locator(".workspace-window[data-preset='settings']")).toHaveAttribute("data-id", "ownership-live::settings-normal");
     await expect(page.getByRole("button", { name: "Split view", exact: true })).toBeEnabled();
-    await page.locator(".op-rail__surface[data-surface='works']").click();
+    await openWorks(page);
     if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
       await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
     await expect(main.locator(".work-row")).toHaveCount(3);

@@ -141,7 +141,11 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
                 return Err(invalid());
             }
         }
-        "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
+        "pr.reopen"
+        | "pr.review.submit"
+        | "release.metadata.set"
+        | "repository.settings.set"
+        | "repository.branch_protection.update" => {
             gwt_github::client::http::validate_pm_settings(&intent.operation, &intent.params)
                 .map_err(io::Error::other)?;
         }
@@ -294,6 +298,7 @@ fn request_with(
         "project.execution.choose" => "Continue preserves this project's admitted work. Stop blocks new admission and gracefully drains this project while preserving its work and history.",
         "board.config.set" | "discussion.create" => "Board synchronization can publish this project's Board entries to its repository Discussion.",
         "repository.required_checks.update" => "This changes required check contexts on the selected develop/main branch.",
+        "repository.branch_protection.update" => "This rewrites only the named protection fields on the selected develop/main branch; every other protection field is carried through unchanged.",
         "actions.release_policy.add" | "actions.release_policy.rollback" => "This changes only prepare-release.yml permission for the current repository. It does not dispatch a workflow. Rollback requires the original successful add receipt and unchanged post-state.",
         "actions.diagnostic.policy.add" | "actions.diagnostic.policy.rollback" => "This changes only windows-diagnostic.yml permission for akiojin/gwt. It does not submit or rerun a diagnostic. Rollback requires this target's successful add receipt and unchanged post-state.",
         "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed PR head, including recovery when merge automation cannot start. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
@@ -610,7 +615,11 @@ fn execute<E: CliEnv>(
             checks_projection(&env.required_status_checks(&p.branch)?)?
         }
         "pr.auto_merge.enable" => reviewed_auto_merge_pr(env, &decode(&intent.params)?)?,
-        "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
+        "pr.reopen"
+        | "pr.review.submit"
+        | "release.metadata.set"
+        | "repository.settings.set"
+        | "repository.branch_protection.update" => {
             env.pm_settings_snapshot(&intent.operation, &intent.params)?
         }
         "discussion.create" | "board.config.set" => {
@@ -710,7 +719,11 @@ fn execute<E: CliEnv>(
             let p: AutoMergeInput = decode(&intent.params)?;
             env.enable_pr_auto_merge(p.number, &p.reviewed_head_sha)
         }
-        "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
+        "pr.reopen"
+        | "pr.review.submit"
+        | "release.metadata.set"
+        | "repository.settings.set"
+        | "repository.branch_protection.update" => {
             env.pm_settings_mutate(&intent.operation, &intent.params, &before)
         }
         _ => unreachable!(),
@@ -808,19 +821,23 @@ mod tests {
         let before = super::reviewed_auto_merge_pr(&mut env, &input)
             .expect("a Ready same-repository PR can recover from workflow startup failure");
         assert_eq!(before["is_cross_repository"], false);
-        for blocker in [
-            "draft",
-            "head_changed",
-            "ci_failing",
-            "review_pending",
-            "visual_failed",
-        ] {
+        // Issue #7810 AC-1b: no CodeRabbit review (never posted, unread, or
+        // rate-limited) does not refuse the authorization.
+        for coderabbit in [None, Some(false)] {
+            let mut unreviewed = snapshot.clone();
+            unreviewed.inventory.coderabbit_review_complete = coderabbit;
+            env.completion_prs.insert(17, unreviewed);
+            assert!(
+                super::reviewed_auto_merge_pr(&mut env, &input).is_ok(),
+                "CodeRabbit {coderabbit:?} is not an auto-merge condition"
+            );
+        }
+        for blocker in ["draft", "head_changed", "ci_failing", "visual_failed"] {
             let mut invalid = snapshot.clone();
             match blocker {
                 "draft" => invalid.inventory.is_draft = true,
                 "head_changed" => invalid.head_sha = "b".repeat(40),
                 "ci_failing" => invalid.inventory.ci_status = "FAILURE".into(),
-                "review_pending" => invalid.inventory.coderabbit_review_complete = Some(false),
                 "visual_failed" => {
                     invalid.inventory.body = "Agent Visual Check: fail(error)".into()
                 }
@@ -1014,6 +1031,10 @@ mod tests {
                 "repository.settings.set",
                 json!({"description":"Coordination","has_discussions":true}),
             ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop","allow_force_pushes":false,"required_conversation_resolution":true,"enforce_admins":false,"strict":false}),
+            ),
         ] {
             assert!(super::parse(operation, &params).is_ok(), "{operation}");
             let mut foreign = params.clone();
@@ -1034,6 +1055,22 @@ mod tests {
             (
                 "repository.settings.set",
                 json!({"required_status_checks":{}}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"feature","allow_force_pushes":false}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop"}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop","allow_deletions":true}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop","enforce_admins":"yes"}),
             ),
         ] {
             assert!(super::parse(operation, &params).is_err(), "{operation}");

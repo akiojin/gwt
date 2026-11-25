@@ -16,7 +16,8 @@
 1. Use JSON operation `pane.list` or recent Board context to identify the target session,
    branch, or agent ID.
 2. Post to Board with JSON operation `board.post`.
-3. Use `params.targets` for a specific recipient; omit it for repo-wide coordination.
+3. Use typed `params.mentions` for specific recipients and `params.broadcast:true`
+   for repo-wide coordination.
 4. Use `params.parent` when replying to an existing Board thread.
 
 ### Lifecycle Mode

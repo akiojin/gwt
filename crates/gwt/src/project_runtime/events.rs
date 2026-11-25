@@ -284,6 +284,12 @@ pub enum OwnerCommand {
         cols: u16,
         rows: u16,
     },
+    SwitchExecutionAccount {
+        id: String,
+        incarnation: u64,
+        #[serde(default)]
+        deleted_account_id: Option<String>,
+    },
     LaunchAgent {
         id: String,
         operation_id: String,
@@ -418,6 +424,10 @@ pub enum OwnerEvent {
         exit_confirmed: bool,
         raw_status: crate::WindowProcessStatus,
         exit_code: Option<u32>,
+        /// The owner's last provider hook state. The composed `status` cannot
+        /// tell a hook-observed Running from the launch placeholder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_status: Option<crate::WindowProcessStatus>,
     },
     WindowRemoved {
         id: String,

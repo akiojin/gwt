@@ -4185,6 +4185,58 @@ mod tests {
         server.shutdown();
     }
 
+    // Issue #7346 (#6492): a client-requested normal close must complete the
+    // closing handshake. Dropping the socket without echoing the Close frame
+    // surfaces as abnormal 1006 on the client.
+    #[test]
+    fn websocket_client_normal_close_receives_close_handshake_reply() {
+        let runtime = Runtime::new().unwrap();
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let url = server
+            .agent_capability_issuer()
+            .pane_websocket_url()
+            .to_string();
+        runtime.block_on(async {
+            let scoped_url = format!("{url}?repo_hash={}", project_a());
+            let (mut socket, _) = connect_async(scoped_url).await.unwrap();
+            socket
+                .send(WebSocketMessage::Text(
+                    r#"{"kind":"frontend_ready"}"#.into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code:
+                        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                    reason: "observation complete".into(),
+                }))
+                .await
+                .unwrap();
+            // No wall-clock deadline: a server that drops the socket ends the
+            // stream with an error or None, so this loop always terminates.
+            let reply = loop {
+                match socket.next().await {
+                    Some(Ok(WebSocketMessage::Close(frame))) => break Ok(frame),
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => break Err(error.to_string()),
+                    None => break Err("stream ended without Close reply".to_string()),
+                }
+            };
+            let frame = reply.expect("server must complete the closing handshake");
+            assert_eq!(frame.map(|frame| u16::from(frame.code)), Some(1000));
+        });
+        server.shutdown();
+    }
+
     // AC-5 inventory: host process/log streams, provider usage (including
     // its session rows), runtime health, and Board sign-in are global host
     // views. Uploads are host staging addressed by opaque upload_id and reply

@@ -777,3 +777,34 @@ fn divergent_or_unavailable_remote_cannot_authorize_a_handoff() {
     )
     .is_err());
 }
+
+#[test]
+fn view_prefers_a_fresh_canonical_run_over_a_stale_body_marker() {
+    // Issue #7356 / #6539: the PR body keeps the verified HEAD recorded at
+    // creation. A later product fix re-verified by a fresh canonical run on
+    // the PR branch must win over that historical marker.
+    let fixture = RemoteFixture::new();
+    fixture.canonical_record();
+    std::fs::write(fixture.verified_repo.join("src.txt"), "fixed source\n").unwrap();
+    git(&fixture.verified_repo, &["add", "src.txt"]);
+    git(
+        &fixture.verified_repo,
+        &["commit", "--quiet", "-m", "fix: product follow-up"],
+    );
+    git(
+        &fixture.verified_repo,
+        &["push", "--quiet", "origin", HEAD_BRANCH],
+    );
+    let fresh_head = git(&fixture.verified_repo, &["rev-parse", "HEAD"]);
+    let record = fixture.canonical_record();
+    assert_eq!(record.verified_head.as_deref(), Some(fresh_head.as_str()));
+
+    let out = fixture.view();
+    assert!(
+        out.contains(&format!("verified_head={fresh_head}")),
+        "the fresh canonical head must be compared: {out}"
+    );
+    assert!(out.contains("classification=matched"), "{out}");
+    assert!(out.contains("local_verification_fresh=true"), "{out}");
+    assert!(!out.contains("PR head drift detected"), "{out}");
+}

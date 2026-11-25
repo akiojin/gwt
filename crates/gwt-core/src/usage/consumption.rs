@@ -269,6 +269,7 @@ pub fn session_telemetry(
         source: match provider {
             UsageProvider::Codex => "codex_rollout",
             UsageProvider::ClaudeCode => "claude_transcript",
+            _ => "none",
         }
         .to_owned(),
         quality: if complete { "measured" } else { "partial" }.to_owned(),

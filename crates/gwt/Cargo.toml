@@ -94,7 +94,7 @@ gwt-clipboard.workspace = true
 gwt-skills.workspace = true
 gwt-terminal.workspace = true
 tracing.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_yaml.workspace = true
 thiserror.workspace = true
@@ -164,6 +164,8 @@ mac-usernotifications = "0.3.1"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSButton", "NSButtonCell", "NSControl", "NSGraphics", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSScrollView", "NSText", "NSTextContainer", "NSTextView", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-security = { version = "0.3", default-features = false, features = ["std", "SecBase", "SecItem"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]

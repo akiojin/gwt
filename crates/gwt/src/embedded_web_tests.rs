@@ -58,6 +58,53 @@ fn embedded_web_status_strip_has_no_runtime_completion_indicator() {
     assert!(static_asset_text("/styles/tokens.css").contains("--color-state-done"));
 }
 
+/// Issue #7633 (SPEC #7007 T-015, AC-6/AC-7): the shared status bar and the
+/// tab title read the one shared summary in plain English words. The old
+/// abbreviations and the encoded `Q9 A3/6` monitor value must not come back.
+#[test]
+fn embedded_web_status_strip_and_tab_title_use_plain_words() {
+    let html = index_html();
+    let strip_start = html
+        .find("id=\"op-status-strip\"")
+        .expect("status strip markup");
+    let strip_end = strip_start + html[strip_start..].find("</footer>").expect("strip end");
+    let strip = &html[strip_start..strip_end];
+    assert!(strip.contains("data-role=\"connection-label\">Connected</span>"));
+    for label in [
+        "Project", "Running", "Idle", "Blocked", "Errors", "Work", "Auto-run", "Load",
+    ] {
+        assert!(
+            strip.contains(&format!(
+                "<span class=\"op-status-strip__label\">{label}</span>"
+            )),
+            "status strip must label `{label}` in plain words"
+        );
+    }
+    for abbreviation in [
+        ">ONLINE<",
+        ">PROJECT<",
+        ">RUNNING<",
+        ">IDLE<",
+        ">BLOCK<",
+        ">ERROR<",
+        ">WORK<",
+        ">ISSUES<",
+        ">PERF<",
+    ] {
+        assert!(
+            !strip.contains(abbreviation),
+            "status strip must not show the abbreviation {abbreviation}"
+        );
+    }
+    let metadata = root_js_module_source("/project-page-metadata.js");
+    assert!(metadata.contains("${running} running · ${blocked} blocked"));
+    assert!(!metadata.contains("RUN ${running}"));
+    let shell = root_js_module_source("/operator-shell.js");
+    assert!(!shell.contains("Q${queue} A${active}"));
+    assert!(shell.contains("${queue} queued · ${active} of ${maxActive} active"));
+    assert!(!app_js().contains("\"ONLINE\" : \"OFFLINE\""));
+}
+
 /// SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
 /// app.js.
 fn project_index_search_surface_js() -> &'static str {
@@ -156,6 +203,8 @@ fn frontend_bundle_source() -> &'static str {
         // moved out of app.js; bundle-level content contracts keep matching
         // against the shipped module set.
         include_str!("../web/terminal-attachments.js"),
+        "\n",
+        include_str!("../web/attachment-upload.js"),
         "\n",
         // SPEC-3064 Phase 3 (E3) — Project Index window surface moved out
         // of app.js.
@@ -311,7 +360,9 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
         surface_js.contains("settings:open")
             && surface_js.contains(r#"section: "issues""#)
             && settings_js.contains("set_issue_monitor_autonomous_mode")
-            && settings_js.contains("set_issue_monitor_enabled")
+            && settings_js.contains("set_project_autonomy")
+            && !surface_js.contains("set_issue_monitor_enabled")
+            && !settings_js.contains("set_issue_monitor_enabled")
             && !settings_js.contains("set_issue_monitor_max_active_agents"),
         "Issues must delegate project controls to Settings without duplicate capacity editing"
     );
@@ -1486,7 +1537,15 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
         "expected a shared presetRoleLabel helper",
     );
     for label in [
-        "Shell", "Claude", "Codex", "Agent", "Branches", "Settings", "Profile", "Logs", "Issue",
+        "Shell",
+        "Claude",
+        "Codex",
+        "Agent",
+        "Branches",
+        "Settings",
+        "Environment variables",
+        "Logs",
+        "Issue",
         "Board",
     ] {
         assert!(
@@ -2703,7 +2762,7 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
         "expected Profile surface to expose selection, CRUD, active-switch, and save events",
     );
     assert!(
-        html.contains("Environment Variables")
+        html.contains("role=\"heading\" aria-level=\"2\">Environment variables")
             && html.contains("Use OS")
             && html.contains("Override")
             && html.contains("Disabled")
@@ -2976,8 +3035,10 @@ fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
         "expected Launch Wizard to derive a dedicated Runtime confirmation state",
     );
     assert!(
-        html.contains("const showSetupForms = showManualSetup && !isRuntimeConfirmation;"),
-        "expected setup form rendering to be disabled during Runtime confirmation",
+        html.contains(
+            "const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;"
+        ),
+        "expected setup form rendering to be disabled during Runtime confirmation and the stages of an Issue launch (Issue #7771)",
     );
     assert!(
             html.contains("renderWizardSummary();")
@@ -2986,7 +3047,8 @@ fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
             "expected Runtime confirmation to keep the read-only summary while hiding selection/setup rows",
         );
     assert!(
-        html.contains("showSetupForms && launchWizard.show_branch_controls !== false")
+        html.contains("(showSetupForms || planStage === \"plan\")")
+            && html.contains("&& launchWizard.show_branch_controls !== false")
             && html.contains("showSetupForms && launchWizard.show_linked_issue"),
         "expected branch and linked issue controls to be gated to setup forms \
              (linked issue uses dedicated show_linked_issue flag per SPEC-2014 FR-057)",
@@ -3992,7 +4054,7 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
         "SPEC #3206 FR-012: retired region CSS must not ship",
     );
 
-    // The replacement is wired: registered + imported, bell in the rail, and
+    // The replacement is wired: registered + imported, bell in the header, and
     // the autonomous fan-out records into the notification center history.
     assert!(
         root_js_module_assets()
@@ -4006,9 +4068,9 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
         "SPEC #3206 v2: app.js must import and mount the notification center on <body>",
     );
     assert!(
-        html.contains("id=\"op-notifications-button\"")
-            && html.contains("data-cmd=\"toggle-notifications\""),
-        "SPEC #3206 FR-009: the rail must carry the notification bell",
+        module_graph.contains("view.elementId = \"op-notifications-button\"")
+            && js.contains("notifications: () => notificationCenter.toggle()"),
+        "SPEC #3206 FR-009 / Issue #7740: the shared header must carry the notification bell",
     );
     assert!(
         js.contains("case \"issue_monitor_toast\"") && js.contains("kind: \"issue-monitor\""),
@@ -4049,24 +4111,28 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
 fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     let js = app_js();
     let pm_chat = root_js_module_source("/pm-chat.js");
-    assert!(js.contains("import { createPmChat, createPmWindowModel } from \"/pm-chat.js\""));
-    assert!(pm_chat.contains("export function createPmChat"));
+    assert!(js.contains("import { createPmWindowModel } from \"/pm-chat.js\""));
     assert!(pm_chat.contains("export function createPmWindowModel"));
-    assert!(js.contains("windowData.is_pm && presetSurface(windowData.preset) === \"terminal\""));
+    assert!(js.contains("windowData.is_pm && surface === \"terminal\""));
     assert!(pm_chat.contains("event.session_id !== previous.sessionId"));
     let render_key = js_braced_block_after(js, "function workspaceWindowsRenderKey(").unwrap();
     assert!(render_key.contains("windowData?.session_id"));
     assert!(render_key.contains("windowData?.is_pm"));
     assert!(js.contains("bindPmWindowState(windowData.id, windowData.session_id)"));
-    assert!(js.contains("view.controller.update(state)"));
-    assert!(js.contains("view.unsubscribe()"));
-    assert!(js.contains("view.controller.dispose()"));
     assert!(js.contains("requestPmReports(windowData.id, resync)"));
     assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
     assert!(js.contains("case \"pm_reports\""));
     assert!(
         js.contains("frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64)")
     );
+}
+
+#[test]
+fn embedded_web_pm_windows_mount_only_the_terminal() {
+    let js = app_js();
+    assert!(!js.contains("createPmChat"));
+    assert!(js.contains("function openHomeDecisions("));
+    assert!(js.contains("HUB_DECISIONS_URL_PATH"));
 }
 
 #[test]

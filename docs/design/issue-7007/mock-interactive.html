@@ -1,0 +1,1964 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gwt 全画面刷新モック（対話型）</title>
+<style>
+      button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) { min-height: 2rem; }
+        </style>
+<style>
+      :root{
+        --bg:#f2f3f5; --panel:#ffffff; --panel2:#e9ebee; --ink:#1b1e24; --ink2:#4c5462; --ink3:#7c8594;
+        --line:#d8dce2; --line2:#c3c9d2;
+        --accent:#0f766e; --accent-ink:#0b5a53; --accent-soft:#e2f1ee;
+        --amber:#b45309; --amber-soft:#fbf0dd;
+        --red:#b3261e; --red-soft:#fbe9e7;
+        --blue:#2563eb; --blue-soft:#e5ecfd;
+        --gray-soft:#eceef1;
+        --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+        --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
+        --shadow:0 10px 30px rgba(20,26,38,.10),0 2px 6px rgba(20,26,38,.06);
+      }
+      @media (prefers-color-scheme: dark){
+        :root{
+          --bg:#121418; --panel:#1b1e24; --panel2:#23262e; --ink:#e8eaee; --ink2:#aab2bf; --ink3:#79828f;
+          --line:#2e323b; --line2:#3d434f;
+          --accent:#2dd4bf; --accent-ink:#5eead4; --accent-soft:#10312d;
+          --amber:#f0b269; --amber-soft:#3a2c14;
+          --red:#f08a80; --red-soft:#3d1f1c;
+          --blue:#8db0f5; --blue-soft:#1d2a47;
+          --gray-soft:#262a31;
+          --shadow:0 10px 30px rgba(0,0,0,.45),0 2px 6px rgba(0,0,0,.35);
+        }
+      }
+      *{box-sizing:border-box}
+      html{scroll-behavior:smooth}
+      body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.65;font-size:15px}
+      .wrap{max-width:1060px;margin:0 auto;padding:0 18px 90px}
+
+      /* ---------- document header ---------- */
+      header.doc{padding:44px 0 8px}
+      .doc-kicker{font-size:12.5px;letter-spacing:.14em;color:var(--accent-ink);font-weight:700;text-transform:uppercase}
+      h1{font-size:31px;line-height:1.3;margin:10px 0 12px;font-weight:800;letter-spacing:-.01em}
+      .lead{font-size:16px;color:var(--ink2);max-width:46em;margin:0}
+      .lead strong{color:var(--ink)}
+
+      /* ---------- principles ---------- */
+      .principles{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:26px 0 6px}
+      @media (max-width:720px){.principles{grid-template-columns:1fr}}
+      .pr{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+      .pr h3{margin:0 0 6px;font-size:15.5px}
+      .pr h3 .n{display:inline-block;background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;line-height:22px;text-align:center;font-size:12.5px;margin-right:8px;vertical-align:2px}
+      .pr p{margin:0;font-size:13.8px;color:var(--ink2)}
+      .pr p strong{color:var(--ink)}
+      .snapshot-note{background:var(--accent-soft);border:1px solid var(--line);border-radius:10px;padding:13px 18px;margin:16px 0 0;font-size:13.8px}
+      .snapshot-note strong{color:var(--accent-ink)}
+
+      /* ---------- vocab table ---------- */
+      .vocab{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:13.8px}
+      .vocab th,.vocab td{padding:9px 14px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+      .vocab tr:last-child td{border-bottom:none}
+      .vocab th{background:var(--panel2);font-size:12.5px;letter-spacing:.06em;color:var(--ink2)}
+      .vocab td.before{font-family:var(--mono);font-size:12.8px;color:var(--red)}
+      .vocab td.after{font-weight:600}
+
+      /* ---------- sticky nav ---------- */
+      nav.screens{position:sticky;top:0;z-index:40;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);margin:34px -18px 0;padding:10px 18px}
+      nav.screens .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;max-width:1060px;margin:0 auto}
+      nav.screens a{color:var(--ink2);text-decoration:none;font-size:13px;font-weight:600;padding:7px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel)}
+      nav.screens a:hover{color:var(--ink);border-color:var(--line2)}
+      nav.screens .master{margin-left:auto;display:flex;gap:6px;align-items:center}
+      nav.screens .master span{font-size:12px;color:var(--ink3);font-weight:600}
+
+      /* ---------- sections ---------- */
+      section.screen{margin-top:56px;scroll-margin-top:76px}
+      section.screen>h2{font-size:23px;margin:0 0 4px;font-weight:800;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+      section.screen>h2 .en{font-size:13px;color:var(--accent-ink);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+      .why{color:var(--ink2);font-size:14.5px;max-width:52em;margin:0 0 14px}
+      .why strong{color:var(--ink)}
+      .points{margin:14px 0 0;padding:0;list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:8px 22px}
+      @media (max-width:720px){.points{grid-template-columns:1fr}}
+      .points li{font-size:13.8px;color:var(--ink2);padding-left:20px;position:relative}
+      .points li::before{content:"";position:absolute;left:2px;top:.62em;width:7px;height:7px;border-radius:2px;background:var(--accent)}
+      .points li strong{color:var(--ink)}
+      .prob{font-size:12px;color:var(--red);font-weight:700}
+
+      /* ---------- Before/After toggle ---------- */
+      .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px;margin:0 0 12px}
+      .seg button{border:0;background:transparent;font:inherit;font-size:13px;font-weight:700;color:var(--ink2);padding:6px 18px;border-radius:999px;cursor:pointer;min-height:36px}
+      .seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.18)}
+      section.screen[data-mode="before"] .view-a{display:none}
+      section.screen[data-mode="after"] .view-b{display:none}
+
+      /* ---------- mock window (shared) ---------- */
+      .mock{background:var(--panel);border:1px solid var(--line2);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;font-size:13.5px}
+      .mock-head{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+      .dots{display:flex;gap:6px}
+      .dots i{width:11px;height:11px;border-radius:50%;display:block}
+      .dots i:nth-child(1){background:#e0655f}.dots i:nth-child(2){background:#e5b95c}.dots i:nth-child(3){background:#63b06a}
+      .mock-title{font-size:12.8px;color:var(--ink2);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .mock-title b{color:var(--ink)}
+      .mock-body{display:flex;min-height:120px}
+      .content{flex:1;padding:18px 20px;min-width:0}
+      @media (max-width:640px){.content{padding:14px}}
+
+      /* After app rail */
+      .rail{width:196px;flex:none;border-right:1px solid var(--line);padding:14px 10px;background:var(--panel);display:flex;flex-direction:column;gap:2px}
+      @media (max-width:640px){.rail{display:none}}
+      .pm-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--accent-soft)}
+      .pm-card .who{display:flex;align-items:center;gap:9px}
+      .pm-ava{width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;flex:none}
+      .chat-head{display:flex;align-items:center;gap:11px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
+      .chat-head .nm{font-weight:800;font-size:15px;line-height:1.3}
+      .chat-head .sub{font-size:12px;color:var(--ink2)}
+      .msg .btnrow{margin-top:9px}
+      .start-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(330px,1fr);gap:26px;align-items:start}
+      @media (max-width:920px){.start-grid{grid-template-columns:1fr}}
+      .field-col{min-width:0}
+      .statebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:22px 0 14px}
+      .statebar .lab{font-size:13px;font-weight:700;color:var(--ink2)}
+      .statebar .seg{margin:0}
+      .empty-col{max-width:660px}
+      .empty-col .opt{margin-top:10px}
+      .mrow{display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid var(--line)}
+      .mrow .badge{margin-left:auto}
+      .many-search{margin:10px 0 4px}
+      .pblock{border:1px solid var(--line);border-radius:12px;padding:11px 13px 6px;margin-bottom:10px;background:var(--panel)}
+      .pblock .phead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+      .pblock .phead .rel{margin-left:auto}
+      .wline{display:flex;gap:9px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line)}
+      .wline .grow{flex:1;min-width:0}
+      .wline .t{font-weight:700;font-size:13px;line-height:1.4}
+      .wline .d{font-size:12px;color:var(--ink2);line-height:1.45}
+      .wline .bar{margin-top:5px}
+      .wcard{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:9px 11px;margin-top:9px}
+      .wcard:hover{border-color:var(--accent)}
+      .wcard .grow{flex:1;min-width:0}
+      .wcard .t{font-weight:700;font-size:13px;line-height:1.4;color:var(--ink)}
+      .wcard .d{font-size:12px;color:var(--ink2);line-height:1.45}
+      .pm-face{position:relative;width:36px;height:36px;border-radius:50%;flex:none;background:radial-gradient(circle at 36% 42%,var(--panel) 0 2.5px,transparent 3.4px),radial-gradient(circle at 64% 42%,var(--panel) 0 2.5px,transparent 3.4px),var(--accent)}
+      .pm-face::after{content:"";position:absolute;left:50%;top:53%;width:34%;height:17%;transform:translateX(-50%);border:2px solid var(--panel);border-top:0;border-radius:0 0 999px 999px}
+      .pm-face.sm{width:26px;height:26px}
+      .pm-face .dot{position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--accent);border:2px solid var(--panel)}
+      .pm-face .dot.wait{background:var(--amber)}
+      .pm-face .dot.stop{background:var(--red)}
+      .pm-byline{display:flex;align-items:center;gap:9px;margin:0 0 12px}
+      .pm-byline .who{font-size:13px;color:var(--ink2)}
+      .pm-byline .who b{color:var(--ink);font-size:13.5px}
+      .pm-card .nm{font-weight:800;font-size:13.5px;line-height:1.25}
+      .pm-card .sub{font-size:11.5px;color:var(--ink2);line-height:1.35}
+      .ctx-switch{margin-top:9px;width:100%;font:inherit;font-size:12.5px;font-weight:700;padding:7px 9px;border-radius:8px;border:1px solid var(--line2);background:var(--panel);color:var(--ink);text-align:left;cursor:pointer}
+      .ctx-switch small{display:block;font-weight:500;color:var(--ink3);font-size:11px}
+      .rail a{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;color:var(--ink2);text-decoration:none;font-weight:600;font-size:13.5px;min-height:36px}
+      .rail a.on{background:var(--gray-soft);color:var(--ink)}
+      .rail a .cnt{margin-left:auto;background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px}
+      .rail a .cnt.gray{background:var(--ink3)}
+      .rail .foot{margin-top:auto;font-size:11.5px;color:var(--ink3);padding:8px 10px 2px;border-top:1px solid var(--line)}
+
+      /* After content primitives */
+      .h-big{font-size:20px;font-weight:800;margin:0 0 4px;line-height:1.35}
+      .h-sub{color:var(--ink2);margin:0 0 16px;font-size:13.5px}
+      .h-sec{font-size:12px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3);margin:20px 0 8px}
+      .h-sec:first-child{margin-top:0}
+      .stat-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+      .stat{flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+      .stat .num{font-size:24px;font-weight:800;line-height:1.1}
+      .stat .lab{font-size:12px;color:var(--ink2);font-weight:600}
+      .stat.warn{border-color:var(--amber);background:var(--amber-soft)}
+      .stat.bad{border-color:var(--red);background:var(--red-soft)}
+      .rowitem{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;background:var(--panel);flex-wrap:wrap}
+      .rowitem .grow{flex:1;min-width:180px}
+      .rowitem .t{font-weight:700;line-height:1.4}
+      .rowitem .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+      .ptag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:800;padding:2px 9px;border-radius:999px;background:var(--gray-soft);color:var(--ink);white-space:nowrap}
+      .ptag i{width:8px;height:8px;border-radius:50%;display:block;flex:none}
+      .badge{display:inline-flex;align-items:center;font-size:11.5px;font-weight:800;padding:2px 9px;border-radius:999px;white-space:nowrap}
+      .b-run{background:var(--accent-soft);color:var(--accent-ink)}
+      .b-wait{background:var(--amber-soft);color:var(--amber)}
+      .b-block{background:var(--red-soft);color:var(--red)}
+      .b-done{background:var(--gray-soft);color:var(--ink2)}
+      .b-queue{background:var(--blue-soft);color:var(--blue)}
+      .btn{font:inherit;font-size:12.8px;font-weight:700;border-radius:8px;border:1px solid var(--line2);background:var(--panel);color:var(--ink);padding:7px 13px;cursor:pointer;min-height:36px}
+      .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+      .btn.amber{background:var(--amber);border-color:var(--amber);color:#fff}
+      .btn.danger{background:var(--red);border-color:var(--red);color:#fff}
+      .btn.ghost{border-color:transparent;color:var(--ink2)}
+      .btnrow{display:flex;gap:8px;flex-wrap:wrap}
+      .rel{color:var(--ink3);font-size:12px}
+      .bar{height:8px;border-radius:99px;background:var(--gray-soft);overflow:hidden}
+      .bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
+      .bar i.amb{background:var(--amber)} .bar i.red{background:var(--red)} .bar i.blu{background:var(--blue)}
+      .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+      .chip{font-size:12.5px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink2);border-radius:999px;padding:6px 13px;cursor:pointer;min-height:36px}
+      .chip.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+      .projgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+      @media (max-width:720px){.projgrid{grid-template-columns:1fr}}
+      .projrow{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;flex-wrap:wrap}
+      .projrow .nm{font-weight:800}
+      .projrow .meta{margin-left:auto;font-size:12.5px;color:var(--ink2);text-align:right}
+      .idle{color:var(--ink3)}
+      .cols{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+      .cols.c4{grid-template-columns:repeat(4,1fr)}
+      @media (max-width:900px){.cols{grid-template-columns:repeat(2,1fr)}.cols.c4{grid-template-columns:repeat(2,1fr)}}
+      @media (max-width:520px){.cols{grid-template-columns:1fr}}
+      .col{border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--panel2)}
+      .col h4{margin:0 0 8px;font-size:12.5px;display:flex;justify-content:space-between}
+      .col h4 .n{background:var(--ink);color:var(--panel);border-radius:999px;font-size:11px;padding:0 7px}
+      .mini{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:8px 9px;margin-bottom:8px;font-size:12.3px}
+      .mini .t{font-weight:700;line-height:1.4}
+      .mini .d{color:var(--ink2);font-size:11.8px}
+      .mini.stuck{border-color:var(--red)}
+      .mini.mine{border-color:var(--amber);background:var(--amber-soft)}
+
+      /* chat */
+      .chat{display:flex;flex-direction:column;gap:12px}
+      .msg{max-width:88%;border-radius:14px;padding:11px 14px;line-height:1.55}
+      .msg .meta{font-size:11.5px;font-weight:800;margin-bottom:3px}
+      .msg .meta{display:flex;align-items:center;gap:7px}
+      .msg.pm{background:var(--gray-soft);border-bottom-left-radius:4px;align-self:flex-start}
+      .msg.me{background:var(--accent);color:#fff;border-bottom-right-radius:4px;align-self:flex-end}
+      .msg.me .meta{color:#cdeee8}
+      .msg .route{display:inline-block;margin-top:7px;font-size:11.8px;font-weight:700;background:var(--panel);border:1px solid var(--line2);border-radius:999px;padding:3px 10px;color:var(--ink)}
+      .composer{border:1px solid var(--line2);border-radius:12px;padding:10px 12px;margin-top:16px;background:var(--panel)}
+      .composer .scope{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:9px;font-size:12.5px;color:var(--ink2)}
+      .composer textarea{width:100%;border:0;resize:none;font:inherit;font-size:14px;background:transparent;color:var(--ink);min-height:44px;outline:none}
+      .composer .send{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+
+      /* timeline */
+      .tl{position:relative;padding-left:22px}
+      .tl::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:2px;background:var(--line)}
+      .tl-item{position:relative;padding:0 0 14px}
+      .tl-item::before{content:"";position:absolute;left:-21px;top:5px;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--panel)}
+      .tl-item.dec::before{background:var(--amber)} .tl-item.err::before{background:var(--red)} .tl-item.done::before{background:var(--ink3)}
+      .tl-item .when{font-size:12px;color:var(--ink3);font-weight:700}
+      .tl-item .what{font-weight:600}
+
+      /* settings */
+      .set-group{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px}
+      .set-group h4{margin:0 0 4px;font-size:14.5px}
+      .set-group .d{font-size:12.8px;color:var(--ink2);margin:0 0 10px}
+      .set-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+      .set-row:first-of-type{border-top:none}
+      .set-row .grow{flex:1;min-width:200px}
+      .set-row .t{font-weight:700;font-size:13.5px}
+      .set-row .d2{font-size:12.3px;color:var(--ink2)}
+      .switch{width:46px;height:26px;border-radius:99px;background:var(--accent);position:relative;flex:none}
+      .switch::after{content:"";position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;background:#fff}
+      .switch.off{background:var(--line2)} .switch.off::after{right:auto;left:3px}
+      .use{margin-top:5px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
+      .use .bar{width:110px;flex:none}
+      .use .pct{font-weight:700;color:var(--ink)}
+      .use.off{color:var(--ink3)}
+
+      /* status bar mock */
+      .statusbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid var(--line2);border-radius:10px;padding:10px 16px;background:var(--panel);box-shadow:var(--shadow);font-size:13.5px}
+      .statusbar .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:none}
+      .statusbar .sep{width:1px;height:18px;background:var(--line2)}
+      .statusbar .r{margin-left:auto;color:var(--ink3);font-size:12.5px}
+      .statusbar b.you{color:var(--amber)}
+
+      /* ---------- Before style ---------- */
+      .view-b .mock{background:#eceff2;border-color:#b9bfc7;color:#24282e}
+      @media (prefers-color-scheme: dark){.view-b .mock{background:#22252b;border-color:#3a3f47;color:#cfd4da}}
+      .view-b .mock-head{background:#dde1e6;border-bottom-color:#b9bfc7}
+      @media (prefers-color-scheme: dark){.view-b .mock-head{background:#2a2e35;border-bottom-color:#3a3f47}}
+      .view-b .mock-title{color:#5a616b;font-family:var(--mono);font-size:12px}
+      .view-b .content{padding:12px 14px;font-size:12.3px}
+      .b-kpi{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+      .b-kpi .k{border:1px solid #b9bfc7;background:#f4f6f8;border-radius:4px;padding:6px 10px;font-family:var(--mono);font-size:11.5px}
+      @media (prefers-color-scheme: dark){.b-kpi .k{background:#262a30;border-color:#3a3f47}}
+      .b-warn{font-family:var(--mono);font-size:11.5px;color:#9a6a00;background:#fdf3d7;border:1px solid #e3cf8f;border-radius:4px;padding:6px 9px;margin-bottom:6px}
+      @media (prefers-color-scheme: dark){.b-warn{background:#3a3115;color:#e8c96a;border-color:#6b5c22}}
+      .b-card{border:1px solid #b9bfc7;background:#f7f8f9;border-radius:4px;padding:8px 10px;margin-bottom:7px;font-family:var(--mono);font-size:11.6px;line-height:1.6;word-break:break-word}
+      @media (prefers-color-scheme: dark){.b-card{background:#262a30;border-color:#3a3f47}}
+      .b-card .hd{font-weight:700;font-family:var(--sans);font-size:12.3px}
+      .b-tabs{display:flex;gap:2px;margin-bottom:10px;flex-wrap:wrap}
+      .b-tabs span{font-size:11.5px;font-weight:700;padding:5px 10px;border:1px solid #b9bfc7;border-bottom:none;border-radius:4px 4px 0 0;background:#dde1e6;color:#4a5058}
+      .b-tabs span.on{background:#f7f8f9;color:#24282e}
+      @media (prefers-color-scheme: dark){.b-tabs span{background:#2a2e35}.b-tabs span.on{background:#262a30;color:#e8eaee}}
+      .b-err{font-family:var(--mono);font-size:11.6px;color:#8f1d16;background:#fbe9e7;border:1px solid #e0a49e;border-radius:4px;padding:8px 10px;line-height:1.6;word-break:break-word}
+      @media (prefers-color-scheme: dark){.b-err{background:#3d1f1c;color:#f0a49c;border-color:#6e352e}}
+      .b-bar{font-family:var(--mono);font-size:11.8px;border:1px solid #b9bfc7;background:#dde1e6;border-radius:4px;padding:8px 12px;color:#33383f;word-break:break-word}
+      @media (prefers-color-scheme: dark){.b-bar{background:#2a2e35;color:#cfd4da;border-color:#3a3f47}}
+      .b-note{font-size:12px;color:#6a7280;font-family:var(--mono)}
+      .b-ro{border:1px dashed #aab1ba;border-radius:4px;padding:9px 11px;font-size:12.3px;color:#5a616b;background:#eef0f2}
+      @media (prefers-color-scheme: dark){.b-ro{background:#22252b;color:#9aa3ae}}
+
+      /* ---------- phone (mobile variant) ---------- */
+      .mobile-variant{margin-top:26px}
+      .mobile-variant>h3{font-size:15.5px;margin:0 0 4px;display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+      .mobile-variant>h3 .en{font-size:11.5px;color:var(--accent-ink);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+      .mobile-note{color:var(--ink2);font-size:13.8px;max-width:52em;margin:0 0 12px}
+      .phone{width:390px;max-width:100%;background:var(--panel);border:1px solid var(--line2);border-radius:26px;box-shadow:var(--shadow);overflow:hidden;font-size:13.5px;position:relative}
+      .phone-status{display:flex;align-items:center;gap:7px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel2);font-size:12.3px;color:var(--ink2)}
+      .phone-status .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+      .phone-status b{color:var(--ink)}
+      .phone-status b.you{color:var(--amber)}
+      .phone-status .r{margin-left:auto;font-size:11.5px;color:var(--ink3);flex:none}
+      .phone-body{padding:14px 14px 12px}
+      .phone-body .stat-row{flex-direction:column}
+      .phone-body .stat{min-width:0}
+      .phone-body .msg{max-width:94%}
+      .phone-nav{display:flex;border-top:1px solid var(--line);background:var(--panel)}
+      .phone-nav a{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;padding:9px 2px 10px;color:var(--ink3);text-decoration:none;font-size:11px;font-weight:700;position:relative}
+      .phone-nav a.on{color:var(--accent-ink)}
+      .phone-nav a .cnt{position:absolute;top:5px;right:calc(50% - 19px);background:var(--amber);color:#fff;font-size:10px;font-weight:800;border-radius:999px;padding:0 5px;line-height:16px}
+      .phone-nav a .cnt.gray{background:var(--ink3)}
+      .opt{display:block;width:100%;text-align:left;font:inherit;font-size:13.8px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink);border-radius:10px;padding:13px 14px;min-height:48px;cursor:pointer;margin-top:8px}
+      .opt small{display:block;font-weight:500;color:var(--ink2);font-size:12.3px;margin-top:2px}
+      .opt.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+      .opt.primary small{color:#cdeee8}
+      .opt.amber{background:var(--amber);border-color:var(--amber);color:#fff}
+      .opt.danger{background:var(--red);border-color:var(--red);color:#fff}
+      .dcard{border:1px solid var(--line);border-radius:12px;padding:13px 14px;margin-bottom:12px;background:var(--panel)}
+      .dcard .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+      .dcard .t{font-weight:800;line-height:1.45;font-size:14.3px}
+      .dcard .d{font-size:13px;color:var(--ink2);line-height:1.55}
+
+      footer.doc{margin-top:70px;border-top:1px solid var(--line);padding-top:20px;color:var(--ink2);font-size:13.8px}
+      footer.doc h3{color:var(--ink);font-size:16px;margin:0 0 8px}
+    
+      /* ---------- interactive mock additions ---------- */
+      .screen-pane{display:none}
+      .screen-pane.on{display:block}
+      .set-pane{display:none}
+      .set-pane.on{display:block}
+      .app-status{position:sticky;bottom:14px;z-index:30;margin-top:14px}
+      [data-nav]{cursor:pointer}
+      .projrow:hover{border-color:var(--line2)}
+    </style>
+<style>
+      /* ---------- page skeleton additions ---------- */
+      .mock{position:relative}
+      [hidden]{display:none!important}
+      .pagehead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+      .pagehead .plink{margin-left:auto}
+      .pagerow{display:flex;flex:1;min-width:0}
+      .pagegroup{display:none;flex:1;min-width:0;flex-direction:column}
+      .pagegroup.on{display:flex}
+      .start-wrap{flex:1;padding:24px 28px 28px;min-width:0}
+      @media (max-width:640px){.start-wrap{padding:16px}}
+      .proj-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--gray-soft)}
+      .proj-card .sub{font-size:11.5px;color:var(--ink2);margin-top:5px;line-height:1.4}
+      .lrow{display:flex;align-items:center;gap:10px;padding:12px 2px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+      .lrow:last-child{border-bottom:none}
+      .lrow .grow{flex:1;min-width:180px}
+      .lrow .t{font-weight:700;line-height:1.4}
+      .lrow .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+      .plink{color:var(--accent-ink);font-weight:800;cursor:pointer;text-decoration:none}
+      .plink:hover{text-decoration:underline}
+      .hero{border:1px solid var(--amber);background:var(--amber-soft);border-radius:12px;padding:18px 20px}
+      .hero .t{font-size:16.5px;font-weight:800;line-height:1.45;margin:7px 0 5px}
+      .hero .d{color:var(--ink2);font-size:13.5px;line-height:1.6;margin:0 0 13px}
+      .countline{font-size:13.5px;color:var(--ink2)}
+      .countline b{color:var(--ink)}
+      .field{font:inherit;font-size:13.5px;padding:9px 11px;border:1px solid var(--line2);border-radius:8px;background:var(--panel);color:var(--ink)}
+      .f-label{font-size:12.5px;font-weight:700;color:var(--ink2);display:block;margin:0 0 5px}
+      .notice{background:var(--accent-soft);border:1px solid var(--line);border-radius:10px;padding:11px 14px;margin:16px 0 4px;font-size:13.5px}
+      details.pathform{margin:2px 0 6px}
+      details.pathform summary{cursor:pointer;font-weight:700;color:var(--accent-ink);font-size:13.5px;width:fit-content}
+      .post{padding:11px 2px;border-bottom:1px solid var(--line)}
+      .post:last-child{border-bottom:none}
+      .post .meta{font-size:11.8px;font-weight:800;color:var(--ink2);margin-bottom:2px}
+      .post .meta{display:flex;align-items:center;gap:7px}
+      .post .body{font-size:13.5px;line-height:1.55}
+      .post .body .d{color:var(--ink2);font-size:12.8px}
+      /* clone modal */
+      .clone-backdrop{position:absolute;inset:0;background:color-mix(in srgb,var(--ink) 42%,transparent);display:flex;align-items:flex-start;justify-content:center;padding:36px 16px;z-index:50;overflow:auto}
+      .clone-dialog{background:var(--panel);border:1px solid var(--line2);border-radius:14px;box-shadow:var(--shadow);width:600px;max-width:100%;padding:20px 22px}
+      .clone-dialog h3{margin:0;font-size:17px;font-weight:800}
+      .clone-dialog .sub{color:var(--ink2);font-size:13px;margin:3px 0 0}
+      .clone-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
+      .clone-head .grow{flex:1}
+      .repo-row{display:block;width:100%;text-align:left;font:inherit;border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;color:var(--ink)}
+      .repo-row:hover{border-color:var(--line2)}
+      .repo-row.sel{border-color:var(--accent);background:var(--accent-soft)}
+      .repo-row .rt{font-weight:800;display:block}
+      .repo-row .rd{font-size:12.5px;color:var(--ink2);display:block}
+      .repo-row .rm{font-size:11.8px;color:var(--ink3);display:block}
+      [data-openpage]{cursor:pointer}
+      /* app header / footer (shared by all pages) */
+      .app-head{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+      .app-head .brand{font-size:15px;font-weight:800}
+      .app-head .proj{font-size:13px;font-weight:700;color:var(--ink2)}
+      .app-head .hnav{margin-left:auto;display:flex;align-items:center;gap:6px}
+      .hpm{display:flex;align-items:center;gap:8px;font:inherit;background:none;border:none;border-radius:8px;padding:4px 6px;cursor:pointer;color:var(--ink)}
+      .hpm .hname{font-size:13px;font-weight:800}
+      .app-foot{display:flex;align-items:center;gap:8px;padding:6px 14px;border-top:1px solid var(--line);background:var(--panel2);color:var(--ink2);font-size:12px}
+      .app-foot .fstat{margin-left:auto}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="doc">
+      <h1>gwt 全画面刷新モック — 対話型</h1>
+      <p class="lead">刷新案を、現行アプリと同じ骨格で触れる形に組み直したモックです。各画面は<strong>独立したページ</strong>で、それぞれ固有の URL を持ちます。起点は<strong>開始画面（URL: /）</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開くと PM が様子を話しかけ、返事を書けば仕事が進みます（現行 Hub の項目の再現ではなく、体験から設計しました）。会話の隣には、各プロジェクトの「今」を実データの粒度で並べます（進行中の作業・担当者・状態・進み具合、止まっている作業と理由、判断待ち、直近の完了）。プロジェクトを開くと、そのプロジェクト専用のページ（URL: /p/&lt;hash&gt;）へ移ります——標準では<strong>新しいブラウザタブ</strong>で開き、複数プロジェクトを並べて見るのはブラウザタブの役割です（アプリの中に横断の入れ物は作りません）。開始画面の会話は端末全体を見る PM とのもので（独立した PM のページは作りません）、プロジェクト固有の相談は各プロジェクトページの「相談」で行います。判断は会話の中で提示され、その場で選ぶか、<strong>各プロジェクトのページの「判断」で完結</strong>させます。アプリ全体の設定は、開始画面から開く設定ページに置きます。1画面＝1文脈、主役は1つ、を原則に要素を絞っています（2026-11-12、実際に触った本人のフィードバック、「タブ＝ブラウザのタブ」の訂正、PM 要約ブロックの決定を受けて改修。モックの文言は内容を評価できるよう日本語にしています）。</p>
+    </header>
+    <div class="statebar">
+      <span class="lab">状態：</span>
+      <div class="seg" role="group" aria-label="開始画面の状態切替">
+        <button type="button" data-startstate="has" aria-pressed="true">プロジェクトあり</button>
+        <button type="button" data-startstate="empty" aria-pressed="false">プロジェクトなし</button>
+        <button type="button" data-startstate="many" aria-pressed="false">プロジェクトが多い（20件）</button>
+      </div>
+    </div>
+    <div class="mock" id="app">
+      <div class="mock-head">
+        <span class="dots"><i style="background:#e0655f"></i><i style="background:#e5b95c"></i><i style="background:#63b06a"></i></span>
+        <span><b>gwt</b> — <span id="appTitle">開始画面</span></span>
+      </div>
+      <div class="app-head">
+        <span class="brand">gwt</span>
+        <span class="proj" id="appProj" hidden></span>
+        <div class="hnav">
+          <button class="hpm" type="button" data-openpage="start"><span class="pm-face sm"><span class="dot wait"></span></span><span class="hname">ツムギ</span><span class="badge b-wait">判断待ち 5件</span></button>
+          <button class="btn ghost hagents" type="button" data-openpage="settings" data-settingstab="launch">エージェント</button>
+          <button class="btn ghost hset" type="button" data-openpage="settings">設定</button>
+        </div>
+      </div>
+      <div class="mock-body">
+
+        <div class="pagegroup on" data-page="start">
+          <div class="start-wrap" id="startHas">
+            <div class="start-grid">
+              <div class="chat-col">
+                <div class="chat-head">
+                  <span class="pm-face"><span class="dot wait"></span></span>
+                  <div>
+                    <div class="nm">ツムギ</div>
+                    <div class="sub">あなたの PM · 判断待ち 5件</div>
+                  </div>
+                </div>
+                <div class="chat" id="startChat">
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。昨夜の間に、gwt の共有状態モデル（#7048）が終わってレビュー待ちになりました。実装は Haruto です。KeibaDB は、Sora が夜の分まで取り込みを完了しています。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-works"><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">gwt · Haruto · Codex</div></div><span class="badge b-wait">レビュー待ち</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>いま 9件の作業が進んでいます。gwt では Yui がホームと判断の画面（#7007）を1時間12分続けていて、KeibaDB では Sora がレース結果の取り込み（#130）の途中です。止まっているのは 3件 — gwt の #7047 はチェック4件の失敗、KeibaDB の毎日の取り込み（#121）は形式の変更、unity-cli は3日動きがありません。メモリの課題（#5561）は待ち行列の先頭です。まだ読まれていない報告が 9件あります。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-board"><div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">gwt · Haruto · チェック4件が失敗して停止中</div></div><span class="badge b-block">止まっている</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。対応表を直せば取り込みはそのまま続けられ、止めれば安全に止まります。
+                    <div class="wcard" data-openpage="keibadb" data-openscreen="k-decide"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">KeibaDB · 48分待ち · 対応表の判断待ち</div></div><span class="badge b-block">要対応</span></div>
+                    <div class="btnrow"><button class="btn primary" type="button" data-say="対応表を直して、取り込みを続けて" data-reply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直す</button><button class="btn" type="button" data-say="取り込みを止めて" data-reply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断が 2件あります。「ホームと判断の画面」（#7007）の計画の承認と、保存されていない変更の扱いです。ほかのプロジェクトにも 2件あります。
+                    <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>プロジェクトの中身の相談は、そのプロジェクトのページの「相談」が早いです。たとえばメモリの課題（#5561）の詳しい話は、gwt の相談で聞いてください。
+                    <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-ask">gwt の相談へ</button></div></div>
+                </div>
+                <div class="composer">
+                  <textarea id="startInput" placeholder="ツムギに話しかける…"></textarea>
+                  <div class="send"><button class="btn primary" type="button" id="startSend">送る</button></div>
+                </div>
+              </div>
+              <div class="field-col">
+                <div class="notice" id="startNotice" hidden><b class="dyn-proj-name">vr-cabin-exposure</b> を開きました。 <a class="plink" data-openpage="vr">新しいタブで開く</a></div>
+                <p class="h-sec">プロジェクトの今</p>
+                <div class="pblock" id="startVrRow" hidden>
+                  <div class="phead">
+                    <a class="plink" data-openpage="vr"><span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span></a>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                    <span class="badge b-run">作業中</span>
+                    <span class="badge b-wait">判断待ち 2件</span>
+                    <span class="rel">未解決132件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">新しい画面の共有状態モデル（#7048）</div>
+                      <div class="d">Haruto · Codex · 実装が入ってレビュー待ち</div>
+                    </div>
+                    <span class="badge b-wait">レビュー待ち</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">刷新のホームと判断の画面（#7007）</div>
+                      <div class="d">Yui · Claude Code · 1時間12分実行中 · 進み具合 55%</div>
+                      <div class="bar"><i style="width:55%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">状態モデルの変更でチェックが失敗（#7047）</div>
+                      <div class="d">Haruto · チェック4件が失敗して停止中</div>
+                    </div>
+                    <span class="badge b-block">止まっている</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">メモリの課題（#5561）</div>
+                      <div class="d">待ち行列の先頭 · 次に始まります</div>
+                    </div>
+                    <span class="badge b-queue">開始待ち</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">設定のセクションを1つの PR で出す（#7039）</div>
+                      <div class="d">昨夜完了 · PR が入りました</div>
+                    </div>
+                    <span class="badge b-done">完了</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                    <span class="badge b-wait">判断待ち 1件</span>
+                    <span class="rel">未解決14件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">レース結果の取り込み — 2026-11-11（#130）</div>
+                      <div class="d">Sora · Claude Code · 25分実行中 · 24レース中18件</div>
+                      <div class="bar"><i style="width:75%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div>
+                      <div class="d">対応表の判断待ち · 48分</div>
+                    </div>
+                    <span class="badge b-block">要対応</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">夜の取り込み（2026-11-11 分）</div>
+                      <div class="d">Sora · 取り込みが完了しています</div>
+                    </div>
+                    <span class="badge b-done">完了</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">新しい JRA-VAN の出力形式に対応する（#98）</div>
+                      <div class="d">拾われて開始待ち</div>
+                    </div>
+                    <span class="badge b-queue">開始待ち</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#2563eb"></i>llmlb</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">応答時間の定期計測</div>
+                      <div class="d">直近24時間 · 異常なし</div>
+                    </div>
+                    <span class="badge b-run">計測中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">昨夜の負荷テスト</div>
+                      <div class="d">完了 · 結果は想定内でした</div>
+                    </div>
+                    <span class="badge b-done">完了</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#c2410c"></i>event-magazine</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">公開前チェック（11月特集）</div>
+                      <div class="d">確認 20件中12件</div>
+                      <div class="bar"><i style="width:60%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">動いているセッションはありません · 最後の活動は3日前</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#a16207"></i>155-Demi</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">新しい課題はありません · 最後の作業は先週完了しました</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#475569"></i>160-Idina</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">新しい課題はありません</div>
+                    </div>
+                  </div>
+                </div>
+                <p class="h-sec">新しく始める</p>
+                <div class="btnrow">
+                  <button class="btn" type="button">フォルダを開く…</button>
+                  <button class="btn" type="button" data-clone-open>GitHub から取り込む…</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="start-wrap" id="startMany" hidden>
+            <div class="start-grid">
+              <div class="chat-col">
+                <div class="chat-head">
+                  <span class="pm-face"><span class="dot wait"></span></span>
+                  <div>
+                    <div class="nm">ツムギ</div>
+                    <div class="sub">あなたの PM · 判断待ち 5件</div>
+                  </div>
+                </div>
+                <div class="chat" id="manyChat">
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。プロジェクトは全部で20件あります。昨夜の間に変わったのは2件だけです。gwt の共有状態モデル（#7048）が終わってレビュー待ちになりました。実装は Haruto です。KeibaDB は、Sora が夜の分まで取り込みを完了しています。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-works"><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">gwt · Haruto · Codex</div></div><span class="badge b-wait">レビュー待ち</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>いま動いている作業は4件、止まっているのは3件です。gwt では Yui がホームと判断の画面（#7007）を続けていて、KeibaDB では Sora がレース結果の取り込み（#130）の途中、llmlb は応答時間の定期計測中、event-magazine は公開前チェックの途中です。止まっているのは、gwt の #7047（チェック4件の失敗）、KeibaDB の毎日の取り込み（#121、形式の変更）、それと unity-cli で、3日動きがありません。様子が変わったプロジェクトはこの5件だけで、残りの15件は変化がありません。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-board"><div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">gwt · Haruto · チェック4件が失敗して停止中</div></div><span class="badge b-block">止まっている</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。対応表を直せば取り込みはそのまま続けられ、止めれば安全に止まります。
+                    <div class="wcard" data-openpage="keibadb" data-openscreen="k-decide"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">KeibaDB · 48分待ち · 対応表の判断待ち</div></div><span class="badge b-block">要対応</span></div>
+                    <div class="btnrow"><button class="btn primary" type="button" data-msay="対応表を直して、取り込みを続けて" data-mreply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直す</button><button class="btn" type="button" data-msay="取り込みを止めて" data-mreply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断が 2件あります。「ホームと判断の画面」（#7007）の計画の承認と、保存されていない変更の扱いです。ほかのプロジェクトにも 2件あります。
+                    <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>プロジェクトの中身の相談は、そのプロジェクトのページの「相談」が早いです。たとえばメモリの課題（#5561）の詳しい話は、gwt の相談で聞いてください。
+                    <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-ask">gwt の相談へ</button></div></div>
+                </div>
+                <div class="composer">
+                  <textarea id="manyInput" placeholder="ツムギに話しかける…"></textarea>
+                  <div class="send"><button class="btn primary" type="button" id="manySend">送る</button></div>
+                </div>
+              </div>
+              <div class="field-col">
+                <p class="h-sec">プロジェクトの今</p>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                    <span class="badge b-run">作業中</span>
+                    <span class="badge b-wait">判断待ち 2件</span>
+                    <span class="rel">未解決132件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">新しい画面の共有状態モデル（#7048）</div>
+                      <div class="d">Haruto · Codex · 実装が入ってレビュー待ち</div>
+                    </div>
+                    <span class="badge b-wait">レビュー待ち</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">刷新のホームと判断の画面（#7007）</div>
+                      <div class="d">Yui · Claude Code · 1時間12分実行中 · 進み具合 55%</div>
+                      <div class="bar"><i style="width:55%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">状態モデルの変更でチェックが失敗（#7047）</div>
+                      <div class="d">Haruto · チェック4件が失敗して停止中</div>
+                    </div>
+                    <span class="badge b-block">止まっている</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                    <span class="badge b-wait">判断待ち 1件</span>
+                    <span class="rel">未解決14件</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">レース結果の取り込み — 2026-11-11（#130）</div>
+                      <div class="d">Sora · Claude Code · 25分実行中 · 24レース中18件</div>
+                      <div class="bar"><i style="width:75%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div>
+                      <div class="d">対応表の判断待ち · 48分</div>
+                    </div>
+                    <span class="badge b-block">要対応</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#2563eb"></i>llmlb</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">応答時間の定期計測</div>
+                      <div class="d">直近24時間 · 異常なし</div>
+                    </div>
+                    <span class="badge b-run">計測中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#c2410c"></i>event-magazine</span>
+                    <span class="badge b-run">作業中</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="t">公開前チェック（11月特集）</div>
+                      <div class="d">確認 20件中12件</div>
+                      <div class="bar"><i style="width:60%"></i></div>
+                    </div>
+                    <span class="badge b-run">実行中</span>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span>
+                    <span class="badge b-done">止まっています</span>
+                  </div>
+                  <div class="wline">
+                    <div class="grow">
+                      <div class="d">動いているセッションはありません · 最後の活動は3日前</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="pblock">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span style="font-weight:700;font-size:13px">ほか15件は変化なし</span>
+                    <button class="btn ghost" type="button" id="manyAllToggle" aria-expanded="false" style="margin-left:auto">すべてのプロジェクトを見る</button>
+                  </div>
+                  <div id="manyAll" hidden>
+                    <div class="many-search"><input class="field" style="width:100%" type="text" id="manySearch" placeholder="プロジェクト名で絞り込む" aria-label="プロジェクト名で絞り込む"></div>
+                    <div class="mrow" data-name="gwt"><a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a><span class="badge b-run">作業中</span></div>
+                    <div class="mrow" data-name="KeibaDB"><a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a><span class="badge b-wait">判断待ち</span></div>
+                    <div class="mrow" data-name="llmlb"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="badge b-run">作業中</span></div>
+                    <div class="mrow" data-name="event-magazine"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="badge b-run">作業中</span></div>
+                    <div class="mrow" data-name="unity-cli"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="badge b-block">止まっている</span></div>
+                    <div class="mrow" data-name="155-Demi"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="160-Idina"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="161-Kura Portal"><span class="ptag"><i style="background:#0f766e"></i>161-Kura Portal</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="harbor-works"><span class="ptag"><i style="background:#2563eb"></i>harbor-works</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="207-Sakura CMS"><span class="ptag"><i style="background:#be123c"></i>207-Sakura CMS</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="note-relay"><span class="ptag"><i style="background:#c2410c"></i>note-relay</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="318-Field Log"><span class="ptag"><i style="background:#6d28d9"></i>318-Field Log</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="pixel-bench"><span class="ptag"><i style="background:#a16207"></i>pixel-bench</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="402-Kaze API"><span class="ptag"><i style="background:#475569"></i>402-Kaze API</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="drum-tutor"><span class="ptag"><i style="background:#0f766e"></i>drum-tutor</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="511-Umi Chart"><span class="ptag"><i style="background:#2563eb"></i>511-Umi Chart</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="lantern-docs"><span class="ptag"><i style="background:#be123c"></i>lantern-docs</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="623-Toki Store"><span class="ptag"><i style="background:#c2410c"></i>623-Toki Store</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="fern-search"><span class="ptag"><i style="background:#6d28d9"></i>fern-search</span><span class="badge b-done">止まっています</span></div>
+                    <div class="mrow" data-name="730-Mori Lab"><span class="ptag"><i style="background:#a16207"></i>730-Mori Lab</span><span class="badge b-done">止まっています</span></div>
+                  </div>
+                </div>
+                <p class="h-sec">新しく始める</p>
+                <div class="btnrow">
+                  <button class="btn" type="button">フォルダを開く…</button>
+                  <button class="btn" type="button" data-clone-open>GitHub から取り込む…</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="start-wrap" id="startEmpty" hidden>
+            <div class="empty-col">
+              <div class="chat-head">
+                <span class="pm-face"><span class="dot"></span></span>
+                <div>
+                  <div class="nm">ツムギ</div>
+                  <div class="sub">あなたの PM</div>
+                </div>
+              </div>
+              <div class="chat" id="emptyChat">
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>はじめまして、ツムギです。この端末の PM として、プロジェクトの様子を見て、進んでいる作業や、あなたの判断が要ることをお伝えします。いまは、まだプロジェクトがありません。</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>最初のプロジェクトを始めましょう。この端末にあるフォルダを開くか、GitHub のリポジトリを取り込むか、どちらからでも始められます。
+                  <button class="opt primary" type="button" data-clone-open>GitHub から取り込む…</button>
+                  <button class="opt" type="button">フォルダを開く…</button></div>
+              </div>
+              <div class="composer">
+                <textarea id="emptyInput" placeholder="ツムギに話しかける…"></textarea>
+                <div class="send"><button class="btn primary" type="button" id="emptySend">送る</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pagegroup" data-page="settings">
+          <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a></div>
+          <div class="pagerow">
+          <div class="content">
+            <div class="screen-pane on" data-screen="appsettings">
+              <p class="h-big">設定</p>
+              <div class="chips" role="group" aria-label="設定のタブ"><button class="chip on" type="button" data-tab="yourpm">あなたの PM</button><button class="chip" type="button" data-tab="tools">ツール</button><button class="chip" type="button" data-tab="launch">起動</button><button class="chip" type="button" data-tab="projects">プロジェクト</button></div>
+              <div class="set-pane on" data-pane="yourpm">
+                <div class="set-group">
+                  <h4>あなたの PM — この端末</h4>
+                  <p class="d">PM を務めるエージェントの振る舞いの設定です。誰が PM を務めるかは、「起動」タブのエージェント設定で決めます。</p>
+                  <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">PM のアバターと名前</div><div class="d2">いまはこの顔と名前（ツムギ）です。</div></div><button class="btn" type="button">変える</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">相談の内容から、担当プロジェクトを自動で決める</div><div class="d2">プロジェクトページの「相談」の内容から PM が候補を出し、必ずあなたに見せてから決めます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                  <div class="set-row"><div class="grow"><div class="t">判断は、出てきた時点で知らせる</div><div class="d2">オフにすると、判断は朝と夜の報告にまとめられます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                  <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">23:00〜7:00 は、止まった作業と判断だけを知らせます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                  <div class="set-row"><div class="grow"><div class="t">アプリの更新 — gwt 本体</div><div class="d2">現在のバージョン 9.161.0。</div></div><button class="btn" type="button">今すぐ確認</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">更新を自動で適用する</div><div class="d2">更新の準備ができたら、動いている作業を安全に終わらせてから gwt を再起動して適用します。適用前なら取り消せます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                  <div class="set-row"><div class="grow"><div class="t">リリースノートと gwt について</div><div class="d2">バージョンごとの変更点です。古いバージョンに戻すときは、先に確認を求めます。</div></div><button class="btn" type="button">開く</button></div>
+                </div>
+                <div class="set-group">
+                  <h4>性能とシステム — この端末</h4>
+                  <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">担当者のプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button">バランス ▾</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">ログイン時に gwt を起動する</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
+                  <div class="set-row"><div class="grow"><div class="t">作業の出力行数</div><div class="d2">作業セッションで表示する出力の行数です（3〜10）。</div></div><button class="btn" type="button">6 ▾</button></div>
+                </div>
+              </div>
+              <div class="set-pane" data-pane="tools">
+                <div class="set-group">
+                  <h4>対応ツール</h4>
+                  <div class="set-row"><div class="grow"><div class="t">ツールを自動で更新する</div><div class="d2">次回起動時に、更新の経路が確認できていて新しいバージョンがあるツールだけを更新します。勝手にインストールはしません。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                  <p class="d" style="margin:2px 0 4px">担当者が作業している間は、インストールと更新はできません。担当者の画面を閉じてからやり直してください。更新に失敗しても、起動はできます。</p>
+                  <div class="set-row"><div class="grow"><div class="t">Claude Code</div><div class="d2">インストール済み · バージョン 2.1.322 · 最新 2.1.322 — 最新です · セッション5つ利用可</div></div><span class="badge b-done">最新</span></div>
+                  <div class="set-row"><div class="grow"><div class="t">Codex</div><div class="d2">インストール済み · バージョン 0.58.0 · 最新 0.59.0 — 更新があります · セッション1つはサインインが必要（担当者の画面を見てください）</div></div><span class="badge b-wait">要確認</span><button class="btn" type="button">更新</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">Grok Build</div><div class="d2">未インストール</div></div><button class="btn primary" type="button">インストール</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">OpenCode</div><div class="d2">インストール済み · バージョン 1.1.8 · 最新 1.1.8 — 最新です</div></div><span class="badge b-done">最新</span></div>
+                </div>
+              </div>
+              <div class="set-pane" data-pane="launch">
+                <div class="set-group">
+                  <h4>起動 — 担当者の始め方</h4>
+                  <p class="d">エージェントごとの起動プロファイル（候補）です。</p>
+                  <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">1. ツムギ — Claude Code · Auto · 推論 標準</div><div class="d2">実行環境：ホスト · セッション：常駐 · いま、この端末の PM</div></div><button class="btn" type="button">編集</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">オンのエージェントは、この端末で1人だけです。</div></div><input type="checkbox" checked aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+                  <div class="set-row"><div class="grow"><div class="t">使うツール</div><div class="d2">Claude Code</div></div><button class="btn" type="button">変える</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">モデル</div><div class="d2">Auto · 推論 標準</div></div><button class="btn" type="button">変える</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">2. Haruto — Codex · gpt-6-sol · 推論 xhigh</div><div class="d2">実行環境：ホスト · セッション：通常 · 得意：実装</div></div><button class="btn" type="button">編集</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">3. Yui — Claude Code · Auto · 推論 標準</div><div class="d2">実行環境：Docker · サービス agent-dev · セッション：通常</div></div><button class="btn" type="button">編集</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">4. Sora — Claude Code · Auto · 推論 標準</div><div class="d2">実行環境：ホスト · セッション：通常 · 得意：データ取り込み</div></div><button class="btn" type="button">編集</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">起動プロファイルを管理する</div><div class="d2">プロファイルの追加、並び替え、削除をします。</div></div><button class="btn" type="button">プロファイルを追加</button></div>
+                </div>
+              </div>
+              <div class="set-pane" data-pane="projects">
+                <div class="set-group">
+                  <h4>プロジェクト</h4>
+                  <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">違うところ2件：報告はチームのチャンネルへ · 今週は React の作業が優先</div></div><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-settings">ページを開く</button></div>
+                  <div class="set-row"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="d2">違うところ1件：サービスの再起動にはあなたの判断が必要</div></div><button class="btn" type="button">開く</button></div>
+                  <div class="set-row"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="d2">違うところ1件：取り込みは毎日 6:00</div></div><button class="btn" type="button">開く</button></div>
+                  <div class="set-row"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="ptag"><i style="background:#475569"></i>160-Idina</span><div class="grow"><div class="d2">違いなし — 端末全体の設定をそのまま使用</div></div></div>
+                </div>
+                <div class="set-group">
+                  <h4>掲示板の共有 — この端末</h4>
+                  <div class="set-row"><div class="grow"><div class="t">掲示板の共有先</div><div class="d2">この端末のみ、Slack、Teams から選びます。切り替えると、掲示板のフックも配線し直します。GitHub Discussions の受け渡し（判断・止まった報告・引き継ぎ）は、共有先が「この端末のみ」のときだけ有効です。</div></div><button class="btn" type="button">この端末のみ ▾</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">Slack / Teams の接続</div><div class="d2">クライアント ID と秘密情報、テナント、標準のチャンネル。サインインとサインアウトもここです。</div></div><button class="btn" type="button">設定する</button></div>
+                </div>
+                <div class="set-group">
+                  <h4>プロジェクトごと — 作業の進め方</h4>
+                  <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">このプロジェクトの課題を見て、対象のものを作業にします。自動（自律）で進める場合は、先に聞かずに進めます。GitHub トークン（GH_TOKEN / GITHUB_TOKEN）が必要です。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                  <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">空きが出たら、補充の上限（今は3）まで待ち行列を埋め続けます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                  <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題だけが、起動の待ち行列に入ります。</div></div><button class="btn" type="button">ラベルを編集</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM のツムギが、このプロジェクトも見ています。PM 自身の設定は、「起動」タブのエージェント設定にあります。</div></div><button class="btn" type="button">開く</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">フック — フックセンター</div><div class="d2">このプロジェクトのフックの監査・健全性・修復・再生成、Git フックの配置、gwt が管理する Codex フックの信頼。</div></div><button class="btn" type="button">開く</button></div>
+                  <div class="set-row"><div class="grow"><div class="t">プロジェクトの検索索引</div><div class="d2">索引の健全性：状態、文書の数、最後の修復。再構築、全て再構築、状態の更新がここでできます。</div></div><button class="btn" type="button">再構築</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          </div>
+        </div>
+
+        <div class="pagegroup" data-page="gwt">
+          <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a></div>
+          <div class="pagerow">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#0f766e"></i>gwt</span>
+              <div class="sub">プロジェクトページ · ポリシー：実行中</div>
+            </div>
+            <a href="#" data-nav="g-issues" class="on">課題</a>
+            <a href="#" data-nav="g-works">作業</a>
+            <a href="#" data-nav="g-decide">判断<span class="cnt">2</span></a>
+            <a href="#" data-nav="g-ask">相談</a>
+            <a href="#" data-nav="g-agents">担当者</a>
+            <a href="#" data-nav="g-board">掲示板</a>
+            <a href="#" data-nav="g-index">検索</a>
+            <a href="#" data-nav="g-branches">ブランチ</a>
+            <a href="#" data-nav="g-settings">設定</a>
+          </div>
+          <div class="content">
+
+            <div class="screen-pane on" data-screen="g-issues">
+              <p class="h-big">課題</p>
+              <p class="h-sub">gwt · 未解決132件</p>
+              <p class="countline" style="margin-bottom:8px">段階 — 未着手 <b>118</b> · 待ち <b>3</b> · 計画中 <b>1</b> · 実装中 <b>2</b> · レビュー中 <b>1</b> · 今日完了 <b>5</b></p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">長時間のセッションでメモリが増え続ける（#5561）</div>
+                  <div class="d">バグ · 6日前に報告 · 拾われて開始待ち</div>
+                </div>
+                <span class="badge b-queue">開始待ち</span>
+                <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">新しい画面の共有状態モデル（#7048）</div>
+                  <div class="d">実装 · Haruto が作業中</div>
+                </div>
+                <span class="badge b-run">実行中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">刷新のホームと判断の画面（#7007）</div>
+                  <div class="d">実装 · Yui が作業中</div>
+                </div>
+                <span class="badge b-run">実行中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">変更でチェックが失敗している（#7047）</div>
+                  <div class="d">レビュー · チェック4件が失敗 — 修正を準備中</div>
+                </div>
+                <span class="badge b-block">要対応</span>
+              </div>
+              <p class="rel" style="margin-top:12px">+ gwt の課題があと128件</p>
+            </div>
+
+            <div class="screen-pane" data-screen="g-issue">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-issues">&larr; 課題一覧へ</button></div>
+              <p class="h-big">長時間のセッションでメモリが増え続ける</p>
+              <p class="h-sub">課題 #5561 · <b>gwt</b> · バグ · 6日前に報告 · PM が拾いました — 「作業」で開始待ちです。</p>
+              <div class="set-group">
+                <h4>目的</h4>
+                <p class="d">長時間のセッションで GUI のメモリが増えないようにします（約4時間で 0.85 GB から 2.7 GB へ）。再起動なしで一日中 gwt を開いておけるようにします。</p>
+                <div class="set-row"><div class="grow"><div class="t">受け入れ条件</div><div class="d2">同じ作業量で4時間動かしても、メモリが横ばいのまま。この端末だけでなく Windows でも確認します。</div></div><span class="badge b-queue">作業の中</span></div>
+                <div class="set-row"><div class="grow"><div class="t">段階</div><div class="d2">待ち — 開始を待っています。</div></div><button class="btn" type="button" data-nav="g-issues">課題へ</button></div>
+              </div>
+              <div class="set-group">
+                <h4>やり取り</h4>
+                <div class="set-row"><div class="grow"><div class="t">あなたの PM</div><div class="d2">フィードバックの待ち行列から拾いました。Windows でも同じ遅さに気づいていたので、両方の報告をここに結びました。</div></div><span class="rel">2日前</span></div>
+                <div class="set-row"><div class="grow"><div class="t">あなた</div><div class="d2">長時間動かすと GUI が入力を受け付けなくなることもある — 同じ仲間として扱って。</div></div><span class="rel">2日前</span></div>
+              </div>
+              <div class="set-group">
+                <h4>実行</h4>
+                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">開始待ち — まだ誰も作業していません。</div></div><span class="badge b-queue">開始待ち</span></div>
+                <div class="set-row"><div class="grow"><div class="t">担当者とセッション</div><div class="d2">まだありません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">ありません。</div></div><span class="badge b-done">なし</span></div>
+              </div>
+              <div class="set-group">
+                <h4>検証と成果物</h4>
+                <div class="set-row"><div class="grow"><div class="t">検証</div><div class="d2">まだ実行していません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">成果物</div><div class="d2">まだ何もありません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">未処理の義務</div><div class="d2">この課題に付いた未処理の義務（レビュー、チェック、判断）はありません。</div></div></div>
+              </div>
+              <div class="set-group">
+                <h4>経過と文脈</h4>
+                <div class="set-row"><div class="grow"><div class="t">経過</div><div class="d2">報告 → PM が拾う → 開始待ち。</div></div></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-works">
+              <p class="h-big">作業</p>
+              <p class="h-sub">今 gwt で動いているセッションです。</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">新しい画面の共有状態モデル（#7048）</div>
+                  <div class="d">Codex · Haruto · 42分実行中 · 最後の活動は2分前</div>
+                </div>
+                <span class="badge b-run">実行中</span>
+                <button class="btn" type="button">セッションを開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">刷新のホームと判断の画面（#7007）</div>
+                  <div class="d">Claude Code · Yui · 1時間12分実行中 · 最後の活動はたった今</div>
+                </div>
+                <span class="badge b-run">実行中</span>
+                <button class="btn" type="button">セッションを開く</button>
+              </div>
+              <p class="h-sec">過去のセッション</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">過去のセッションを再開する</div>
+                  <div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div>
+                </div>
+                <button class="btn" type="button">セッションを選ぶ…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-decide">
+              <p class="h-big">判断 — gwt</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">「ホームと判断の画面」（#7007）の計画を承認しますか？</div><div class="d">設計は終わり、待っていた土台も入りました。承認すると、すぐに実装が再開します。</div></div><span class="rel">1時間待ち</span><div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn" type="button">変更を求める</button></div></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="t">保存されていない変更を、保存しますか？</div><div class="d">このプロジェクトには、まだ保存（コミット）も送信（プッシュ）もされていない変更が2件あります。この端末が初期化されると、その作業は失われます。</div></div><span class="rel">26分待ち</span><div class="btnrow"><button class="btn amber" type="button">保存して送信する</button><button class="btn" type="button">あとで</button></div></div>
+              <p class="rel">判断待ちは以上です。</p>
+            </div>
+
+            <div class="screen-pane" data-screen="g-ask">
+              <p class="h-big">相談 — gwt</p>
+              <div class="chat">
+                <div class="msg me"><div class="meta">あなた · たった今</div>メモリの課題（#5561）はどうなってる？</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>待ち行列に入っていて、次に始まります。計画は承認済みで、妨げるものはありません。修正が入ったら、メモリの記録をここに投稿します。
+                  <br><span class="route">範囲：gwt</span></div>
+              </div>
+              <div class="composer">
+                <div class="scope"><span>範囲：<b>gwt</b></span></div>
+                <textarea placeholder="gwt のことを聞く…"></textarea>
+                <div class="send"><button class="btn primary" type="button">送る</button></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-agents">
+              <p class="h-big">担当者</p>
+              <div class="rowitem">
+                <span class="ava" style="background:#2563eb">H</span>
+                <div class="grow">
+                  <div class="t">Haruto <span class="rel">· Codex（ツール）</span></div>
+                  <div class="d">作業中：#7048、共有状態モデル · ここまで42分</div>
+                  <div class="use"><div class="bar"><i style="width:64%"></i></div><span class="u">Codex アカウント — 週間64%使用 · 金曜18:00にリセット</span></div>
+                </div>
+                <span class="badge b-run">作業中</span>
+                <button class="btn ghost" type="button">一時停止</button>
+              </div>
+              <div class="rowitem">
+                <span class="ava" style="background:#c2410c">Y</span>
+                <div class="grow">
+                  <div class="t">Yui <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="d">作業中：#7007、ホームと判断の画面 · ここまで1時間12分</div>
+                  <div class="use"><div class="bar"><i style="width:31%"></i></div><span class="u">Claude アカウント — 週間31%使用 · 金曜18:00にリセット</span></div>
+                </div>
+                <span class="badge b-run">作業中</span>
+                <button class="btn ghost" type="button">一時停止</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-board">
+              <p class="h-big">掲示板</p>
+              <p class="countline" style="margin-bottom:6px">あなた待ち <b>2</b> · 要対応 <b>1</b> · 進行中 <b>4</b> · 開始待ち <b>9</b></p>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">あなた宛て</span><span class="chip">全体</span><span class="chip">一斉</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">未解決の詰まり 1件</div>
+                  <div class="d">#7047 — Haruto の申告 · PM が見ています</div>
+                </div>
+              </div>
+              <div class="post">
+                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">判断</span> · 12:12</div>
+                <div class="body">判断：設定のセクションは1つの PR で出します（#7039）。</div>
+              </div>
+              <div class="post">
+                <div class="meta">Haruto · <span class="badge b-block">要対応</span> · PM 宛て · 12:03</div>
+                <div class="body">#7047 で止まっています：状態モデルの変更でチェック4件が失敗。</div>
+              </div>
+              <div class="post">
+                <div class="meta">引き継ぎ · <span class="badge b-plan">別のマシンから · GitHub Discussions</span> · 11:48</div>
+                <div class="body">Windows のセッションが #7047 の修正を試し終えました — 詳しくは課題にあります。
+                </div>
+              </div>
+              <p class="rel" style="margin-top:12px">掲示板の共有先：この端末のみ（判断・止まった報告・引き継ぎは GitHub Discussions で受け渡し中）</p>
+              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="gwt の掲示板に投稿…">
+                <button class="btn" type="button">投稿</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-index">
+              <p class="h-big">検索</p>
+              <p class="rel" style="margin-bottom:10px">範囲：gwt — このプロジェクトの中だけを探します</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:220px" type="text" value="memory growth long session" aria-label="gwt を検索">
+                <button class="btn primary" type="button">検索</button>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip">意味で探す</span><span class="chip on">全ての語を含む</span>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">課題</span><span class="chip on">仕様</span><span class="chip on">掲示板</span><span class="chip on">議論</span><span class="chip on">作業</span><span class="chip on">報告</span><span class="chip on">メモリ</span><span class="chip on">ファイル</span><span class="chip">ドキュメント</span>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <span class="rel">ファイルの作業ツリー：</span>
+                <button class="btn" type="button">work/issue-7007 ▾</button>
+              </div>
+              <p class="h-sec">厳密な結果</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">長時間のセッションでメモリが増え続ける（#5561）</div>
+                  <div class="d">課題 · 一致した語：memory、growth、session · 不足する語：long</div>
+                  <div class="d">プレビュー：長時間のセッションでメモリ使用量が増え続け、再起動するまで戻らない…</div>
+                </div>
+                <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">長時間セッションのメモリ調査</div>
+                  <div class="d">作業 · 一致した語：memory、session · 不足する語：growth、long</div>
+                </div>
+              </div>
+              <p class="h-sec">意味の候補</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">長時間セッションのメモリ記録 — 報告</div>
+                  <div class="d">報告 · 一致度88% · 一致した語：memory、session</div>
+                </div>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">メモリ調査の進め方</div>
+                  <div class="d">掲示板 · 一致度81% · 一致した語：memory</div>
+                </div>
+              </div>
+              <p class="h-sec">索引の健全性</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">準備完了 8/9</div>
+                  <div class="d">劣化中：ファイル（work/issue-5561）</div>
+                </div>
+                <button class="btn" type="button" data-nav="g-settings">設定で開く</button>
+              </div>
+              <p class="h-sec">健全性</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">状態：おおむね準備完了</div>
+                  <div class="d">準備完了 8 · 要対応 1</div>
+                </div>
+                <button class="btn" type="button">状態を更新</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">課題（仕様と共通の索引）· リポジトリ共有</div>
+                  <div class="d">準備完了 · 文書8,214件 · 最後の修復は2日前</div>
+                </div>
+                <button class="btn" type="button">再構築</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">掲示板 · リポジトリ共有</div>
+                  <div class="d">準備完了 · 文書1,102件 · 最後の修復は2日前</div>
+                </div>
+                <button class="btn" type="button">再構築</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">ファイル</div>
+                  <div class="d">土台（git の木ごと）＋作業ツリーごとの差分</div>
+                </div>
+                <button class="btn" type="button">すべて再構築</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">ファイル · work/issue-7007</div>
+                  <div class="d">準備完了 · 文書3,864件 · 最後の修復は昨日</div>
+                </div>
+                <button class="btn" type="button">再構築</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">ファイル · work/issue-5561</div>
+                  <div class="d">状態を取得できません</div>
+                </div>
+                <button class="btn" type="button">再構築</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-branches">
+              <p class="h-big">ブランチ</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">develop</div>
+                  <div class="d">12:44に更新 · origin と一致</div>
+                </div>
+                <span class="badge b-done">現在</span>
+                <span class="badge b-plan">保護</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-7048</div>
+                  <div class="d">Haruto のセッション · 2分前に更新</div>
+                </div>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-7007</div>
+                  <div class="d">Yui のセッション · たった今更新</div>
+                </div>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-5561</div>
+                  <div class="d">開始待ち</div>
+                </div>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">chore/old-cleanup</div>
+                  <div class="d">30日間動きなし — 片付けて安全です</div>
+                </div>
+                <button class="btn ghost" type="button">片付ける…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-settings">
+              <p class="h-big">設定</p>
+              <div class="set-group">
+                <div class="set-head">実行ポリシー</div>
+                <div class="set-row">
+                  <div class="grow">
+                    <div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div>
+                    <div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトの担当者が終わるのを待ってから止めます。</div>
+                  </div>
+                  <button class="btn ghost" type="button">このプロジェクトを止める</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">作業の進め方</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。オフにすると、このプロジェクトには触りません。</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">自動で補充する</div><div class="d2">タスクが終わると、gwt の次の課題が自分で始まります。</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：bug、docs。</div></div>
+                  <button class="btn" type="button">ラベルを編集</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">PM とフック</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM のツムギです。ツール、モデル、指示、利用量の上限は、エージェントの設定（端末の設定「起動」タブ）にあります。</div></div>
+                  <button class="btn" type="button">開く</button>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">フック</div><div class="d2">このプロジェクトの状態が変わったときにスクリプトを動かします — 開始、終了、停止など。</div></div>
+                  <button class="btn" type="button">開く</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">プロジェクトの検索索引</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">索引の健全性</div><div class="d2">9つの範囲すべて準備完了 · 文書12,480件 · 最後の修復は2日前。</div></div>
+                  <button class="btn" type="button">再構築</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">閉じる</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、gwt の担当者が終わるのを待ってから閉じます。</div></div>
+                  <button class="btn ghost" type="button">閉じる…</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+          </div>
+        </div>
+
+        <div class="pagegroup" data-page="keibadb">
+          <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a></div>
+          <div class="pagerow">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span>
+              <div class="sub">プロジェクトページ · ポリシー：実行中</div>
+            </div>
+            <a href="#" data-nav="k-issues" class="on">課題</a>
+            <a href="#" data-nav="k-works">作業</a>
+            <a href="#" data-nav="k-decide">判断<span class="cnt">1</span></a>
+            <a href="#" data-nav="k-ask">相談</a>
+            <a href="#" data-nav="k-agents">担当者</a>
+            <a href="#" data-nav="k-board">掲示板</a>
+            <a href="#" data-nav="k-index">検索</a>
+            <a href="#" data-nav="k-branches">ブランチ</a>
+            <a href="#" data-nav="k-settings">設定</a>
+          </div>
+          <div class="content">
+
+            <div class="screen-pane on" data-screen="k-issues">
+              <p class="h-big">課題</p>
+              <p class="h-sub">KeibaDB · 未解決14件</p>
+              <p class="countline" style="margin-bottom:8px">段階 — 未着手 <b>9</b> · 待ち <b>1</b> · 実装中 <b>1</b> · レビュー中 <b>0</b> · 今日完了 <b>1</b></p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">レース結果の取り込み — 2026-11-11（#130）</div>
+                  <div class="d">実装 · Sora が作業中</div>
+                </div>
+                <span class="badge b-run">実行中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div>
+                  <div class="d">要対応 · 取り込みの対応表について、あなたの判断が必要です</div>
+                </div>
+                <span class="badge b-block">要対応</span>
+                <button class="btn" type="button" data-nav="k-decide">判断する</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">新しい JRA-VAN の出力形式に対応する（#98）</div>
+                  <div class="d">未着手 · 拾われて開始待ち</div>
+                </div>
+                <span class="badge b-queue">開始待ち</span>
+              </div>
+              <p class="rel" style="margin-top:12px">+ KeibaDB の課題があと11件</p>
+            </div>
+
+            <div class="screen-pane" data-screen="k-works">
+              <p class="h-big">作業</p>
+              <p class="h-sub">今 KeibaDB で動いているセッションです。</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">レース結果の取り込み — 2026-11-11（#130）</div>
+                  <div class="d">Claude Code · Sora · 25分実行中 · 最後の活動は4分前</div>
+                </div>
+                <span class="badge b-run">実行中</span>
+                <button class="btn" type="button">セッションを開く</button>
+              </div>
+              <p class="h-sec">過去のセッション</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">過去のセッションを再開する</div>
+                  <div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div>
+                </div>
+                <button class="btn" type="button">セッションを選ぶ…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-decide">
+              <p class="h-big">判断 — KeibaDB</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です</span></div>
+              <div class="rowitem"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="t">取り込みファイルの形式が変わりました。対応表を直しますか？</div><div class="d">毎日の取り込み（#121）は止まっています。対応表を直すと、担当者の作業が約20分かかります。止めたままにすると、結果は明日まで古いままです。</div></div><span class="rel">48分待ち</span><div class="btnrow"><button class="btn primary" type="button">対応表を直す</button><button class="btn" type="button">取り込みを止める</button></div></div>
+              <p class="rel">判断待ちは以上です。</p>
+            </div>
+
+            <div class="screen-pane" data-screen="k-ask">
+              <p class="h-big">相談 — KeibaDB</p>
+              <div class="chat">
+                <div class="msg me"><div class="meta">あなた · たった今</div>毎日の取り込みはまだ止まってる？</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>はい — 形式が変わったので、対応表が「判断」であなた待ちです。選んでもらえれば、取り込みを再開して結果をここに投稿します。
+                  <br><span class="route">範囲：KeibaDB</span></div>
+              </div>
+              <div class="composer">
+                <div class="scope"><span>範囲：<b>KeibaDB</b></span></div>
+                <textarea placeholder="KeibaDB のことを聞く…"></textarea>
+                <div class="send"><button class="btn primary" type="button">送る</button></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-agents">
+              <p class="h-big">担当者</p>
+              <div class="rowitem">
+                <span class="ava" style="background:#475569">S</span>
+                <div class="grow">
+                  <div class="t">Sora <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="d">作業中：#130、レース結果の取り込み · ここまで25分</div>
+                  <div class="use"><div class="bar"><i style="width:31%"></i></div><span class="u">Claude アカウント — 週間31%使用 · 金曜18:00にリセット</span></div>
+                </div>
+                <span class="badge b-run">作業中</span>
+                <button class="btn ghost" type="button">一時停止</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-board">
+              <p class="h-big">掲示板</p>
+              <p class="countline" style="margin-bottom:6px">あなた待ち <b>1</b> · 要対応 <b>1</b> · 進行中 <b>1</b> · 開始待ち <b>2</b></p>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">あなた宛て</span><span class="chip">全体</span><span class="chip">一斉</span>
+              </div>
+              <div class="post">
+                <div class="meta">Sora · <span class="badge b-block">要対応</span> · PM 宛て · 11:32</div>
+                <div class="body">#121 で止まっています：毎日の取り込みが停止 — 形式が変わりました。</div>
+              </div>
+              <div class="post">
+                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">判断</span> · 11:40</div>
+                <div class="body">判断が「判断」で待っています：取り込みの対応表を直すか、形式が落ち着くまで取り込みを止めるか。</div>
+              </div>
+              <p class="rel" style="margin-top:12px">掲示板の共有先：この端末のみ</p>
+              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="KeibaDB の掲示板に投稿…">
+                <button class="btn" type="button">投稿</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-index">
+              <p class="h-big">検索</p>
+              <p class="rel" style="margin-bottom:10px">範囲：KeibaDB — このプロジェクトの中だけを探します</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:220px" type="text" value="import format" aria-label="KeibaDB を検索">
+                <button class="btn primary" type="button">検索</button>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">意味で探す</span><span class="chip">全ての語を含む</span>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">課題</span><span class="chip on">仕様</span><span class="chip on">掲示板</span><span class="chip on">議論</span><span class="chip on">作業</span><span class="chip on">報告</span><span class="chip on">メモリ</span><span class="chip">ファイル</span><span class="chip">ドキュメント</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">取り込みの対応表 — 形式 v3</div>
+                  <div class="d">文書 · 一致度91% · 一致した語：import、format</div>
+                </div>
+              </div>
+              <p class="h-sec">索引の健全性</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">9つの範囲すべて準備完了</div>
+                  <div class="d">文書640件 · 最後の修復は4日前</div>
+                </div>
+                <button class="btn" type="button" data-nav="k-settings">設定で開く</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-branches">
+              <p class="h-big">ブランチ</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">main</div>
+                  <div class="d">11:55に更新 · origin と一致</div>
+                </div>
+                <span class="badge b-done">現在</span>
+                <span class="badge b-plan">保護</span>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">work/issue-130</div>
+                  <div class="d">Sora のセッション · 4分前に更新</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-settings">
+              <p class="h-big">設定</p>
+              <div class="set-group">
+                <div class="set-head">実行ポリシー</div>
+                <div class="set-row">
+                  <div class="grow">
+                    <div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div>
+                    <div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトの担当者が終わるのを待ってから止めます。</div>
+                  </div>
+                  <button class="btn ghost" type="button">このプロジェクトを止める</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">作業の進め方</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">毎日の取り込み</div><div class="d2">6:00 に動きます。</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。オフにすると、このプロジェクトには触りません。</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">自動で補充する</div><div class="d2">タスクが終わると、KeibaDB の次の課題が自分で始まります。</div></div>
+                  <span class="switch on" aria-hidden="true"></span>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">プロジェクトの検索索引</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">索引の健全性</div><div class="d2">9つの範囲すべて準備完了 · 文書640件 · 最後の修復は4日前。</div></div>
+                  <button class="btn" type="button">再構築</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">閉じる</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、KeibaDB の担当者が終わるのを待ってから閉じます。</div></div>
+                  <button class="btn ghost" type="button">閉じる…</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+          </div>
+        </div>
+
+        <div class="pagegroup" data-page="vr">
+          <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a></div>
+          <div class="pagerow">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#2563eb"></i><span class="dyn-proj-name">vr-cabin-exposure</span></span>
+              <div class="sub">プロジェクトページ · ポリシー：実行中</div>
+            </div>
+            <a href="#" data-nav="v-issues" class="on">課題</a>
+            <a href="#" data-nav="v-works">作業</a>
+            <a href="#" data-nav="v-decide">判断</a>
+            <a href="#" data-nav="v-ask">相談</a>
+            <a href="#" data-nav="v-agents">担当者</a>
+            <a href="#" data-nav="v-board">掲示板</a>
+            <a href="#" data-nav="v-index">検索</a>
+            <a href="#" data-nav="v-branches">ブランチ</a>
+            <a href="#" data-nav="v-settings">設定</a>
+          </div>
+          <div class="content">
+            <div class="screen-pane on" data-screen="v-issues">
+              <p class="h-big">課題</p>
+              <p class="h-sub">まだ課題はありません</p>
+              <div class="btnrow"><button class="btn" type="button" data-nav="v-ask">最初に何をするか PM に聞く</button></div>
+            </div>
+            <div class="screen-pane" data-screen="v-works">
+              <p class="h-big">作業</p>
+              <p class="h-sub">まだセッションはありません</p>
+            </div>
+            <div class="screen-pane" data-screen="v-decide">
+              <p class="h-big">判断 — <span class="dyn-proj-name">vr-cabin-exposure</span></p>
+              <p class="h-sub">判断待ちはありません。このプロジェクトで判断が必要になったら、ここに出ます。</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断は、ここに出ます</span></div>
+            </div>
+            <div class="screen-pane" data-screen="v-ask">
+              <p class="h-big">相談</p>
+              <div class="chat">
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>取り込んで準備ができました。これは Unity のプロトタイプです。まずプロジェクトの構成を開いて、何が既にあるか一覧にするところから始められます。そこから最初のタスクを一緒に選びましょう。
+                  <br><span class="route">範囲：<span class="dyn-proj-name">vr-cabin-exposure</span></span></div>
+              </div>
+              <div class="composer">
+                <div class="scope"><span>範囲：<b>このプロジェクト</b></span></div>
+                <textarea placeholder="このプロジェクトのことを聞く…"></textarea>
+                <div class="send"><button class="btn primary" type="button">送る</button></div>
+              </div>
+            </div>
+            <div class="screen-pane" data-screen="v-agents">
+              <p class="h-big">担当者</p>
+              <p class="h-sub">まだ担当者はいません。作業が始まるときに PM が割り当てます。</p>
+            </div>
+            <div class="screen-pane" data-screen="v-board">
+              <p class="h-big">掲示板</p>
+              <p class="h-sub">まだ投稿はありません</p>
+            </div>
+            <div class="screen-pane" data-screen="v-index">
+              <p class="h-big">検索</p>
+              <p class="countline">索引を作成中…</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="このプロジェクトを検索" aria-label="このプロジェクトを検索">
+                <button class="btn primary" type="button">検索</button>
+              </div>
+            </div>
+            <div class="screen-pane" data-screen="v-branches">
+              <p class="h-big">ブランチ</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">main</div>
+                  <div class="d">取り込んだばかり · origin と一致</div>
+                </div>
+                <span class="badge b-done">現在</span>
+                <span class="badge b-plan">保護</span>
+              </div>
+            </div>
+            <div class="screen-pane" data-screen="v-settings">
+              <p class="h-big">設定</p>
+              <div class="set-group">
+                <div class="set-head">実行ポリシー</div>
+                <div class="set-row">
+                  <div class="grow">
+                    <div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div>
+                    <div class="d2">状態：実行中 · 保存した選択：続ける。</div>
+                  </div>
+                  <button class="btn ghost" type="button">このプロジェクトを止める</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">閉じる</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、このプロジェクトの担当者が終わるのを待ってから閉じます。</div></div>
+                  <button class="btn ghost" type="button">閉じる…</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="app-foot">
+        <span>gwt 9.161.0</span>
+        <span>·</span>
+        <span>最新</span>
+        <span class="fstat">PM 稼働中</span>
+      </div>
+
+      <div class="clone-backdrop" id="cloneModal" hidden>
+        <div class="clone-dialog" role="dialog" aria-label="プロジェクトを取り込む">
+          <div class="clone-head">
+            <div class="grow">
+              <h3>プロジェクトを取り込む</h3>
+            </div>
+            <button class="btn ghost" type="button" data-clone-close>閉じる</button>
+          </div>
+          <div data-cstep="form">
+            <div class="chips" style="margin-bottom:12px">
+              <span class="chip on" data-cmode="search">検索</span>
+              <span class="chip" data-cmode="url">URL</span>
+            </div>
+            <div id="cloneSearchArea">
+              <label class="f-label" for="cloneSearchInput">リポジトリ検索</label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:200px" id="cloneSearchInput" type="text" placeholder="owner/name またはキーワード" value="vr-cabin">
+                <button class="btn" type="button" id="cloneSearchBtn">検索</button>
+              </div>
+              <div id="cloneResults">
+                <div class="rel" id="cloneEmpty" style="padding:4px 2px">リポジトリが選択されていません</div>
+                <div class="rel" id="cloneSearching" hidden style="padding:4px 2px">リポジトリを検索中...</div>
+                <div id="cloneRepoList" hidden>
+                  <button class="repo-row" type="button" data-repo="akiojin/vr-cabin-exposure" data-name="vr-cabin-exposure">
+                    <span class="rt">akiojin/vr-cabin-exposure</span>
+                    <span class="rd">VR キャビンの曝露療法 — Unity プロトタイプ</span>
+                    <span class="rm">非公開 | 既定ブランチ: main | 2日前に更新</span>
+                  </button>
+                  <button class="repo-row" type="button" data-repo="cloud-creative-studios/shared-ui-kit" data-name="shared-ui-kit">
+                    <span class="rt">cloud-creative-studios/shared-ui-kit</span>
+                    <span class="rd">スタジオのプロジェクトで共有する UI 部品</span>
+                    <span class="rm">非公開 | 既定ブランチ: main | 先週更新</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div id="cloneUrlArea" hidden>
+              <label class="f-label" for="cloneUrlInput">リポジトリの URL</label>
+              <input class="field" style="width:100%" id="cloneUrlInput" type="text" placeholder="https://github.com/owner/repo.git または git@github.com:owner/repo.git">
+            </div>
+            <div style="margin-top:14px">
+              <label class="f-label" for="cloneParentInput">取り込み先のフォルダ</label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:200px" id="cloneParentInput" type="text" value="~/Projects">
+                <button class="btn" type="button">フォルダを選ぶ...</button>
+              </div>
+            </div>
+            <div class="btnrow" style="margin-top:16px">
+              <button class="btn ghost" type="button" data-clone-close>キャンセル</button>
+              <button class="btn primary" type="button" id="cloneStart" disabled>取り込む</button>
+            </div>
+          </div>
+          <div data-cstep="progress" hidden>
+            <p class="t" style="font-weight:800" id="cloneProgressLine">「vr-cabin-exposure」を取り込んでいます...</p>
+            <div class="bar" style="margin:12px 0"><i id="cloneBarFill" style="width:0%"></i></div>
+          </div>
+          <div data-cstep="done" hidden>
+            <p class="t" style="font-weight:800"><span id="cloneDoneName">vr-cabin-exposure</span> を取り込みました</p>
+            <p class="d" style="color:var(--ink2)">プロジェクトのページは、新しいブラウザタブで開きました。</p>
+            <div class="btnrow">
+              <button class="btn primary" type="button" id="cloneOpenBtn">新しいプロジェクトのページへ</button>
+              <button class="btn ghost" type="button" data-clone-close>ここにとどまる</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="app-status">
+      <div class="statusbar">
+        <span class="dot"></span>
+        <span><b>PM</b> が7つのプロジェクトを監視中</span>
+        <span class="sep"></span><span><b>9</b>件 実行中</span>
+        <span class="sep"></span><span><b>3</b>件 要対応</span>
+        <span class="sep"></span><span><b class="you">5件があなたの判断待ち</b></span>
+        <span class="r">たった今更新</span>
+      </div>
+    </div>
+    <footer class="doc">
+      <p class="note">このモックで決めたこと／現行への対応：各画面は独立したページで、固有の URL を持つ。骨格は現行の構造（開始画面ページ（URL: /）→ プロジェクトごとのページ（URL: /p/&lt;hash&gt;）→ その中を見る）を土台にし、見せ方と情報整理だけを整える。複数プロジェクトを並べて見るのはブラウザタブの役割で、アプリ内に横断の入れ物は作らない——前版のアプリ内タブバーは、オーナー訂正（2026-11-12「タブで開くってのはブラウザのタブのことです」）を受けて廃止し、ページ単位の構成に改めた。開始画面は体験から設計した（2026-11-12 オーナー方針「コードから再現する必要はない。今回の刷新は体験重視」）。さらに同日のオーナー承認で、開始画面の役割自体を作り替えた：プロジェクトのランチャーではなく、端末 PM との会話の場所とする。開くと PM（アバター＋名前）が様子を話しかけ、直近の変化と進んでいる作業を会話で伝え、判断待ちは会話の中で、選ぶと何が起きると一緒に提示する（その場で選べる。腰を据えて決める場合は各プロジェクトの判断面へ進む）。状態の要約は別ブロックにせず、PM の発言に溶かす。プロジェクトの「今」は会話の隣に置く：プロジェクトごとに、進行中の作業（名前・担当者・状態・進み具合）、止まっている作業と理由、判断待ち、直近で完了した作業を実データの粒度で並べ、選ぶとそのプロジェクトのページが開く（2026-11-12 オーナーの追加フィードバック「会話はアリ。でもプロジェクトの内容が分からなさ過ぎる」「単なるチャットアプリに見えてしまう」「シンプルすぎる」を受けた再調整。密度を上げるのは説明文ではなく現場の実物で、PM の発言にも実名の作業・Issue 番号・担当者・状態と、押せる作業カードを埋め込む）。フォルダを開く／GitHub から取り込む導線も脇に置く。現行再現のために入れていた項目のうち、フォルダのパスの入力欄・終了待ちのプロジェクト・行ごとの実行ポリシー状態行・開いている／最近の二分は落とした。開く＝そのプロジェクトのページへ移ることで、標準では新しいブラウザタブで開く。取り込み（clone）は開始画面の一導線で、現行の取り込みモーダルの実フロー（検索／URL 切替、候補選択、取り込み先、進捗、完了でプロジェクトページが新しいブラウザタブで開く）に沿う。PM の置き場（2026-11-12 決定）：独立した PM のページは作らない。端末全体を見る PM との会話は開始画面に置き、PM の状態（何を見ていて、作業が進んでいるか）・判断待ち・報告の未読は、要約ブロックとして別に置かず PM の発言に溶かす。判断は各プロジェクトのページの「判断」で完結させる（横断の判断一覧は置かない）。PM への相談・指示のうち端末全体の話は開始画面の会話で、プロジェクト固有の話はプロジェクトページの「相談」で行い、開始画面の会話でプロジェクト固有の話題が出たら PM がそのプロジェクトのページへ誘導する。報告の一覧ページも廃止し、個別の報告は各プロジェクトの掲示板と相談で扱う。1画面の主役は1つ。アプリ全体の設定は、開始画面から開く設定ページに置く（あなたの PM／ツール／起動／プロジェクトの4タブ、ページ内切替）。プロジェクトページの設定は、そのプロジェクトの差分だけを持つ。利用量は担当者にアカウント単位で既定表示。#4833：掲示板の共有先は provider が担い、Discussions は判断／止まった報告／引き継ぎの受け渡し経路。掲示板はプロジェクト単位（Q7）。Custom Agents／Backends は廃止決定（2026-11-12）：両者とも GUI 経路が未配線のまま行き止まりと確定したため、モックからも表示を除去した（ツールは組み込みの検出・インストール／更新・自動更新のみが残る）。PM の見せ方：開始画面の会話と各面の冒頭に、PM の役割（端末全体を見て、作業を割り当て・進行させ、判断だけを本人へ運ぶ）と現在の状態を明記した。相談への返答は相談の会話に出て、判断が要る話は「判断」にも上がる、という流れを各面の注記で統一した。システムトレイ：現行どおりトレイ常駐を維持し、役割は状態の要約と入口に絞る（プロジェクトごとの実行中／エラー件数、クリックでそのプロジェクトをブラウザタブで開く、開始画面を開く、終了）。判断待ち件数をトレイに出すかは未決定の論点。モックの文言は日本語にした（2026-11-12 オーナー指示：モックは内容を評価できることが優先。製品 UI の言語方針とは別の話）。PM の顔（2026-11-12 オーナー提案「PM にはアバター機能はあった方が良いかも。Muse のような」）：PM にはアバターと名前（モックでは「ツムギ」という仮名）を持たせ、開始画面の会話・相談での発言・判断の提示者では、一貫して「アバター＋名前」で出す。状態（見ている／判断待ち／止まっている）は、アバターの小さな印と一言だけで控えめに伝える。アバターと名前は、設定「あなたの PM」で変えられる想定で置いた。画面の中に説明文は置かない（2026-11-12 オーナー指摘「説明のページみたい」を受けた作法）：画面に残すのは、ボタンのラベル、状態を伝える一言、PM の発言、空状態の短い案内だけとし、設計の意図・前提・決定の記録はこのノートに集約する。設定は2層で、プロジェクトページの設定（そのプロジェクトの差分）が、端末全体の設定より優先される。プロジェクトがない場合（2026-11-12 オーナーの問い「プロジェクトがない場合の画面は？」を受けた追加）：プロジェクトが0件のとき、開始画面に「プロジェクトの今」パネルは置かず、PM との会話がそのまま案内役になる。PM が「まだプロジェクトがありません」から始めて、最初の一歩（フォルダを開く／GitHub から取り込む）を会話の中で示し、取り込みの入口は脇ではなく主役級に大きく出す。取り込みが完了したら、プロジェクトのある通常の開始画面へ切り替わる。モックでは両方の状態を確認できるよう、外枠（製品画面の外）に「状態：プロジェクトあり／プロジェクトなし」の切替を置いた（製品画面の中には切替を置かない）。プロジェクトが多い場合（2026-11-12 オーナーとの合意を受けた追加）：プロジェクトが20件規模になると、全件を同格には並べない。「プロジェクトの今」に出すのは、今、注意が要るプロジェクト（動いている／止まっている／判断待ちがある）だけを厚くし、静かなプロジェクトは「ほか15件は変化なし」の1行に畳んで、展開できる全件リスト（名前と状態だけの薄い行、名前で絞り込み可）に分ける。会話側も同じ原則で、PM は全件を報告せず、変化と判断だけを蒸留して話す。モックの状態切替は「プロジェクトが多い（20件）」を加えた3状態にした。PM の置き場の訂正（2026-11-12 オーナー指摘「以前に、PMも他のエージェントと同じでAgentsに追加して、エージェントの設定でPMに設定可能かどうかチェックボックスを入れるという案があったはずです」を受けた訂正）：「Agent」は名前を持ってタスクを担当する実体で、メンバーも PM も Agent。PM はほかのエージェントと分けて扱わず、同じ台帳・同じ設定の枠に乗せる。PM かどうかは各エージェントの設定にある「PM を務める」チェックボックスの属性として持ち、端末 PM はオンになっているエージェント1人。使うツール・モデルなどの実行設定は、そのエージェントの設定として「起動」タブの台帳に置く（モックではツムギを台帳の先頭に置き、チェックが入った状態で実行設定が続けて見える形にした）。ツールのインストール・更新という土台は「ツール」タブで共通に扱う。設定「あなたの PM」は、PM を務めるエージェントの振る舞い（知らせ方・静かな時間・アバターと名前）の設定として残す。プロジェクト側の設定にはプロジェクト固有の PM を置かず、端末 PM（ツムギ）がそのプロジェクトも見ていることへの参照だけを置く。直前に置いた「実行設定は『あなたの PM』に置き、PM は分けて扱う」という整理は、この訂正で置き換える。共通の枠（2026-11-12 オーナー提案「ヘッダーとかフッターとかあっても良いかも」）：全ページ共通のヘッダーとフッターを置いた。ヘッダーは端末全体のものだけを扱う——左は製品名で、プロジェクトページでは現在のプロジェクト名も並ぶ。右はいつも同じ並びで、PM の状態（アバター＋名前＋判断待ち件数のバッジ。押すと開始画面の会話へ戻る）、エージェントへの入口（設定ページ「起動」タブのエージェント台帳へ）、設定への入口。プロジェクト内の面移動は従来どおり各ページのレールが担い、ヘッダーとは役割を分ける。フッターは細い帯で、バージョン・更新の状態・PM の稼働状態だけを静かに置く。開始画面の脇に場当たりで置いていた「アプリ全体の設定」行は、ヘッダーの設定入口に役割を移して撤去した（設定ページへの導線自体はヘッダーが担う）。以前に撤去した URL チップ（pagehead）はモック側のメタ表示であり、この製品ヘッダーとは別物。Index（検索）の反映（2026-11-15 オーナー決定「調査結果を全部モックへ反映する」）：検索はプロジェクト単位のまま（全プロジェクト横断の検索は作らない）とし、各プロジェクトの検索面に実態どおりの要素を入れた——範囲は9つ（課題／仕様／掲示板／議論／作業／報告／メモリ／ファイル／ドキュメント。既定はファイルとドキュメントを除く7つ）、探し方は2つ（意味で探す／全ての語を含む。全ての語を含むでは厳密な結果と意味の候補の二段で、一致した語と不足する語を根拠として出す）、ファイルとドキュメントを選んだときだけ作業ツリーの選択が出る、結果には詳細プレビューと開く操作が付く。健全性は検索面の要約と健全性の表（範囲×作業ツリー、文書の数・最後の修復・取得できない状態、範囲ごとの再構築とすべて再構築、状態を更新）の実体を置き、同じ健全性はプロジェクト設定にも出る二重配置のままにした。ファイルの索引は、土台（git の木ごと）＋作業ツリーごとの差分という単位で表す。索引がまだできていないプロジェクトでは「探せない」状態と「結果が無い」を分けて出す。Board の原則確定（2026-11-15 オーナー決定「推奨案で一括して進める」）：エージェント同士は干渉しない。エージェントの投稿は自分の状態申告（状態・着手・詰まり）に限って自分の PM 宛てに書き、調整と引き継ぎは PM 経由にする。端末を跨ぐ PM の引き継ぎは GitHub Discussions の引き継ぎ投稿で受け渡す（共有先が「この端末のみ」のときだけ有効で、Slack／Teams を共有先に選ぶと Discussions の受け渡しは止まる）。未解決の詰まりは時系列に埋もれさせず、索引として掲示板の先頭に出す。</p>
+    </footer>
+  </div>
+
+  <script>
+  (function () {
+    var pageLabels = { start: "開始画面", settings: "設定", gwt: "gwt", keibadb: "KeibaDB", vr: "vr-cabin-exposure" };
+    var screenTitles = {
+      appsettings: "設定",
+      "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断", "g-ask": "相談", "g-agents": "担当者",
+      "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-settings": "設定",
+      "k-issues": "課題", "k-works": "作業", "k-decide": "判断", "k-ask": "相談", "k-agents": "担当者",
+      "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-settings": "設定",
+      "v-issues": "課題", "v-works": "作業", "v-decide": "判断", "v-ask": "相談", "v-agents": "担当者",
+      "v-board": "掲示板", "v-index": "検索", "v-branches": "ブランチ", "v-settings": "設定"
+    };
+    var current = { start: "start", settings: "appsettings", gwt: "g-issues", keibadb: "k-issues", vr: "v-issues" };
+    var activePage = "start";
+    function titleFor(p) {
+      if (p === "start") return "開始画面";
+      return pageLabels[p] + " — " + (screenTitles[current[p]] || "");
+    }
+    function renderTitle() {
+      var t = document.getElementById("appTitle");
+      if (t) t.textContent = titleFor(activePage);
+      var proj = document.getElementById("appProj");
+      if (proj) {
+        var isProj = activePage === "gwt" || activePage === "keibadb" || activePage === "vr";
+        proj.hidden = !isProj;
+        if (isProj) proj.textContent = pageLabels[activePage];
+      }
+    }
+    function showPage(p) {
+      activePage = p;
+      document.querySelectorAll(".pagegroup").forEach(function (el) {
+        el.classList.toggle("on", el.getAttribute("data-page") === p);
+      });
+      renderTitle();
+    }
+    function showScreen(p, name) {
+      current[p] = name;
+      var pageEl = document.querySelector('.pagegroup[data-page="' + p + '"]');
+      if (!pageEl) return;
+      pageEl.querySelectorAll(".screen-pane").forEach(function (pane) {
+        pane.classList.toggle("on", pane.getAttribute("data-screen") === name);
+      });
+      var railName = name === "g-issue" ? "g-issues" : name;
+      pageEl.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
+        a.classList.toggle("on", a.getAttribute("data-nav") === railName);
+      });
+      if (p === activePage) renderTitle();
+    }
+    function openPage(p, screen) {
+      if (screen) showScreen(p, screen);
+      showPage(p);
+    }
+    document.querySelectorAll("[data-nav]").forEach(function (el) {
+      el.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        var pageEl = el.closest(".pagegroup");
+        if (!pageEl) return;
+        showScreen(pageEl.getAttribute("data-page"), el.getAttribute("data-nav"));
+      });
+    });
+    document.querySelectorAll("[data-openpage]").forEach(function (el) {
+      el.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        openPage(el.getAttribute("data-openpage"), el.getAttribute("data-openscreen"));
+        var stab = el.getAttribute("data-settingstab");
+        if (stab) {
+          var chip = document.querySelector('.screen-pane[data-screen="appsettings"] [data-tab="' + stab + '"]');
+          if (chip) chip.click();
+        }
+      });
+    });
+    document.querySelectorAll("[data-tab]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var scope = b.closest(".screen-pane");
+        if (!scope) return;
+        scope.querySelectorAll("[data-tab]").forEach(function (x) { x.classList.toggle("on", x === b); });
+        var target = b.getAttribute("data-tab");
+        scope.querySelectorAll(".set-pane").forEach(function (p) {
+          p.classList.toggle("on", p.getAttribute("data-pane") === target);
+        });
+      });
+    });
+    /* ----- Clone flow (from the Start screen) ----- */
+    var modal = document.getElementById("cloneModal");
+    var cloneState = { mode: "search", repo: "", name: "", searching: false, timer: null };
+    function cloneStep(name) {
+      modal.querySelectorAll("[data-cstep]").forEach(function (s) {
+        s.hidden = s.getAttribute("data-cstep") !== name;
+      });
+    }
+    function openClone() { modal.hidden = false; cloneStep("form"); }
+    function closeClone() {
+      modal.hidden = true;
+      if (cloneState.timer) { clearInterval(cloneState.timer); cloneState.timer = null; }
+    }
+    document.querySelectorAll("[data-clone-open]").forEach(function (b) {
+      b.addEventListener("click", function () { openClone(); });
+    });
+    modal.querySelectorAll("[data-clone-close]").forEach(function (b) {
+      b.addEventListener("click", closeClone);
+    });
+    modal.querySelectorAll("[data-cmode]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        cloneState.mode = b.getAttribute("data-cmode");
+        modal.querySelectorAll("[data-cmode]").forEach(function (x) { x.classList.toggle("on", x === b); });
+        document.getElementById("cloneSearchArea").hidden = cloneState.mode !== "search";
+        document.getElementById("cloneUrlArea").hidden = cloneState.mode !== "url";
+        updateCloneStart();
+      });
+    });
+    var startBtn = document.getElementById("cloneStart");
+    var parentInput = document.getElementById("cloneParentInput");
+    var urlInput = document.getElementById("cloneUrlInput");
+    function updateCloneStart() {
+      var ready = cloneState.mode === "search" ? cloneState.repo !== "" : urlInput.value.trim() !== "";
+      startBtn.disabled = !(ready && parentInput.value.trim() !== "");
+    }
+    urlInput.addEventListener("input", updateCloneStart);
+    parentInput.addEventListener("input", updateCloneStart);
+    var searchBtn = document.getElementById("cloneSearchBtn");
+    searchBtn.addEventListener("click", function () {
+      if (cloneState.searching) return;
+      cloneState.searching = true;
+      searchBtn.textContent = "検索中...";
+      document.getElementById("cloneEmpty").hidden = true;
+      document.getElementById("cloneRepoList").hidden = true;
+      document.getElementById("cloneSearching").hidden = false;
+      setTimeout(function () {
+        cloneState.searching = false;
+        searchBtn.textContent = "検索";
+        document.getElementById("cloneSearching").hidden = true;
+        document.getElementById("cloneRepoList").hidden = false;
+      }, 350);
+    });
+    modal.querySelectorAll(".repo-row").forEach(function (row) {
+      row.addEventListener("click", function () {
+        modal.querySelectorAll(".repo-row").forEach(function (r) { r.classList.toggle("sel", r === row); });
+        cloneState.repo = row.getAttribute("data-repo");
+        cloneState.name = row.getAttribute("data-name");
+        updateCloneStart();
+      });
+    });
+    function repoName() {
+      if (cloneState.mode === "search") return cloneState.name;
+      var v = urlInput.value.trim().replace(/\.git$/, "");
+      var parts = v.split(/[\/:]/).filter(function (s) { return s !== ""; });
+      return parts.length ? parts[parts.length - 1] : "project";
+    }
+    startBtn.addEventListener("click", function () {
+      cloneStep("progress");
+      var name = repoName();
+      var lines = ["「" + name + "」を取り込んでいます...", "オブジェクトを受信中: 100%", "差分を解決中...", "ファイルを展開中..."];
+      var bar = document.getElementById("cloneBarFill");
+      var lineEl = document.getElementById("cloneProgressLine");
+      var pct = 0;
+      lineEl.textContent = lines[0];
+      bar.style.width = "0%";
+      cloneState.timer = setInterval(function () {
+        pct += 25;
+        bar.style.width = pct + "%";
+        lineEl.textContent = lines[Math.min(lines.length - 1, Math.floor(pct / 34))];
+        if (pct >= 100) {
+          clearInterval(cloneState.timer);
+          cloneState.timer = null;
+          pageLabels.vr = name;
+          document.querySelectorAll(".dyn-proj-name").forEach(function (el) { el.textContent = name; });
+          document.getElementById("cloneDoneName").textContent = name;
+          var row = document.getElementById("startVrRow"); if (row) row.hidden = false;
+          var notice = document.getElementById("startNotice"); if (notice) notice.hidden = false;
+          setStartState(false);
+          cloneStep("done");
+        }
+      }, 300);
+    });
+    document.getElementById("cloneOpenBtn").addEventListener("click", function () {
+      closeClone();
+      openPage("vr");
+    });
+    /* ----- Start screen: conversation with the terminal PM ----- */
+    var startChat = document.getElementById("startChat");
+    var startInput = document.getElementById("startInput");
+    function startAppend(kind, text, chat) {
+      var m = document.createElement("div");
+      m.className = "msg " + kind;
+      var meta = document.createElement("div");
+      meta.className = "meta";
+      if (kind === "pm") {
+        meta.innerHTML = '<span class="pm-face sm"><span class="dot"></span></span>ツムギ';
+      } else {
+        meta.textContent = "あなた · たった今";
+      }
+      m.appendChild(meta);
+      m.appendChild(document.createTextNode(text));
+      (chat || startChat).appendChild(m);
+    }
+    /* ----- Start screen states: has projects / no projects yet / many projects ----- */
+    var startHas = document.getElementById("startHas");
+    var startEmpty = document.getElementById("startEmpty");
+    var startMany = document.getElementById("startMany");
+    function setStartState(state) {
+      if (state === true) state = "empty";
+      if (state === false || state === undefined || state === null) state = "has";
+      if (startHas) startHas.hidden = state !== "has";
+      if (startEmpty) startEmpty.hidden = state !== "empty";
+      if (startMany) startMany.hidden = state !== "many";
+      document.querySelectorAll("[data-startstate]").forEach(function (b) {
+        b.setAttribute("aria-pressed", b.getAttribute("data-startstate") === state ? "true" : "false");
+      });
+    }
+    document.querySelectorAll("[data-startstate]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        setStartState(b.getAttribute("data-startstate"));
+      });
+    });
+    document.querySelectorAll("[data-say]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        startAppend("me", b.getAttribute("data-say"));
+        startAppend("pm", b.getAttribute("data-reply"));
+        var row = b.closest(".btnrow");
+        if (row) row.querySelectorAll("[data-say]").forEach(function (x) { x.disabled = true; });
+      });
+    });
+    function startSend() {
+      var v = startInput.value.trim();
+      if (!v) return;
+      startInput.value = "";
+      startAppend("me", v);
+      setTimeout(function () {
+        startAppend("pm", "受け取りました。その方向で進めます。様子はここで伝えます。");
+      }, 350);
+    }
+    document.getElementById("startSend").addEventListener("click", startSend);
+    var emptyChat = document.getElementById("emptyChat");
+    var emptyInput = document.getElementById("emptyInput");
+    function emptySend() {
+      var v = emptyInput.value.trim();
+      if (!v) return;
+      emptyInput.value = "";
+      startAppend("me", v, emptyChat);
+      setTimeout(function () {
+        startAppend("pm", "受け取りました。まずはプロジェクトを取り込みましょう。取り込んだら、様子はここで伝えます。", emptyChat);
+      }, 350);
+    }
+    document.getElementById("emptySend").addEventListener("click", emptySend);
+    emptyInput.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); emptySend(); }
+    });
+    /* ----- Start screen, many-projects state ----- */
+    var manyChat = document.getElementById("manyChat");
+    var manyInput = document.getElementById("manyInput");
+    function manySend() {
+      var v = manyInput.value.trim();
+      if (!v) return;
+      manyInput.value = "";
+      startAppend("me", v, manyChat);
+      setTimeout(function () {
+        startAppend("pm", "受け取りました。その方向で進めます。様子が変わったらここで伝えます。", manyChat);
+      }, 350);
+    }
+    document.getElementById("manySend").addEventListener("click", manySend);
+    manyInput.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); manySend(); }
+    });
+    document.querySelectorAll("[data-msay]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        startAppend("me", b.getAttribute("data-msay"), manyChat);
+        startAppend("pm", b.getAttribute("data-mreply"), manyChat);
+        var row = b.closest(".btnrow");
+        if (row) row.querySelectorAll("[data-msay]").forEach(function (x) { x.disabled = true; });
+      });
+    });
+    var manyAll = document.getElementById("manyAll");
+    var manyAllToggle = document.getElementById("manyAllToggle");
+    manyAllToggle.addEventListener("click", function () {
+      var open = manyAll.hidden;
+      manyAll.hidden = !open;
+      manyAllToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      manyAllToggle.textContent = open ? "一覧を閉じる" : "すべてのプロジェクトを見る";
+    });
+    var manySearch = document.getElementById("manySearch");
+    manySearch.addEventListener("input", function () {
+      var q = manySearch.value.trim().toLowerCase();
+      document.querySelectorAll("#manyAll .mrow").forEach(function (r) {
+        var hit = q === "" || r.getAttribute("data-name").toLowerCase().indexOf(q) >= 0;
+        r.style.display = hit ? "" : "none";
+      });
+    });
+    startInput.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); startSend(); }
+    });
+    showPage("start");
+  })();
+  </script>
+</body>
+</html>

@@ -32,7 +32,7 @@ test.describe("Recovery Center", () => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
     const modal = page.locator("#recovery-center-modal");
     const rows = modal.locator(".recovery-center-row");
     await expect(rows).toHaveCount(2);
@@ -77,7 +77,7 @@ test.describe("Recovery Center", () => {
     await marker(6);
     await expect(modal).not.toHaveClass(/\bopen\b/);
     await expect(rows).toHaveCount(0);
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
     await expect(rows).toHaveCount(2);
     const current = (await fixtureMessages(page)).filter(message => message.kind === "load_recovery_center").at(-1)!;
     expect(current.request_id).not.toBe(request.request_id);
@@ -95,7 +95,7 @@ test.describe("Recovery Center", () => {
   });
 
   test("filters independently and resets both filters when reopened", async ({ page }) => {
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
     const modal = page.locator("#recovery-center-modal");
     const state = modal.locator("#recovery-center-state-filter");
     const form = modal.locator("#recovery-center-worktree-filter");
@@ -105,7 +105,7 @@ test.describe("Recovery Center", () => {
     await expect(modal.locator(".recovery-center-row")).toContainText("Acknowledged");
     await page.keyboard.press("Escape");
     await expect(modal).not.toHaveClass(/\bopen\b/);
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
     await expect(state).toHaveValue("attention");
     await expect(form).toHaveValue("all");
     await expect(modal.locator(".recovery-center-row")).toHaveCount(2);
@@ -113,7 +113,7 @@ test.describe("Recovery Center", () => {
 
   test("distinguishes missing storage and preserves Board response fences and retry", async ({ page }, info) => {
     await page.evaluate(() => { (window as any).__recoveryCenterMissing = true; });
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
     const modal = page.locator("#recovery-center-modal");
     await expect(modal.getByRole("status").filter({ hasText: "No recovery Store" }))
       .toHaveText("No recovery Store was found for this project.");
@@ -122,7 +122,7 @@ test.describe("Recovery Center", () => {
       (window as any).__recoveryCenterMissing = false;
       (window as any).__recoveryCenterReject = true;
     });
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
     await modal.locator("#recovery-center-state-filter").selectOption("all");
     await modal.getByRole("button", { name: "Open Board history" }).click();
     await expect(modal.getByRole("alert"))
@@ -171,7 +171,7 @@ test.describe("Recovery Center", () => {
   test("renders all public facets and reuses the Board deep-link path", async ({
     page,
   }, testInfo) => {
-    await runPaletteCommand(page, "Open Recovery Center");
+    await openRecoveryCenter(page);
 
     const modal = page.locator("#recovery-center-modal");
     const dialog = modal.getByRole("dialog", { name: "Recovery Center" });
@@ -223,16 +223,12 @@ test.describe("Recovery Center", () => {
   });
 });
 
-async function runPaletteCommand(page: any, query: string): Promise<void> {
-  await page.locator("#op-palette-button").click();
-  const input = page.locator("#op-palette-input");
-  await expect(input).toBeVisible();
-  await input.fill(query);
-  await page.keyboard.press("Enter");
-  await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute(
-    "data-open",
-    "true",
-  );
+async function openRecoveryCenter(page: any): Promise<void> {
+  // #7879: the command palette is retired; the op:command bus keeps the
+  // open-recovery-center route the palette used to dispatch.
+  await page.evaluate(() => document.dispatchEvent(
+    new CustomEvent("op:command", { detail: { id: "open-recovery-center" } }),
+  ));
 }
 
 async function fixtureMessages(page: any): Promise<Array<Record<string, unknown>>> {

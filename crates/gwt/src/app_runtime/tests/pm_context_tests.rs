@@ -3542,7 +3542,7 @@ fn a_failed_pm_launch_is_reported_as_a_restartable_pm_start_block() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let (runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let context = runtime.project_context("tab-1").expect("project context");
 
     assert!(runtime.record_pm_launch_failure(&context, "tab-1::pm", "the launch was refused"));
@@ -3561,6 +3561,63 @@ fn a_failed_pm_launch_is_reported_as_a_restartable_pm_start_block() {
     assert!(block.restart_clears_it);
     assert_eq!(block.reason, "the launch was refused");
     assert!(block.required_operation.contains("Restart Project Manager"));
+}
+
+/// Issue #7664: right after an update the machine Agent capacity observation
+/// is briefly unavailable. A PM launch refused for that reason must be retried
+/// on the scheduled tick instead of leaving the project without a PM; a
+/// non-transient refusal keeps waiting for the operator.
+#[test]
+fn a_transient_capacity_refusal_retries_the_pm_on_the_scheduled_tick() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").expect("project context");
+
+    assert!(runtime.record_pm_launch_failure(&context, "tab-1::pm", "the launch was refused"));
+    runtime.retry_transient_pm_launch_failures();
+    assert!(
+        runtime.pending_startup_pm_tabs.is_empty(),
+        "a non-transient refusal is not retried automatically"
+    );
+
+    for detail in [
+        "Machine Agent capacity observation is unavailable; wait for the next fresh measurement",
+        "Machine Agent census is uncertain; wait for its next observation",
+    ] {
+        runtime.pending_startup_pm_tabs.clear();
+        assert!(runtime.record_pm_launch_failure(&context, "tab-1::pm", detail));
+        assert!(
+            runtime.pending_startup_pm_tabs.is_empty(),
+            "the retry waits for the scheduled tick"
+        );
+        runtime.retry_transient_pm_launch_failures();
+        assert_eq!(runtime.pending_startup_pm_tabs, vec!["tab-1".to_string()]);
+    }
+
+    // A closed tab is not retried.
+    runtime.pending_startup_pm_tabs.clear();
+    assert!(runtime.record_pm_launch_failure(
+        &context,
+        "tab-1::pm",
+        "Machine Agent census is uncertain; wait for its next observation",
+    ));
+    runtime.tabs.clear();
+    runtime.retry_transient_pm_launch_failures();
+    assert!(runtime.pending_startup_pm_tabs.is_empty());
 }
 
 #[test]

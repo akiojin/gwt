@@ -71,6 +71,7 @@ pub(crate) struct OwnerSavedSessionRestore {
     pub request: serde_json::Value,
     pub source: gwt_agent::Session,
     pub origin: gwt_agent::SessionLaunchOrigin,
+    pub account_switch: Option<(String, gwt_agent::AccountSwitchReason)>,
     pub registry: Arc<std::sync::Mutex<crate::WindowRegistry>>,
     pub placeholders: Vec<crate::PersistedWindowState>,
     pub worktree_reserved: bool,
@@ -711,7 +712,15 @@ pub(crate) fn prepare_owner_saved_session_restore(
             }
         };
     }
-    if restore.origin == gwt_agent::SessionLaunchOrigin::UserRestart {
+    if let Some((account_id, reason)) = restore.account_switch.as_ref() {
+        config.execution_account_id = Some(account_id.clone());
+        config.execution_account_switch_reason = Some(*reason);
+        if is_pm && session.exact_resume_session_id().is_some() {
+            config
+                .args
+                .retain(|arg| arg != crate::pm_registry::PM_BOOTSTRAP_PROMPT);
+        }
+    } else if restore.origin == gwt_agent::SessionLaunchOrigin::UserRestart {
         config.launch_route = gwt_agent::LaunchRoute::Manual;
     }
     config.predecessor_session_id = Some(restore.source.id.clone());
@@ -1921,6 +1930,9 @@ pub struct IssueMonitorSpawnAdmissionInput {
 pub const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
     "Issues spawn admission changed; prepare the launch again";
 
+/// 21 seconds between retries allow at most three preparations in any minute.
+pub const MONITOR_STALE_RETRY_SECS: u64 = 21;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IssueMonitorAdmissionFileVersion {
     Metadata(Option<(std::time::SystemTime, u64)>),
@@ -3073,10 +3085,26 @@ pub(crate) fn prepare_owner_agent_admission(
                 )
             })
     });
+    let review_dispatch = launch_feedback_context
+        .as_ref()
+        .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
+    let fresh_member_prefs = selected_agent_member_id
+        .as_deref()
+        .filter(|_| {
+            !review_dispatch && !input.is_continue_work && input.restore_source.is_none()
+                && config.session_mode == gwt_agent::SessionMode::Normal
+        })
+        .map(|member_id| {
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(input.project_root),
+            ).map_err(|error| error.to_string())?;
+            if !prefs.member_environment_allows_tool(member_id, config.agent_id.command()) {
+                return Err("The execution environment is no longer available for the selected Agent. Reload and try again.".into());
+            }
+            Ok::<_, String>((member_id, prefs))
+        })
+        .transpose()?;
     if let Some(issue_number) = issue_monitor_issue_number {
-        let review_dispatch = launch_feedback_context
-            .as_ref()
-            .is_some_and(|feedback| feedback.issue_monitor_review_dispatch);
         let prepared = prepared.as_mut().expect("Monitor admission");
         prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
             project_root: input.project_root.into(),
@@ -3085,19 +3113,24 @@ pub(crate) fn prepare_owner_agent_admission(
             target_branch: config.branch.clone().unwrap_or_default(),
             issue_link_cache_dir: input.issue_link_cache_dir.into(),
         })?;
-        if !review_dispatch
-            && monitor_requested_tier.is_none()
-            && !input.is_continue_work
-            && input.restore_source.is_none()
-            && config.session_mode == gwt_agent::SessionMode::Normal
-        {
-            if let Some(member_id) = selected_agent_member_id.as_deref() {
-                let prefs = crate::load_issue_monitor_prefs(
-                    &crate::issue_monitor_prefs_path_for_repo_path(input.project_root),
-                )
-                .map_err(|error| error.to_string())?;
-                let matches = crate::agent_registry::member_profile(&prefs, member_id).is_some_and(
+        if monitor_requested_tier.is_none() {
+            if let Some((member_id, prefs)) = &fresh_member_prefs {
+                let matches = crate::agent_registry::member_profile(prefs, member_id).is_some_and(
                     |profile| {
+                        // Issue #7647: the agent starts with the project's
+                        // environment, its traits and that environment's
+                        // runtime options, as the candidate was prepared.
+                        let tool = config.agent_id.command();
+                        let profile = if prefs.environment_lists_tool(tool)
+                            || prefs.member_environment_overrides_tool(member_id, tool)
+                        {
+                            profile.on_tool(tool)
+                        } else {
+                            profile
+                        };
+                        let profile = crate::execution_environments::candidate_as_started(
+                            prefs, profile, false,
+                        );
                         if !profile
                             .agent_id
                             .eq_ignore_ascii_case(config.agent_id.command())
@@ -3243,9 +3276,24 @@ pub(crate) fn prepare_owner_agent_admission(
             monitor_requested_tier.filter(|_| !feedback.issue_monitor_review_dispatch)
         {
             crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-                let tiers = prefs.effective_launch_tiers();
+                let candidates = prefs
+                    .registered_launch_profiles_with_tool_filter(issue_number, |tool| {
+                        tool == config.agent_id.command()
+                    });
+                let tiers = prefs.launch_tiers_for_pool(&candidates);
                 let eligible = tiers.get(usize::from(tier)).is_some_and(|pool| {
                     pool.iter().any(|profile| {
+                        if selected_agent_member_id.is_some()
+                            && profile.agent_member_id != selected_agent_member_id
+                        {
+                            return false;
+                        }
+                        // The tier's candidate as the selection started it.
+                        let profile = crate::execution_environments::candidate_as_started(
+                            prefs,
+                            profile.clone(),
+                            true,
+                        );
                         profile
                             .agent_id
                             .eq_ignore_ascii_case(config.agent_id.command())
@@ -4699,6 +4747,157 @@ mod owner_admission_tests {
         });
         assert!(expired.is_err());
         assert_eq!(attempts, 0, "an elapsed deadline cannot be extended");
+    }
+
+    /// Issue #7647 AC-3: a registered agent starts with the project's
+    /// environment, not the tool saved with it, and its traits hold in an
+    /// automatic tier.
+    #[test]
+    fn owner_admits_a_registered_agent_on_the_project_environment() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/fixture.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        let id = roster.members[0].agent_member_id.clone();
+        crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::SetTraits {
+                member_id: id.clone(),
+                traits: crate::agent_names::AgentTraits {
+                    reasoning_level: Some(crate::agent_names::TraitReasoningLevel::High),
+                    ..Default::default()
+                },
+            },
+            Some(roster.revision),
+        )
+        .unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.set_launch_profile_pool(vec![serde_json::from_value(serde_json::json!({
+                "agent_id":"codex", "agent_member_id":id, "model":"codex-only-model"
+            }))
+            .unwrap()]);
+            prefs.execution_environments = vec![crate::ProjectExecutionEnvironment {
+                environment_id: "claude".into(),
+                tool: "claude".into(),
+            }];
+            prefs.launch_tiers = vec![vec![serde_json::from_value(serde_json::json!({
+                "agent_id":"claude", "model":"sonnet", "reasoning":"low"
+            }))
+            .unwrap()]];
+            Ok(())
+        })
+        .unwrap();
+        let roots = vec![root.clone()];
+        let known = std::collections::HashSet::new();
+        let runtime_handles = std::collections::HashMap::new();
+        let admit = |tier: Option<u8>| {
+            crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                prefs.launch_auto = tier.is_some();
+                Ok(())
+            })
+            .unwrap();
+            let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let candidate = match tier {
+                Some(tier) => prefs.effective_launch_tiers()[usize::from(tier)][0].clone(),
+                None => prefs.registered_launch_profiles_for_issue(43)[0].clone(),
+            };
+            assert_eq!(candidate.agent_id, "claude");
+            assert_eq!(candidate.agent_member_id.as_deref(), Some(id.as_str()));
+            let started = crate::execution_environments::candidate_as_started(
+                &prefs,
+                candidate,
+                tier.is_some(),
+            );
+            assert_eq!(
+                started.reasoning.as_deref(),
+                Some("high"),
+                "the trait decides"
+            );
+            let (model, reasoning) =
+                crate::launch_wizard::default_launch_tuning("claude", started.model.as_deref());
+            let mut builder = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+                .working_dir(&root)
+                .skip_permissions(started.skip_permissions);
+            if let Some(model) = started.model.or(model) {
+                builder = builder.model(model);
+            }
+            if let Some(reasoning) = started.reasoning.or(reasoning) {
+                builder = builder.reasoning_level(reasoning);
+            }
+            let mut config = builder.build();
+            config.branch = Some("work/issue-43".into());
+            let result = prepare_owner_agent_admission(
+                OwnerAgentAdmissionInput {
+                    project_root: &root,
+                    sessions_dir: &sessions,
+                    issue_link_cache_dir: temp.path(),
+                    window_id: "pane",
+                    materializer_id: "test",
+                    host_project_roots: &roots,
+                    snapshot: crate::IssueMonitorWindowSnapshot {
+                        project_tab_id: "tab".into(),
+                        observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+                        windows: vec![],
+                    },
+                    snapshot_tabs: Default::default(),
+                    runtime_handles: &runtime_handles,
+                    known_names: &known,
+                    metadata: OwnerLaunchMetadata {
+                        selected_agent_member_id: Some(id.clone()),
+                        monitor_requested_tier: tier,
+                        launch_feedback_context: Some(LaunchFeedbackContext {
+                            client_id: "test".into(),
+                            title: "test".into(),
+                            issue_monitor_issue_number: Some(43),
+                            issue_monitor_delivery_id: None,
+                            issue_monitor_project_root: Some(root.clone()),
+                            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+                            issue_monitor_autonomous_handoff: None,
+                            issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
+                        }),
+                        ..Default::default()
+                    },
+                    is_continue_work: false,
+                    restore_source: None,
+                },
+                &mut config,
+            );
+            assert!(
+                result.is_ok(),
+                "tier {tier:?}: the environment's tool must be admitted: {:?}",
+                result.err()
+            );
+            assert_eq!(config.env_vars.get("GWT_AGENT_MEMBER_ID"), Some(&id));
+            let reservation = config.env_vars.remove("GWT_AGENT_RESERVATION_ID").unwrap();
+            crate::agent_names::release_project_member(&root, &sessions, &id, &reservation)
+                .unwrap();
+        };
+        admit(None);
+        admit(Some(0));
     }
 
     #[test]

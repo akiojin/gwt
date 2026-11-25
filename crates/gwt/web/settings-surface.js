@@ -29,6 +29,7 @@ import { renderHookCenterPanel, hookRepairUnavailableReason } from "./hook-cente
 import { createUiStateStore } from "./ui-state-store.js";
 import { createRepositoryLabelChip } from "./ui-content.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "./first-run-setup.js";
 
 function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
@@ -116,9 +117,9 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   const help = document.createElement("p");
   help.className = "settings-help";
   help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
-    + "Updates require no open agent windows or pending launches, including the Project Manager. "
-    + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
-    + "close them and retry. Update failures leave launches available.";
+    + "A tool is skipped while an agent window, including the Project Manager, is running it. "
+    + "Nothing is installed automatically. Manual installs and updates of a tool are refused while an agent window "
+    + "is running that tool; close those windows and retry. Update failures leave launches available.";
   panel.appendChild(help);
   const globalResult = maintenance.get("");
   if (globalResult?.message) {
@@ -219,7 +220,7 @@ function scopeSettingsControlIds(panel) {
 
 
 function renderIssuesSettingsPanel(panel, options) {
-  const { project, status, send, launchControls = [], catalog = {} } = options;
+  const { project, status, send, launchControls = [], catalog = {}, autonomyControl = null } = options;
   const document = panel.ownerDocument;
   const labelsScrollTop = panel.querySelector(".settings-label-options")?.scrollTop ?? 0;
   const focusedLabel = panel.dataset.pendingLabelFocus ?? (panel.contains(document.activeElement) ? document.activeElement?.dataset.repositoryLabel : undefined);
@@ -265,9 +266,20 @@ function renderIssuesSettingsPanel(panel, options) {
     return input;
   };
   const launch = group("Launch control");
+  // Issue #7728: monitoring has no switch of its own. It follows the one
+  // project stop/start, shared with the Hub project list.
+  if (autonomyControl) {
+    const field = document.createElement("div");
+    field.className = "settings-field";
+    field.dataset.settingsLaunchAction = "project-autonomy";
+    const caption = document.createElement("span");
+    caption.textContent = "Project";
+    field.append(caption, autonomyControl.element);
+    setControlExplanation(autonomyControl.element, "Stop or start this project. Stopping halts new Issue assignments and the Project Manager patrol together; agents already working finish first.", "settings-project-autonomy");
+    launch.appendChild(field);
+  }
   for (const [action, name, key, kind] of [
     ["monitor-autonomous", "Autonomous", "autonomous_mode", "set_issue_monitor_autonomous_mode"],
-    ["monitor-toggle", "Monitoring", "enabled", "set_issue_monitor_enabled"],
   ]) {
     const slot = document.createElement("span");
     let control = launchControls.find(control => control.dataset.action === action);
@@ -286,9 +298,7 @@ function renderIssuesSettingsPanel(panel, options) {
     control.checked = status?.[key] === true;
     control.dataset.confirmed = String(control.checked);
     control.disabled = !status;
-    setControlExplanation(control, action === "monitor-autonomous"
-      ? "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent."
-      : "Start or pause monitoring for queued issues.", `settings-${action}`);
+    setControlExplanation(control, "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent.", `settings-${action}`);
     slot.appendChild(control);
     row(launch, name, slot).dataset.settingsLaunchAction = action;
   }
@@ -390,7 +400,7 @@ function renderCandidateSaveError(panel, event) {
     feedback.textContent = event.message;
     feedback.dataset.kind = "error";
     feedback.setAttribute("role", "alert");
-    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|docker_lifecycle_intent|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
     const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
     const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
     const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
@@ -432,7 +442,8 @@ function reconcileCandidateSave(panel, event) {
       if (input.type === "checkbox") input.checked = profile[key] === true;
       else {
         const saved = key === "prefer_for" ? (profile[key] || []).join(", ")
-          : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+          : key === "runtime_target" && profile.runtime_inherit ? "Inherit"
+            : String(profile[key] ?? ({ session_mode: "Normal", runtime_target: "Host", docker_lifecycle_intent: "Connect" }[key] || ""));
         if (input.localName === "select") {
           if (![...input.options].some(option => option.value === saved)) {
             const option = panel.ownerDocument.createElement("option");
@@ -456,7 +467,7 @@ function reconcileCandidateSave(panel, event) {
 }
 
 export function renderMemberTuningControls(host, options) {
-  const { target, choices = null, available = true, onEdit = () => {}, onRetry = () => {}, onReload = null, onReloadCatalog = null } = options;
+  const { target, choices = null, available = true, launchFields = true, onEdit = () => {}, onRetry = () => {}, onReload = null, onReloadCatalog = null } = options;
   const editable = available && target?.available !== false;
   const document = host.ownerDocument;
   host.dataset.memberTuningHost = "";
@@ -465,6 +476,11 @@ export function renderMemberTuningControls(host, options) {
     host.replaceChildren(); host.memberTuningIdentity = identity;
     const owns = control => host.memberTuningIdentity === identity && host.isConnected && control.isConnected && host.contains(control);
     const title = document.createElement("h4"); title.textContent = target?.canonical.role === "pm" ? "Saved Project Manager profile" : "Saved implementation settings"; host.append(title);
+    // Issue #7647: the agent ledger offers no tool, model or reasoning for a
+    // member; those controls stay in the document, unshown, for the shared
+    // state below.
+    const launchHost = launchFields ? host : host.appendChild(Object.assign(document.createElement("div"), { hidden: true }));
+    if (!launchFields) launchHost.dataset.memberTuningLaunch = "";
     for (const [key, caption] of [["agent_id", "Tool"], ["model", "Model"], ["reasoning", "Reasoning"]]) {
       const label = document.createElement("label"); label.className = "settings-field";
       const text = document.createElement("span"); text.textContent = caption;
@@ -479,10 +495,10 @@ export function renderMemberTuningControls(host, options) {
           if (input.value !== host.memberTuningAgentId) for (const field of host.querySelectorAll('input[data-member-tuning-field]')) { field.memberComposing = false; field.value = ""; }
           host.memberTuningOptions.onEdit({ agent_id: input.value });
         });
-        label.append(text, input); host.append(label); continue;
+        label.append(text, input); launchHost.append(label); continue;
       }
       const list = document.createElement("datalist"); list.id = `member-tuning-${key}-${Math.random().toString(36).slice(2)}`;
-      input.setAttribute("list", list.id); label.append(text, input, list); host.append(label);
+      input.setAttribute("list", list.id); label.append(text, input, list); launchHost.append(label);
       const edit = composing => { if (owns(input) && !input.disabled) host.memberTuningOptions.onEdit({ [key]: input.value }, { composing }); };
       input.addEventListener("compositionstart", () => { input.memberComposing = owns(input); if (input.memberComposing) edit(true); });
       input.addEventListener("compositionend", () => { const completed = input.memberComposing && owns(input); input.memberComposing = false; if (completed) edit(false); });
@@ -529,14 +545,14 @@ export function renderMemberTuningControls(host, options) {
     modelUnavailable.className = "settings-help";
     modelUnavailable.setAttribute("role", "status");
     modelUnavailable.dataset.modelUnavailable = "";
-    host.append(modelUnavailable);
+    launchHost.append(modelUnavailable);
     const catalogStatus = document.createElement("p");
     catalogStatus.className = "settings-help"; catalogStatus.setAttribute("role", "status");
-    catalogStatus.dataset.modelCatalogStatus = ""; host.append(catalogStatus);
+    catalogStatus.dataset.modelCatalogStatus = ""; launchHost.append(catalogStatus);
     const retryCatalog = document.createElement("button"); retryCatalog.type = "button"; retryCatalog.className = "wizard-button";
     retryCatalog.textContent = "Retry model catalog"; retryCatalog.dataset.action = "retry-model-catalog";
     retryCatalog.addEventListener("click", () => { if (owns(retryCatalog) && !retryCatalog.disabled) host.memberTuningOptions.onReloadCatalog?.(); });
-    host.append(retryCatalog);
+    launchHost.append(retryCatalog);
     const revision = document.createElement("p"); revision.className = "settings-help"; revision.dataset.memberTuningRevision = ""; host.append(revision);
     const status = document.createElement("p"); status.className = "settings-status"; status.dataset.memberTuningStatus = ""; status.setAttribute("role", "status"); host.append(status);
     const retry = document.createElement("button"); retry.type = "button"; retry.className = "wizard-button"; retry.textContent = "Retry profile"; retry.dataset.action = "retry-tuning";
@@ -718,6 +734,10 @@ export function renderAgentsSettingsPanel(panel, options) {
         : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
           : input.value.trim() || null;
     }
+    // Issue #7729 AC-4: "Inherit" is a choice of its own, not a third place.
+    // The place the candidate last named stays saved under it.
+    next.runtime_inherit = next.runtime_target === "Inherit";
+    if (next.runtime_inherit) next.runtime_target = profile.runtime_target || "Host";
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === next.agent_member_id);
     if (member) next.agent_id = member.agent_id;
     if (repair && staleTool) {
@@ -775,7 +795,7 @@ export function renderAgentsSettingsPanel(panel, options) {
       && provider(savedMember.agent_id) !== provider(profile.agent_id);
     rows.push({ row, profile, staleTool });
     const memberChoices = (availableMembers || []).filter(implementationEligible).map(member => ({ value: member.member_id || member.agent_member_id,
-      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})${member.enabled ? "" : " · Resting"}` }));
+      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})` }));
     if ((!savedMember || !implementationEligible(savedMember)) && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
     const agent = field(row, "Agent", "agent_member_id", profile.agent_member_id || "", "text", memberChoices);
     agent.disabled = availableMembers === null;
@@ -788,13 +808,26 @@ export function renderAgentsSettingsPanel(panel, options) {
     let previousTool = provider(profile.agent_id);
     const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(selectedMember()?.agent_id || profile.agent_id));
     const initial = capabilities();
+    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
+    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
+    // Issue #7729 AC-4 (SPEC #7007 item 197): where the candidate runs. Docker
+    // is offered only in a project that has a Docker setup; a saved Docker
+    // choice stays visible, and the launch falls back to the host.
+    const dockerAvailable = (choices?.docker_services || []).length > 0;
+    const runtime = field(row, "Runs on", "runtime_target", profile.runtime_inherit ? "Inherit" : profile.runtime_target || "Host", "text", [
+      { value: "Inherit", label: "Inherit (this project's last launch)" }, "Host", ...(dockerAvailable ? ["Docker"] : []),
+    ]);
     const docker = field(row, "Docker service", "docker_service", profile.docker_service ?? "", "text", [
       { value: "", label: choices?.default_docker_service ? `Auto (${choices.default_docker_service})` : "Auto" },
       ...(choices?.docker_services || []),
     ]);
-    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
-    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
-    const runtime = field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
+    const lifecycle = field(row, "Docker lifecycle", "docker_lifecycle_intent", profile.docker_lifecycle_intent || "Connect", "text", [
+      { value: "Connect", label: "Connect only" }, { value: "Start", label: "Start then launch" },
+      { value: "Restart", label: "Restart then launch" }, { value: "Recreate", label: "Recreate then launch" },
+      { value: "CreateAndStart", label: "Create and start then launch" },
+    ]);
+    const runtimeNote = document.createElement("p"); runtimeNote.className = "settings-help"; runtimeNote.dataset.profileRuntimeNote = "";
+    runtimeNote.setAttribute("role", "status"); row.append(runtimeNote);
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
@@ -831,7 +864,7 @@ export function renderAgentsSettingsPanel(panel, options) {
       toolValue.textContent = entry?.name || tool;
       memberStatus.textContent = availableMembers === null ? "Loading registered members…" : !member
         ? "Selected member is unavailable. Choose a registered member; no substitute will be launched."
-        : !implementationEligible(member) ? "This member holds a Project Manager role and is unavailable for implementation launches." : !member.enabled ? "Resting member. Future launches wait until this member is enabled." : "";
+        : !implementationEligible(member) ? "This member holds a Project Manager role and is unavailable for implementation launches." : "";
       memberStatus.hidden = !memberStatus.textContent;
       if (!changed || agentChanged) {
         setChoices(mode, entry?.session_modes || ["Normal"], agentChanged ? "Normal" : mode.value);
@@ -842,8 +875,14 @@ export function renderAgentsSettingsPanel(panel, options) {
       syncTuning();
       skip.disabled = !entry?.supports_skip_permissions;
       fast.disabled = !entry?.supports_fast_mode;
-      docker.disabled = runtime.value !== "Docker";
-      shell.disabled = runtime.value === "Docker" || !choices?.windows_shell_supported;
+      const onDocker = runtime.value === "Docker";
+      docker.disabled = lifecycle.disabled = !onDocker;
+      docker.closest("label").hidden = lifecycle.closest("label").hidden = !onDocker;
+      runtimeNote.textContent = runtime.value === "Inherit"
+        ? "Runs where this project's last launch ran. With no earlier launch, it runs on the host."
+        : onDocker && !dockerAvailable ? "This project has no Docker setup, so launches run on the host." : "";
+      runtimeNote.hidden = !runtimeNote.textContent;
+      shell.disabled = onDocker || !choices?.windows_shell_supported;
     };
     row.updateCandidateChoices();
     for (const [direction, offset] of [["up", -1], ["down", 1]]) {
@@ -866,7 +905,7 @@ export function renderAgentsSettingsPanel(panel, options) {
   panel.appendChild(add);
   const remaining = (availableMembers || []).filter(member => implementationEligible(member) && !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
   const candidate = field(add, "Add candidate", "new", "", "text", [{ value: "", label: "Select a registered member…" },
-    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})${member.enabled ? "" : " · Resting"}` }))]);
+    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})` }))]);
   const addButton = button(add, "Add candidate", "add-candidate", () => {
     const memberId = candidate.value.trim(), next = draft();
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === memberId);
@@ -956,6 +995,12 @@ export function createSettingsSurface({
   rosterModel,
   tuningController,
   onReloadProfile,
+  renderProjectEnvironments = null,
+  renderPmEnvironments = null,
+  projectEnvironmentSetsModel = createUiStateStore({}),
+  // Issue #7728: the PM half of the project stop/start state.
+  projectAutonomyPmModel = createUiStateStore({ paused: null }),
+  createProjectAutonomyControl = null,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1148,9 +1193,27 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
+      function renderProjectEnvironmentSet(body, snapshots = projectEnvironmentSetsModel.read()) {
+        const event = snapshots[body.dataset.settingsProjectRoot];
+        const select = body.querySelector("[data-project-environment-set]");
+        if (!event || !select) return;
+        const names = event.names || [];
+        const options = [createNode("option", "", "None"), ...names.map(name => createNode("option", "", name))];
+        options[0].value = "";
+        select.replaceChildren(...options);
+        select.value = event.assigned || "";
+        select.disabled = Boolean(event.error && !names.length);
+        body.querySelector("[data-project-environment-set-status]").textContent =
+          event.error || "Applies to new agent sessions in this project.";
+      }
+      projectEnvironmentSetsModel.subscribe(state => state, state => {
+        for (const body of settingsWindowBodies) {
+          renderProjectEnvironmentSet(body, state);
+        }
+      });
       const hookDoctorModel = createUiStateStore({}, { scheduleFrame });
       let nextHookDoctorRequest = 0;
-      function requestHookDoctor(projectRoot, repair = false, recovering = false) {
+      function requestHookDoctor(projectRoot, repair = false, recovering = false, userHookChange = null) {
         if (!projectRoot || projectRoot !== activeProjectTab()?.project_root) return;
         const current = hookDoctorModel.read()[projectRoot];
         if (repair && hookRepairUnavailableReason(current)) return;
@@ -1160,10 +1223,14 @@ export function createSettingsSurface({
           report: null, error: null, requestId, pending: true, repairRequested: repair,
           lastRepairOutcome: repair ? "unknown" : current?.lastRepairOutcome ?? null,
         } }));
-        const result = send({ kind: "get_hook_doctor", request_id: requestId, repair });
-        if (repair && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+        const result = send(userHookChange
+          ? { kind: "update_user_hooks", request_id: requestId, change: userHookChange }
+          : { kind: "get_hook_doctor", request_id: requestId, repair });
+        if ((repair || userHookChange) && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
           ...state[projectRoot], pending: false,
-          error: "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically.",
+          error: repair
+            ? "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically."
+            : "The hook change could not be confirmed on this connection. Reconnect and refresh the audit; the change will not be retried automatically.",
         } }));
       }
       function applyHookDoctorEvent(event) {
@@ -1187,6 +1254,7 @@ export function createSettingsSurface({
           renderHookCenterPanel(panel, {
             projectRoot: root, state: state[root], available: Boolean(root && root === activeProjectTab()?.project_root),
             onRefresh: () => requestHookDoctor(root), onRepair: () => requestHookDoctor(root, true),
+            onChangeUserHook: change => requestHookDoctor(root, false, false, change),
           });
         }
       }
@@ -1258,13 +1326,31 @@ export function createSettingsSurface({
         const root = body.dataset.settingsProjectRoot || "";
         return issueSettingsModel.read()[root] || {};
       }
+      // Issue #7728: one control per Settings window, re-rendered in place.
+      function projectAutonomyControl(body, status, dispatch) {
+        if (!createProjectAutonomyControl) return null;
+        body.projectAutonomyControl ??= createProjectAutonomyControl({
+          projectTitle: () => body.dataset.settingsProjectName || "",
+          send: running => body.projectAutonomyDispatch?.({ kind: "set_project_autonomy", running }),
+        });
+        body.projectAutonomyDispatch = dispatch;
+        const pmPaused = projectAutonomyPmModel.read().paused;
+        body.projectAutonomyControl.update(status ? {
+          monitor_enabled: status.enabled === true, pm_paused: pmPaused, active_agents: status.active_count ?? 0,
+        } : null);
+        return body.projectAutonomyControl;
+      }
+      projectAutonomyPmModel.subscribe(state => state.paused, () => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
       function renderProjectSettings(body) {
         const root = body.dataset.settingsProjectRoot || "";
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
-        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"]')];
         for (const control of launchControls) {
-          control.checked = current.status?.[control.dataset.action === "monitor-autonomous" ? "autonomous_mode" : "enabled"] === true;
+          control.checked = current.status?.autonomous_mode === true;
           control.dataset.confirmed = String(control.checked);
           control.disabled = !current.status;
         }
@@ -1295,6 +1381,16 @@ export function createSettingsSurface({
           }
           send(message);
         };
+        // Issue #7741: the project's available execution environments.
+        const environmentsPanel = body.querySelector("[data-settings-environments]");
+        if (environmentsPanel) renderProjectEnvironments?.(environmentsPanel, {
+          view: current.environments || null, error: current.environmentsError || null,
+          send: message => {
+            if (!root || activeProjectTab()?.project_root !== root) return;
+            issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], environmentsPending: true, environmentsError: null } }));
+            send(message);
+          },
+        });
         const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
@@ -1304,6 +1400,7 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, catalog: current.catalog, labelsPending: Array.isArray(current.labelsExpected), profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
+            autonomyControl: section === "issues" ? projectAutonomyControl(body, current.status, dispatch) : null,
             availableMembers, tuningController, onReloadProfile,
           });
         }
@@ -1336,6 +1433,46 @@ export function createSettingsSurface({
             labelsRequestId: confirmed ? null : current.labelsRequestId,
           } };
         });
+      }
+      // Issue #7741: `execution_environments` carries the list of the project
+      // the reply was scoped to.
+      // Issue #7732: the Project Manager's own list is saved with this
+      // machine, so every reply carries it, with or without a project.
+      const pmEnvironmentsModel = createUiStateStore({ view: null, pending: false, error: null }, { scheduleFrame });
+      function renderPmEnvironmentsPanel(body, state = pmEnvironmentsModel.read()) {
+        const panel = body.querySelector("[data-settings-pm-environments]");
+        if (panel) renderPmEnvironments?.(panel, {
+          view: state.view, error: state.error,
+          send: message => {
+            pmEnvironmentsModel.update(current => ({ ...current, pending: true, error: null }));
+            send(message);
+          },
+        });
+      }
+      pmEnvironmentsModel.subscribe(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderPmEnvironmentsPanel(body, state);
+      });
+      function applyExecutionEnvironments(view) {
+        if (view) pmEnvironmentsModel.update(() => ({ view, pending: false, error: null }));
+        const root = view?.project?.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => ({ ...state, [root]: {
+          ...state[root], environments: view, environmentsPending: false, environmentsError: null,
+        } }));
+      }
+      // Only a save this window sent is answered here; other refusals belong
+      // to the Execution environments screen.
+      function applyExecutionEnvironmentError(event) {
+        if (pmEnvironmentsModel.read().pending) {
+          pmEnvironmentsModel.update(state => ({ ...state, pending: false, error: event.message }));
+          return;
+        }
+        const root = event.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => state[root]?.environmentsPending ? { ...state, [root]: {
+          ...state[root], environmentsPending: false, environmentsError: event.message,
+        } } : state);
       }
       function applyIssueMonitorProfiles(event) {
         const root = event.project_root;
@@ -1471,10 +1608,14 @@ export function createSettingsSurface({
 
       function requestSettingsSnapshots(recovering = false) {
         if (activeProjectTab()?.project_root) {
+          send({ kind: "get_project_environment_set" });
           send({ kind: "list_issue_monitor" });
           send({ kind: "get_repository_labels", refresh: false });
           send({ kind: "get_issue_monitor_profiles" });
+          send({ kind: "get_execution_environments" });
           send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+        } else {
+          send({ kind: "get_execution_environments" });
         }
         send({ kind: "list_supported_agents" });
         send({ kind: "get_system_settings" });
@@ -1533,6 +1674,8 @@ export function createSettingsSurface({
       function disposeSettingsBody(body) {
         if (!body) return;
         body.settingsExplanations?.dispose();
+        body.projectAutonomyControl?.unmount?.();
+        body.projectAutonomyControl = null;
         for (const panel of body.querySelectorAll("[data-settings-candidates]")) {
           for (const unsubscribe of panel.candidateTuningUnsubscribers || []) unsubscribe();
           panel.candidateTuningUnsubscribers = [];
@@ -1631,6 +1774,35 @@ export function createSettingsSurface({
         updateStatus.setAttribute("role", "status");
         updateSection.appendChild(updateStatus);
         panelSystem.appendChild(updateSection);
+        // Issue #7646: members, their order and deletion live in the agent
+        // ledger. Settings only links there.
+        const ledgerSection = createDiv("settings-section");
+        ledgerSection.appendChild(createNode("p", "settings-help", "Agent members, their order and deletion are managed in the agent ledger."));
+        const ledgerLink = createNode("button", "wizard-button", "Open agent ledger");
+        ledgerLink.type = "button";
+        ledgerLink.dataset.action = "open-agent-ledger";
+        ledgerLink.addEventListener("click", () => document.dispatchEvent(new document.defaultView.CustomEvent("agents:open")));
+        ledgerSection.appendChild(ledgerLink);
+        panelSystem.appendChild(ledgerSection);
+        // Issue #7732: the Project Manager's execution environments.
+        const pmEnvironments = createDiv();
+        pmEnvironments.dataset.settingsPmEnvironments = "";
+        panelSystem.appendChild(pmEnvironments);
+        // Issue #7731: every step of the first-run setup stays reachable
+        // from here. The setup lives on the Hub page.
+        const setupSection = createDiv("settings-section");
+        setupSection.dataset.firstRunSetupReview = "";
+        setupSection.appendChild(createNode("h4", "settings-section-heading", "Review first-run setup"));
+        setupSection.appendChild(createNode("p", "settings-help", "Open any step of the setup again. It shows this machine's current state."));
+        const setupLinks = createDiv("settings-link-row");
+        for (const { step, label } of SETUP_REVIEW_STEPS) {
+          const link = createNode("a", "wizard-button", label);
+          link.href = firstRunSetupUrlPath(step);
+          link.dataset.setupStep = step;
+          setupLinks.appendChild(link);
+        }
+        setupSection.appendChild(setupLinks);
+        panelSystem.appendChild(setupSection);
         const systemContent = createDiv();
         systemContent.id = `${panelSystem.id}-content`;
         systemContent.dataset.systemSettingsContent = "";
@@ -1685,6 +1857,30 @@ export function createSettingsSurface({
         const controls = createDiv();
         controls.dataset.settingsIssuesControls = "";
         panelIssues.appendChild(controls);
+        if (project?.project_root) {
+          const environmentSet = createNode("fieldset", "settings-section");
+          environmentSet.appendChild(createNode("legend", "", "Environment variables"));
+          const field = createNode("label", "settings-field");
+          field.appendChild(createNode("span", "", "Environment variable set"));
+          const select = createNode("select", "settings-select");
+          select.dataset.projectEnvironmentSet = "";
+          select.disabled = true;
+          field.appendChild(select);
+          environmentSet.appendChild(field);
+          const status = createNode("p", "settings-help", "Loading environment variable sets…");
+          status.setAttribute("role", "status");
+          status.dataset.projectEnvironmentSetStatus = "";
+          environmentSet.appendChild(status);
+          select.addEventListener("change", () => {
+            if (activeProjectTab()?.project_root !== project.project_root) return;
+            select.disabled = true;
+            send({ kind: "set_project_environment_set", name: select.value || null });
+          });
+          panelIssues.appendChild(environmentSet);
+        }
+        const environments = createDiv();
+        environments.dataset.settingsEnvironments = "";
+        panelIssues.appendChild(environments);
         const candidates = createDiv();
         candidates.dataset.settingsCandidates = "";
         panelIssues.appendChild(candidates);
@@ -1716,6 +1912,9 @@ export function createSettingsSurface({
         settingsWindowBodies.add(body);
         body.addEventListener("settings:section-changed", event => {
           if (event.detail.section === "hooks") requestHookDoctor(body.dataset.settingsProjectRoot);
+          if (event.detail.section === "issues" && body.dataset.settingsProjectRoot) {
+            send({ kind: "get_project_environment_set" });
+          }
         });
         renderHookCenterPanels();
         renderUpdateStatus(body, globalUpdateModel.read());
@@ -1732,6 +1931,8 @@ export function createSettingsSurface({
           });
         });
         renderProjectSettings(body);
+        renderProjectEnvironmentSet(body);
+        renderPmEnvironmentsPanel(body);
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
@@ -2933,6 +3134,8 @@ export function createSettingsSurface({
         applyIssueSettingsStatus,
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,
+        applyExecutionEnvironments,
+        applyExecutionEnvironmentError,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,

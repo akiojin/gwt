@@ -337,6 +337,34 @@ pub enum SessionLaunchOrigin {
     UserRestart,
 }
 
+/// Account and credential location selected for this launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionAccount {
+    pub account_id: String,
+    /// Environment variable name for selecting the credential home.
+    pub env_key: String,
+    /// `None` uses the tool's default credential home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_home: Option<String>,
+}
+
+/// Reason the account changed when starting a session again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSwitchReason {
+    RateLimit,
+    Manual,
+}
+
+/// A dated change between account ids for a provider conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountSwitch {
+    pub from: String,
+    pub to: String,
+    pub reason: AccountSwitchReason,
+    pub at: UtcTimestamp,
+}
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -398,6 +426,10 @@ pub struct Session {
     /// Sessions keep this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<SessionExecutionBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_account: Option<ExecutionAccount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub account_switches: Vec<AccountSwitch>,
     #[serde(default)]
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
@@ -620,6 +652,8 @@ impl Session {
             docker_service: None,
             docker_runtime_binding: None,
             execution_binding: None,
+            execution_account: None,
+            account_switches: Vec::new(),
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
             review_dispatch: false,
@@ -4881,6 +4915,32 @@ display_name = "Codex"
         let session: Session = toml::from_str(legacy).expect("deserialize legacy");
 
         assert!(session.project_state_root.is_none());
+        assert!(session.execution_account.is_none());
+        assert!(session.account_switches.is_empty());
+    }
+
+    #[test]
+    fn session_account_and_switch_history_round_trip() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let account = ExecutionAccount {
+            account_id: "codex-2".into(),
+            env_key: "CODEX_HOME".into(),
+            credential_home: Some("/tmp/accounts/codex/codex-2".into()),
+        };
+        let switch = AccountSwitch {
+            from: "codex-1".into(),
+            to: account.account_id.clone(),
+            reason: AccountSwitchReason::RateLimit,
+            at: session.created_at,
+        };
+        session.execution_account = Some(account.clone());
+        session.account_switches.push(switch.clone());
+
+        let persisted = toml::to_string(&session).expect("serialize account metadata");
+        assert!(persisted.contains("reason = \"rate_limit\""));
+        let restored: Session = toml::from_str(&persisted).expect("deserialize account metadata");
+        assert_eq!(restored.execution_account, Some(account));
+        assert_eq!(restored.account_switches, [switch]);
     }
 
     #[test]

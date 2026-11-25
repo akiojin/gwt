@@ -1,10 +1,102 @@
 use super::*;
 
 fn request(action: &str) -> FrontendEvent {
+    request_for("codex", action)
+}
+
+fn request_for(agent_id: &str, action: &str) -> FrontendEvent {
     serde_json::from_value(serde_json::json!({
-        "kind": "maintain_supported_agent", "agent_id": "codex", "action": action
+        "kind": "maintain_supported_agent", "agent_id": agent_id, "action": action
     }))
     .expect("supported agents expose maintenance requests")
+}
+
+/// A tab whose single agent window is starting on `tool` for `name` / `issue`.
+fn starting_agent_tab(tool: &str, name: &str, issue: u64) -> ProjectTabRuntime {
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent",
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut persisted = tab.workspace.persisted().clone();
+    persisted.windows[0].agent_id = Some(tool.into());
+    persisted.windows[0].agent_name = Some(name.into());
+    persisted.windows[0].linked_issue_number = Some(issue);
+    tab.workspace = WindowRegistry::from_persisted(persisted);
+    tab
+}
+
+fn maintenance_reply(events: &[OutboundEvent]) -> serde_json::Value {
+    events
+        .iter()
+        .map(|event| serde_json::to_value(&event.event).unwrap())
+        .find(|event| event["kind"] == "supported_agent_maintenance")
+        .expect("maintenance response")
+}
+
+// Issue #7744 AC-1: only the target tool's users gate its maintenance.
+#[test]
+fn unused_tools_update_while_another_tool_is_live_and_launches_are_pending() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = starting_agent_tab("claude", "小田 洋平", 7744);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    // Launches that have not chosen a tool yet are held by the launch guard.
+    runtime
+        .inflight_launches
+        .insert("pending".into(), ("next-agent".into(), Instant::now()));
+    for (index, tool) in ["codex", "grok"].into_iter().enumerate() {
+        let events = runtime.handle_frontend_event("settings".into(), request_for(tool, "update"));
+        assert_eq!(maintenance_reply(&events)["pending"], true, "{tool}");
+        assert_eq!(tasks.lock().unwrap().len(), index + 1, "{tool}");
+        let completed = runtime.handle_supported_agent_maintenance_complete(
+            super::super::agent_maintenance::AgentMaintenanceCompletion {
+                results: vec![gwt::agent_maintenance::MaintenanceResult {
+                    agent_id: tool.into(),
+                    action: gwt::agent_maintenance::MaintenanceAction::Update,
+                    before_version: Some("1.0.0".into()),
+                    after_version: Some("1.0.1".into()),
+                    success: true,
+                    message: "Updated.".into(),
+                }],
+                cache: None,
+                catalog: None,
+            },
+        );
+        assert_eq!(maintenance_reply(&completed)["success"], true, "{tool}");
+        assert!(!runtime.agent_maintenance.busy);
+    }
+}
+
+// Issue #7744 AC-2: the refusal names who is using the tool.
+#[test]
+fn maintenance_of_a_tool_in_use_names_the_agent_and_issue_using_it() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = starting_agent_tab("codex", "小田 洋平", 7744);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    for action in ["update", "install"] {
+        let events = runtime.handle_frontend_event("settings".into(), request(action));
+        let reply = maintenance_reply(&events);
+        assert_eq!(reply["success"], false);
+        let message = reply["message"].as_str().unwrap();
+        assert!(
+            message.contains("Codex") && message.contains("小田 洋平") && message.contains("#7744"),
+            "{message}"
+        );
+    }
+    assert!(tasks.lock().unwrap().is_empty());
+    // An agent gwt cannot map to a catalog tool may be running any of them.
+    assert!(runtime.agent_maintenance_rejection("grok").is_none());
+    let mut persisted = runtime.tabs[0].workspace.persisted().clone();
+    persisted.windows[0].agent_id = Some("my-custom-agent".into());
+    runtime.tabs[0].workspace = WindowRegistry::from_persisted(persisted);
+    assert!(runtime.agent_maintenance_rejection("grok").is_some());
 }
 
 #[test]
@@ -140,6 +232,16 @@ fn maintenance_reserves_admission_before_the_worker_and_refuses_agent_launches()
         )
         .unwrap_err();
     assert!(error.contains("maintenance"));
+    // Issue #7744 AC-3: only the tool being replaced is held back.
+    assert!(runtime
+        .agent_maintenance_launch_block(Some("codex"))
+        .is_some());
+    assert!(runtime
+        .agent_maintenance_launch_block(Some("claude"))
+        .is_none());
+    assert!(runtime
+        .agent_maintenance_launch_block(Some("my-custom-agent"))
+        .is_some());
     let legacy = runtime.start_window("tab-1", "agent", WindowPreset::Codex);
     assert!(legacy.iter().any(|event| serde_json::to_value(&event.event)
         .unwrap()
@@ -275,62 +377,40 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
     for status in [WindowProcessStatus::Idle, WindowProcessStatus::Waiting] {
         runtime.set_window_status("tab-1", "pm", status);
         assert!(
-            runtime.agent_maintenance_rejection().is_some(),
+            runtime.agent_maintenance_rejection("codex").is_some(),
             "live {status:?} PM agent"
         );
+        assert!(runtime.agent_maintenance_rejection("grok").is_none());
     }
     close_test_owner_runtime(&mut runtime, &id);
+    runtime.set_window_status("tab-1", "pm", WindowProcessStatus::Stopped);
+    assert!(runtime.agent_maintenance_rejection("codex").is_none());
+    runtime.pending_startup_auto_resume_sessions.push(
+        super::super::PendingStartupAutoResumeSession {
+            tab_id: "tab-1".into(),
+            session: gwt_agent::Session::new(
+                temp.path().join("worktree"),
+                "feature/restore",
+                gwt_agent::AgentId::Codex,
+            ),
+            workspace_resume_context: None,
+        },
+    );
+    assert!(
+        runtime
+            .agent_maintenance_rejection("codex")
+            .is_some_and(|message| message.contains("pending")),
+        "a launch already bound to the tool owns its admission"
+    );
+    assert!(runtime.agent_maintenance_rejection("grok").is_none());
+    runtime.pending_startup_auto_resume_sessions.clear();
     runtime
         .inflight_launches
         .insert("pending".into(), ("next-agent".into(), Instant::now()));
-    assert!(runtime.agent_maintenance_rejection().is_some());
-    runtime.inflight_launches.clear();
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .unwrap()
-        .pending_launch_wizard_materializations
-        .insert(
-            "confirmed-wizard".into(),
-            sample_launch_wizard_session("tab-1", temp.path()),
-        );
     assert!(
-        runtime.agent_maintenance_rejection().is_some(),
-        "confirmed wizard preparation owns launch admission"
+        runtime.agent_maintenance_rejection("codex").is_none(),
+        "a launch without a chosen tool is held by the launch guard instead"
     );
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .unwrap()
-        .pending_launch_wizard_materializations
-        .clear();
-    runtime.set_window_status("tab-1", "pm", WindowProcessStatus::Stopped);
-    assert!(runtime.agent_maintenance_rejection().is_none());
-    let context = runtime.test_context();
-    runtime.issue_monitor_launch_preparations.insert((
-        context.tab_id.clone(),
-        context.generation,
-        5596,
-        None,
-        true,
-    ));
-    let (spawner, _tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    runtime.auto_launch_issue_monitor_delivery_events_for_project(
-        &context.project_root,
-        5597,
-        LinkedIssueKind::Issue,
-        Some("launch:maintenance-queued".to_string()),
-        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
-    );
-    assert_eq!(runtime.issue_monitor_launch_queue.len(), 1);
-    runtime.issue_monitor_launch_preparations.clear();
-    assert!(runtime.inflight_launches.is_empty());
-    assert!(runtime.runtimes.is_empty());
-    assert!(
-        runtime.agent_maintenance_rejection().is_some(),
-        "a waiting Monitor queue alone must retain launch admission"
-    );
-    runtime.issue_monitor_launch_queue.clear();
-    assert!(runtime.agent_maintenance_rejection().is_none());
 }
 
 #[test]
@@ -468,6 +548,42 @@ fn startup_updates_only_installed_supported_agents_and_refreshes_catalog_after_c
     assert_eq!(payload["auto_update"], true);
 }
 
+// Issue #7744 AC-4: startup applies the same per-tool admission.
+#[cfg(unix)]
+#[test]
+fn startup_skips_only_the_tools_in_use() {
+    for (tool_in_use, codex_updated) in [("codex", false), ("claude", true)] {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, events, tasks) =
+            startup_fixture(temp.path(), Some("1.2.3"), "1.2.4", false);
+        runtime
+            .tabs
+            .push(starting_agent_tab(tool_in_use, "小田 洋平", 7744));
+        runtime.start_agent_auto_update();
+        assert!(runtime.agent_maintenance.busy, "{tool_in_use}");
+        assert_eq!(
+            runtime
+                .agent_maintenance_launch_block(Some("codex"))
+                .is_some(),
+            codex_updated,
+            "a skipped tool stays launchable ({tool_in_use})"
+        );
+        assert!(runtime
+            .agent_maintenance_launch_block(Some("grok"))
+            .is_some());
+        finish_startup_worker(&mut runtime, &events, &tasks);
+        let calls = fs::read_to_string(temp.path().join("agent-bin/calls")).unwrap_or_default();
+        assert_eq!(
+            calls
+                .lines()
+                .any(|line| line.starts_with("install -g @openai/codex")),
+            codex_updated,
+            "{tool_in_use}: {calls}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn startup_updates_antigravity_but_never_unverified_native_routes() {
@@ -521,7 +637,7 @@ fn startup_does_not_install_missing_current_or_unknown_version_agents_and_failur
         runtime.start_agent_auto_update();
         let outbound = finish_startup_worker(&mut runtime, &events, &tasks);
         assert!(!runtime.agent_maintenance.busy);
-        assert!(runtime.agent_maintenance_rejection().is_none());
+        assert!(runtime.agent_maintenance_rejection("codex").is_none());
         let calls = fs::read_to_string(temp.path().join("agent-bin/calls")).unwrap_or_default();
         assert_eq!(
             calls.lines().any(|line| line.starts_with("install")),
@@ -536,10 +652,12 @@ fn startup_does_not_install_missing_current_or_unknown_version_agents_and_failur
 }
 
 #[test]
-fn startup_disabled_or_pending_launch_does_not_schedule_updates() {
+fn startup_disabled_or_unidentified_live_agent_does_not_schedule_updates() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let tab = starting_agent_tab("my-custom-agent", "小田 洋平", 7744);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.set_window_status("tab-1", "agent", WindowProcessStatus::Stopped);
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.start_agent_auto_update();
@@ -548,9 +666,7 @@ fn startup_disabled_or_pending_launch_does_not_schedule_updates() {
     let mut settings = Settings::load_from_path(&path).unwrap();
     settings.agent.auto_update = true;
     settings.save(&path).unwrap();
-    runtime
-        .inflight_launches
-        .insert("pending".into(), ("next-agent".into(), Instant::now()));
+    runtime.set_window_status("tab-1", "agent", WindowProcessStatus::Starting);
     runtime.start_agent_auto_update();
     assert!(tasks.lock().unwrap().is_empty());
     assert!(!runtime.agent_maintenance.busy);

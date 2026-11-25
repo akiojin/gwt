@@ -28,6 +28,10 @@ const SEARCH_LEASE_CONTENTION_REASONS: [&str; 3] = [
     "search admission deadline expired",
     "search coordinator unavailable",
 ];
+/// Issue #7493: the attempt ended while the resident worker was still loading
+/// its model. The token is the one `index.status` reports for the same cause.
+const SEARCH_WORKER_WARMING_REASON: &str = "query_worker_warming";
+const SEARCH_UNAVAILABLE_WARMING_RECOVERY: &str = "The query worker is still loading its embedding model and keeps loading after this attempt (index.status reports query_worker_warming until it is ready); retry after the indicated delay instead of running index.repair.";
 const SEARCH_UNAVAILABLE_LEASE_RECOVERY: &str = "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild.";
 const SEARCH_UNAVAILABLE_RUNNER_RECOVERY: &str = "The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay.";
 const SEARCH_UNAVAILABLE_COMMON_RECOVERY: &str = "For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.";
@@ -91,7 +95,9 @@ pub(crate) struct IndexSearchUnavailable {
 impl IndexSearchUnavailable {
     /// Caller action for this reason, plus the shared start/fallback guidance.
     pub(crate) fn recovery(&self) -> String {
-        let specific = if SEARCH_LEASE_CONTENTION_REASONS.contains(&self.reason.as_str()) {
+        let specific = if self.reason == SEARCH_WORKER_WARMING_REASON {
+            SEARCH_UNAVAILABLE_WARMING_RECOVERY
+        } else if SEARCH_LEASE_CONTENTION_REASONS.contains(&self.reason.as_str()) {
             SEARCH_UNAVAILABLE_LEASE_RECOVERY
         } else {
             SEARCH_UNAVAILABLE_RUNNER_RECOVERY
@@ -1211,6 +1217,19 @@ fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptErro
     })
 }
 
+/// A transport that ended without an answer. While the resident worker is
+/// still loading its model the cause is that load, not a broken runner, and
+/// `index.status` names it the same way (Issue #7493).
+fn search_transport_unavailable(worker_dir: &Path, fallback: &str) -> IndexSearchAttemptError {
+    let warming =
+        crate::index_resources::query_worker_status_at(worker_dir).model_state == "warming";
+    search_unavailable_error(if warming {
+        SEARCH_WORKER_WARMING_REASON
+    } else {
+        fallback
+    })
+}
+
 /// Claim the host-wide heavy lease for one query encode (FR-417).
 ///
 /// Admission shares the search attempt's absolute deadline. If the slot is
@@ -1318,15 +1337,20 @@ fn run_batch_scope_search(
         &args,
         gwt_core::process_console::SpawnOptions::new("project index search-multi")
             .current_dir(project_root)
-            .forward_output(false),
+            .forward_output(false)
+            // Issue #7493: the cold worker this starts must finish loading
+            // its model after the attempt deadline, or no retry ever finds
+            // it warm.
+            .allow_resident_descendant(true),
     );
     crate::perf::record_route_phase(
         crate::perf::PerfRoute::Search,
         "runner_transport",
         runner_started.elapsed(),
     );
-    let output =
-        output.map_err(|_| search_unavailable_error("project index runner unavailable"))?;
+    let output = output.map_err(|_| {
+        search_transport_unavailable(&worker_dir, "project index runner unavailable")
+    })?;
     if !output.success() {
         return Err(classify_failed_runner_output(&output));
     }
@@ -1443,7 +1467,10 @@ fn resident_search_request(
         Ok(frame) => serde_json::from_slice(&frame)
             .map_err(|_| search_unavailable_error("search worker transport failed"))
             .and_then(classify_search_payload),
-        Err(_) => Err(search_unavailable_error("search worker transport failed")),
+        Err(_) => Err(search_transport_unavailable(
+            worker_dir,
+            "search worker transport failed",
+        )),
     })
 }
 
@@ -2180,6 +2207,36 @@ mod tests {
             Instant::now() + Duration::from_secs(10)
         )
         .is_none());
+    }
+
+    #[test]
+    fn unanswered_transport_names_a_warming_worker_like_index_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let reason_and_recovery = |state: &str| {
+            std::fs::write(
+                directory.path().join("endpoint.json"),
+                json!({"pid": std::process::id(), "model_state": state}).to_string(),
+            )
+            .unwrap();
+            match search_transport_unavailable(directory.path(), "project index runner unavailable")
+            {
+                IndexSearchAttemptError::Unavailable(unavailable) => {
+                    (unavailable.reason.clone(), unavailable.recovery())
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        };
+
+        let (reason, recovery) = reason_and_recovery("warming");
+        assert_eq!(reason, "query_worker_warming");
+        assert!(recovery.contains("index.status"), "{recovery}");
+        assert!(
+            recovery.contains("instead of running index.repair"),
+            "{recovery}"
+        );
+
+        let (reason, _) = reason_and_recovery("cold");
+        assert_eq!(reason, "project index runner unavailable");
     }
 
     #[test]

@@ -18,6 +18,8 @@ export const ORIGIN_URL = "http://gwt-playwright.local/";
 export const APP_PROJECT_KEY = "0123456789abcdef";
 export const APP_URL = `${ORIGIN_URL}p/${APP_PROJECT_KEY}`;
 export const HUB_URL = ORIGIN_URL;
+// Issue #7639: `/` opens on Home; the picker is its Projects view.
+export const HUB_PROJECTS_URL = `${ORIGIN_URL}?view=projects`;
 
 const ROOT_MODULES = new Set([
   "app.js",
@@ -29,7 +31,17 @@ const ROOT_MODULES = new Set([
   // SPEC #7007 — task-centered Progress island host imported by pm-chat.js.
   "task-progress.js",
   // SPEC #7007 — task-centered Log island host imported by pm-chat.js and app.js.
-  "task-log.js",
+  // Issue #7648 — Execution environments island host imported by app.js.
+  "execution-environments.js",
+  // Issue #7740 — shared header and footer imported by app.js, hub-app.js and frontend-route.js.
+  "app-chrome.js",
+  // Issue #7639 — Home conversation host imported by hub-app.js.
+  "home-conversation.js",
+  "attachment-upload.js",
+  // Issue #7731 — first-run setup host imported by hub-app.js and settings-surface.js.
+  "first-run-setup.js",
+  "project-execution-environments.js",
+  "project-themes.js",
   // SPEC #7007 T-014 — typed window command error presentation imported by app.js.
   "window-command-error.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
@@ -59,6 +71,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
   "close-project-confirm-modal.js",
+  "project-autonomy.js",
   "project-execution-policy-model.js",
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
@@ -68,6 +81,7 @@ const ROOT_MODULES = new Set([
   "surface-rail.js",
   "split-surfaces.js",
   "agents-surface.js",
+  "agent-avatar.js",
   "works-surface.js",
   "terminal-text-preview.js",
   "focus-trap.js",

@@ -174,6 +174,30 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "decision.answer",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.attach",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.defer",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.merge",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.register",
+        aliases: &[],
+    },
+    Operation {
         name: "diagnostics.cpu",
         aliases: &[],
     },
@@ -476,6 +500,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["issue.monitor.review-verdict"],
     },
     Operation {
+        name: "issue.monitor.review_merged_evidence",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.schedule.read",
         aliases: &[],
     },
@@ -699,6 +727,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.branch_freshness.refresh",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.status.set",
         aliases: &[],
     },
@@ -708,6 +740,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pm.report.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.theme.record",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.theme.list",
         aliases: &[],
     },
     Operation {
@@ -840,6 +880,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "release.update.defer",
+        aliases: &[],
+    },
+    Operation {
+        name: "repository.branch_protection.update",
         aliases: &[],
     },
     Operation {
@@ -977,6 +1021,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "worktree.gc_build_artifacts",
         aliases: &["worktree.gc-build-artifacts"],
+    },
+    Operation {
+        name: "worktree.remove_merged",
+        aliases: &["worktree.remove-merged"],
     },
 ];
 
@@ -1314,7 +1362,7 @@ mod tests {
             );
         }
         assert!(
-            index.contains("  worktree    1 operation(s); see gwtd --help worktree\n"),
+            index.contains("  worktree    2 operation(s); see gwtd --help worktree\n"),
             "{index}"
         );
     }

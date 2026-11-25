@@ -4,6 +4,7 @@ import type { IncomingMessage } from "node:http";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const THIRTY_MINUTES = 30 * 60 * 1000;
 const RECOVERY_TIMEOUT_MS = 15_000;
@@ -84,7 +85,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       await page.waitForFunction(() => document.visibilityState === "visible", undefined,
         { polling: 100, timeout: 10_000 });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       const works = page.locator('.works-surface:not(.works-surface--preview) .work-row');

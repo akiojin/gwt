@@ -794,7 +794,7 @@ impl AppRuntime {
         .outbound(client_id.clone())])
     }
 
-    fn capture_attachment_operation(
+    pub(super) fn capture_attachment_operation(
         &self,
         client_id: ClientId,
         id: String,
