@@ -36,7 +36,7 @@ fn structured_reports_preserve_details_and_replay_suppress_or_report_material_ch
     );
     let mut tick = submission("next-tick", 1);
     tick.events[0].summary.result = "Reworded observation".into();
-    tick.events[0].observed_at = Some(Utc::now());
+    tick.events[0].observed_at = Some(UtcTimestamp::now());
     assert!(post_submission(&repo, &tick).unwrap().reports.is_empty());
     assert_eq!(load_reports(&repo).unwrap().len(), 1);
     tick.request_id = "fatal".into();
@@ -375,7 +375,7 @@ fn structured_decisions_and_corrections_are_material_but_internal_actions_still_
     batch.request_id = "same-freshness-next-tick".into();
     batch.events[0].expected_revision = 2;
     batch.events[0].summary.result = "Only the freshness wording changed".into();
-    batch.events[0].observed_at = Some(Utc::now());
+    batch.events[0].observed_at = Some(UtcTimestamp::now());
     assert!(post_submission(&repo, &batch).unwrap().reports.is_empty());
 }
 

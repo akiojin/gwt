@@ -1,5 +1,6 @@
 //! Monitor commits made by the fixed project's physical owner.
 use super::launch_payload::LaunchFeedbackContext;
+use crate::monitor_duplicate_runtime::HeldMonitorPromptSession;
 use crate::runtime_daemon_events::{
     IssueMonitorAgentFailureSource, IssueMonitorControlPublishError,
 };
@@ -190,8 +191,9 @@ pub(crate) fn reject_preflight_launch(
                 );
             }
         }
-        let (environment, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+        let (environment, _) = gwt_agent::LaunchEnvironment::for_project(
             &gwt_core::paths::gwt_config_path(),
+            root,
             gwt_agent::LaunchRuntimeTarget::Host,
         )?
         .into_parts();
@@ -330,7 +332,8 @@ pub(crate) fn reject_preflight_launch(
                             claim.snapshot_tabs.clone(),
                         );
                     }
-                    let status = observed.agent_status_at(&chrono::Utc::now().to_rfc3339());
+                    let status = observed
+                        .agent_status_at(&gwt_core::timestamp::UtcTimestamp::now().to_rfc3339());
                     let unissued = prefs
                         .pending_launch_deliveries
                         .iter()
@@ -455,7 +458,7 @@ pub(crate) fn reject_preflight_launch(
                     );
                     let prepared = monitor.prepare_autonomous_handoff_delivery(
                         issue,
-                        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                     );
                     *prefs = monitor.prefs();
                     Ok(prepared)
@@ -788,7 +791,7 @@ impl MonitorLaunch {
     pub fn heartbeat(&self, at: Option<&str>, source_event: Option<&str>) -> Result<(), String> {
         self.check_current()?;
         publish(&self.root,json!({"heartbeat":{
-            "issue_number":self.issue()?, "at":at.map(str::to_string).unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            "issue_number":self.issue()?, "at":at.map(str::to_string).unwrap_or_else(|| gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()),
             "agent_id":self.agent_id, "source_event":source_event,
         }})).map_err(|error| error.to_string())
     }
@@ -883,7 +886,7 @@ impl MonitorLaunch {
         if let Some(attempt) = self.feedback.issue_monitor_autonomous_handoff.as_ref() {
             let issue = self.issue()?;
             let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&self.root);
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let (_, committed) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
                 // Zero identifies the no-pane preflight rejection. Captured
                 // failed runtimes may compensate after their writer is revoked.
@@ -1284,6 +1287,27 @@ mod startup_diagnosis_tests {
         assert!(rejected.contains("project policy denied this prompt"));
     }
 
+    /// Issue #7465: a failed managed hook means gwt can never observe the
+    /// initial prompt, so the diagnosis names the hook failure and is
+    /// reported without waiting for the 180s timeout.
+    #[test]
+    fn issue_7465_grok_managed_hook_failure_is_an_immediate_startup_failure() {
+        let screen = "Grok Build\n♦ pre_tool_use hook (project/settings.local) failed, ignored: exit code 1: ParserError: ;\n│ ❯ │";
+        assert!(super::startup_hook_failure_line(screen).is_some());
+        let detail = monitor_startup_failure_detail(7465, Some(screen));
+        assert!(
+            detail.starts_with("Issues startup failed: managed hook failed"),
+            "{detail}"
+        );
+        assert!(detail.contains("ParserError"), "{detail}");
+        assert!(gwt_agent::is_transient_launch_failure(&detail), "{detail}");
+        // A policy denial is the hook working, not failing.
+        assert!(super::startup_hook_failure_line(
+            "PreToolUse:Bash hook error: Agent Workspace identity is required"
+        )
+        .is_none());
+    }
+
     #[test]
     fn grok_startup_reports_authentication_and_confirmation_evidence() {
         let auth =
@@ -1324,8 +1348,28 @@ mod startup_diagnosis_tests {
     }
 }
 
+/// A provider line reporting that a configured hook itself failed to run, as
+/// Grok prints it (`pre_tool_use hook (project/settings.local) failed,
+/// ignored: exit code 1: ...`). Policy denials are the hook working and do
+/// not match.
+pub(crate) fn startup_hook_failure_line(screen: &str) -> Option<&str> {
+    screen.lines().rev().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains(" hook (") && lower.contains(") failed")
+    })
+}
+
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
+    // Issue #7465: gwt observes the initial prompt only through its managed
+    // hooks, so a failing hook would otherwise end in the 180s timeout.
+    if let Some(line) = startup_hook_failure_line(screen) {
+        return format!(
+            "Issues startup failed: managed hook failed before the initial prompt; last output: {}; {}",
+            line.trim().chars().take(800).collect::<String>(),
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        );
+    }
     let owner = format!("#{issue}");
     let mut in_prompt_box = false;
     let unsubmitted = screen.lines().any(|line| {
@@ -1408,7 +1452,7 @@ pub fn prepare_issue_monitor_handoff_delivery(
     materializer_id: &str,
     bind_existing_session: bool,
 ) -> Result<Option<crate::AutonomousHandoffDeliveryPreparation>, String> {
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let preparation =
         crate::prepare_autonomous_handoff_delivery_from_prefs(prefs_path, issue_number, &now)
             .map_err(|error| format!("failed to prepare the autonomous answer: {error}"))?;
@@ -1545,6 +1589,10 @@ pub(crate) fn deliver_existing_answer(
     let write = || -> Result<(), String> {
         launch.check_current()?;
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)?;
+        let held_session = match identity.as_ref() {
+            Some(identity) => HeldMonitorPromptSession::Bound(identity),
+            None => HeldMonitorPromptSession::Unbound(&session),
+        };
         let commit = || -> Result<(), String> {
             launch.check_current()?;
             if let Some(binding) = &session.execution_binding {
@@ -1557,11 +1605,17 @@ pub(crate) fn deliver_existing_answer(
                     );
                 }
             }
-            super::agent_dispatch::write_current_pane_input(&writers, &launch.id, &writer, &prompt)
+            super::agent_dispatch::write_current_pane_input(
+                &writers,
+                &launch.id,
+                &writer,
+                &prompt,
+                Some(held_session),
+            )
         };
-        if let Some(identity) = identity {
+        if let Some(identity) = identity.as_ref() {
             crate::cli::execution_state::with_current_active_session_execution_identity_lease(
-                &sessions, &identity, commit,
+                &sessions, identity, commit,
             )
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "autonomous answer producing Session changed".to_string())?
@@ -1583,7 +1637,7 @@ pub(crate) fn deliver_existing_answer(
         }
     };
     if let Err(error) = write() {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         let marker = crate::mark_autonomous_handoff_delivery_ambiguous_from_prefs(
             &prefs_path,
             &attempt.handoff_id,

@@ -7,6 +7,7 @@ import {
   focusLiveWindow, gotoLiveGwt, liveGwtProjectUrl,
   readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 useManagedBrowserSource(test);
 
@@ -89,7 +90,7 @@ async function revealTerminal(page: Page, id: string) {
   await page.bringToFront();
   if (await page.locator(`.workspace-window[data-id="${id}"]`).isVisible()
     || await page.locator(`.works-full .works-terminal[data-window-id="${id}"]`).isVisible()) return;
-  await page.locator('.op-rail__surface[data-surface="works"]').click();
+  await openWorks(page);
   if (await page.locator('.works-surface:not(.works-surface--preview) .works-full:not([hidden])').isVisible()) {
     await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
   }

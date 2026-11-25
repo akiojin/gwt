@@ -437,7 +437,7 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     session.agent_session_id = Some("conv-1".to_string());
     session.session_history = vec![gwt_agent::AgentSessionHistoryEntry {
         agent_session_id: "conv-1".to_string(),
-        started_at: chrono::Utc::now(),
+        started_at: gwt_core::timestamp::UtcTimestamp::now(),
     }];
     assert!(
         session.repo_hash.is_some(),
@@ -532,7 +532,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents,
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),
@@ -624,7 +624,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             agent_with_conv(
                 "c1",
@@ -1144,7 +1144,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             agent_view(
                 "claude-old",
@@ -1242,7 +1242,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             bare_agent("gwt-ghost", ""),
             bare_agent("gwt-named", "Claude Code"),
@@ -1298,7 +1298,7 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         session_id: "gwt-session-anon".to_string(),
         agent_id: None,
         display_name: None,
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         attached_by: None,
     };
     let view = super::super::workspace_work_agent_view_from_ref(
@@ -1373,7 +1373,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             // Resume-created record agent: no display_name recorded yet.
             agent_view("gwt-new", "", "2026-06-12T02:05:00Z", "conv-shared"),
@@ -1511,7 +1511,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             agent_view(
                 &issue_session.id,
@@ -1584,7 +1584,7 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         session_id: "gwt-session-1".to_string(),
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         attached_by: None,
     };
 
@@ -1626,7 +1626,7 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
         session_id: session.id.clone(),
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         attached_by: None,
     };
 
@@ -1667,7 +1667,7 @@ fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
         session_id: session.id.clone(),
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         attached_by: None,
     };
 
@@ -1766,7 +1766,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: Vec::new(),
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),
@@ -1846,7 +1846,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         pr_number: None,
         pr_url: None,
         pr_state: pr_state.map(str::to_string),
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: Vec::new(),
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),
@@ -1865,10 +1865,12 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         row(Some("work/open"), None),
         row(None, Some("MERGED")),
     ];
-    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
-        [("work/merged".to_string(), chrono::Utc::now())]
-            .into_iter()
-            .collect();
+    let merged: HashMap<String, gwt_core::timestamp::UtcTimestamp> = [(
+        "work/merged".to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    )]
+    .into_iter()
+    .collect();
 
     super::super::mark_merged_active_works(&mut works, Some(&merged), None);
 
@@ -1917,7 +1919,7 @@ fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
         pr_number: Some(123),
         pr_url: None,
         pr_state: Some("MERGED".to_string()),
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: Vec::new(),
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),
@@ -1996,7 +1998,7 @@ fn apply_work_merge_status_caches_and_flags_rows() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     gwt_core::workspace_projection::record_workspace_work_event(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
@@ -2019,10 +2021,12 @@ fn apply_work_merge_status_caches_and_flags_rows() {
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
-        [("work/merged".to_string(), chrono::Utc::now())]
-            .into_iter()
-            .collect();
+    let merged: HashMap<String, gwt_core::timestamp::UtcTimestamp> = [(
+        "work/merged".to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    )]
+    .into_iter()
+    .collect();
     let _ = runtime.apply_work_merge_status(
         &repo,
         merged,
@@ -2079,7 +2083,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-dirty-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("dirty work".to_string());
         event.execution_container = Some(
@@ -2195,7 +2199,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-gwt-writes-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("gwt writes only".to_string());
         event.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
@@ -2334,7 +2338,7 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-historical-merged-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("Historical merged work".to_string());
         event.execution_container = Some(
@@ -2448,7 +2452,7 @@ fn work_merge_scan_checks_dirty_state_only_for_actionable_branches() {
 
 #[test]
 fn work_branch_scan_targets_preserve_merged_pr_dirty_guard() {
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut projection = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
     let mut event = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Pr,
@@ -2507,7 +2511,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-reuse",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -2646,7 +2650,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-absent",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -2755,7 +2759,7 @@ fn spawn_work_merge_status_scan_clears_stale_cache_when_no_targets_remain() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-terminal-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("terminal work".to_string());
         event.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
@@ -2812,7 +2816,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-no-changes-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("no changes work".to_string());
         event.execution_container = Some(
@@ -3059,33 +3063,40 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
         fs::create_dir_all(&target_root).unwrap();
         init_repo_with_initial_commit(&drain_root);
         init_repo_with_initial_commit(&target_root);
+        seed_owner_fixture_roster(&target_root, 8);
+        configure_owner_fixture_tools(&target_root, &["codex"]);
+        gwt::agent_registry::ensure_active_for_project(&target_root).unwrap();
+        gwt::agent_registry::ensure_active_for_project(&drain_root).unwrap();
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
         let tabs = vec![
             sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
             sample_project_tab("target", "target", target_root, ProjectKind::Git, &[]),
         ];
-        let mut prefs = gwt::IssueMonitorPrefs {
-            update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: version.into(),
-                since: "2026-10-13T00:00:00Z".into(),
-                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
-                automatic: None,
-                blocking: Vec::new(),
-            }),
-            ..Default::default()
-        };
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: version.into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        });
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut expected_persisted: gwt::IssueMonitorPrefs =
+            serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
         let mut runtime = sample_runtime(&case_root, tabs, Some("target"));
         persist_lifecycle_host_catalog(&runtime);
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .branch("work/issue-5351-test")
             .build();
         let id = spawn_owner_codex_fixture(&mut runtime, "target", config, None);
-        prefs.update_drain = None;
-        assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+        expected_persisted.update_drain = None;
+        let actual_persisted: gwt::IssueMonitorPrefs =
+            serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
+        assert_eq!(actual_persisted, expected_persisted);
         close_test_owner_runtime(&mut runtime, &id);
 
         // Next-scan reconciliation also works without a resume marker or daemon.
+        prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
             version: version.into(),
             since: "2026-10-13T00:00:00Z".into(),
@@ -3326,6 +3337,10 @@ fn manual_successor_early_admission_cancel_requires_actual_cleanup_proof() {
                     && summary["recovery_unchanged"] == true
             },
         "cleanup consistency: {summary}"
+    );
+    assert!(
+        cleaned_ack,
+        "exact cancellation before Session materialization must finish cleanup: {summary}"
     );
 }
 
@@ -3724,6 +3739,27 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
         }),
         "STOP publishes the retained snapshot marker to existing clients"
     );
+    let retained_index = projected
+        .iter()
+        .position(|event| {
+            matches!(&event.event,
+            BackendEvent::WorkspaceState { workspace }
+                if workspace.tabs.iter().flat_map(|tab| &tab.workspace.windows)
+                    .any(|row| row.id == window_id && !row.persist))
+        })
+        .unwrap();
+    let stopped_index = projected
+        .iter()
+        .position(|event| {
+            matches!(&event.event,
+            BackendEvent::TerminalStatus { id, status: WindowProcessStatus::Stopped, .. }
+                if id == &window_id)
+        })
+        .unwrap();
+    assert!(
+        retained_index < stopped_index,
+        "the retained catalog must precede STOP status and its empty live census"
+    );
     let window = runtime.tabs[0]
         .workspace
         .window(&before.id)
@@ -3762,6 +3798,7 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
                 incarnation: pane.incarnation,
                 kind: super::super::RemoteRuntimeCommandKind::Resize,
                 approval_resolution_started: false,
+                attachment_outcome: None,
                 input_command_id: None,
                 result: Err("pane incarnation mismatch".into()),
             })
@@ -4019,7 +4056,7 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
         owner_fixture_block_on(owner.observe_runtime_policy(
             &probe.id,
             probe.incarnation,
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
             Instant::now(),
         ))
         .unwrap();
@@ -4225,7 +4262,7 @@ fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let window_id = "tab-1::agent-1";
     let host_pid = std::process::id();
     let host_started_at = gwt::process::host_process_start_time(host_pid).expect("host start time");
@@ -4415,7 +4452,7 @@ fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
             "https://github.com/akiojin/gwt.git",
         ],
     );
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.set_source_repository(Some(("example", "project")));
     monitor.terminal_queue_push(&[42], "operator", &now);
@@ -4642,6 +4679,7 @@ fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
                 control_id: "control-1".into(),
                 should_scan: true,
                 authority_changed: false,
+                window_close_applied_at: None,
             }),
             last_scan_at: Some("2026-10-24T00:00:00Z".into()),
             ..gwt::IssueMonitorPrefs::default()
@@ -4762,7 +4800,8 @@ fn issue6096_write_capacity_sample(repo: &Path, available_ram_bytes: u64) {
     let artifact = target.join("fixture-artifact");
     fs::write(&artifact, b"measured target fixture").unwrap();
     let target_bytes = fs::metadata(&artifact).unwrap().len();
-    let now = u64::try_from(Utc::now().timestamp()).expect("positive epoch");
+    let now = u64::try_from(gwt_core::timestamp::UtcTimestamp::now().timestamp())
+        .expect("positive epoch");
     let snapshot = serde_json::json!({
         "observed_at": now, "expires_at": now + 30,
         "performance_cores": 2, "gui_cpu_millicores": 0,

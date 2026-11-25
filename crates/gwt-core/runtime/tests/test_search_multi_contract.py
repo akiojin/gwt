@@ -9,6 +9,7 @@ batch or silently returning empty results for broken scopes.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import math
@@ -624,7 +625,28 @@ class SearchMultiContractTests(unittest.TestCase):
             self.assertIs(models[1], models[3])
             self.assertIsNot(models[0], models[1])
             self.assertEqual(constructor.call_count, 2)
+            self.assertEqual(constructor.call_args_list, [
+                mock.call(runner.FILE_INDEX_V2_MODEL_ID, local_files_only=True),
+                mock.call(runner.FILE_INDEX_V2_MODEL_ID, revision=runner.FILE_INDEX_V2_MODEL_REVISION,
+                          local_files_only=True),
+            ])
             download.assert_not_called()
+
+    def test_cold_search_downloads_only_when_the_local_model_is_missing(self):
+        model = object()
+        constructor = mock.Mock(side_effect=[OSError("model not cached"), model])
+        with mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="0"), \
+                mock.patch.dict(sys.modules, {
+                    "sentence_transformers": types.SimpleNamespace(SentenceTransformer=constructor),
+                }), \
+                mock.patch.object(runner, "_MODEL_CACHE", {}), \
+                mock.patch.object(runner, "_SEARCH_WORKER_QOS", "interactive"):
+            self.assertIs(runner._get_embedding_model(), model)
+            self.assertIs(runner._get_embedding_model(), model)
+        self.assertEqual(constructor.call_args_list, [
+            mock.call(runner.FILE_INDEX_V2_MODEL_ID, local_files_only=True),
+            mock.call(runner.FILE_INDEX_V2_MODEL_ID),
+        ])
 
     def test_background_default_snapshot_reuses_the_pinned_graph_in_either_order(self):
         pin = runner.FILE_INDEX_V2_MODEL_REVISION
@@ -883,6 +905,41 @@ class SearchMultiContractTests(unittest.TestCase):
             self.assertNotIn("private-vector", json.dumps(payload))
             self.assertNotIn("scopes", payload)
             self.assertNotIn("scope_results", payload)
+
+    def test_unreadable_board_ann_is_unhealthy_without_blocking_issue_search(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, HOME=tmp):
+            base = Path(tmp)
+            db_root = base / "index"
+            self._write_cached_issue(base, 7493, "Available search result")
+            self.assertTrue(runner.action_index_issues_v2(
+                REPO_HASH, str(base), db_root=db_root)["ok"])
+            board_entries = [{"id": "board-7493", "body": "Broken ANN graph"}]
+            with mock.patch.object(runner, "_load_board_documents", return_value=(board_entries, [])):
+                self.assertTrue(runner.action_index_board_v2(
+                    REPO_HASH, str(base), db_root=db_root)["ok"])
+                open_collection = runner._open_chroma_collection
+
+                def open_with_unreadable_ann(path, name):
+                    client, collection = open_collection(path, name)
+                    if name == runner.V2_BOARD_COLLECTION:
+                        self.assertEqual(collection.count(), 1)
+                        collection = mock.Mock(wraps=collection)
+                        collection.query.side_effect = RuntimeError("Error loading hnsw index")
+                    return client, collection
+
+                with mock.patch.object(runner, "_open_chroma_collection", open_with_unreadable_ann):
+                    with mock.patch.object(runner, "_get_embedding_model", side_effect=AssertionError("health must not load a model")):
+                        health = runner._scope_status_v2(REPO_HASH, None, "board", db_root)
+                    self.assertFalse(health["healthy"], health)
+                    self.assertTrue(health["repair_required"], health)
+                    payload = runner.action_search_multi_v2(
+                        REPO_HASH, None, str(base), "Available search result", 5,
+                        ["board", "issues"], db_root=db_root)
+                self.assertTrue(payload["ok"], payload)
+                self.assertEqual(payload["scopes"]["board"]["state"], "corrupt")
+                self.assertEqual(payload["scopes"]["board"]["reason"], health["reason"])
+                self.assertNotIn("board", payload["scope_results"])
+                self.assertEqual(payload["issueResults"][0]["number"], 7493)
 
     def test_search_multi_reports_query_encoding_failure_without_runtime_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1699,6 +1756,103 @@ class SearchWorkerTests(unittest.TestCase):
                 endpoint = base / "background-worker/endpoint.json"
                 if endpoint.exists():
                     os.kill(json.loads(endpoint.read_text())["pid"], signal.SIGTERM)
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "requires POSIX process groups")
+    def test_cold_start_survives_a_caller_that_gives_up(self):
+        """Issue #7493: a caller deadline must not discard the cold model load."""
+        import signal
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project = base / "project"
+            project.mkdir()
+            gate = base / "model-gate"
+            env = dict(os.environ, HOME=tmp, USERPROFILE=tmp, GWT_INDEX_FAKE_EMBEDDING="1",
+                       GWT_TEST_MODEL_GATE=str(gate))
+            subprocess.run(["git", "init", "--quiet", str(project)], env=env,
+                           check=True, capture_output=True, timeout=30)
+            # The model constructor blocks until the gate opens, standing in
+            # for a load that outlasts the caller's deadline.
+            launcher = base / "gated_runner.py"
+            launcher.write_text(
+                "import os, sys, time\n"
+                "from pathlib import Path\n"
+                f"sys.path.insert(0, {str(Path(runner.__file__).resolve().parent)!r})\n"
+                "import chroma_index_runner as runner\n"
+                "runner.__file__ = __file__\n"
+                "gate = Path(os.environ['GWT_TEST_MODEL_GATE'])\n"
+                "class GatedModel(runner._FakeEmbeddingModel):\n"
+                "    def __init__(self):\n"
+                "        while not gate.exists():\n"
+                "            time.sleep(0.1)\n"
+                "runner._FakeEmbeddingModel = GatedModel\n"
+                "sys.exit(runner.main())\n",
+                encoding="utf-8",
+            )
+            memory = base / ".gwt" / "projects" / REPO_HASH / "work-notes" / "memory.md"
+            memory.parent.mkdir(parents=True)
+            memory.write_text("## 2026-11-22 — alpha worker\n\nPersistent search model.\n",
+                              encoding="utf-8")
+            common = ["--repo-hash", REPO_HASH, "--project-root", str(project),
+                      "--worktree-hash", WORKTREE_HASH, "--file-index-protocol", "v2"]
+            indexed = subprocess.run(
+                [sys.executable, str(Path(runner.__file__).resolve()), *common,
+                 "--worker-dir", str(base / "background-worker"), "--action", "index-memory"],
+                env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(indexed.returncode, 0, indexed.stderr + indexed.stdout)
+            search = [sys.executable, str(launcher), *common,
+                      "--worker-dir", str(base / "worker"), "--action", "search-multi",
+                      "--scopes", "memory", "--query", "alpha worker"]
+            endpoint = base / "worker" / "endpoint.json"
+
+            def worker_state():
+                try:
+                    return json.loads(endpoint.read_text())
+                except (OSError, ValueError):
+                    return {}
+
+            def wait_for_model_state(expected, pid=None):
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    state = worker_state()
+                    if state.get("model_state") == expected:
+                        return state
+                    if pid is not None:
+                        try:
+                            os.kill(pid, 0)
+                        except OSError:
+                            self.fail(f"worker {pid} was discarded before reaching {expected}")
+                    time.sleep(0.1)
+                self.fail(f"worker never reached {expected}: {worker_state()}")
+
+            # Its own process group mirrors the deadline-bounded Rust spawn,
+            # whose expiry kills that whole group.
+            caller = subprocess.Popen(search, env=env, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, start_new_session=True)
+            worker_pid = None
+            try:
+                worker_pid = wait_for_model_state("warming")["pid"]
+                os.killpg(caller.pid, signal.SIGKILL)
+                caller.wait(timeout=10)
+                gate.touch()
+                wait_for_model_state("warm", pid=worker_pid)
+
+                retry = subprocess.run(search, env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(retry.returncode, 0, retry.stderr + retry.stdout)
+                payload = json.loads(retry.stdout.strip().splitlines()[-1])
+                self.assertTrue(payload["ok"], payload)
+                self.assertEqual(payload["worker_pid"], worker_pid)
+                self.assertTrue(payload["scope_results"]["memory"]["memoryResults"], payload)
+            finally:
+                gate.touch()
+                if caller.poll() is None:
+                    caller.kill()
+                    caller.wait()
+                for pid in {worker_pid, worker_state().get("pid"),
+                            json.loads((base / "background-worker" / "endpoint.json").read_text())["pid"]
+                            if (base / "background-worker" / "endpoint.json").exists() else None}:
+                    if pid:
+                        with contextlib.suppress(OSError):
+                            os.kill(pid, signal.SIGKILL)
 
     def test_worker_readiness_surrounds_model_construction_and_cache_hits(self):
         with tempfile.TemporaryDirectory() as tmp:

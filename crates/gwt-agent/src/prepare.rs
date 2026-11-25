@@ -631,7 +631,9 @@ fn normalize_launch_config_working_dir(config: &mut LaunchConfig) {
             "GWT_PROJECT_ROOT".to_string(),
             normalized.display().to_string(),
         );
-    }
+    } // Issue #3910: intake and new-branch launches only learn their worktree
+      // here, after the argument builders ran without one.
+    config.apply_worktree_config_env();
 }
 
 fn set_worktree_launch_path(

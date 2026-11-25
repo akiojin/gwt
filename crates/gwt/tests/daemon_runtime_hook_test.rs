@@ -6,7 +6,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use chrono::TimeZone;
+
 use gwt::daemon_runtime::{
     handle_coordination_event, handle_forward, handle_runtime_state, HOOK_LIVE_ATTEMPT_BUDGET,
     HOOK_LIVE_READINESS_BUDGET,
@@ -150,9 +150,7 @@ fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSn
         labels: labels.into_iter().map(str::to_string).collect(),
         state: IssueState::Open,
         updated_at: UpdatedAt::new(
-            chrono::Utc
-                .with_ymd_and_hms(2026, 4, 20, 0, 0, 0)
-                .single()
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 20, 0, 0, 0)
                 .unwrap()
                 .to_rfc3339(),
         ),

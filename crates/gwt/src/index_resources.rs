@@ -205,7 +205,7 @@ impl Default for QueryWorkerStatus {
     }
 }
 
-fn query_worker_status_at(worker_dir: &Path) -> QueryWorkerStatus {
+pub(crate) fn query_worker_status_at(worker_dir: &Path) -> QueryWorkerStatus {
     let read = || -> Option<QueryWorkerStatus> {
         let endpoint: serde_json::Value =
             serde_json::from_slice(&std::fs::read(worker_dir.join("endpoint.json")).ok()?).ok()?;
@@ -238,6 +238,8 @@ fn query_worker_status_at(worker_dir: &Path) -> QueryWorkerStatus {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct IndexResourceDiagnostics {
     pub query_worker: QueryWorkerStatus,
+    /// False when the heavy-lane status could not be read, rather than verified idle.
+    pub heavy_status_available: bool,
     pub heavy_held: bool,
     pub heavy_owner_pid: Option<u32>,
     pub heavy_holder_kind: Option<String>,
@@ -265,6 +267,7 @@ pub fn collect_index_resources() -> IndexResourceDiagnostics {
         if let Ok(status) = gwt_core::index_coordinator::IndexCoordinator::open(coordinator_root)
             .and_then(|coordinator| coordinator.heavy_lease_status())
         {
+            diagnostics.heavy_status_available = true;
             diagnostics.heavy_held = status.held;
             diagnostics.heavy_pending = status.pending;
             diagnostics.heavy_holder = index_runner_holder(&status);
@@ -447,7 +450,17 @@ mod tests {
         let temp = tempfile::tempdir().expect("isolated home");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let root = temp.path().join("coordinator");
+        let _coordinator_root = ScopedEnvVar::set("GWT_INDEX_COORDINATOR_ROOT", &root);
+        assert!(!collect_index_resources().heavy_status_available);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("targets"), b"not a directory").unwrap();
+        assert!(!collect_index_resources().heavy_status_available);
+        std::fs::remove_file(root.join("targets")).unwrap();
         let coordinator = IndexCoordinator::open_default().expect("coordinator");
+        let idle = collect_index_resources();
+        assert!(idle.heavy_status_available);
+        assert!(!idle.heavy_held);
         let key = TargetKey::repo_shared("other-repo", "issues");
         let JobAdmission::Owner(job) = coordinator
             .request_job(&key, JobPriority::Background, Duration::from_secs(1))
@@ -493,6 +506,7 @@ mod tests {
             .unwrap();
 
         let diagnostics = collect_index_resources();
+        assert!(diagnostics.heavy_status_available);
         let payload = serde_json::to_value(&diagnostics).expect("diagnostics json");
         assert_eq!(payload["heavy_holder"]["repo_hash"], "other-repo");
         assert_eq!(

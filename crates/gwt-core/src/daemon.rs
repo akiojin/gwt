@@ -431,7 +431,9 @@ impl DaemonEndpoint {
             pid,
             bind,
             auth_token,
-            updated_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            updated_at_unix_ms: time::OffsetDateTime::now_utc()
+                .unix_timestamp_nanos()
+                .div_euclid(1_000_000) as i64,
             project_transport_url: None,
         }
     }
@@ -529,6 +531,8 @@ pub enum ClientFrame {
     Publish { channel: String, payload: Value },
     /// Request a snapshot of the daemon's current runtime stats.
     Status,
+    /// Read back a recent committed Issues control after its ACK was lost.
+    IssueMonitorControlReceipt { id: String },
     /// Launch one verification command from the daemon instead of from the
     /// caller's process tree (Issue #4409).
     ///

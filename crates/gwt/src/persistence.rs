@@ -172,6 +172,9 @@ pub struct PersistedWindowState {
     /// `pm.json` — matching the `agent_color` wire-only convention above.
     #[serde(default, skip_deserializing)]
     pub is_pm: bool,
+    /// The current PM runtime's operation-derived title activity; never restored.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub pm_activity: Option<crate::pm_activity::PmActivity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,6 +342,7 @@ pub fn default_workspace_state() -> PersistedWindowRegistry {
                 runtime_started_at_ms: None,
                 surface_owner: None,
                 is_pm: false,
+                pm_activity: None,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -360,6 +364,7 @@ pub fn default_workspace_state() -> PersistedWindowRegistry {
                 runtime_started_at_ms: None,
                 surface_owner: None,
                 is_pm: false,
+                pm_activity: None,
             },
         ],
         next_z_index: 3,
@@ -540,7 +545,11 @@ pub fn save_workspace_state_durable(
             .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
     let content = serde_json::to_string_pretty(state)?;
-    durable_atomic_write_with_parent_sync(path, content.as_bytes(), sync_parent_directory)
+    write_durable_bytes(path, content.as_bytes())
+}
+
+pub(crate) fn write_durable_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    durable_atomic_write_with_parent_sync(path, bytes, sync_parent_directory)
 }
 
 fn durable_atomic_write_with_parent_sync(
@@ -953,6 +962,7 @@ mod tests {
                     runtime_started_at_ms: None,
                     surface_owner: None,
                     is_pm: false,
+                    pm_activity: None,
                 },
                 PersistedWindowState {
                     id: "settings-1".to_string(),
@@ -974,6 +984,7 @@ mod tests {
                     runtime_started_at_ms: None,
                     surface_owner: None,
                     is_pm: false,
+                    pm_activity: None,
                 },
             ],
             next_z_index: 6,
@@ -1655,6 +1666,7 @@ mod tests {
                 runtime_started_at_ms: None,
                 surface_owner: None,
                 is_pm: false,
+                pm_activity: None,
             }],
             next_z_index: 2,
         };
@@ -1730,6 +1742,7 @@ mod tests {
             runtime_started_at_ms: None,
             surface_owner: None,
             is_pm: false,
+            pm_activity: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         assert!(
@@ -1818,6 +1831,7 @@ mod tests {
                     runtime_started_at_ms: None,
                     surface_owner: None,
                     is_pm: false,
+                    pm_activity: None,
                 },
                 PersistedWindowState {
                     id: "board-1".to_string(),
@@ -1839,6 +1853,7 @@ mod tests {
                     runtime_started_at_ms: None,
                     surface_owner: None,
                     is_pm: false,
+                    pm_activity: None,
                 },
             ],
             next_z_index: 3,
@@ -2043,6 +2058,7 @@ mod tests {
                     runtime_started_at_ms: None,
                     surface_owner: None,
                     is_pm: false,
+                    pm_activity: None,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -2064,6 +2080,7 @@ mod tests {
                     runtime_started_at_ms: None,
                     surface_owner: None,
                     is_pm: false,
+                    pm_activity: None,
                 },
             ],
             next_z_index: 3,

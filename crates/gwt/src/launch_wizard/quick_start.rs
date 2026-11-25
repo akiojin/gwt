@@ -122,7 +122,6 @@ impl<'a> WorktreePathScope<'a> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
     use super::*;
@@ -132,7 +131,7 @@ mod tests {
         branch: &str,
         worktree_path: &Path,
         agent_id: gwt_agent::AgentId,
-        updated_at: chrono::DateTime<Utc>,
+        updated_at: gwt_core::timestamp::UtcTimestamp,
         resume_id: &str,
     ) {
         sample_session_with_resume(
@@ -150,7 +149,7 @@ mod tests {
         branch: &str,
         worktree_path: &Path,
         agent_id: gwt_agent::AgentId,
-        updated_at: chrono::DateTime<Utc>,
+        updated_at: gwt_core::timestamp::UtcTimestamp,
         resume_id: Option<&str>,
     ) {
         let mut session = gwt_agent::Session::new(worktree_path, branch, agent_id);
@@ -164,6 +163,7 @@ mod tests {
         session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
         session.docker_service = Some("gwt".to_string());
         session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+
         session.created_at = updated_at;
         session.updated_at = updated_at;
         session.last_activity_at = updated_at;
@@ -174,7 +174,7 @@ mod tests {
         branch: &str,
         worktree_path: &Path,
         agent_id: gwt_agent::AgentId,
-        updated_at: chrono::DateTime<Utc>,
+        updated_at: gwt_core::timestamp::UtcTimestamp,
         resume_id: Option<&str>,
     ) -> gwt_agent::Session {
         let mut session = gwt_agent::Session::new(worktree_path, branch, agent_id);
@@ -188,6 +188,7 @@ mod tests {
         session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
         session.docker_service = Some("gwt".to_string());
         session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+
         session.created_at = updated_at;
         session.updated_at = updated_at;
         session.last_activity_at = updated_at;
@@ -204,7 +205,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             "older",
         );
         sample_session(
@@ -212,7 +213,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             "newer",
         );
 
@@ -232,7 +233,7 @@ mod tests {
             "work/issue-3457",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 8, 5, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 8, 5, 10, 0, 0).unwrap(),
             Some("provider-conversation"),
         );
         session.id = "durable-session-3457".to_string();
@@ -256,7 +257,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             "older-resume",
         );
         sample_session(
@@ -264,7 +265,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             "newer-resume",
         );
 
@@ -294,7 +295,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             "resume-older",
         );
         sample_session_with_resume(
@@ -302,7 +303,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             None,
         );
 
@@ -328,7 +329,7 @@ mod tests {
             "feature/other",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             "wrong-branch",
         );
         sample_session(
@@ -336,7 +337,7 @@ mod tests {
             "feature/gui",
             &other_worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 30, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 30, 0).unwrap(),
             "wrong-worktree",
         );
         sample_session_with_resume(
@@ -344,7 +345,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             None,
         );
 
@@ -366,7 +367,7 @@ mod tests {
             "feature/gui",
             &same_worktree_with_dot,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             "resume-canonical",
         );
 
@@ -393,7 +394,7 @@ mod tests {
             "feature/gui",
             &symlink,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             "resume-symlink",
         );
 
@@ -414,7 +415,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             Some("resume-older"),
         );
         older.tool_version = Some("0.110.0".to_string());
@@ -429,7 +430,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             None,
         );
         newer.tool_version = Some("0.111.0".to_string());

@@ -1,6 +1,6 @@
 // SPEC-2356 — Operator Design System: chrome shell wiring.
 // Imports the small theme/hotkey modules and assembles the project bar
-// theme toggle, command palette, hotkey overlay, mission briefing intro,
+// theme toggle, hotkey overlay, mission briefing intro,
 // status strip live clock, and Living Telemetry counter logic.
 
 import { createThemeManager, createBrowserEnv } from "/theme-manager.js";
@@ -30,27 +30,16 @@ export function initOperatorShell(deps = {}) {
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
   safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
-  const palette = safeWire(
-    "command palette",
-    () => wireCommandPalette({ doc, hotkey }),
-    markDegraded,
-    null,
-  );
-  safeWire(
-    "global hotkeys",
-    () => wireGlobalHotkeys({ doc, hotkey, palette }),
-    markDegraded,
-  );
+  safeWire("global hotkeys", () => wireGlobalHotkeys({ doc, hotkey }), markDegraded);
 
-  return { themeManager, hotkey, palette };
+  return { themeManager, hotkey };
 }
 
-function safeWire(label, fn, onError, fallback = undefined) {
+function safeWire(label, fn, onError) {
   try {
-    return fn();
+    fn();
   } catch (error) {
     onError(label, error);
-    return fallback;
   }
 }
 
@@ -195,7 +184,7 @@ export function applyTelemetryCounts(doc, counts = {}) {
   const runningInline = Number(counts.running_inline ?? 0);
   const inlineSlot = doc.getElementById("op-strip-running-inline");
   if (inlineSlot) {
-    inlineSlot.textContent = `${runningInline} inline`;
+    inlineSlot.textContent = `${runningInline} in Issues`;
     inlineSlot.hidden = !(runningInline > 0);
   }
   const runningCell = doc.querySelector(".op-status-strip__cell--running");
@@ -245,9 +234,16 @@ export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0
   wireIssueMonitorStatusCell(doc, cell);
   const view = issueMonitorStatusStripView(status, counts);
   value.textContent = view.value;
+  const needsHuman = doc.getElementById("op-strip-needs-human");
+  const needsHumanLabel = view.needsHuman == null ? "" : `Needs human ${view.needsHuman}`;
+  if (needsHuman) {
+    needsHuman.hidden = !needsHumanLabel;
+    needsHuman.textContent = needsHumanLabel;
+  }
+  const attention = attentionSummary || needsHumanLabel;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, attentionSummary].filter(Boolean).join(". "));
-  cell.setAttribute("title", ["Open Issues", view.title, attentionSummary].filter(Boolean).join(" | "));
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, attention].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, attention].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
@@ -293,23 +289,25 @@ function issueMonitorStatusStripView(status, counts) {
     state = "idle";
   }
   const { queue, active, maxActive } = counts;
+  const needsHuman = status.needs_human_count ?? null;
 
   if (state === "disabled") {
     return {
       state,
       value: "Off",
-      title: "Issues: Off",
+      needsHuman,
+      title: "Auto-run: Off",
       alert: false,
     };
   }
 
   let label = "Idle";
   if (state === "error") label = "Error";
-  else if (state === "auth_required") label = "Auth";
-  else if (state === "launching" || state === "active") label = "Run";
-  else if (state === "quota_hold") label = "Hold";
+  else if (state === "auth_required") label = "Sign-in needed";
+  else if (state === "launching" || state === "active") label = "Running";
+  else if (state === "quota_hold") label = "On hold";
 
-  const value = `${label} Q${queue} A${active}/${maxActive}`;
+  const value = `${label} · ${queue} queued · ${active} of ${maxActive} active`;
   const lastError = typeof status.last_error === "string" ? status.last_error.trim() : "";
   const quotaHoldDetail = state === "quota_hold"
     ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}`
@@ -318,261 +316,9 @@ function issueMonitorStatusStripView(status, counts) {
   return {
     state,
     value,
-    title: detail ? `Issues: ${value} | ${detail}` : `Issues: ${value}`,
+    needsHuman,
+    title: detail ? `Auto-run: ${value} | ${detail}` : `Auto-run: ${value}`,
     alert: state === "error" || state === "auth_required",
-  };
-}
-
-// ------------------------------------------------------------
-// Provider usage pill (SPEC-2970)
-// ------------------------------------------------------------
-
-const USAGE_PROVIDER_LABEL = { codex: "CX", claude_code: "CC" };
-const USAGE_PROVIDER_NAME = { codex: "Codex", claude_code: "Claude Code" };
-
-function usageProviderLabel(provider) {
-  const known = USAGE_PROVIDER_LABEL[provider];
-  if (known) return known;
-  const compact = String(provider || "")
-    .replace(/[^a-z0-9]+/gi, "")
-    .slice(0, 2)
-    .toUpperCase();
-  return compact || "?";
-}
-
-function usageWindowPercent(window) {
-  const value = window?.used_percent;
-  if (typeof value !== "number" &&
-      !(typeof value === "string" && value.trim() !== "")) return null;
-  const percent = Number(value);
-  return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
-}
-
-function usageSummaryPercent(account) {
-  if (account.provider === "claude_code" &&
-      !["ok", "stale"].includes(account.state?.kind)) return null;
-  const percentages = (account.windows || [])
-    .filter(
-      (window) => account.provider !== "claude_code" ||
-        window.kind === "five_hour" || window.kind === "weekly",
-    )
-    .map(usageWindowPercent)
-    .filter((percent) => percent != null);
-  return percentages.length ? Math.max(...percentages) : null;
-}
-
-function codexCreditStatus(account) {
-  if (account.provider !== "codex" || !account.credits ||
-      !["ok", "stale"].includes(account.state?.kind)) return null;
-  const full = (account.windows || []).some(window =>
-    ["five_hour", "weekly"].includes(window.kind) && usageWindowPercent(window) === 100);
-  return {
-    active: full && account.credits.has_credits === true,
-    exhausted: full && account.credits.has_credits === false,
-  };
-}
-
-function usageDisplayLimitReached(account) {
-  const credits = codexCreditStatus(account);
-  return !credits?.active && (account.limit_reached || credits?.exhausted);
-}
-
-// Stable, glanceable per-provider summary value for the status strip (the
-// window nearest its limit when available, else a short degraded token).
-function usageSummaryValue(account) {
-  const kind = (account.state || {}).kind || "ok";
-  if (kind === "disabled") return "off";
-  if (kind === "no_data") return "—";
-  if (kind === "unavailable") return "n/a";
-  if (codexCreditStatus(account)?.active) {
-    const credits = account.credits;
-    const balance = credits.unlimited ? "unlimited"
-      : Number.isFinite(credits.balance) && credits.balance >= 0
-        ? `${credits.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits` : "— credits";
-    return `Using credits · ${balance}${kind === "stale" ? " · stale" : ""}`;
-  }
-  const percent = usageSummaryPercent(account);
-  if (percent != null) return `${Math.round(percent)}%`;
-  return "—";
-}
-
-function usageSeverity(account) {
-  if (usageDisplayLimitReached(account)) return "danger";
-  if (codexCreditStatus(account)?.active) return "normal";
-  const percent = usageSummaryPercent(account);
-  if (percent == null) return "";
-  if (percent >= 95) return "danger";
-  if (percent >= 80) return "warning";
-  return "normal";
-}
-
-function usageCriticality(account) {
-  if (account.limit_reached) return 101;
-  return usageSummaryPercent(account) ?? -1;
-}
-
-function usageModelSummaries(account) {
-  const state = account.state || {};
-  const readable = state.kind === "ok" || state.kind === "stale";
-  return [["fable_weekly", "Fable"], ["opus_weekly", "Opus"]].map(([kind, name]) => {
-    const window = (account.windows || []).find((item) => item.kind === kind);
-    const percent = readable ? usageWindowPercent(window) : null;
-    const value = state.kind === "disabled" ? "off"
-      : state.kind === "unavailable" ? "n/a"
-      : percent != null ? `${Math.round(percent)}%` : "—";
-    const severity = percent == null ? "" : percent >= 95 ? "danger"
-      : percent >= 80 ? "warning" : "normal";
-    const description = value === "—"
-      ? readable ? "not provided" : state.kind === "no_data" ? "No data yet" : "unknown"
-      : value;
-    return { kind, name, value, severity, description };
-  });
-}
-
-// SPEC-2970 — status-strip USAGE cell: a stable, consolidated summary
-// with both Claude model windows. Hover, focus, and click show the consolidated
-// popover (all windows + consumption) via the app-provided hooks. No ticker
-// rotation — everything is visible at a glance / in the popover.
-export function applyProviderUsage(doc, snapshot = {}) {
-  const cell = doc.getElementById("op-strip-usage");
-  if (!cell) return;
-  const win = doc.defaultView || window;
-  const accounts = snapshot.accounts || [];
-  if (!accounts.length) {
-    while (cell.firstChild) cell.removeChild(cell.firstChild);
-    cell.hidden = true;
-    cell.setAttribute("aria-expanded", "false");
-    cell.setAttribute("aria-label", "Provider usage and limits");
-    cell.title = "Provider usage & limits";
-    delete cell.dataset.limit;
-    try {
-      win.__gwtHideUsageHover?.({ immediate: true });
-    } catch {
-      /* no-op */
-    }
-    return;
-  }
-  while (cell.firstChild) cell.removeChild(cell.firstChild);
-  const label = doc.createElement("span");
-  label.className = "op-status-strip__label";
-  label.textContent = "USAGE";
-  cell.appendChild(label);
-  const summaries = accounts.map((account) => ({
-    account,
-    label: usageProviderLabel(account.provider),
-    accessibleLabel:
-      USAGE_PROVIDER_NAME[account.provider] || usageProviderLabel(account.provider),
-    value: usageSummaryValue(account),
-    severity: usageSeverity(account),
-    accessibleSeverity: usageDisplayLimitReached(account)
-      ? "limit reached"
-      : usageSeverity(account),
-    criticality: usageCriticality(account),
-    models: account.provider === "claude_code" ? usageModelSummaries(account) : null,
-  }));
-  const visibleSummaries =
-    summaries.length <= 2
-      ? summaries
-      : [
-          summaries.reduce((mostCritical, summary) =>
-            summary.criticality > mostCritical.criticality ? summary : mostCritical,
-          ),
-        ];
-  for (const summary of visibleSummaries) {
-    const { account } = summary;
-    const chip = doc.createElement("span");
-    chip.className = "op-usage-sum";
-    chip.dataset.provider = account.provider;
-    if (usageDisplayLimitReached(account)) chip.dataset.limit = "true";
-    if (codexCreditStatus(account)?.active) chip.classList.add("op-usage-sum--credits");
-    if (summary.severity) chip.dataset.severity = summary.severity;
-    if (summary.models) {
-      chip.classList.add("op-usage-sum--models");
-      chip.appendChild(doc.createTextNode(`${summary.label} `));
-      for (const model of summary.models) {
-        const item = doc.createElement("span");
-        item.className = "op-usage-model";
-        item.dataset.windowKind = model.kind;
-        if (model.severity) item.dataset.severity = model.severity;
-        item.textContent = `${model.name} weekly ${model.value}`;
-        chip.appendChild(item);
-        chip.appendChild(doc.createTextNode(" "));
-      }
-      if (account.state?.kind === "stale") {
-        const stale = doc.createElement("span");
-        stale.className = "op-usage-stale";
-        stale.textContent = "stale";
-        chip.appendChild(stale);
-      }
-    } else {
-      chip.textContent = `${summary.label} ${summary.value}`;
-    }
-    cell.appendChild(chip);
-  }
-  if (summaries.length > 2) {
-    const more = doc.createElement("span");
-    more.className = "op-usage-more";
-    more.textContent = `+${summaries.length - 1}`;
-    more.title = `${summaries.length - 1} more providers`;
-    cell.appendChild(more);
-  }
-  const accessibleSummary = `Provider usage: ${summaries
-    .map(
-      (summary) => {
-        if (summary.models) {
-          const state = summary.account.state || {};
-          const reason = state.kind === "stale" ? `stale ${Math.round((state.age_secs || 0) / 60)}m`
-            : state.kind === "unavailable" ? state.reason || "Unavailable"
-            : state.kind === "disabled" ? "Enable in Settings" : "";
-          return `${summary.accessibleLabel}, ${summary.models.map((model) =>
-            `${model.name} weekly ${model.description}`).join(", ")}, shared quota ${summary.value}${
-            summary.accessibleSeverity ? ` ${summary.accessibleSeverity}` : ""}${reason ? `, ${reason}` : ""}`;
-        }
-        return `${summary.accessibleLabel} ${summary.value}${
-          summary.accessibleSeverity ? ` ${summary.accessibleSeverity}` : ""
-        }`;
-      },
-    )
-    .join(", ")}`;
-  cell.setAttribute("aria-label", accessibleSummary);
-  cell.setAttribute("aria-controls", "provider-usage-popover");
-  if (!cell.hasAttribute("aria-expanded")) cell.setAttribute("aria-expanded", "false");
-  cell.title = accessibleSummary;
-  if (accounts.some(usageDisplayLimitReached)) cell.dataset.limit = "true";
-  else delete cell.dataset.limit;
-  cell.hidden = false;
-
-  // No modal: hover (or click, for touch/non-hover) shows the full popover.
-  const showUsagePopover = () => {
-    try {
-      win.__gwtShowUsageHover?.(cell);
-    } catch {
-      /* no-op */
-    }
-  };
-  const hideUsagePopover = () => {
-    try {
-      win.__gwtHideUsageHover?.();
-    } catch {
-      /* no-op */
-    }
-  };
-  cell.onclick = showUsagePopover;
-  cell.onmouseenter = showUsagePopover;
-  cell.onfocus = showUsagePopover;
-  cell.onmouseleave = hideUsagePopover;
-  cell.onblur = (event) => {
-    if (win.__gwtUsageHoverContains?.(event?.relatedTarget)) return;
-    hideUsagePopover();
-  };
-  cell.onkeydown = (event) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      showUsagePopover();
-      win.requestAnimationFrame?.(() => win.__gwtFocusUsageHover?.());
-    } else if (event.key === "Escape") {
-      win.__gwtHideUsageHover?.({ immediate: true });
-    }
   };
 }
 
@@ -628,11 +374,11 @@ function runtimeHealthState(state) {
 function runtimeHealthStateLabel(state) {
   switch (runtimeHealthState(state)) {
     case "hot":
-      return "HOT";
+      return "High";
     case "warn":
-      return "WARN";
+      return "Elevated";
     case "warming":
-      return "WARM";
+      return "Warming";
     default:
       return "OK";
   }
@@ -664,11 +410,11 @@ function signedDelta(value) {
 function runtimeHealthTitle(snapshot, queue) {
   return [
     RUNTIME_HEALTH_CPU_UNITS,
-    `state: ${runtimeHealthState(snapshot.state)}`,
-    `processes: ${Number(snapshot.process_count) || 0}`,
-    `runners: ${Number(snapshot.runner_count) || 0}`,
-    `queued: ${Number(queue.queued_entries) || 0}`,
-    `dropped: ${signedDelta(queue.dropped_lossy_delta)}`,
+    `State: ${runtimeHealthStateLabel(snapshot.state)}`,
+    `Processes: ${Number(snapshot.process_count) || 0}`,
+    `Runners: ${Number(snapshot.runner_count) || 0}`,
+    `Queued events: ${Number(queue.queued_entries) || 0}`,
+    `Dropped events: ${signedDelta(queue.dropped_lossy_delta)}`,
   ].join(" | ");
 }
 
@@ -751,13 +497,13 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
 
   const summary = doc.createElement("div");
   summary.className = "op-runtime-health-detail__summary";
-  appendRuntimeHealthChip(doc, summary, "STATE", runtimeHealthStateLabel(snapshot.state));
+  appendRuntimeHealthChip(doc, summary, "State", runtimeHealthStateLabel(snapshot.state));
   appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeAggregateCpu(snapshot.cpu_percent));
-  appendRuntimeHealthChip(doc, summary, "MEM", formatRuntimeMemory(snapshot.memory_bytes));
+  appendRuntimeHealthChip(doc, summary, "Memory", formatRuntimeMemory(snapshot.memory_bytes));
   appendRuntimeHealthChip(
     doc,
     summary,
-    "PROC",
+    "Processes",
     `${Number(snapshot.process_count) || 0}/${Number(snapshot.runner_count) || 0}`,
   );
   detail.appendChild(summary);
@@ -1243,210 +989,10 @@ function wireHotkeyOverlay({ doc, hotkey }) {
 }
 
 // ------------------------------------------------------------
-// Command Palette
-// ------------------------------------------------------------
-
-function wireCommandPalette({ doc, hotkey }) {
-  const overlay = doc.getElementById("op-palette-backdrop");
-  const input = doc.getElementById("op-palette-input");
-  const list = doc.getElementById("op-palette-list");
-  const button = doc.getElementById("op-palette-button");
-  if (!overlay || !input || !list) return null;
-
-  const actions = createActionRegistry(doc);
-  let selectedIndex = 0;
-  let visible = [];
-
-  function open() {
-    overlay.dataset.open = "true";
-    overlay.removeAttribute("aria-hidden");
-    // SPEC-2356 — combobox accessibility: announce that the popup is now open
-    // so screen readers attach the listbox to the input.
-    input.setAttribute("aria-expanded", "true");
-    input.value = "";
-    selectedIndex = 0;
-    render();
-    setTimeout(() => input.focus(), 0);
-  }
-
-  function close() {
-    delete overlay.dataset.open;
-    overlay.setAttribute("aria-hidden", "true");
-    input.setAttribute("aria-expanded", "false");
-    input.removeAttribute("aria-activedescendant");
-    if (doc.activeElement === input) input.blur();
-  }
-
-  function render() {
-    const query = input.value.trim().toLowerCase();
-    visible = actions.filter(query);
-    if (selectedIndex >= visible.length) selectedIndex = Math.max(0, visible.length - 1);
-    while (list.firstChild) list.removeChild(list.firstChild);
-    if (visible.length === 0) {
-      const empty = doc.createElement("li");
-      empty.className = "op-palette__empty";
-      empty.textContent = query
-        ? `No commands match "` + query + `"`
-        : "No commands registered yet.";
-      list.appendChild(empty);
-      return;
-    }
-    const groups = new Map();
-    for (const a of visible) {
-      const key = a.group ?? "Commands";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(a);
-    }
-    let idx = 0;
-    for (const [group, items] of groups) {
-      const head = doc.createElement("li");
-      head.className = "op-palette__group";
-      head.textContent = group;
-      list.appendChild(head);
-      for (const a of items) {
-        const li = doc.createElement("li");
-        li.className = "op-palette__row";
-        li.dataset.index = String(idx);
-        li.dataset.selected = idx === selectedIndex ? "true" : "false";
-        // SPEC-2356 — combobox/listbox a11y: each row is an option with a
-        // stable id so the input can target it via aria-activedescendant.
-        li.id = `op-palette-row-${idx}`;
-        li.setAttribute("role", "option");
-        li.setAttribute("aria-selected", idx === selectedIndex ? "true" : "false");
-        li.innerHTML = `<span></span><span class="op-palette__hint"></span>`;
-        li.firstChild.textContent = a.label;
-        li.lastChild.textContent = a.hint ?? "";
-        li.addEventListener("mousemove", () => {
-          if (selectedIndex !== idx) {
-            selectedIndex = idx;
-            updateSelection();
-          }
-        });
-        const myIdx = idx;
-        li.addEventListener("click", () => {
-          execute(visible[myIdx]);
-        });
-        list.appendChild(li);
-        idx += 1;
-      }
-    }
-  }
-
-  function updateSelection() {
-    const rows = list.querySelectorAll(".op-palette__row");
-    rows.forEach((row, i) => {
-      const isSelected = i === selectedIndex;
-      row.dataset.selected = isSelected ? "true" : "false";
-      row.setAttribute("aria-selected", isSelected ? "true" : "false");
-      if (isSelected) {
-        row.scrollIntoView({ block: "nearest" });
-        // SPEC-2356 — point the combobox input at the active option so screen
-        // readers announce the highlighted command without moving DOM focus.
-        input.setAttribute("aria-activedescendant", row.id);
-      }
-    });
-    if (rows.length === 0) input.removeAttribute("aria-activedescendant");
-  }
-
-  function execute(action) {
-    if (!action) return;
-    close();
-    try { action.handler(); } catch (e) { console.error("palette action threw", e); }
-  }
-
-  input.addEventListener("input", () => {
-    selectedIndex = 0;
-    render();
-  });
-
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { close(); e.preventDefault(); return; }
-    if (e.key === "ArrowDown") {
-      selectedIndex = Math.min(selectedIndex + 1, visible.length - 1);
-      updateSelection();
-      e.preventDefault();
-    } else if (e.key === "ArrowUp") {
-      selectedIndex = Math.max(selectedIndex - 1, 0);
-      updateSelection();
-      e.preventDefault();
-    } else if (e.key === "Enter") {
-      execute(visible[selectedIndex]);
-      e.preventDefault();
-    }
-  });
-
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
-  });
-
-  button?.addEventListener("click", open);
-
-  hotkey.register("cmd+k", () => { open(); return true; });
-  hotkey.register("cmd+p", () => { open(); return true; });
-
-  return {
-    open, close,
-    register: (action) => actions.register(action),
-    unregister: (id) => actions.unregister(id),
-  };
-}
-
-function createActionRegistry(doc) {
-  const items = new Map();
-
-  // Default surface commands. Frontend modules dispatch these via DOM events
-  // so we don't need a hard import dependency between operator-shell and app.
-  const dispatch = (id) => () => doc.dispatchEvent(new CustomEvent("op:command", { detail: { id } }));
-
-  const seed = [
-    { id: "open-board", label: "Focus Board surface", hint: "⌘B", group: "Navigate", handler: dispatch("open-board") },
-    { id: "open-git", label: "Focus Work", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
-    { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
-    { id: "open-recovery-center", label: "Open Recovery Center", hint: "Durable delivery", group: "Navigate", handler: dispatch("open-recovery-center") },
-    { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
-    // SPEC-3431 FR-026: the rail gear only appears on hover, so the palette is
-    // the keyboard-reachable entry to PM settings.
-    { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
-    { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
-    { id: "open-branches", label: "Open Issues", hint: "Issues and other work", group: "Spawn", handler: dispatch("open-branches") },
-    { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
-    { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },
-  ];
-  seed.forEach((a) => items.set(a.id, a));
-
-  return {
-    register(action) {
-      if (!action || !action.id) throw new Error("action requires id");
-      items.set(action.id, action);
-    },
-    unregister(id) {
-      items.delete(id);
-    },
-    filter(query) {
-      const all = Array.from(items.values());
-      if (!query) return all;
-      const score = (a) => {
-        const haystack = `${a.label} ${a.id} ${a.group ?? ""}`.toLowerCase();
-        if (haystack.startsWith(query)) return 100;
-        if (haystack.includes(query)) return 50;
-        const tokens = query.split(/\s+/).filter(Boolean);
-        let acc = 0;
-        for (const t of tokens) if (haystack.includes(t)) acc += 10;
-        return acc;
-      };
-      return all.map((a) => ({ a, s: score(a) }))
-        .filter(({ s }) => s > 0)
-        .sort((x, y) => y.s - x.s)
-        .map(({ a }) => a);
-    },
-  };
-}
-
-// ------------------------------------------------------------
 // Global hotkeys (delegate to operator command bus)
 // ------------------------------------------------------------
 
-function wireGlobalHotkeys({ doc, hotkey, palette }) {
+function wireGlobalHotkeys({ doc, hotkey }) {
   const send = (id) => () => {
     doc.dispatchEvent(new CustomEvent("op:command", { detail: { id } }));
     return true;
@@ -1458,12 +1004,6 @@ function wireGlobalHotkeys({ doc, hotkey, palette }) {
   // SPEC-2356 Phase 9: Cmd+\\ sidebar toggle hotkey is removed in favor of the
   // hover-reveal peek 帯. Chrome visibility is now driven entirely by pointer
   // hover / keyboard focus / pointer tap.
-
-  if (typeof palette?.close === "function") {
-    doc.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") palette.close();
-    });
-  }
 
   hotkey.attach(doc);
 }
@@ -1584,5 +1124,5 @@ function applyProjectOwnerHealth(doc, health = {}) {
   cell.hidden = false;
   cell.title = health.detail || "";
   const value = cell.querySelector("[data-project-owner-health-value]");
-  if (value) value.textContent = state === "healthy" ? "Ready" : state === "wedged" ? "Wedged" : state === "degraded" ? "Unavailable" : "Connecting";
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "wedged" ? "Not responding" : state === "degraded" ? "Unavailable" : "Connecting";
 }

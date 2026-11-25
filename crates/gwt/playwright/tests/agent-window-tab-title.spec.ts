@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -21,7 +22,7 @@ test.describe("Agent window navigation without tabs", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installTabbedAgentsBackend(page);
     await page.goto(appUrl);
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
     await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
   });
@@ -68,7 +69,7 @@ test.describe("Agent window navigation without tabs", () => {
     // Back changes presentation only; the native terminal remains owned by its session.
     await page.locator('.works-full [data-action="back"]').click();
     expect(await closedIds()).toEqual([]);
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
     expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);

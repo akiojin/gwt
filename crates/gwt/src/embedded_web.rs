@@ -79,6 +79,8 @@ root_js_modules! {
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
     "close-project-confirm-modal.js" => "createCloseProjectController",
     "project-execution-policy-model.js" => "createProjectExecutionPolicyModel",
+    // Issue #7728: host of the one project stop/start (Hub list and Settings).
+    "project-autonomy.js" => "createProjectAutonomyControl",
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
@@ -108,6 +110,9 @@ root_js_modules! {
     "hook-center-panel.js" => "renderHookCenterPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
+    // Issue #7702: IME composition commit gate. app.js imports it at module
+    // top level, so a missing asset 404s and the splash never clears.
+    "terminal-input-commit.js" => "createTerminalInputCommitGate",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
@@ -167,6 +172,7 @@ root_js_modules! {
     // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface
     // (image paste / file drop / upload progress) extracted from app.js.
     "terminal-attachments.js" => "createTerminalAttachments",
+    "attachment-upload.js" => "uploadAttachmentFile",
     // SPEC-3064 Phase 3 (E3) — Project Index window surface (index status
     // map + search state/render + Index window mount) extracted from app.js.
     "project-index-search-surface.js" => "createProjectIndexSearchSurface",
@@ -196,10 +202,28 @@ root_js_modules! {
     // pm-chat.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.
     "task-progress.js" => "createTaskProgress",
-    // SPEC #7007 — task-centered Log island host for the PM chat surface.
-    // pm-chat.js and app.js import this at module top level, so the asset
+    // Issue #7648 (SPEC #7007 T-030) — Execution environments island host.
+    // app.js and provider-usage-surface.js import this at module top level,
+    // so the asset MUST be registered or the ES module load 404s and the
+    // splash hangs.
+    "execution-environments.js" => "createExecutionEnvironments",
+    // Issue #7740 — the header and footer every page shares. app.js,
+    // hub-app.js and frontend-route.js import this at module top level, so
+    // the asset MUST be registered or the ES module load 404s.
+    "app-chrome.js" => "createAppChrome",
+    // Issue #7639 — host of the Home conversation with the Project Manager.
+    // hub-app.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load 404s.
+    "home-conversation.js" => "createHomeConversation",
+    // Issue #7731 — host of the first-run setup. hub-app.js and
+    // settings-surface.js import this at module top level, so the asset
+    // MUST be registered or the ES module load 404s.
+    "first-run-setup.js" => "createFirstRunSetup",
+    // Issue #7741 — host of a project's available execution environments
+    // list. app.js imports this at module top level, so the asset
     // MUST be registered or the ES module load 404s and the splash hangs.
-    "task-log.js" => "createTaskLog",
+    "project-execution-environments.js" => "renderProjectExecutionEnvironments",
+    "project-themes.js" => "createProjectThemes",
     // SPEC #7007 T-014 — typed window command error presentation.
     // app.js imports this at module top level, so the asset MUST be
     // registered or the ES module load 404s and the splash hangs.
@@ -235,6 +259,10 @@ root_js_modules! {
     // top level, so a missing entry would hang the splash.
     "surface-rail.js" => "installSurfaceRail",
     "split-surfaces.js" => "createSplitSurfaces",
+    // Issue #7635 — the avatar part every Agent display shares. app-chrome.js
+    // and agents-surface.js import it at module top level, so the asset MUST
+    // be registered or the ES module load 404s and the splash hangs.
+    "agent-avatar.js" => "agentAvatar",
     "agents-surface.js" => "createAgentsSurface",
     "works-surface.js" => "createWorksSurface",
     "terminal-text-preview.js" => "createTerminalTextPreview",

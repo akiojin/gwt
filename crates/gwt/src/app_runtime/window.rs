@@ -246,6 +246,25 @@ impl AppRuntime {
         self.activate_tab_for_window_events(address.tab_id)
     }
 
+    pub(crate) fn control_pane_layout_place_events(
+        &mut self,
+        request: gwt::project_open_control::PaneLayoutPlaceRequest,
+    ) -> Vec<OutboundEvent> {
+        if self
+            .project_key_for_window(&request.id)
+            .map(|key| key.as_str())
+            != Some(request.project_key.as_str())
+        {
+            return Vec::new();
+        }
+        self.place_agent_window_in_kanban_events(
+            &request.id,
+            &request.board_id,
+            request.lane_id,
+            request.order,
+        )
+    }
+
     pub(crate) fn place_agent_window_in_kanban_events(
         &mut self,
         id: &str,
@@ -756,6 +775,46 @@ impl AppRuntime {
         let mut all = vec![self.workspace_state_broadcast(&context)];
         all.extend(events);
         all
+    }
+
+    pub(crate) fn resume_with_next_account_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        self.switch_window_account(id, None)
+    }
+
+    pub(super) fn resume_after_account_deletion(&mut self, account_id: &str) -> Vec<OutboundEvent> {
+        let affected: Vec<_> = self
+            .active_agent_sessions
+            .iter()
+            .filter(|(_, active)| {
+                gwt_agent::session_ledger::load_session_candidate(
+                    &self.sessions_dir,
+                    &active.session_id,
+                )
+                .and_then(|session| session.execution_account)
+                .is_some_and(|account| account.account_id == account_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        affected
+            .into_iter()
+            .flat_map(|id| self.switch_window_account(&id, Some(account_id)))
+            .collect()
+    }
+
+    fn switch_window_account(&mut self, id: &str, deleted: Option<&str>) -> Vec<OutboundEvent> {
+        let Some(runtime) = self.runtimes.get(id) else {
+            return Vec::new();
+        };
+        let command = gwt::project_runtime::events::OwnerCommand::SwitchExecutionAccount {
+            id: runtime.owner_pane_id.clone(),
+            incarnation: runtime.incarnation,
+            deleted_account_id: deleted.map(str::to_owned),
+        };
+        self.queue_remote_runtime_command(
+            id,
+            command,
+            super::RemoteRuntimeCommandKind::SwitchExecutionAccount,
+        )
     }
 
     pub(crate) fn list_windows_event_for_project(

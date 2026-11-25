@@ -81,6 +81,10 @@ pub struct AgentLaunchInput {
     pub prepared_manual_launch_claim: Option<gwt_agent::SessionActiveLaunchHandshake>,
     pub issue_monitor_trust_candidate: Option<IssueMonitorTrustCandidate>,
     pub issue_monitor_launch: bool,
+    pub pm_restore_prior: Option<(
+        gwt_agent::Session,
+        Option<crate::agent_names::AgentMemberAssignment>,
+    )>,
 }
 
 /// Public display updates emitted while owner-local launch preparation runs.
@@ -169,8 +173,9 @@ pub(super) fn check_launch_permission(
     }
     let custom = configured_custom_agent_for_launch(config, &gwt_core::paths::gwt_config_path())?;
     let mut materialized = config.clone();
-    gwt_agent::LaunchEnvironment::from_active_profile(
+    gwt_agent::LaunchEnvironment::for_project(
         &gwt_core::paths::gwt_config_path(),
+        project_root,
         config.runtime_target,
     )?
     .with_project_root(&worktree)
@@ -232,6 +237,7 @@ pub fn prepare_agent_launch(
         prepared_manual_launch_claim,
         issue_monitor_trust_candidate,
         issue_monitor_launch,
+        pm_restore_prior,
     } = input;
     // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
     // compose ps/up incl. image build, exec probes), mirror docker-kind
@@ -254,11 +260,23 @@ pub fn prepare_agent_launch(
         .get("GWT_AGENT_MEMBER_ID")
         .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
         .map(|(member, reservation)| (member.clone(), reservation.clone()));
+    let pm_launch = config
+        .working_dir
+        .as_deref()
+        .is_some_and(gwt::pm_registry::is_canonical_pm_worktree);
+    let pm_profile_revision = config.env_vars.get("GWT_PM_PROFILE_REVISION").cloned();
+    type PmCandidate = (gwt_agent::Session, Result<Option<Vec<u8>>, String>);
+    let mut pm_candidate: Option<PmCandidate> = None;
     let mut active_launch_handshake_cleanup = prepared_manual_launch_claim;
     // Issue #4283 AC-5: attribute the pane-create route to its phases so
     // the next regression is read from the perf stream, not guessed.
     let mut phases = gwt::perf::RoutePhaseClock::start(gwt::perf::PerfRoute::PaneCreate);
-    let result: AgentLaunchResult = (|| {
+    let mut result: AgentLaunchResult = (|| {
+        if pm_launch && (member_reservation.is_none() || pm_profile_revision.is_none()) {
+            return Err(
+                "PM launch requires its exact owner-prepared member and profile reservation".into(),
+            );
+        }
         let phase = LaunchPhaseTimer::start("worktree");
         emit(AgentLaunchEvent::Progress {
             message: "Preparing worktree...".to_string(),
@@ -309,12 +327,56 @@ pub fn prepare_agent_launch(
         }
         let initial_prompt_file =
             crate::launch_runtime::prepare_initial_prompt(&mut config, &worktree_path)?;
-        gwt_agent::LaunchEnvironment::from_active_profile(
-            &profile_config_path,
-            config.runtime_target,
-        )?
-        .with_project_root(&worktree_path)
-        .apply_to_config(&mut config);
+        let environment = if pm_launch {
+            gwt_agent::LaunchEnvironment::from_active_profile(
+                &profile_config_path,
+                config.runtime_target,
+            )
+        } else {
+            gwt_agent::LaunchEnvironment::for_project(
+                &profile_config_path,
+                Path::new(&project_root),
+                config.runtime_target,
+            )
+        }?;
+        environment
+            .with_project_root(&worktree_path)
+            .apply_to_config(&mut config);
+        let predecessor = (config.execution_account_switch_reason.is_some()
+            || matches!(
+                config.session_mode,
+                gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
+            ))
+        .then(|| {
+            pm_restore_prior
+                .as_ref()
+                .map(|(session, _)| session.clone())
+                .or_else(|| {
+                    let id = config.predecessor_session_id.as_deref()?;
+                    gwt_agent::validate_session_id_path_component(id).ok()?;
+                    let session =
+                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()?;
+                    (session.id == id).then_some(session)
+                })
+        })
+        .flatten()
+        .filter(|session| {
+            session.agent_id == config.agent_id
+                && (session.worktree_path == worktree_path
+                    || session.project_state_root.as_deref() == Some(Path::new(&project_root)))
+        });
+        let provider_cwd =
+            pm_provider_runtime_dir(&config).unwrap_or_else(|| worktree_path.clone());
+        let selected_account = gwt::account_switch::pool_account_for_launch(
+            &mut config,
+            predecessor.as_ref(),
+            &provider_cwd,
+            |message| emit(AgentLaunchEvent::Progress { message }),
+        )?;
+        let (execution_account, verified_copilot) = selected_account
+            .map_or((None, None), |selected| {
+                (Some(selected.account), selected.copilot)
+            });
         if let Some(managed_worktree) = managed_codex_worktree.as_ref() {
             let report = register_codex_managed_project_trust_for_resolved_launch(
                 &profile_config_path,
@@ -328,6 +390,13 @@ pub fn prepare_agent_launch(
                 });
             }
         }
+        if let Some(repository) = configure_grok_repository_trust(&mut config, &worktree_path)? {
+            tracing::info!(
+                repository = %repository.display(),
+                worktree = %worktree_path.display(),
+                "Grok repository trust requested with native --trust"
+            );
+        }
         resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
         phases.mark("environment");
         phase.finish();
@@ -335,6 +404,31 @@ pub fn prepare_agent_launch(
         let runner_health_report = (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host)
             .then(|| resolve_host_runner_health_checked(&mut config))
             .transpose()?;
+        let copilot_token = verified_copilot.and_then(|copilot| {
+            // Use the runner that verified the identity. The gh wrapper
+            // would perform executable lookup again at spawn time.
+            config.command = copilot.executable.to_string_lossy().into_owned();
+            if config.args.first().is_some_and(|arg| arg == "copilot") {
+                config.args.remove(0);
+                if config.args.first().is_some_and(|arg| arg == "--") {
+                    config.args.remove(0);
+                }
+            }
+            config.env_vars.insert("COPILOT_GH".into(), "true".into());
+            config
+                .env_vars
+                .insert("COPILOT_AUTO_UPDATE".into(), "false".into());
+            if copilot.token.is_some() {
+                config.args.insert(
+                    0,
+                    format!(
+                        "--secret-env-vars={}",
+                        gwt::account_homes::COPILOT_TOKEN_ENV
+                    ),
+                );
+            }
+            copilot.token
+        });
         phases.mark("runner_health");
         phase.finish();
         let phase = LaunchPhaseTimer::start("managed_assets");
@@ -407,11 +501,36 @@ pub fn prepare_agent_launch(
         let provider_permission_args = config.args.clone();
         apply_windows_host_shell_wrapper(&mut config)?;
 
+        // The scan and durable claim can predate a close. Make this read on
+        // the launch worker before creating Session or execution authority,
+        // with the exact delivery already available for transient retry.
+        if issue_monitor_launch
+            && config.launch_route == gwt_agent::LaunchRoute::Autonomous
+            && !config
+                .env_vars
+                .get("GWT_REVIEW_DISPATCH")
+                .is_some_and(|value| value == "1")
+        {
+            let issue_number = config
+                .linked_issue_number
+                .ok_or("Monitor launch has no linked Issue")?;
+            super::installation::confirm_open_monitor_issue(
+                Path::new(&project_root),
+                issue_number,
+            )?;
+        }
+
         let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
 
         let agent_id = config.agent_id.clone();
         let mut session =
             initialize_launch_session(&worktree_path, Path::new(&project_root), &config);
+        gwt::account_switch::record_launch_account(
+            &mut session,
+            predecessor.as_ref(),
+            execution_account,
+            config.execution_account_switch_reason,
+        );
         // Keep a separate observation identity if the resumed authority
         // cannot be installed. Never overwrite the coordinator's Session.
         let unbound_session_id = session.id.clone();
@@ -434,13 +553,16 @@ pub fn prepare_agent_launch(
         // An automatic restore without a current Monitor owner must not recover
         // the predecessor's historical Issue through its producing binding.
         let mut rebound_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
-        if matches!(
-            &config.execution_intent,
-            gwt_agent::ExecutionLaunchIntent::Automatic
-        ) && matches!(
-            config.session_mode,
-            gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
-        ) && (!config.automatic_restore || config.linked_issue_number.is_some())
+        if !pm_launch
+            && matches!(
+                &config.execution_intent,
+                gwt_agent::ExecutionLaunchIntent::Automatic
+            )
+            && matches!(
+                config.session_mode,
+                gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
+            )
+            && (!config.automatic_restore || config.linked_issue_number.is_some())
         {
             if let Some(predecessor) = config.predecessor_session_id.clone() {
                 // Issue #4783 AC-2: an automatic restore never reactivates
@@ -779,7 +901,7 @@ pub fn prepare_agent_launch(
             .as_deref()
             .or(config.working_dir.as_deref())
             .and_then(|cwd| config.validated_codex_auth_root_for_cwd(cwd));
-        if let Err(error) = persist_finalized_launch_session(
+        let persisted = persist_finalized_launch_session(
             &sessions_dir,
             // Monitor's shared admission census must not mistake a
             // prepared no-child runtime for an unknown live worker. Its
@@ -787,7 +909,16 @@ pub fn prepare_agent_launch(
             (!issue_monitor_launch).then_some(runtime_path.as_path()),
             &mut session,
             None,
-        ) {
+        );
+        if pm_launch {
+            let runtime = match std::fs::read(&runtime_path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.to_string()),
+            };
+            pm_candidate = Some((session.clone(), runtime));
+        }
+        if let Err(error) = persisted {
             let rollback = if is_fresh_execution_install {
                 Some(rollback_materialized_fresh_execution_launch(
                     &sessions_dir,
@@ -814,21 +945,36 @@ pub fn prepare_agent_launch(
             .into());
         }
         if let Some((member, reservation)) = member_reservation.as_ref() {
-            gwt::agent_names::bind_project_member_session(
-                Path::new(&project_root),
-                member,
-                reservation,
-                &session.id,
-            )?;
+            if pm_launch {
+                crate::agent_registry::bind_prepared_pm_member_session(
+                    Path::new(&project_root),
+                    member,
+                    reservation,
+                    &session.id,
+                    pm_profile_revision.as_deref(),
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                gwt::agent_names::bind_project_member_session(
+                    Path::new(&project_root),
+                    member,
+                    reservation,
+                    &session.id,
+                )?;
+            }
         }
         let expected_execution_identity =
             gwt_agent::SessionExecutionIdentity::from_session(&session)?;
 
+        let mut spawn_env = config.env_vars.clone();
+        if let Some(token) = copilot_token {
+            spawn_env.insert(gwt::account_homes::COPILOT_TOKEN_ENV.into(), token);
+        }
         let process_launch = ProcessLaunch {
             initial_prompt_file,
             command: config.command.clone(),
             args: config.args.clone(),
-            env: config.env_vars.clone(),
+            env: spawn_env,
             remove_env: config.remove_env.clone(),
             cwd: pm_provider_runtime_dir(&config).or_else(|| config.working_dir.clone()),
             resource_policy,
@@ -891,14 +1037,59 @@ pub fn prepare_agent_launch(
 
     if result.is_err() {
         if let Some((member, reservation)) = member_reservation.as_ref() {
-            let _ = gwt::agent_names::release_project_member(
-                Path::new(&project_root),
-                &sessions_dir,
-                member,
-                reservation,
-            );
+            if pm_launch {
+                let cleanup = (|| -> Result<(), String> {
+                    if let Some(handshake) = active_launch_handshake_cleanup.as_ref() {
+                        gwt::cli::execution_state::finish_active_session_launch_handshake(
+                            &sessions_dir,
+                            handshake,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    }
+                    let stopped = pm_candidate
+                        .as_ref()
+                        .map(|(candidate, runtime)| {
+                            super::owner::retire_unspawned_launch_runtime(
+                                &sessions_dir,
+                                candidate,
+                                Some(runtime),
+                            )
+                        })
+                        .transpose()?;
+                    crate::agent_registry::cancel_unspawned_pm_member(
+                        Path::new(&project_root),
+                        &sessions_dir,
+                        member,
+                        reservation,
+                        stopped.as_ref(),
+                        pm_restore_prior
+                            .as_ref()
+                            .map(|(source, prior)| (source, prior.as_ref())),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    Ok(())
+                })();
+                if let Err(cleanup) = cleanup {
+                    if let Err(error) = &mut result {
+                        error.detail = format!(
+                            "{}; PM reservation retained pending exact reconciliation: {cleanup}",
+                            error.detail
+                        );
+                    }
+                }
+            } else {
+                let _ = gwt::agent_names::release_project_member(
+                    Path::new(&project_root),
+                    &sessions_dir,
+                    member,
+                    reservation,
+                );
+            }
         }
-        if let Some(handshake) = active_launch_handshake_cleanup.as_ref() {
+        if let Some(handshake) = active_launch_handshake_cleanup
+            .as_ref()
+            .filter(|_| !pm_launch)
+        {
             let _ = gwt::cli::execution_state::finish_active_session_launch_handshake(
                 &sessions_dir,
                 handshake,
@@ -1173,9 +1364,13 @@ pub fn issue_monitor_trust_candidate_from_feedback(
         session_mode,
         gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
     ) {
-        return Err(format!(
-            "Issues managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
-        ));
+        tracing::warn!(
+            ?session_mode,
+            "Issues managed Codex trust rejected session mode"
+        );
+        return Err(
+            "Issues launch requires Normal or Resume session mode. The agent was not launched. Choose one of those modes and launch again.".into()
+        );
     }
     Ok(Some(IssueMonitorTrustCandidate {
         issue_number,
@@ -1454,7 +1649,8 @@ pub fn effective_host_codex_config_path(
         } else {
             child_cwd.join(codex_home)
         };
-        return canonical_launch_path(&resolved, "CODEX_HOME").map(|home| home.join("config.toml"));
+        return canonical_launch_path(&resolved, "CODEX_HOME")
+            .map(|home| test_isolated_codex_config(home.join("config.toml")));
     }
 
     let user_home = match semantics {
@@ -1479,13 +1675,55 @@ pub fn effective_host_codex_config_path(
             user_home.display()
         ));
     }
-    Ok(user_home.join(".codex").join("config.toml"))
+    Ok(test_isolated_codex_config(
+        user_home.join(".codex").join("config.toml"),
+    ))
+}
+
+fn test_isolated_codex_config(path: PathBuf) -> PathBuf {
+    gwt_config::home::test_isolated_config_path(path, Path::new(".codex/config.toml"))
 }
 
 fn canonical_launch_path(path: &Path, role: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(path)
         .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
         .map_err(|error| format!("failed to canonicalize {role} {}: {error}", path.display()))
+}
+
+/// Request native repository trust only when gwt launches Grok on the Host.
+/// Grok shares a normal repository's trust across its linked worktrees; a
+/// worktree of a bare repository has no main workdir and uses its own root.
+fn configure_grok_repository_trust(
+    config: &mut gwt_agent::LaunchConfig,
+    cwd: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if config.agent_id != gwt_agent::AgentId::GrokBuild
+        || config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+    {
+        return Ok(None);
+    }
+    // A missing cwd otherwise makes the PTY inherit gwt's own directory.
+    // Keep the logged trust key and the eventual provider process aligned.
+    let launch_cwd = config
+        .working_dir
+        .get_or_insert_with(|| cwd.to_path_buf())
+        .clone();
+    let provider_cwd = pm_provider_runtime_dir(config).unwrap_or(launch_cwd);
+    let Ok(repository) = gwt_git::Repository::discover(&provider_cwd) else {
+        return Ok(None);
+    };
+    let main = gwt_git::worktree::main_worktree_root(repository.path())
+        .map_err(|error| error.to_string())?;
+    let root = if main.join(".git").is_dir() {
+        main.as_path()
+    } else {
+        repository.path()
+    };
+    let root = canonical_launch_path(root, "Grok repository trust root")?;
+    if !config.args.iter().any(|arg| arg == "--trust") {
+        config.args.insert(0, "--trust".to_string());
+    }
+    Ok(Some(root))
 }
 
 pub fn validate_issue_monitor_managed_codex_worktree(
@@ -1511,9 +1749,11 @@ pub fn validate_issue_monitor_managed_codex_worktree(
         ));
     }
     if config.linked_issue_number != Some(candidate.issue_number) {
+        tracing::warn!(expected_issue = candidate.issue_number, actual_issue = ?config.linked_issue_number,
+            "Issues launch rejected mismatched linked Issue");
         return Err(format!(
-            "Issues linked Issue #{} does not match launch metadata {:?}",
-            candidate.issue_number, config.linked_issue_number
+            "Issues linked Issue #{} does not match the launch settings. The agent was not launched. Reopen the launch setup for this Issue.",
+            candidate.issue_number
         ));
     }
     if !matches!(
@@ -1521,17 +1761,18 @@ pub fn validate_issue_monitor_managed_codex_worktree(
         gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
     ) || config.session_mode != candidate.session_mode
     {
-        return Err(format!(
-            "Issues session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
-            candidate.session_mode, config.session_mode
-        ));
+        tracing::warn!(expected_mode = ?candidate.session_mode, actual_mode = ?config.session_mode,
+            "Issues launch rejected mismatched session mode");
+        return Err(
+            "Issues session mode does not match the launch settings; matching Normal or Resume modes are required. The agent was not launched. Reopen the launch setup for this Issue.".into()
+        );
     }
 
     let expected_branch = format!("work/issue-{}", candidate.issue_number);
     if !candidate.review_dispatch && config.branch.as_deref() != Some(expected_branch.as_str()) {
         return Err(format!(
-            "Issues branch must be {expected_branch}, got {:?}",
-            config.branch
+            "Issues branch must be {expected_branch}, got {}. The agent was not launched. Select the Issue work branch in the launch setup.",
+            config.branch.as_deref().unwrap_or("no branch")
         ));
     }
 
@@ -1804,4 +2045,145 @@ pub(crate) fn record_named_launch_assignment(
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod grok_repository_trust_tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = gwt_core::process::run_git_logged(args, Some(cwd)).unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn grok_repository_trust_matches_main_and_linked_git_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let bare = temp.path().join("bare.git");
+        let bare_linked = temp.path().join("bare-linked");
+        git(
+            temp.path(),
+            &["init", "--quiet", "-b", "main", main.to_str().unwrap()],
+        );
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=Grok trust test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                main.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                bare_linked.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        for (cwd, expected) in [
+            (&main, &main),
+            (&linked, &main),
+            (&bare_linked, &bare_linked),
+        ] {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+                .working_dir(cwd)
+                .extra_arg("$gwt-execute #7183")
+                .build();
+            if cwd == &main {
+                // The central launch path also uses the project root when
+                // LaunchConfig has no explicit working directory.
+                config.working_dir = None;
+            }
+            let original = config.args.clone();
+            assert!(!original.iter().any(|arg| arg == "--trust"));
+            assert_eq!(
+                configure_grok_repository_trust(&mut config, cwd).unwrap(),
+                Some(canonical_launch_path(expected, "expected trust root").unwrap())
+            );
+            assert_eq!(
+                config.working_dir.as_deref(),
+                Some(cwd.as_path()),
+                "the spawned Grok must use the directory whose trust was resolved"
+            );
+            assert_eq!(config.args[0], "--trust");
+            assert_eq!(&config.args[1..], original);
+            configure_grok_repository_trust(&mut config, cwd).unwrap();
+            assert_eq!(
+                config.args.iter().filter(|arg| *arg == "--trust").count(),
+                1
+            );
+        }
+
+        let mut codex = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&main)
+            .build();
+        let original = codex.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut codex, &main).unwrap(),
+            None
+        );
+        assert_eq!(codex.args, original);
+
+        let mut docker = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+            .working_dir(&linked)
+            .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
+            .build();
+        let original = docker.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut docker, &linked).unwrap(),
+            None
+        );
+        assert_eq!(docker.args, original);
+    }
+
+    #[test]
+    fn grok_repository_trust_leaves_non_git_launch_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+            .working_dir(temp.path())
+            .build();
+        let original = config.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut config, temp.path()).unwrap(),
+            None
+        );
+        assert_eq!(config.args, original);
+    }
 }

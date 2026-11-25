@@ -15,7 +15,10 @@
 //! unrestorable, which is what stops the resident loop, without depending on a
 //! running GUI or a live pane connection.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use gwt_core::paths::gwt_sessions_dir;
 use gwt_core::pm_report::{self, PmReportKind};
@@ -23,12 +26,17 @@ use gwt_core::pm_status::{self, PmStatusInput};
 use gwt_github::{ApiError, SpecOpsError};
 use serde::Serialize;
 
+use crate::agent_names::{AgentMember, AgentRosterAction};
 use crate::cli::env::CliEnv;
 use crate::pm_registry;
 
 /// Parsed `pm.*` command surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
+    AgentAdd {
+        name: String,
+        agent_id: String,
+    },
     /// Read a summary, bounded IDs or one record, without a raw-store dump.
     RequestTasksRead {
         selector: RequestTaskSelector,
@@ -69,6 +77,14 @@ pub enum PmCommand {
         project_root: Option<String>,
         submission: Box<pm_report::Submission>,
     },
+    /// Issue #7644: record what the current human PM turn asked or decided as
+    /// a theme, or that it is not one. Bound to the native human message.
+    ThemeRecord {
+        original: String,
+        decision: crate::themes::ThemeDecision,
+    },
+    /// Issue #7644: the project's themes, so a decision can update one.
+    ThemeList,
     /// Read the project's reports in posting order.
     ReportList {
         project_root: Option<String>,
@@ -83,6 +99,13 @@ pub enum PmCommand {
     /// explicitly, same convention as Issues queue operations).
     Status {
         project_root: Option<String>,
+    },
+    /// Fetch origin and record the result for the registered PM's current turn.
+    BranchFreshnessRefresh,
+    /// Persist whether the resident PM should start on the next project open.
+    SetAutoStart {
+        project_root: Option<String>,
+        enabled: bool,
     },
     /// Persistently pause or resume the autonomous resident loop.
     SetPaused {
@@ -333,6 +356,12 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         "Use a recorded scoped instruction_id or pm.approval.request; only develop/main required check contexts change",
     ),
     (
+        "repository.branch_protection.update",
+        r#"{}"#,
+        CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request; only typed develop/main protection toggles change (allow_force_pushes, required_conversation_resolution, enforce_admins, strict)",
+    ),
+    (
         "update.settings.set", r#"{}"#, CapabilityGapReason::Permission,
         "Use a recorded scoped instruction_id or pm.approval.request; changes the app-wide Settings preference",
     ),
@@ -350,7 +379,7 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
     ),
     (
         "pr.auto_merge.enable", r#"{}"#, CapabilityGapReason::Permission,
-        "Review the external fork PR and use a scoped instruction_id or pm.approval.request bound to its exact number and reviewed_head_sha; otherwise human merge required because repository automation may exclude external forks",
+        "Review the PR and use a scoped instruction_id or pm.approval.request bound to its exact number and reviewed_head_sha; supports same-repository recovery when merge automation cannot start, with current CI and Ready gates intact",
     ),
     (
         "release.metadata.set", r#"{}"#, CapabilityGapReason::Permission,
@@ -444,6 +473,21 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
+        PmCommand::AgentAdd { name, agent_id } => {
+            let member = add_agent_member(env.repo_path(), name, agent_id).map_err(|error| {
+                let message = format!("pm.agent.add: {error}");
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    refusal(message)
+                } else {
+                    SpecOpsError::from(ApiError::Unexpected(message))
+                }
+            })?;
+            out.push_str(
+                &serde_json::to_string_pretty(&member).map_err(super::serde_as_api_error)?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
         PmCommand::RequestTasksRead { selector } => {
             request_tasks(env.repo_path(), Some(selector), None, None, out)
         }
@@ -587,7 +631,7 @@ pub(super) fn run<E: CliEnv>(
                     timeout_seconds,
                     unavailable,
                 },
-                chrono::Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
             )
             .map_err(|error| refusal(error.to_string()))?;
             out.push_str(&serde_json::json!({"status":if message.unavailable.is_some() {"unavailable"} else {"queued"}, "message":message}).to_string());
@@ -612,6 +656,7 @@ pub(super) fn run<E: CliEnv>(
                 if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
                     tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
                 }
+                crate::pm_report_board::publish_best_effort(&repo_path);
             }
             out.push_str(
                 &serde_json::json!({"schema_version":2,"ok":true,"receipt":receipt}).to_string(),
@@ -741,12 +786,68 @@ pub(super) fn run<E: CliEnv>(
             if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
                 tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
             }
+            crate::pm_report_board::publish_best_effort(&repo_path);
             let mut response =
                 serde_json::json!({"schema_version": 1, "ok": true, "report": report});
             if let Some(saved) = saved_instruction {
                 response["instruction"] = serde_json::json!(saved);
             }
             out.push_str(&response.to_string());
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::ThemeRecord { original, decision } => {
+            let repo_path = env.repo_path().to_path_buf();
+            if !caller_is_registered_pm(&repo_path) {
+                return Err(refusal("pm.theme.record requires the registered PM".into()));
+            }
+            let turn = super::hook::pm_reporting::capture_qa_turn(&repo_path)
+                .map_err(super::io_as_api_error)?
+                .ok_or_else(|| {
+                    refusal("pm.theme.record needs the current human PM turn; automatic prompts are not recorded as themes".into())
+                })?;
+            let (session_id, message_id) = super::hook::pm_reporting::instruction_prompt_identity(
+                &repo_path, &turn, &original,
+            )
+            .map_err(|_| {
+                refusal("pm.theme.record: original must exactly match the latest human message of this PM turn".into())
+            })?;
+            let source = crate::themes::ThemeSource {
+                session_id,
+                message_id,
+                recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+            };
+            let number = crate::themes::record_theme(env.client(), &decision, &source)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.0)))?;
+            let record = super::hook::pm_reporting::record_theme_decision(
+                &repo_path, &turn, &decision, number, &source,
+            )
+            .map_err(super::io_as_api_error)?;
+            out.push_str(
+                &serde_json::json!({"schema_version":1,"ok":true,"theme":record}).to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::ThemeList => {
+            let listing =
+                gwt_github::IssueClient::list_themes(env.client()).map_err(SpecOpsError::from)?;
+            let themes: Vec<_> = listing
+                .themes
+                .iter()
+                .map(|theme| {
+                    serde_json::json!({
+                        "number": theme.number.0,
+                        "title": theme.title,
+                        "summary": crate::themes::theme_summary(&theme.body),
+                        "url": theme.url,
+                        "issues_total": theme.sub_issues_total,
+                    })
+                })
+                .collect();
+            out.push_str(
+                &serde_json::json!({"schema_version":1,"ok":true,"themes":themes,"truncated":listing.truncated}).to_string(),
+            );
             out.push('\n');
             Ok(0)
         }
@@ -763,6 +864,19 @@ pub(super) fn run<E: CliEnv>(
                     .to_string(),
             );
             out.push('\n');
+            Ok(0)
+        }
+        PmCommand::BranchFreshnessRefresh => {
+            let session = ambient_session_id()
+                .ok_or_else(|| refusal("requires this project's registered PM session".into()))?;
+            super::hook::branch_freshness::refresh(env.repo_path(), &session).map_err(|error| {
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    refusal(error.to_string())
+                } else {
+                    ApiError::Unexpected(error.to_string()).into()
+                }
+            })?;
+            out.push_str("git fetch origin succeeded and was recorded for this PM turn\n");
             Ok(0)
         }
         PmCommand::StatusSet {
@@ -789,6 +903,25 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(
                 &serde_json::json!({"schema_version": 1, "ok": true, "status": status}).to_string(),
             );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::SetAutoStart {
+            project_root,
+            enabled,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.auto_start.set requires the registered PM or a direct user CLI call".into(),
+                ));
+            }
+            let prefs = pm_registry::set_pm_auto_start(&repo_path, enabled).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to persist PM auto-start setting: {error}"
+                )))
+            })?;
+            out.push_str(&serde_json::json!({"auto_start": prefs.settings.auto_start}).to_string());
             out.push('\n');
             Ok(0)
         }
@@ -908,6 +1041,58 @@ pub(super) fn run<E: CliEnv>(
             Ok(0)
         }
     }
+}
+
+fn add_agent_member(repo: &Path, name: String, agent_id: String) -> io::Result<AgentMember> {
+    let denied = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "requires this project's registered PM session; inspect pm.status",
+        )
+    };
+    let actor = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| denied())?;
+    let project_dir = peer_project_dir(repo);
+    let prefs_path = project_dir.join("project-state/pm.json");
+    if !pm_registry::session_is_registered_pm(&prefs_path, &actor) {
+        return Err(denied());
+    }
+    let project_key = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("PM project identity is unavailable"))?;
+    let project_key =
+        gwt_core::repo_hash::ProjectKey::parse(project_key).map_err(io::Error::other)?;
+    crate::agent_names::validate_registration_tool(&agent_id).map_err(io::Error::other)?;
+    pm_registry::with_pm_prefs_snapshot(&prefs_path, |prefs| {
+        if prefs
+            .registration
+            .as_ref()
+            .is_none_or(|registration| registration.session_id != actor)
+        {
+            return Err(denied());
+        }
+        let roster_missing = || io::Error::other("Agent roster is unavailable; refresh Agents");
+        let revision = crate::agent_registry::SessionMemberSnapshot::load()?
+            .project_snapshot(&project_key)?
+            .agent_roster
+            .ok_or_else(roster_missing)?
+            .revision;
+        let saved = crate::agent_registry::mutate_pm_selection(
+            &project_key,
+            AgentRosterAction::Add {
+                name: Some(name),
+                agent_id: Some(agent_id),
+                pm_eligible: false,
+                model: None,
+                reasoning: None,
+            },
+            Some(revision),
+        )?;
+        saved
+            .agent_roster
+            .and_then(|mut roster| roster.members.pop())
+            .ok_or_else(roster_missing)
+    })
 }
 
 fn request_tasks(

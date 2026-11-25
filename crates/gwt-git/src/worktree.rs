@@ -19,6 +19,33 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REMOTE_TRACKING_FETCH_MAX_ATTEMPTS: usize = 3;
 const REMOTE_TRACKING_FETCH_RETRY_DELAY: Duration = Duration::from_millis(150);
 
+/// A background remote-branch publication still in flight (Issue #7670),
+/// keyed by the repository and branch that started it (Issue #7723). The
+/// thread yields `Err("<branch>: <error>")` when its publication failed.
+struct RemoteBranchPublication {
+    repo_path: PathBuf,
+    branch: String,
+    handle: JoinHandle<std::result::Result<(), String>>,
+}
+static PENDING_REMOTE_BRANCH_PUBLICATIONS: std::sync::Mutex<Vec<RemoteBranchPublication>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn track_remote_branch_publication(
+    repo_path: &Path,
+    branch: &str,
+    handle: JoinHandle<std::result::Result<(), String>>,
+) {
+    let mut pending = PENDING_REMOTE_BRANCH_PUBLICATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pending.retain(|publication| !publication.handle.is_finished());
+    pending.push(RemoteBranchPublication {
+        repo_path: repo_path.to_path_buf(),
+        branch: branch.to_string(),
+        handle,
+    });
+}
+
 /// Information about a single worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
@@ -1048,6 +1075,12 @@ impl WorktreeManager {
         base_remote_ref: &str,
         new_branch: &str,
     ) -> Result<()> {
+        self.push_remote_branch_from_base(base_remote_ref, new_branch)?;
+        self.fetch_remote_branch_tracking_ref(new_branch)?;
+        Ok(())
+    }
+
+    fn push_remote_branch_from_base(&self, base_remote_ref: &str, new_branch: &str) -> Result<()> {
         let base_ref = normalize_remote_ref(base_remote_ref);
         let push_refspec = format!("{base_ref}:refs/heads/{new_branch}");
         let args = push_args_with_github_token_helper(&push_refspec);
@@ -1059,9 +1092,142 @@ impl WorktreeManager {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(GwtError::Git(stderr));
         }
-
-        self.fetch_remote_branch_tracking_ref(new_branch)?;
         Ok(())
+    }
+
+    /// Create a worktree for a new branch whose remote counterpart does not
+    /// exist yet, without touching the network (Issue #7670).
+    ///
+    /// `new_branch` starts at `base_remote_ref` and is configured to track
+    /// `origin/<new_branch>`, so the first `git push` publishes it under the
+    /// same name. Publishing itself is left to
+    /// [`publish_remote_branch_in_background`](Self::publish_remote_branch_in_background):
+    /// a push that takes minutes must not consume the caller's deadline.
+    pub fn create_from_base_tracking_unpublished_remote(
+        &self,
+        base_remote_ref: &str,
+        new_branch: &str,
+        path: &Path,
+    ) -> Result<()> {
+        let _configuration_lock = self.lock_branch_configuration()?;
+        let base_ref = normalize_remote_ref(base_remote_ref);
+        let path_arg = path_arg_for_git(path);
+        let _config_write = crate::repository::lock_repository_config_write(&self.repo_path)?;
+        // `--no-track`: the base is a remote-tracking ref, and inheriting it as
+        // the upstream would aim the branch's pushes at the base branch.
+        let merge_ref = format!("refs/heads/{new_branch}");
+        let remote_key = format!("branch.{new_branch}.remote");
+        let merge_key = format!("branch.{new_branch}.merge");
+        let steps: [(&str, Vec<&str>); 3] = [
+            (
+                "worktree add --no-track -b",
+                vec![
+                    "worktree",
+                    "add",
+                    "--no-track",
+                    "-b",
+                    new_branch,
+                    path_arg.as_str(),
+                    &base_ref,
+                ],
+            ),
+            (
+                "config branch remote",
+                vec!["config", &remote_key, "origin"],
+            ),
+            (
+                "config branch merge",
+                vec!["config", &merge_key, &merge_ref],
+            ),
+        ];
+        for (label, args) in steps {
+            let output = run_git_observing_operation_deadline(&args, &self.repo_path)
+                .map_err(|e| GwtError::Git(format!("{label}: {e}")))?;
+            if !output.success {
+                return Err(GwtError::Git(git_output_stderr(&output)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Publish `origin/<new_branch>` from `base_remote_ref` on a background
+    /// thread, outside any operation deadline of the caller (Issue #7670).
+    ///
+    /// Best effort: the branch already tracks `origin/<new_branch>`, so a
+    /// failed or lost publication is repaired by the branch's first push. A
+    /// remote branch that has advanced in the meantime rejects this push as a
+    /// non-fast-forward and is left untouched. Each stage's duration is logged
+    /// so a slow remote is attributable.
+    pub fn publish_remote_branch_in_background(&self, base_remote_ref: &str, new_branch: &str) {
+        let manager = Self::new(&self.repo_path);
+        let base_remote_ref = base_remote_ref.to_string();
+        let branch = new_branch.to_string();
+        let spawned = thread::Builder::new()
+            .name("gwt-remote-branch-publish".to_string())
+            .spawn(move || {
+                let push_started = Instant::now();
+                let pushed = manager.push_remote_branch_from_base(&base_remote_ref, &branch);
+                let push_ms = push_started.elapsed().as_secs_f64() * 1000.0;
+                let fetch_started = Instant::now();
+                let result =
+                    pushed.and_then(|()| manager.fetch_remote_branch_tracking_ref(&branch));
+                let fetch_ms = fetch_started.elapsed().as_secs_f64() * 1000.0;
+                match result {
+                    Ok(()) => {
+                        tracing::info!(target: "gwt.launch.timing", branch = %branch,
+                            base = %base_remote_ref, push_ms, fetch_ms,
+                            "remote work branch published after launch");
+                        Ok(())
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "gwt.launch.timing", branch = %branch,
+                            base = %base_remote_ref, push_ms, fetch_ms, %error,
+                            "remote work branch publication failed; the branch's first push creates it");
+                        Err(format!("{branch}: {error}"))
+                    }
+                }
+            });
+        match spawned {
+            Ok(handle) => track_remote_branch_publication(&self.repo_path, new_branch, handle),
+            Err(error) => tracing::warn!(target: "gwt.launch.timing", branch = new_branch, %error,
+                "remote work branch publication could not start; the branch's first push creates it"),
+        }
+    }
+
+    /// Block, with no time limit, until the background publications this
+    /// repository started for `branch` have finished, and return their first
+    /// failure. Publications of other repositories and branches are neither
+    /// waited for nor reported (Issue #7723). Launches never call this; it
+    /// lets a caller that needs the remote branch (or a test) observe the
+    /// publication instead of guessing its timing. The repository is matched
+    /// by the path this manager was created with. A publication that had
+    /// already finished when a later one started is no longer tracked, so a
+    /// caller still checks the remote branch itself (Issue #7714).
+    pub fn wait_for_remote_branch_publication(
+        &self,
+        branch: &str,
+    ) -> std::result::Result<(), String> {
+        let own = {
+            let mut pending = PENDING_REMOTE_BRANCH_PUBLICATIONS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (own, others) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition::<Vec<_>, _>(|publication| {
+                    publication.repo_path == self.repo_path && publication.branch == branch
+                });
+            *pending = others;
+            own
+        };
+        let mut outcome = Ok(());
+        for publication in own {
+            let joined = publication
+                .handle
+                .join()
+                .unwrap_or_else(|_| Err(format!("{branch}: remote branch publication panicked")));
+            outcome = outcome.and(joined);
+        }
+        outcome
     }
 
     /// Delete the remote branch that corresponds to `local_branch`.
@@ -2018,6 +2184,42 @@ mod tests {
             stdout: Vec::new(),
             stderr: stderr.into(),
         }
+    }
+
+    /// Issue #7723: a wait observes only the publications registered for its
+    /// own repository and branch. The failing publications of another branch
+    /// and another repository are still in flight when the wait returns, so
+    /// they were neither waited for nor reported.
+    #[test]
+    fn remote_branch_publication_wait_ignores_other_repositories_and_branches() {
+        let own_repo = Path::new("/issue-7723/own-repo");
+        let other_repo = Path::new("/issue-7723/other-repo");
+        let held_failure = |message: &str| {
+            let message = message.to_string();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let handle = thread::spawn(move || {
+                let _ = released.recv();
+                Err(message)
+            });
+            (release, handle)
+        };
+        let (release_other_branch, other_branch) = held_failure("feature/config-env-2: failed");
+        let (release_other_repo, other_repo_publication) = held_failure("work/issue-7723: failed");
+        track_remote_branch_publication(own_repo, "feature/config-env-2", other_branch);
+        track_remote_branch_publication(other_repo, "work/issue-7723", other_repo_publication);
+        track_remote_branch_publication(own_repo, "work/issue-7723", thread::spawn(|| Ok(())));
+
+        assert_eq!(
+            WorktreeManager::new(own_repo).wait_for_remote_branch_publication("work/issue-7723"),
+            Ok(()),
+            "another repository's or branch's failure leaked into this wait"
+        );
+
+        drop((release_other_branch, release_other_repo));
+        let _ = WorktreeManager::new(own_repo)
+            .wait_for_remote_branch_publication("feature/config-env-2");
+        let _ =
+            WorktreeManager::new(other_repo).wait_for_remote_branch_publication("work/issue-7723");
     }
 
     #[test]

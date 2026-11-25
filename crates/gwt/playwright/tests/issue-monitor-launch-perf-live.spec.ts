@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { gotoLiveGwt, sendLiveGwtEvent } from './_helpers/live-gwt';
+import { openWorks } from './_helpers/works-entry';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || '';
 const HOME = process.env.GWT5596_HOME || '';
@@ -40,7 +41,7 @@ test(LAUNCH_ACCEPTANCE ? 'Issue #7016: six retained panes, ten single launches a
     await gotoLiveGwt(page, BASE, { enableTestBridge: true, projectKey: fixture.project_key });
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     if (fixture.launch_acceptance) {
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       await expect(page.locator('.works-surface:not(.works-surface--preview)')).toBeVisible();
     }
     if (fixture.cargo_load) cargoLoadPeriod.activated = await setCargoLoad(fixture, true);

@@ -282,7 +282,7 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
         expect(page.url()).toBe(primaryProjectUrl);
         await prepareInteraction?.();
 
-        await runPaletteCommand(page, "Start UI Trace");
+        await runUiTrace(page, "start");
         const hook = await trigger.startHook();
         expect(
           await hook.hasCompleted(),
@@ -1301,16 +1301,10 @@ async function readUserPromptSubmitProfiles(
   return totals;
 }
 
-async function runPaletteCommand(page: Page, query: string): Promise<void> {
-  await page.locator("#op-palette-button").click();
-  const input = page.locator("#op-palette-input");
-  await expect(input).toBeVisible();
-  await input.fill(query);
-  await page.keyboard.press("Enter");
-  await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute(
-    "data-open",
-    "true",
-  );
+async function runUiTrace(page: Page, action: "start" | "stop"): Promise<void> {
+  // #7879: the command palette is retired; UI trace stays reachable as a
+  // devtools diagnostic on window.__operatorShell.uiTrace.
+  await page.evaluate(action => { (window as any).__operatorShell.uiTrace[action](); }, action);
 }
 
 async function stopAndReadUiTrace(
@@ -1318,7 +1312,7 @@ async function stopAndReadUiTrace(
   checkHome: string,
 ): Promise<TraceEntry[]> {
   const cursor = await liveMessageCursor(page);
-  await runPaletteCommand(page, "Stop UI Trace");
+  await runUiTrace(page, "stop");
   const saved = await waitForLiveMessage(page, cursor, "ui_trace_saved", () => true);
   const rawTracePath = String(saved.path ?? "");
   if (!rawTracePath || !isAbsolute(rawTracePath)) {

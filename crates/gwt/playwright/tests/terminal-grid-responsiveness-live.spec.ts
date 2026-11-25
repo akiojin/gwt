@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 test.describe("terminal-grid responsiveness (#5117)", () => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
@@ -176,7 +177,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         await info.attach("terminal-output-fallback-observation", { contentType: "application/json", path: evidence });
         // Park auxiliary terminals on the empty Works host before removal so
         // Settings does not create replacement windows during fixture teardown.
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
           await page.locator("#split-view-button").click();
         for (const id of created.reverse()) {
@@ -287,7 +288,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         await info.attach("Two visible windows with peer focus", { body: await page.screenshot(), contentType: "image/png" });
       } finally {
         await page.evaluate(() => (window as any).__gwtAc13PeerPaint?.restore());
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
           await page.locator("#split-view-button").click();
         for (const id of created.reverse()) {
@@ -348,7 +349,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         await page.locator(`.workspace-window[data-id="${id}"]`).screenshot({ path: screenshot });
         await info.attach("UTF-8 snapshot continuation", { path: screenshot, contentType: "image/png" });
       } finally {
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         for (const id of created.reverse()) {
           await sendLiveGwtEvent(page, { kind: "close_window", id });
           await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
@@ -505,7 +506,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
               ({ url: socket.url, readyState: socket.readyState, bufferedAmount: socket.bufferedAmount }))), errors }) });
         // Park auxiliary terminals on the empty Works host before removal so
         // Settings does not create replacement windows during fixture teardown.
-        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(page);
         if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
           await page.locator("#split-view-button").click();
         for (const id of created.reverse()) {

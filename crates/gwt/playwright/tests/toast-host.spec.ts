@@ -293,7 +293,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await expect(alerts).toHaveCount(1);
   await expect(alerts).toContainText(real.id);
   await expect(rows).toHaveCount(1);
-  await expect(page.locator("#op-notifications-button .op-rail__badge")).toHaveText("1");
+  await expect(page.locator("#op-notifications-button .app-head__count")).toHaveText("1");
 
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -331,11 +331,42 @@ test("Issue #6932 Issues notifications group repeated failures and continued/sta
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  const catalog = await readLiveHubCatalog(page, base!);
+  const primary = catalog.projects[0];
+  expect(primary).toBeTruthy();
+  const snapshot = { app_version: "playwright", active_tab_id: primary.id, recent_projects: [],
+    tabs: [{ ...primary, kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows: [] } }] };
+  // Keep the binary-served app connected, but let only this case's injected
+  // notifications reach it; live capacity updates are independent events.
+  await page.addInitScript(({ theme, snapshot }) => {
+    localStorage.setItem("gwt:ui:theme", theme);
+    class SnapshotSocket extends EventTarget {
+      static OPEN = 1;
+      static CLOSED = 3;
+      readyState = 0;
+      constructor() {
+        super();
+        setTimeout(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); }, 0);
+      }
+      send(raw: string) {
+        if (JSON.parse(raw).kind !== "frontend_ready") return;
+        for (const payload of [
+          { kind: "hub_state", hub: { app_version: snapshot.app_version, projects: snapshot.tabs, recent_projects: [] } },
+          { kind: "workspace_state", workspace: snapshot },
+        ]) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+      }
+      close() { this.readyState = 3; }
+    }
+    // @ts-ignore - controlled transport, actual checkout-served frontend.
+    window.WebSocket = SnapshotSocket;
+  }, { theme, snapshot });
   await gotoLiveGwt(page, base!);
+  await expect(page.locator("#app-version")).toHaveText("vplaywright");
   expect(await (await page.request.get(new URL("/app.js", base!).href)).text())
     .toContain("issueMonitorNotificationModel.update(() => ({ ...event }))");
   const bell = page.locator("#op-notifications-button");
-  const badge = bell.locator(".op-rail__badge");
+  const badge = bell.locator(".app-head__count");
   const drawer = page.locator("#notification-center");
   const rows = drawer.locator(".notification-center__item");
   await bell.click();
@@ -381,7 +412,6 @@ test("Issue #6932 Issues notifications group repeated failures and continued/sta
   })));
   await expect(launchRow).toHaveCount(1);
   await expect(rows).toHaveCount(5);
-  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const screenshot = testInfo.outputPath(`monitor-notifications-${theme}.png`);
   await page.screenshot({ path: screenshot, fullPage: true });
@@ -482,6 +512,48 @@ test.describe("toast-host alerts region (real browser, SPEC #3206 P1)", () => {
     });
     expect(layout.hostPosition).toBe("fixed");
     expect(layout.alertsPosition).not.toBe("fixed");
+  });
+
+  // SPEC #6476 T-005c (AC-1): the dismiss control was a 20x19px target on a
+  // phone. Below 601px it is a 44px tap target; wider layouts keep 20px.
+  test.describe("on a phone", () => {
+    test.use({ hasTouch: true });
+    test("the dismiss control is a 44px tap target that dismisses only its toast", async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(String(error)));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const push = (id: string) => page.evaluate(toastId => (window as any).__alerts.push({
+        id: toastId, level: "error", title: `Alert ${toastId}`, message: "detail", timeoutMs: 0, dismissible: true,
+      }), id);
+      const dismiss = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="${id}"] .toast-alerts__dismiss`);
+      await page.setViewportSize({ width: 601, height: 900 });
+      await push("desktop");
+      expect((await dismiss("desktop").boundingBox())!.width, "601px keeps the desktop width").toBe(20);
+      const layout = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="${id}"]`).evaluate(item => {
+        const box = (selector: string) => item.querySelector(selector)!.getBoundingClientRect();
+        const outer = item.getBoundingClientRect();
+        const close = box(".toast-alerts__dismiss");
+        return { gap: box(".toast-alerts__message").top - box(".toast-alerts__title").bottom,
+          inside: close.top >= outer.top && close.bottom <= outer.bottom && close.right <= outer.right };
+      });
+      const desktopGap = (await layout("desktop")).gap;
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        await push(`keep-${width}`);
+        await push(`phone-${width}`);
+        const box = (await dismiss(`phone-${width}`).boundingBox())!;
+        expect(box.width, `dismiss width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(box.height, `dismiss height at ${width}px`).toBeGreaterThanOrEqual(44);
+        await expect(dismiss(`phone-${width}`)).toBeInViewport({ ratio: 1 });
+        const phone = await layout(`phone-${width}`);
+        expect(phone.inside, "the whole 44px target stays inside its toast").toBe(true);
+        expect(phone.gap, "the message stays as close to the title as on desktop").toBeLessThanOrEqual(desktopGap + 1);
+        await dismiss(`phone-${width}`).tap();
+        await expect(page.locator(`.toast-alerts__item[data-toast-id="phone-${width}"]`)).toHaveCount(0);
+        await expect(page.locator(`.toast-alerts__item[data-toast-id="keep-${width}"]`)).toHaveCount(1);
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
   });
 
   test("sticky alerts and the update CTA remain visible and operable without overlap", async ({
@@ -823,7 +895,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     page,
   }) => {
     const bell = page.locator("#op-notifications-button");
-    const badge = bell.locator(".op-rail__badge");
+    const badge = bell.locator(".app-head__count");
     await expect(badge).toBeHidden();
 
     for (let i = 0; i < 12; i += 1) {
@@ -979,7 +1051,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     });
 
     await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)"));
-    const badge = page.locator("#op-notifications-button .op-rail__badge");
+    const badge = page.locator("#op-notifications-button .app-head__count");
     await expect(badge).toHaveText("1");
     await expect(badge).toHaveAttribute("data-has-error", "true");
     // Still nothing rendered inside the Issue window.

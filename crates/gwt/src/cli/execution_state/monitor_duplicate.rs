@@ -566,7 +566,7 @@ mod tests {
                 session_binding_id: "second-binding".into(),
                 initial_session_id: "nonholder".into(),
                 entrypoint: "gwt-execute".into(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             prepare_concurrent_linked_owner_launch_successor(project, owner, &request).unwrap();
             activate_successor(project, owner, &request).unwrap();

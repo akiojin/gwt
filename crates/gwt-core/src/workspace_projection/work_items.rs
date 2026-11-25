@@ -6,9 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::timestamp::UtcTimestamp;
 
 use super::*;
 
@@ -90,7 +91,7 @@ pub struct WorkAgentRef {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
     /// Issue #3216: kind of the event that first attached this session, kept
     /// on the ref so mis-attribution stays diagnosable from works.json alone
     /// after the work-events journal is compacted. `None` for legacy refs and
@@ -187,7 +188,7 @@ pub struct WorkRecoveryLink {
 pub struct WorkTerminalDiagnosis {
     pub work_id: String,
     pub event_id: Option<String>,
-    pub event_time: Option<DateTime<Utc>>,
+    pub event_time: Option<UtcTimestamp>,
     pub source_operation: String,
     pub authority_class: Option<WorkAuthorityClass>,
     pub execution_generation: Option<String>,
@@ -236,7 +237,7 @@ pub struct WorkEvent {
     pub execution_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<WorkRecoveryLink>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 /// Durable provenance for an accepted duplicate event copy. New projections
@@ -367,7 +368,7 @@ impl WorkEvent {
     pub fn new(
         kind: WorkEventKind,
         work_item_id: impl Into<String>,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -412,10 +413,10 @@ pub struct WorkItem {
     pub status_category: WorkspaceStatusCategory,
     #[serde(default)]
     pub owner: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
     #[serde(default)]
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub agents: Vec<WorkAgentRef>,
     #[serde(default)]
@@ -439,7 +440,7 @@ pub struct WorkItem {
     /// Rebuild-applied events may advance `updated_at`, but must not move this
     /// boundary or later-discovered events can be incorrectly hidden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_metadata_snapshot_at: Option<DateTime<Utc>>,
+    pub legacy_metadata_snapshot_at: Option<UtcTimestamp>,
     /// Accepted duplicate copies keyed by event id. The canonical history
     /// stores one event; this provenance preserves enough context to re-check
     /// Session ownership before restoring a duplicate container after refold.
@@ -455,7 +456,7 @@ pub struct WorkItem {
     /// First explicit Discard instant. Unlike `updated_at`, this boundary does
     /// not move when later metadata or heartbeat events are folded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discarded_at: Option<DateTime<Utc>>,
+    pub discarded_at: Option<UtcTimestamp>,
 }
 
 impl WorkItem {
@@ -474,7 +475,7 @@ impl WorkItem {
     /// `legacy_metadata_snapshot_at`. Compaction is the only thing that
     /// produces that combination, because every other writer of
     /// `legacy_metadata_authoritative` stores the snapshot alongside it.
-    pub fn events_compacted_through(&self) -> Option<DateTime<Utc>> {
+    pub fn events_compacted_through(&self) -> Option<UtcTimestamp> {
         if self.legacy_metadata_authoritative && self.legacy_metadata_snapshot.is_none() {
             self.legacy_metadata_snapshot_at
         } else {
@@ -583,7 +584,7 @@ impl WorkItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkItemsProjection {
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
     #[serde(default)]
     pub work_items: Vec<WorkItem>,
 }
@@ -595,7 +596,7 @@ pub enum WorkEventApplyOutcome {
 }
 
 impl WorkItemsProjection {
-    pub fn empty(updated_at: DateTime<Utc>) -> Self {
+    pub fn empty(updated_at: UtcTimestamp) -> Self {
         Self {
             updated_at,
             work_items: Vec::new(),
@@ -604,6 +605,27 @@ impl WorkItemsProjection {
 
     pub fn apply_event(&mut self, event: WorkEvent) -> WorkEventApplyOutcome {
         self.apply_event_inner(event, false)
+    }
+
+    /// A merge refresh for an already linked, completed Work belongs in its
+    /// machine-local history. First-time PR associations still travel with
+    /// the shared Work history.
+    pub fn is_completed_pr_merge_refresh(&self, event: &WorkEvent) -> bool {
+        let Some(incoming) = event.execution_container.as_ref() else {
+            return false;
+        };
+        event.kind == WorkEventKind::Pr
+            && incoming.pr_number.is_some()
+            && incoming.pr_state.as_deref() == Some("MERGED")
+            && self.work_items.iter().any(|item| {
+                item.id == event.work_item_id
+                    && item.status_category == WorkspaceStatusCategory::Done
+                    && !item.discarded
+                    && item.execution_containers.iter().any(|existing| {
+                        existing.pr_number == incoming.pr_number
+                            && workspace_execution_container_same(existing, incoming)
+                    })
+            })
     }
 
     /// Apply one event inside an already globally ordered bulk fold.
@@ -1128,7 +1150,9 @@ pub(crate) fn merge_workspace_pr_metadata(
         if source.pr_url.is_some() {
             target.pr_url = source.pr_url.clone();
         }
-        if source.pr_state.is_some() {
+        // A merged PR cannot reopen. An older shared snapshot may be
+        // ingested after the machine-local merge refresh.
+        if source.pr_state.is_some() && target.pr_state.as_deref() != Some("MERGED") {
             target.pr_state = source.pr_state.clone();
         }
     }
@@ -1398,7 +1422,6 @@ pub type WorkspaceWorkItemsRebuildOutcome = WorkItemsRebuildOutcome;
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
 
     use super::*;
 
@@ -1407,7 +1430,7 @@ mod tests {
     /// survive as authoritative metadata so nothing regresses.
     #[test]
     fn compact_inline_events_caps_history_and_preserves_folded_state() {
-        let started_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let started_at = "2026-09-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(started_at);
 
         let mut start = WorkEvent::new(WorkEventKind::Start, "work-compaction", started_at);
@@ -1427,7 +1450,7 @@ mod tests {
             let mut update = WorkEvent::new(
                 WorkEventKind::Update,
                 "work-compaction",
-                started_at + chrono::Duration::seconds(index as i64 + 1),
+                started_at + time::Duration::seconds(index as i64 + 1),
             );
             update.progress_summary = Some(format!("update {index}"));
             projection.apply_event(update);
@@ -1483,7 +1506,7 @@ mod tests {
     /// move the growth into them.
     #[test]
     fn compact_inline_events_keeps_a_busy_work_item_bounded() {
-        let started_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let started_at = "2026-09-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(started_at);
         projection.apply_event(WorkEvent::new(
             WorkEventKind::Start,
@@ -1497,7 +1520,7 @@ mod tests {
                 let mut event = WorkEvent::new(
                     WorkEventKind::Update,
                     "work-busy",
-                    started_at + chrono::Duration::seconds(clock),
+                    started_at + time::Duration::seconds(clock),
                 );
                 event.board_entry_id = Some(format!("board-{clock}"));
                 event.agent_session_id = Some(format!("session-{clock}"));
@@ -1530,7 +1553,7 @@ mod tests {
 
     #[test]
     fn work_terminal_provenance_and_recovery_roundtrip_without_provider_identity() {
-        let at = Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap();
+        let at = "2026-09-11T01:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut value =
             serde_json::to_value(WorkEvent::new(WorkEventKind::Done, "work", at)).unwrap();
         value["source_operation"] = serde_json::json!("execution.complete");
@@ -1550,7 +1573,7 @@ mod tests {
 
     #[test]
     fn terminal_diagnosis_tracks_current_close_after_resume_and_ignores_later_closes() {
-        let at = Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap();
+        let at = "2026-09-11T01:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(at);
         let first = WorkEvent::new(WorkEventKind::Done, "work", at);
         projection.apply_event(first.clone());
@@ -1587,7 +1610,7 @@ mod tests {
             projection.apply_event(WorkEvent::new(
                 WorkEventKind::Update,
                 "work",
-                at + chrono::Duration::seconds(index as i64 + 1),
+                at + time::Duration::seconds(index as i64 + 1),
             ));
         }
         projection.compact_inline_events();
@@ -1615,7 +1638,7 @@ mod tests {
 
     #[test]
     fn terminal_diagnosis_preserves_discard_and_unknown_eventless_legacy() {
-        let at = Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap();
+        let at = "2026-09-11T01:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(at);
         let discard = WorkEvent::new(WorkEventKind::Discard, "work", at);
         projection.apply_event(discard.clone());
@@ -1651,8 +1674,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let work_items_path = temp.path().join("project-state/works.json");
         let events_path = temp.path().join("workspace/work_events.jsonl");
-        let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 0, 0).unwrap();
-        let done_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 30, 0).unwrap();
+        let started_at = "2026-05-11T01:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let done_at = "2026-05-11T01:30:00Z".parse::<UtcTimestamp>().unwrap();
 
         let mut start = WorkEvent::new(
             WorkEventKind::Start,
@@ -1721,8 +1744,8 @@ mod tests {
 
     #[test]
     fn apply_event_merges_pr_metadata_into_matching_execution_container() {
-        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 10, 0, 0).unwrap();
-        let t1 = Utc.with_ymd_and_hms(2026, 8, 19, 11, 0, 0).unwrap();
+        let t0 = "2026-08-19T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t1 = "2026-08-19T11:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("work/issue-3697");
@@ -1743,7 +1766,7 @@ mod tests {
             pr_url: Some("https://github.com/akiojin/gwt/pull/3672".to_string()),
             pr_state: Some("OPEN".to_string()),
         });
-        projection.apply_event(pr);
+        projection.apply_event(pr.clone());
 
         let item = projection
             .work_items
@@ -1789,14 +1812,30 @@ mod tests {
         assert_eq!(container.worktree_path.as_deref(), Some(worktree.as_path()));
         assert_eq!(container.pr_number, Some(3672));
         assert_eq!(container.pr_state.as_deref(), Some("CLOSED"));
+
+        let mut merged = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
+        let mut merged_container = container.clone();
+        merged_container.pr_state = Some("MERGED".to_string());
+        merged.execution_container = Some(merged_container);
+        projection.apply_event(merged);
+        let mut stale = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t0);
+        stale.execution_container = pr.execution_container;
+        projection.apply_event(stale);
+        assert_eq!(
+            projection.work_items[0].execution_containers[0]
+                .pr_state
+                .as_deref(),
+            Some("MERGED"),
+            "an older snapshot for the same PR must preserve its merge"
+        );
     }
 
     #[test]
     fn apply_event_synthesizes_progress_summary_from_legacy_events() {
         let work_item_id = "test-item-legacy-progress";
-        let t1 = Utc.with_ymd_and_hms(2026, 6, 16, 10, 0, 0).unwrap();
-        let t2 = Utc.with_ymd_and_hms(2026, 6, 16, 11, 0, 0).unwrap();
-        let t3 = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let t1 = "2026-06-16T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-06-16T11:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t3 = "2026-06-16T12:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let mut projection = WorkItemsProjection::empty(t1);
 
@@ -1840,7 +1879,7 @@ mod tests {
     #[test]
     fn batch_apply_defers_derived_progress_until_one_finalization() {
         let work_item_id = "test-item-batch-progress";
-        let started_at = Utc.with_ymd_and_hms(2026, 7, 28, 10, 0, 0).unwrap();
+        let started_at = "2026-07-28T10:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(started_at);
 
         for index in 0..256 {
@@ -1851,7 +1890,7 @@ mod tests {
                     WorkEventKind::Update
                 },
                 work_item_id,
-                started_at + chrono::Duration::seconds(index),
+                started_at + time::Duration::seconds(index),
             );
             event.title = (index == 0).then(|| "Batch progress".to_string());
             event.summary = Some(format!("Completed batch step {index}"));
@@ -1895,10 +1934,10 @@ mod tests {
 
     #[test]
     fn batch_apply_matches_sequential_apply_for_mixed_lifecycle_events() {
-        let t1 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 0, 0).unwrap();
-        let t2 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 1, 0).unwrap();
-        let t3 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 2, 0).unwrap();
-        let t4 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 3, 0).unwrap();
+        let t1 = "2026-07-28T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-07-28T10:01:00Z".parse::<UtcTimestamp>().unwrap();
+        let t3 = "2026-07-28T10:02:00Z".parse::<UtcTimestamp>().unwrap();
+        let t4 = "2026-07-28T10:03:00Z".parse::<UtcTimestamp>().unwrap();
 
         // Seed an existing Work with a newer event so a later incremental
         // Backfill exercises the same out-of-order history repair as intake.
@@ -2020,8 +2059,8 @@ mod tests {
     #[test]
     fn apply_event_preserves_done_against_subsequent_heartbeat() {
         let work_item_id = "test-item-preserve";
-        let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
-        let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 11, 0, 0).unwrap();
+        let t1 = "2026-05-14T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-05-14T11:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let mut projection = WorkItemsProjection::empty(t1);
 
@@ -2068,8 +2107,8 @@ mod tests {
     #[test]
     fn apply_event_done_then_discard_preserves_done_terminal_kind() {
         let work_item_id = "test-item-done-then-discard";
-        let done_at = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
-        let discarded_at = Utc.with_ymd_and_hms(2026, 7, 16, 11, 0, 0).unwrap();
+        let done_at = "2026-07-16T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let discarded_at = "2026-07-16T11:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(done_at);
 
         projection.apply_event(WorkEvent::new(WorkEventKind::Done, work_item_id, done_at));
@@ -2099,8 +2138,8 @@ mod tests {
     #[test]
     fn apply_event_discard_then_done_preserves_discarded_terminal_kind() {
         let work_item_id = "test-item-discard-then-done";
-        let discarded_at = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
-        let done_at = Utc.with_ymd_and_hms(2026, 7, 16, 11, 0, 0).unwrap();
+        let discarded_at = "2026-07-16T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let done_at = "2026-07-16T11:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(discarded_at);
 
         projection.apply_event(WorkEvent::new(
@@ -2137,8 +2176,8 @@ mod tests {
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): a Discard event makes the Work
         // terminal-discarded (not Done) and removes it from the incomplete set.
         let work_item_id = "test-item-discard";
-        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
-        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+        let t1 = "2026-06-04T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-06-04T11:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let mut projection = WorkItemsProjection::empty(t1);
         let mut start = WorkEvent::new(WorkEventKind::Start, work_item_id, t1);
@@ -2172,8 +2211,8 @@ mod tests {
     #[test]
     fn apply_event_repeated_discard_keeps_earliest_timestamp() {
         let work_item_id = "test-item-discard-earliest";
-        let t1 = Utc.with_ymd_and_hms(2026, 7, 16, 9, 0, 0).unwrap();
-        let t2 = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+        let t1 = "2026-07-16T09:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-07-16T10:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t1);
 
         projection.apply_event(WorkEvent::new(WorkEventKind::Discard, work_item_id, t2));
@@ -2196,8 +2235,8 @@ mod tests {
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is terminal — a later
         // heartbeat update (no explicit status_category) must not un-discard.
         let work_item_id = "test-item-discard-preserve";
-        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
-        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+        let t1 = "2026-06-04T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-06-04T11:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let mut projection = WorkItemsProjection::empty(t1);
         let discard = WorkEvent::new(WorkEventKind::Discard, work_item_id, t1);
@@ -2220,7 +2259,7 @@ mod tests {
 
     #[test]
     fn legacy_duplicate_container_provenance_remains_deserializable() {
-        let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
+        let t0 = "2026-07-15T07:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
         projection.apply_event(WorkEvent::new(WorkEventKind::Start, "work-legacy", t0));
         let mut value = serde_json::to_value(&projection.work_items[0]).unwrap();
@@ -2246,8 +2285,8 @@ mod tests {
     #[test]
     fn apply_event_idempotent_done_keeps_first_timestamp() {
         let work_item_id = "test-item-idempotent";
-        let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
-        let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+        let t1 = "2026-05-14T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-05-14T12:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let mut projection = WorkItemsProjection::empty(t1);
 
@@ -2288,9 +2327,9 @@ mod tests {
     /// Work whose branch identity conflicts (FR-348: 1 session : 1 Work).
     #[test]
     fn apply_event_rejects_stray_session_attach_to_conflicting_branch_item() {
-        let t0 = Utc.with_ymd_and_hms(2026, 6, 29, 7, 45, 56).unwrap();
-        let done_at = Utc.with_ymd_and_hms(2026, 6, 29, 8, 0, 0).unwrap();
-        let t1 = Utc.with_ymd_and_hms(2026, 6, 29, 8, 24, 29).unwrap();
+        let t0 = "2026-06-29T07:45:56Z".parse::<UtcTimestamp>().unwrap();
+        let done_at = "2026-06-29T08:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t1 = "2026-06-29T08:24:29Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
         let mut owner_start = WorkEvent::new(WorkEventKind::Start, "work-work-issue-3197", t0);
@@ -2362,8 +2401,8 @@ mod tests {
 
     #[test]
     fn apply_event_rejects_stray_session_before_creating_phantom_work() {
-        let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
-        let t1 = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
+        let t0 = "2026-07-15T07:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t1 = "2026-07-15T08:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
         let mut owner = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
@@ -2393,9 +2432,9 @@ mod tests {
 
     #[test]
     fn incoming_container_conflict_is_not_masked_by_target_history() {
-        let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
-        let done_at = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
-        let stray_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
+        let t0 = "2026-07-15T07:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let done_at = "2026-07-15T08:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let stray_at = "2026-07-15T09:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
         let shared_container = container_for_test("work/shared", "/repo/work/shared");
@@ -2435,7 +2474,7 @@ mod tests {
     /// the historical attach behavior.
     #[test]
     fn apply_event_allows_session_attach_without_identity_conflict() {
-        let t0 = Utc.with_ymd_and_hms(2026, 6, 29, 7, 45, 56).unwrap();
+        let t0 = "2026-06-29T07:45:56Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
         let mut owner_start = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
@@ -2474,7 +2513,7 @@ mod tests {
     /// the WorkAgentRef itself.
     #[test]
     fn apply_event_records_attach_provenance_kind() {
-        let t0 = Utc.with_ymd_and_hms(2026, 6, 29, 7, 45, 56).unwrap();
+        let t0 = "2026-06-29T07:45:56Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
         let mut start = WorkEvent::new(WorkEventKind::Start, "work-provenance", t0);
@@ -2506,8 +2545,8 @@ mod tests {
     /// fail-closed forever).
     #[test]
     fn apply_event_rejects_same_container_duplicate_claim() {
-        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
-        let t1 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 18, 10).unwrap();
+        let t0 = "2026-08-19T00:17:18Z".parse::<UtcTimestamp>().unwrap();
+        let t1 = "2026-08-19T00:18:10Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
         let container = container_for_test("work/issue-3287", "/repo/work/issue-3287");
@@ -2545,7 +2584,7 @@ mod tests {
     /// collaboration) and first-time claims keep attaching.
     #[test]
     fn apply_event_allows_claim_to_other_container_or_first_attach() {
-        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
+        let t0 = "2026-08-19T00:17:18Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
         let mut start = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
@@ -2582,7 +2621,7 @@ mod tests {
     /// canonical Work — and nothing else.
     #[test]
     fn detach_same_container_duplicate_claims_removes_only_the_poisoned_ref() {
-        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
+        let t0 = "2026-08-19T00:17:18Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
         let container = container_for_test("work/issue-3287", "/repo/work/issue-3287");
 
@@ -2656,7 +2695,7 @@ mod tests {
     /// healed away.
     #[test]
     fn detach_same_container_duplicate_claims_keeps_non_claim_and_foreign_refs() {
-        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 0, 17, 18).unwrap();
+        let t0 = "2026-08-19T00:17:18Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
         let container = container_for_test("work/issue-3287", "/repo/work/issue-3287");
 
@@ -2731,7 +2770,7 @@ mod tests {
     /// is the repair.
     #[test]
     fn detach_foreign_container_refs_removes_only_the_accreted_ref() {
-        let t0 = Utc.with_ymd_and_hms(2026, 9, 16, 8, 39, 0).unwrap();
+        let t0 = "2026-09-16T08:39:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
         let own = container_for_test("work/issue-2359", "/repo/work/issue-2359");
         let reused = container_for_test("work/issue-4465", "/repo/work/issue-4465");
@@ -2797,7 +2836,7 @@ mod tests {
     /// strip another Work's container.
     #[test]
     fn detach_foreign_container_refs_is_fail_closed_without_a_live_canonical_owner() {
-        let t0 = Utc.with_ymd_and_hms(2026, 9, 16, 8, 39, 0).unwrap();
+        let t0 = "2026-09-16T08:39:00Z".parse::<UtcTimestamp>().unwrap();
         let reused = container_for_test("work/issue-4465", "/repo/work/issue-4465");
 
         let seed = |with_canonical: bool, canonical_done: bool| {

@@ -23,7 +23,7 @@ fn project_owned_caches_and_pending_work_survive_other_project_reopen_and_close(
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(root),
         ));
     }
-    runtime.apply_work_merge_status(&a, HashMap::from([("merged-a".into(), chrono::Utc::now())]), HashMap::new(), HashSet::new(), HashSet::new(), None);
+    runtime.apply_work_merge_status(&a, HashMap::from([("merged-a".into(), gwt_core::timestamp::UtcTimestamp::now())]), HashMap::new(), HashSet::new(), HashSet::new(), None);
     let cache_a = runtime.project_state_for_tab("tab-a").unwrap().work_items_cache.clone();
     let cache_b = runtime.project_state_for_tab("tab-b").unwrap().work_items_cache.clone();
     assert!(!Arc::ptr_eq(&cache_a, &cache_b), "projects must not share a mutable parse cache");

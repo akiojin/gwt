@@ -20,7 +20,7 @@ vt100 = "0.16"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.32", features = ["signal"] }
 
 [dev-dependencies]
 tempfile.workspace = true

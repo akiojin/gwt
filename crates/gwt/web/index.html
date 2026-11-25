@@ -37,16 +37,18 @@
   <body>
     <div id="app">
       <div class="project-shell">
-        <div class="project-bar">
-
+        <!-- Issue #7740 (SPEC #7007 F-1): the header every page shares. The
+             destinations are rendered into #app-head-nav from the one
+             definition in app-chrome.js; a page adds only its own actions
+             after it. Both live in one row that scrolls sideways instead of
+             wrapping. -->
+        <header class="project-bar app-head" id="app-head">
+          <span class="app-head__brand">gwt</span>
+          <div class="app-head__row">
+          <div class="react-island" id="app-head-nav"></div>
           <div class="project-actions">
             <button class="arrange-button" id="split-view-button" type="button" aria-pressed="false" title="Show two surfaces side by side">Split view</button>
             <button class="arrange-button" id="close-project-button" type="button">Close Project</button>
-            <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
-            <span class="update-check" id="update-check">
-              <button class="arrange-button" id="update-check-button" type="button" title="Check for updates now">Check</button>
-              <span class="update-check-status" id="update-check-status" role="status" aria-live="polite"></span>
-            </span>
             <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
                  retired. Open Folder / Clone from GitHub now live inside the
                  consolidated `Projects ▾` switcher (and Cmd+O opens a folder),
@@ -90,7 +92,8 @@
               >LIGHT</button>
             </div>
           </div>
-        </div>
+          </div>
+        </header>
         <!-- SPEC-3038 US-1: the Command Rail is the always-visible 64px home
              for navigation, window operations, and system actions. Operation
              IDs (#tile-button etc.) and data-cmd attributes are preserved so
@@ -98,16 +101,8 @@
              symbols; hover flyouts carry the label + real shortcut. -->
         <aside class="op-rail" id="op-rail" aria-label="Command rail">
           <div class="op-rail__group" role="group" aria-label="Navigate">
-            <!-- SPEC-3431 FR-018/FR-019/FR-021: the PM is the user's single
-                 conversational window, so its launcher leads the Navigate
-                 group. One click always lands on the PM — an existing pane is
-                 framed in the viewport, a missing one is started first. The
-                 state dot reports running / stopped / not started. -->
-            <!-- SPEC-3431 FR-026: the settings gear is a SIBLING of the PM
-                 button, never a child. Nested, its click would bubble into the
-                 launcher and start/frame the PM every time the user only
-                 wanted to configure it. It stays hidden until the shell is
-                 hovered or focused so the rail keeps one icon per row. -->
+            <!-- The PM status dot remains visible. Open the agent ledger
+                 to use the PM terminal or manage the project's PM. -->
             <div class="pm-launcher-shell">
               <button
                 class="op-rail__item op-rail__item--pm"
@@ -138,10 +133,16 @@
           <!-- Issue #4777 T-1: the rail picks a fixed workspace surface. Every
                window preset folds into Issues / Agents / Board / Settings
                (surface-rail.js), and the entry for the focused window's
-               surface is pressed. The PM sits above them, cut off by the
+               surface is pressed. Issue #7880 (design item 137): Works has
+               no rail entry; a terminal opens from the Issue detail or the
+               Agents screen. The PM sits above them, cut off by the
                rule, because it is the user's own window and not one of the
                agents. SPEC-3885: Issues keeps the ⌘G entry id. -->
           <div class="op-rail__group op-rail__group--surfaces" role="group" aria-label="Surfaces">
+            <button class="op-rail__item op-rail__surface" type="button" data-surface="themes" aria-pressed="false" title="Themes: groups of issues and how far each has come">
+              <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16"/><path d="M8 12h12"/><path d="M8 18h12"/><path d="M4 12v6"/></svg>
+              <span class="op-rail__surface-label">Themes</span>
+            </button>
             <button
               class="op-rail__item op-rail__surface"
               type="button"
@@ -153,10 +154,6 @@
             >
               <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h5v16H3z"/><path d="M9.5 4h5v11h-5z"/><path d="M16 4h5v8h-5z"/></svg>
               <span class="op-rail__surface-label">Issues</span>
-            </button>
-            <button class="op-rail__item op-rail__surface" type="button" data-surface="works" aria-pressed="false" title="Works: live agent output and native terminals">
-              <span class="op-rail__surface-icon" aria-hidden="true">▤</span>
-              <span class="op-rail__surface-label">Works</span>
             </button>
             <button
               class="op-rail__item op-rail__surface"
@@ -196,45 +193,9 @@
               <span class="op-rail__surface-icon" aria-hidden="true">⌕</span>
               <span class="op-rail__surface-label">Index</span>
             </button>
-            <button class="op-rail__item op-rail__surface" type="button" data-cmd="open-profile" title="Profile: environment profiles and variables">
+            <button class="op-rail__item op-rail__surface" type="button" data-cmd="open-profile" aria-label="Environment variables" title="Manage environment variable sets">
               <span class="op-rail__surface-icon" aria-hidden="true">◑</span>
-              <span class="op-rail__surface-label">Profile</span>
-            </button>
-          </div>
-          <div class="op-rail__spacer" aria-hidden="true"></div>
-          <div class="op-rail__divider" aria-hidden="true"></div>
-          <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
-            <!-- SPEC #3206 v2 (FR-009): notification bell + unread badge. The
-                 drawer itself mounts on <body> (app.js) — never inside the rail,
-                 whose stacking context would clamp it under toasts/modals. -->
-            <button
-              class="op-rail__item op-rail__item--notifications"
-              type="button"
-              id="op-notifications-button"
-              data-cmd="toggle-notifications"
-              aria-label="Notifications"
-              title="Notifications"
-              aria-controls="notification-center"
-              aria-expanded="false"
-            >
-              <span class="op-rail__icon" aria-hidden="true">🔔</span>
-              <span class="op-rail__badge" aria-hidden="true" hidden></span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Notifications</span>
-              </span>
-            </button>
-            <button
-              class="op-rail__item"
-              id="op-palette-button"
-              aria-label="Command palette"
-              title="Command palette (⌘K / ⌘P)"
-              aria-keyshortcuts="Meta+K Meta+P"
-            >
-              <span class="op-rail__icon op-rail__icon--palette" aria-hidden="true">⌘K</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Palette</span>
-                <kbd class="op-rail__kbd">⌘ K</kbd>
-              </span>
+              <span class="op-rail__surface-label">Env vars</span>
             </button>
           </div>
         </aside>
@@ -278,14 +239,14 @@
         >
           <div class="op-status-strip__cell">
             <span class="op-status-strip__live-dot" aria-hidden="true"></span>
-            <span class="op-status-strip__label" data-role="connection-label">ONLINE</span>
+            <span class="op-status-strip__label" data-role="connection-label">Connected</span>
           </div>
           <div class="op-status-strip__cell project-owner-health" data-project-owner-health hidden>
-            <span class="op-status-strip__label">PROJECT</span>
+            <span class="op-status-strip__label">Project</span>
             <span class="op-status-strip__value" data-project-owner-health-value>Connecting</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--running">
-            <span class="op-status-strip__label">RUNNING</span>
+            <span class="op-status-strip__label">Running</span>
             <span class="op-status-strip__value" id="op-strip-running" aria-label="Running agents">0</span>
             <!-- Issue #3884 AC-3: how many of the running agents live as inline
                  terminals in the Issue window instead of on the canvas. -->
@@ -294,22 +255,22 @@
               id="op-strip-running-inline"
               aria-label="Running agents shown as inline terminals in the Issue window"
               hidden
-            >0 inline</span>
+            >0 in Issues</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--idle">
-            <span class="op-status-strip__label">IDLE</span>
+            <span class="op-status-strip__label">Idle</span>
             <span class="op-status-strip__value" id="op-strip-idle" aria-label="Idle agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--waiting">
-            <span class="op-status-strip__label">BLOCK</span>
+            <span class="op-status-strip__label">Blocked</span>
             <span class="op-status-strip__value" id="op-strip-waiting" aria-label="Agents that need you, including stopped and errored agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--error">
-            <span class="op-status-strip__label">ERROR</span>
+            <span class="op-status-strip__label">Errors</span>
             <span class="op-status-strip__value" id="op-strip-error" aria-label="Agents with runtime errors">0</span>
           </div>
           <div class="op-status-strip__cell">
-            <span class="op-status-strip__label">WORK</span>
+            <span class="op-status-strip__label">Work</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
           </div>
           <button
@@ -318,14 +279,15 @@
             id="op-strip-issue-monitor"
             data-state="disabled"
             aria-label="Open Issues: Off"
-            title="Open Issues | Issues: Off"
+            title="Open Issues | Auto-run: Off"
           >
-            <span class="op-status-strip__label">ISSUES</span>
+            <span class="op-status-strip__label">Auto-run</span>
             <span
               class="op-status-strip__value"
               id="op-strip-issue-monitor-value"
-              aria-label="Issues status"
+              aria-label="Auto-run status"
             >Off</span>
+            <span class="op-status-strip__sub" id="op-strip-needs-human" hidden></span>
           </button>
           <div
             class="op-status-strip__cell op-status-strip__cell--runtime-health"
@@ -335,24 +297,26 @@
             aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             title="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
           >
-            <span class="op-status-strip__label">PERF</span>
+            <span class="op-status-strip__label">Load</span>
             <span
               class="op-status-strip__value"
               id="op-strip-runtime-health-value"
               aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
-            >CPU -- MEM --</span>
+            >Warming -- --</span>
           </div>
-          <button
-            type="button"
-            class="op-status-strip__cell op-status-strip__cell--usage"
-            id="op-strip-usage"
-            aria-label="Provider usage and limits"
-            title="Provider usage & limits"
-            hidden
-          ></button>
           <div class="op-status-strip__cell" aria-hidden="true">
             <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
           </div>
+        </footer>
+        <!-- Issue #7740: the shared footer carries the version (with its
+             update check) and the PM name only (design item 155). -->
+        <footer class="app-foot" id="app-foot">
+          <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
+          <span class="update-check" id="update-check">
+            <button class="arrange-button" id="update-check-button" type="button" title="Check for updates now">Check</button>
+            <span class="update-check-status" id="update-check-status" role="status" aria-live="polite"></span>
+          </span>
+          <span class="react-island" id="app-foot-pm"></span>
         </footer>
       </div>
       <div
@@ -382,29 +346,6 @@
         <div class="op-briefing__progress" aria-hidden="true"></div>
         <div class="op-briefing__online">— OPERATOR ONLINE —</div>
       </div>
-      <div class="op-palette-backdrop" id="op-palette-backdrop" aria-hidden="true">
-        <div
-          class="op-palette"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Command palette"
-        >
-          <input
-            type="text"
-            class="op-palette__input"
-            id="op-palette-input"
-            placeholder="Run a command…"
-            autocomplete="off"
-            data-hotkey-override="true"
-            role="combobox"
-            aria-controls="op-palette-list"
-            aria-autocomplete="list"
-            aria-expanded="false"
-            aria-label="Search commands"
-          />
-          <ul class="op-palette__list" id="op-palette-list" role="listbox"></ul>
-        </div>
-      </div>
       <div class="op-hotkey-overlay" id="op-hotkey-overlay" aria-hidden="true">
         <div
           class="op-hotkey-card"
@@ -416,14 +357,6 @@
           <h2 class="op-hotkey-card__title">Operator Hotkeys</h2>
           <div class="op-hotkey-card__group">
             <h3 class="op-hotkey-card__group-title">Navigation</h3>
-            <div class="op-hotkey-card__row">
-              <span>Command palette</span>
-              <kbd class="op-kbd">⌘ K</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Project switcher</span>
-              <kbd class="op-kbd">⌘ P</kbd>
-            </div>
             <div class="op-hotkey-card__row">
               <span>Board surface</span>
               <kbd class="op-kbd">⌘ B</kbd>

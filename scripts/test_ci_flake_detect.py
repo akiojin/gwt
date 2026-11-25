@@ -158,12 +158,13 @@ class FlakeDetectionTests(unittest.TestCase):
 
 
 class ChangedTestSelectionTests(unittest.TestCase):
-    def select_suite(self, changed, merged_checkout=False):
+    def select_suite(self, changed, merged_checkout=False, library=False, dependencies=None,
+                     head_merged_newer_base=False, tested_another_head=False):
         code = SCRIPT.read_text().split("# changed-test-selection-begin\n", 1)[1].split(
             "# changed-test-selection-end\n", 1
         )[0]
         tests = ["changed::first", "changed::first_extra", "unrelated::first"]
-        with tempfile.TemporaryDirectory(prefix="gwt-flake-selection-") as directory:
+        with tempfile.TemporaryDirectory(prefix="gwt flake selection ") as directory:
             root = Path(directory)
             crate = root / "crates/gwt"
             (crate / "tests/suites").mkdir(parents=True)
@@ -176,11 +177,15 @@ class ChangedTestSelectionTests(unittest.TestCase):
             )
             (crate / "tests/changed.rs").write_text("fn first() {}\n")
             (crate / "tests/unrelated.rs").write_text("fn first() {}\n")
+            if library:
+                (crate / "src").mkdir()
+                (crate / "src/lib.rs").write_text("fn first() {}\n")
+                (crate / "src/main.rs").write_text("fn main() {}\n")
             git = ["git", "-c", "user.name=CI fixture", "-c", "user.email=ci@example.invalid"]
             for args in (["init", "--quiet"], ["add", "."], ["commit", "--quiet", "-m", "base"]):
                 subprocess.run(git + args, cwd=root, check=True, capture_output=True)
             base = subprocess.check_output(git + ["rev-parse", "HEAD"], cwd=root, text=True).strip()
-            if merged_checkout:
+            if merged_checkout or head_merged_newer_base:
                 (crate / "tests/unrelated.rs").write_text("fn first() { assert!(true); }\n")
                 for args in (["add", "."], ["commit", "--quiet", "-m", "upstream"]):
                     subprocess.run(git + args, cwd=root, check=True, capture_output=True)
@@ -195,19 +200,86 @@ class ChangedTestSelectionTests(unittest.TestCase):
                     path.write_text(changed[name])
             subprocess.run(git + ["add", "."], cwd=root, check=True, capture_output=True)
             subprocess.run(git + ["commit", "--quiet", "-m", "change"], cwd=root, check=True, capture_output=True)
+            owner = subprocess.check_output(git + ["rev-parse", "HEAD"], cwd=root, text=True).strip()
+            if head_merged_newer_base:
+                # The event still names `base`, but the owner merged a newer one.
+                subprocess.run(git + ["merge", "--quiet", "--no-edit", upstream],
+                               cwd=root, check=True, capture_output=True)
             head = subprocess.check_output(git + ["rev-parse", "HEAD"], cwd=root, text=True).strip()
-            if merged_checkout:
+            if head_merged_newer_base:
+                # GitHub tests a merge commit: current base tip first, head second.
+                for args in (["checkout", "--quiet", "--detach", upstream],
+                             ["merge", "--quiet", "--no-ff", "--no-edit",
+                              owner if tested_another_head else head]):
+                    subprocess.run(git + args, cwd=root, check=True, capture_output=True)
+            elif merged_checkout:
                 subprocess.run(git + ["merge", "--quiet", "--no-edit", upstream],
                                cwd=root, check=True, capture_output=True)
             listing = root / "tests.txt"
-            listing.write_text("\n".join(f"{test}: test" for test in tests))
+            header = ""
+            if library:
+                binary = root / "target/debug/deps/gwt-fixture"
+                binary.parent.mkdir(parents=True)
+                header = f"\x1b[1m     Running\x1b[0m unittests src/lib.rs ({binary})\n"
+                if dependencies is not None:
+                    rule = dependencies
+                    if isinstance(rule, list):
+                        sources = [(crate / name).as_posix().replace(" ", "\\ ") for name in rule]
+                        rule = f"{binary}: " + " ".join(sources) + "\n"
+                    binary.with_suffix(".d").write_text(rule)
+            listing.write_text(header + "\n".join(f"{test}: test" for test in tests))
+            entry = "gwt|lib|" if library else "gwt|test|ci_contracts"
             result = subprocess.run(
-                [sys.executable, "-c", code, "gwt|test|ci_contracts", str(listing), base],
+                [sys.executable, "-c", code, entry, str(listing), base],
                 cwd=root, env=dict(os.environ, PYTHONPATH=str(SCRIPT.parent.resolve()),
                                   GWT_FLAKE_HEAD_SHA=head),
                 capture_output=True, text=True, check=True,
             )
             return result.stdout.splitlines()
+
+    def test_library_ignores_only_sources_proven_absent_from_its_compilation(self):
+        changed = {"../src/lib.rs": "fn first() {} // changed\n",
+                   "../src/main.rs": "fn main() {} // binary-only\n"}
+        self.assertEqual(self.select_suite(changed, library=True, dependencies=["src/lib.rs"]),
+                         ["changed::first", "unrelated::first"])
+
+    def test_library_preserves_proven_empty_selection_with_uncompiled_companions(self):
+        changed = {"../src/main.rs": "fn main() {} // binary-only\n",
+                   "changed.rs": "fn first() {} // integration-only\n",
+                   "../../../.github/workflows/test.yml": "# workflow-only\n",
+                   "../../../.gwt/work/events/ab/event.jsonl": "{}\n"}
+        self.assertEqual(self.select_suite(changed, library=True, dependencies=["src/lib.rs"]), [])
+
+    def test_empty_library_selection_keeps_unproven_or_compiled_changes(self):
+        changed = {"../src/main.rs": "fn main() {} // binary-only\n"}
+        full = ["changed::first", "changed::first_extra", "unrelated::first"]
+        for dependencies in (None, "malformed\n", ["src/main.rs"],
+                             ["src/lib.rs", "src/main.rs"]):
+            with self.subTest(dependencies=dependencies):
+                self.assertEqual(self.select_suite(changed, library=True,
+                                                   dependencies=dependencies), full)
+        for companion, dependencies in (
+            ("../Cargo.toml", ["src/lib.rs"]),
+            ("../../../scripts/config.py", ["src/lib.rs"]),
+            ("../../../.github/workflows/test.yml", ["src/lib.rs", "../../.github/workflows/test.yml"]),
+        ):
+            with self.subTest(companion=companion):
+                self.assertEqual(self.select_suite({**changed, companion: "# changed\n"},
+                                                   library=True, dependencies=dependencies), full)
+        self.assertEqual(self.select_suite({"../src/main.rs": None}, library=True,
+                                           dependencies=["src/lib.rs"]), full)
+
+    def test_library_keeps_full_fallback_without_proof_or_for_unknown_and_deleted_sources(self):
+        full = ["changed::first", "changed::first_extra", "unrelated::first"]
+        changed = {"../src/lib.rs": "fn first() {} // changed\n",
+                   "../src/main.rs": "fn main() {} // binary-only\n"}
+        for dependencies in (None, "malformed\n", ["src/main.rs"],
+                             ["src/lib.rs", "src/main.rs"]):
+            with self.subTest(dependencies=dependencies):
+                self.assertEqual(self.select_suite(changed, library=True,
+                                                   dependencies=dependencies), full)
+        changed["../src/main.rs"] = None
+        self.assertEqual(self.select_suite(changed, library=True, dependencies=["src/lib.rs"]), full)
 
     def test_consolidated_suite_repeats_only_the_changed_file(self):
         self.assertEqual(self.select_suite({"changed.rs": "fn first() { assert!(true); }\n"}),
@@ -217,6 +289,22 @@ class ChangedTestSelectionTests(unittest.TestCase):
         self.assertEqual(self.select_suite({"changed.rs": "fn first() { assert!(true); }\n"},
                                            merged_checkout=True),
                          ["changed::first", "changed::first_extra"])
+
+    def test_head_that_merged_a_newer_base_excludes_delivered_upstream_changes(self):
+        # PR #7413: the event base predated the base its head had merged.
+        self.assertEqual(self.select_suite({"changed.rs": "fn first() { assert!(true); }\n"},
+                                           head_merged_newer_base=True),
+                         ["changed::first", "changed::first_extra"])
+        # The owner's own source change is still repeated.
+        self.assertEqual(self.select_suite({"../src/lib.rs": "fn first() {} // changed\n"},
+                                           library=True, dependencies=["src/lib.rs"],
+                                           head_merged_newer_base=True),
+                         ["changed::first", "unrelated::first"])
+
+    def test_merge_commit_of_another_head_keeps_the_wider_event_base(self):
+        self.assertEqual(self.select_suite({"changed.rs": "fn first() { assert!(true); }\n"},
+                                           head_merged_newer_base=True, tested_another_head=True),
+                         ["changed::first", "changed::first_extra", "unrelated::first"])
 
     def test_suite_harness_or_unknown_or_deleted_source_retains_the_full_target(self):
         for changed in (

@@ -14,10 +14,12 @@
 //! the whole event log, which is how a lost or truncated index file is
 //! repaired.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::coordination::{BoardEntry, BoardEntryKind};
+use crate::{
+    coordination::{BoardEntry, BoardEntryKind},
+    timestamp::UtcTimestamp,
+};
 
 /// File name of the persisted index inside the coordination directory.
 pub const ESCALATIONS_FILE_NAME: &str = "escalations.json";
@@ -47,9 +49,9 @@ pub struct BoardEscalation {
     pub origin_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_branch: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_at: Option<DateTime<Utc>>,
+    pub resolved_at: Option<UtcTimestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_by_entry_id: Option<String>,
 }
@@ -110,7 +112,7 @@ pub struct BoardEscalationStore {
     pub version: u32,
     #[serde(default)]
     pub escalations: Vec<BoardEscalation>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 impl Default for BoardEscalationStore {
@@ -118,7 +120,7 @@ impl Default for BoardEscalationStore {
         Self {
             version: ESCALATION_STORE_VERSION,
             escalations: Vec::new(),
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         }
     }
 }
@@ -169,7 +171,7 @@ impl BoardEscalationStore {
         }
 
         if changed {
-            self.updated_at = Utc::now();
+            self.updated_at = UtcTimestamp::now();
         }
         changed
     }
@@ -194,7 +196,7 @@ impl BoardEscalationStore {
             return false;
         }
         self.escalations.push(BoardEscalation::from_entry(entry));
-        self.updated_at = Utc::now();
+        self.updated_at = UtcTimestamp::now();
         true
     }
 
@@ -241,13 +243,13 @@ impl BoardEscalationStore {
     /// uninteresting, so the index cannot grow without bound on a
     /// long-lived repository. Open escalations are never pruned regardless of
     /// age — an old unanswered request is the most important row there is.
-    pub fn prune_resolved_before(&mut self, cutoff: DateTime<Utc>) -> bool {
+    pub fn prune_resolved_before(&mut self, cutoff: UtcTimestamp) -> bool {
         let before = self.escalations.len();
         self.escalations
             .retain(|escalation| escalation.is_open() || escalation.created_at >= cutoff);
         let changed = self.escalations.len() != before;
         if changed {
-            self.updated_at = Utc::now();
+            self.updated_at = UtcTimestamp::now();
         }
         changed
     }
@@ -631,9 +633,7 @@ pub fn render_escalation_issue_comment(escalation: &BoardEscalation) -> String {
             .as_deref()
             .map(|branch| format!(" ({branch})"))
             .unwrap_or_default(),
-        created_at = escalation
-            .created_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        created_at = escalation.created_at.to_rfc3339_seconds(),
         body = escalation.body.trim(),
     )
 }
@@ -667,7 +667,7 @@ pub fn render_open_escalation_lines(
                 author = escalation.author,
                 created_at = escalation
                     .created_at
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    .to_rfc3339_seconds(),
                 entry_id = escalation.entry_id,
                 body = truncate_body(&escalation.body, body_char_limit),
             )
@@ -689,7 +689,6 @@ fn truncate_body(body: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use crate::coordination::AuthorKind;
-    use chrono::TimeZone;
 
     fn entry(id: &str, kind: BoardEntryKind, owners: &[&str], body: &str) -> BoardEntry {
         let mut entry = BoardEntry::new(
@@ -703,7 +702,7 @@ mod tests {
             owners.iter().map(|owner| owner.to_string()).collect(),
         );
         entry.id = id.to_string();
-        entry.created_at = Utc.with_ymd_and_hms(2026, 8, 18, 6, 0, 0).unwrap();
+        entry.created_at = "2026-08-18T06:00:00Z".parse::<UtcTimestamp>().unwrap();
         entry.updated_at = entry.created_at;
         entry
     }
@@ -930,17 +929,17 @@ mod tests {
     fn pruning_drops_old_resolved_rows_and_keeps_every_open_one() {
         let mut store = BoardEscalationStore::default();
         let mut old_open = blocked("b1", &["2338"]);
-        old_open.created_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        old_open.created_at = "2026-01-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         store.apply_entry(&old_open);
 
         let mut old_closed = blocked("b2", &["3645"]);
-        old_closed.created_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        old_closed.created_at = "2026-01-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         store.apply_entry(&old_closed);
         let mut resolution = entry("r1", BoardEntryKind::Status, &["3645"], "解消");
         resolution.resolves_entry_ids = vec!["b2".to_string()];
         store.apply_entry(&resolution);
 
-        assert!(store.prune_resolved_before(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()));
+        assert!(store.prune_resolved_before("2026-06-01T00:00:00Z".parse().unwrap()));
         assert_eq!(store.escalations.len(), 1);
         assert_eq!(
             store.open_owner_issue_numbers(),

@@ -149,7 +149,7 @@ fn refresh_at_safe_boundary(worktree: &Path) -> io::Result<Option<String>> {
     if !pm_registry::is_pm_worktree(worktree) {
         return Ok(None);
     }
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let previous_freshness = worktree
         .parent()
         .and_then(Path::parent)
@@ -232,7 +232,7 @@ fn refresh_failure_counter_path(worktree: &Path) -> Option<std::path::PathBuf> {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PromptRefreshFailure {
     consecutive_failures: u32,
-    retry_after: Option<chrono::DateTime<chrono::Utc>>,
+    retry_after: Option<gwt_core::timestamp::UtcTimestamp>,
     previous_freshness: Option<pm_registry::PmWorktreeFreshness>,
     failure_reason: String,
 }
@@ -256,7 +256,7 @@ fn previous_freshness_context(freshness: Option<&pm_registry::PmWorktreeFreshnes
 
 fn prompt_refresh_retry_context(
     worktree: &Path,
-    now: chrono::DateTime<chrono::Utc>,
+    now: gwt_core::timestamp::UtcTimestamp,
 ) -> Option<String> {
     let failure = load_prompt_refresh_failure(worktree)?;
     let retry_after = failure
@@ -273,7 +273,7 @@ fn prompt_refresh_retry_context(
 fn bump_refresh_failure_count(
     worktree: &Path,
     error: &io::Error,
-    now: chrono::DateTime<chrono::Utc>,
+    now: gwt_core::timestamp::UtcTimestamp,
     previous_freshness: Option<pm_registry::PmWorktreeFreshness>,
 ) -> u32 {
     let Some(path) = refresh_failure_counter_path(worktree) else {
@@ -295,7 +295,7 @@ fn bump_refresh_failure_count(
         // the next prompt, preserving immediate identity/error inspection
         // once the other refresh releases its lock (#4686).
         retry_after: gwt_core::operation_deadline::is_deadline_expired(error)
-            .then(|| now + chrono::Duration::seconds(PM_PROMPT_REFRESH_RETRY_SECS)),
+            .then(|| now + time::Duration::seconds(PM_PROMPT_REFRESH_RETRY_SECS)),
         previous_freshness,
         failure_reason: error.to_string(),
     };
@@ -319,13 +319,18 @@ pub(crate) fn clear_refresh_failure_count(worktree: &Path) {
 
 #[cfg(test)]
 fn record_degraded_refresh(worktree: &Path, error: &io::Error) {
-    record_degraded_refresh_at(worktree, error, chrono::Utc::now(), None);
+    record_degraded_refresh_at(
+        worktree,
+        error,
+        gwt_core::timestamp::UtcTimestamp::now(),
+        None,
+    );
 }
 
 fn record_degraded_refresh_at(
     worktree: &Path,
     error: &io::Error,
-    now: chrono::DateTime<chrono::Utc>,
+    now: gwt_core::timestamp::UtcTimestamp,
     previous_freshness: Option<pm_registry::PmWorktreeFreshness>,
 ) {
     let form = "skipped";
@@ -402,7 +407,9 @@ pub fn handle_user_prompt_submit(worktree: &Path) -> io::Result<Option<String>> 
             return None;
         }
         let project = root.parent()?.parent()?;
-        if let Some(context) = prompt_refresh_retry_context(root, chrono::Utc::now()) {
+        if let Some(context) =
+            prompt_refresh_retry_context(root, gwt_core::timestamp::UtcTimestamp::now())
+        {
             return Some(context);
         }
         Some(
@@ -430,7 +437,7 @@ pub fn handle_user_prompt_submit(worktree: &Path) -> io::Result<Option<String>> 
     });
     handle_user_prompt_submit_at(
         worktree,
-        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
     );
     Ok(refresh_context)
 }
@@ -463,7 +470,7 @@ pub fn handle_with_input(
 ) -> HookOutput {
     handle_at(
         worktree,
-        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         super::envelope::stop_hook_active_from(input),
         current_session,
     )
@@ -591,10 +598,10 @@ fn handle_at(
     }
     if let Some(last) = state.last_continued_at.as_deref() {
         if let (Ok(now_t), Ok(last_t)) = (
-            chrono::DateTime::parse_from_rfc3339(now),
-            chrono::DateTime::parse_from_rfc3339(last),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(last),
         ) {
-            if (now_t - last_t).num_seconds() < i64::try_from(interval_secs).unwrap_or(i64::MAX) {
+            if (now_t - last_t).whole_seconds() < i64::try_from(interval_secs).unwrap_or(i64::MAX) {
                 end_own_chain(&state);
                 return HookOutput::Silent;
             }
@@ -776,7 +783,7 @@ mod tests {
         let now = std::time::Instant::now();
         let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
-        let retry_now = chrono::Utc::now();
+        let retry_now = gwt_core::timestamp::UtcTimestamp::now();
         record_degraded_refresh_at(
             &worktree,
             &io::Error::new(
@@ -802,11 +809,10 @@ mod tests {
             .count();
         assert_eq!(failures, 1, "100 prompts must make only one failed attempt");
         assert_eq!(std::fs::read(&prefs_path).unwrap(), previous);
-        assert!(prompt_refresh_retry_context(
-            &worktree,
-            retry_now + chrono::Duration::seconds(300)
-        )
-        .is_none());
+        assert!(
+            prompt_refresh_retry_context(&worktree, retry_now + time::Duration::seconds(300))
+                .is_none()
+        );
         clear_refresh_failure_count(&worktree);
         assert!(prompt_refresh_retry_context(&worktree, retry_now).is_none());
         eprintln!("Issue #5391: 100 prompts, 1 failed attempt, prior freshness preserved; elapsed_ms={:.3}", measured.elapsed().as_secs_f64() * 1000.0);
@@ -1117,6 +1123,7 @@ mod tests {
                 settings: crate::pm_registry::PmSettings::default(),
                 worktree_freshness: None,
                 start_block: None,
+                title_activity: None,
             },
         )
         .expect("seed PM registration");
@@ -1924,7 +1931,10 @@ mod tests {
                 "operation deadline expired during git",
             ),
         );
-        assert!(prompt_refresh_retry_context(&worktree, chrono::Utc::now()).is_some());
+        assert!(
+            prompt_refresh_retry_context(&worktree, gwt_core::timestamp::UtcTimestamp::now())
+                .is_some()
+        );
 
         let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false, None);
 
@@ -2186,6 +2196,13 @@ mod tests {
             "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
         })
         .to_string();
+        // Issue #7785: the provider's paste envelope must not hide the marker.
+        let pasted = serde_json::json!({
+            "prompt": format!(
+                "\n\n<pasted_content id=\"c676\">\n{body} [gwt-delivery:{operation_id}:{body_sha256}]\n</pasted_content id=\"c676\">\n"
+            )
+        })
+        .to_string();
         {
             let _wrong_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "wrong-session");
             handle_delivery_acknowledgement(&repo, &input);
@@ -2201,6 +2218,16 @@ mod tests {
             .expect("load receipt")
             .iter()
             .any(|receipt| receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified));
+
+        handle_delivery_acknowledgement(&repo, &pasted);
+        assert_eq!(
+            pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            pm_registry::PmDeliveryReceiptStatus::Verified,
+            "a pasted delivery acknowledges its exact operation"
+        );
     }
 
     /// The brakes: a floor between continuations and a cap without user

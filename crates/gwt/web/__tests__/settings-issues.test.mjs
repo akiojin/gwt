@@ -8,6 +8,7 @@ import { createInteractionGuard } from "../interaction-guard.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 import * as uiContent from "../ui-content.js";
 import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "../first-run-setup.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 const candidateChoices = {
@@ -42,7 +43,7 @@ function selectValue(control, value) {
   option.selected = true;
 }
 function load(name, bindings = {}) {
-  bindings = { setControlExplanation, createRepositoryLabelChip: uiContent.createRepositoryLabelChip, ...bindings };
+  bindings = { setControlExplanation, createRepositoryLabelChip: uiContent.createRepositoryLabelChip, ...(name === "renderAgentsSettingsPanel" ? { renderMemberTuningControls: load("renderMemberTuningControls") } : {}), ...bindings };
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
   const open = source.indexOf("{", source.indexOf(")", start));
@@ -69,7 +70,7 @@ test("Settings entry points reuse only the requested surface owner", () => {
     assert.equal(body.hidden, false, "reveal the surface before focusing its section");
     selected.push([body.id, target]);
   } })({
-    document, settingsWindowBodies: new Set([normal, pm]), activeProjectTab: () => ({ project_root: "/A" }),
+    document, onOpenAgents: () => focused.push(["agents"]), settingsWindowBodies: new Set([normal, pm]), activeProjectTab: () => ({ project_root: "/A" }),
     focusOrSpawnPreset: (...args) => {
       focused.push(args);
       (args[1].surfaceOwner === "pm" ? pm : normal).hidden = false;
@@ -77,11 +78,12 @@ test("Settings entry points reuse only the requested surface owner", () => {
   });
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
-  assert.deepEqual(selected, [["pm", "project-manager"], ["normal", "issues"]]);
-  assert.deepEqual(focused, [["settings", { surfaceOwner: "pm" }], ["settings", { surfaceOwner: null }]]);
+  assert.deepEqual(selected, [["normal", "issues"]]);
+  assert.deepEqual(focused, [["agents"], ["settings", { surfaceOwner: null }]]);
   pm.remove();
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
-  assert.deepEqual(pending, [["project-manager", "pm"]]);
+  assert.deepEqual(pending, []);
+  assert.deepEqual(focused.at(-1), ["agents"]);
 });
 
 test("Reopening an existing System Settings window reloads CLI update preferences", () => {
@@ -121,6 +123,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
       terminal_queue_auto_refill_limit: 3, allowed_labels: ["auto-merge"] },
     catalog: { loaded: true, labels: [{ name: "auto-merge", color: "008800" }, { name: "bug", color: "ff0000" }] },
     send: message => sent.push(message),
+    autonomyControl: { element: Object.assign(document.createElement("span"), { textContent: "Running" }) },
   });
   assert.match(panel.textContent, /Project settings.*Project A/);
   assert.deepEqual([...panel.querySelectorAll("legend")].map(el => el.textContent), ["Launch control", "Refill", "Target"]);
@@ -131,7 +134,10 @@ test("Issues Settings keeps labels and values together and sends existing projec
   assert.equal(panel.querySelector(".settings-issues-capacity"), null);
   assert.equal(panel.querySelector('[aria-label="Auto-refill"]').closest("fieldset").querySelector("legend").textContent, "Refill");
   assert.equal(panel.querySelector('[aria-label="Allowed labels"]').closest("fieldset").querySelector("legend").textContent, "Target");
-  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Monitoring"]);
+  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Project", "Autonomous"]);
+  // Issue #7728 AC-2: monitoring has no switch of its own; the project stop/start replaces it.
+  assert.equal(panel.querySelector('[aria-label="Monitoring"]'), null);
+  assert.match(panel.querySelector('[data-settings-launch-action="project-autonomy"] > span:last-child').getAttribute("aria-description") || "", /Stopping halts new Issue assignments and the Project Manager patrol together/);
   const change = (name, value) => {
     const control = panel.querySelector(`[aria-label="${name}"]`);
     assert.ok(control, name);
@@ -149,10 +155,8 @@ test("Issues Settings keeps labels and values together and sends existing projec
   ]);
   change("Autonomous", true);
   assert.equal(panel.querySelector('[aria-label="Autonomous"]').checked, false, "wait for the confirmed server status");
-  change("Monitoring", false);
-  assert.deepEqual(sent.slice(-2), [
+  assert.deepEqual(sent.slice(-1), [
     { kind: "set_issue_monitor_autonomous_mode", enabled: true },
-    { kind: "set_issue_monitor_enabled", enabled: false },
   ], "Settings owns independent controls connected to the same project model");
 });
 
@@ -164,10 +168,10 @@ test("Settings launch controls retain their nodes and save once across status re
   render(panel, options);
   const launchControls = [...panel.querySelectorAll('[data-action]')];
   render(panel, { ...options, launchControls });
-  assert.equal(panel.querySelector('[aria-label="Monitoring"]'), launchControls[1]);
-  launchControls[1].checked = false;
-  launchControls[1].dispatchEvent(new Event("change"));
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_enabled", enabled: false }]);
+  assert.equal(panel.querySelector('[aria-label="Autonomous"]'), launchControls[0]);
+  launchControls[0].checked = true;
+  launchControls[0].dispatchEvent(new Event("change"));
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_autonomous_mode", enabled: true }]);
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
@@ -198,7 +202,8 @@ test("Project settings never writes capacity when opened, remounted or updated",
       launchControls: [...panel.querySelectorAll("[data-action]")] });
     assert.equal(panel.querySelectorAll('[aria-label^="Max active"], [aria-label="Apply Max active"], .settings-issues-capacity').length, 0);
     assert.doesNotMatch(panel.textContent, /This project allocation|Measuring capacity|All projects on this machine/);
-    assert.equal(panel.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]').length, 2);
+    assert.equal(panel.querySelectorAll('[data-action="monitor-autonomous"]').length, 1);
+    assert.equal(panel.querySelectorAll('[data-action="monitor-toggle"]').length, 0);
   }
   assert.deepEqual(sent, []);
 });
@@ -211,7 +216,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
-    ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
+    ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i],
     ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*default limit of 3/i],
     ["Allowed labels", /matching issues/i],
   ]) {
@@ -305,120 +310,25 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
   assert.ok(parseFloat(railPopup.style.left) + Math.min(360, parseFloat(railPopup.style.maxWidth)) <= 392);
 });
 
-test("Agents Settings edits full profiles while preserving runtime fields and project isolation", () => {
-  const { document, Event } = parseHTML("<html><body><section id=a></section><section id=b></section></body></html>");
+test("Candidates preserve runtime choices and project isolation without editing implementation defaults", () => {
+  const { document, Event } = parseHTML('<section id="a"></section><section id="b"></section>');
   const a = document.getElementById("a"), b = document.getElementById("b"), sent = [];
-  const profiles = [
-    { agent_member_id: "m-codex", agent_id: "codex", model: "gpt-6", reasoning: "high", runtime_target: "Docker", docker_service: "dev", prefer_for: ["type:fix"] },
-    { agent_member_id: "m-claude", agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
-  ];
-  const renderer = load("renderAgentsSettingsPanel");
-  const render = (panel, options) => renderer(panel, { choices: candidateChoices, ...options });
-  render(a, { project: { project_root: "/A", name: "A" }, profiles, status: { usage_threshold_percent: 73 }, send: m => sent.push(m) });
-  render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
-  const model = a.querySelector('[aria-label="Model codex"]');
-  assert.equal(model.value, "gpt-6");
-  assert.deepEqual([...a.querySelector('[aria-label="Runtime codex"]').options].map(o => o.value), ["Host", "Docker"]);
-  selectValue(model, "new model");
-  model.dispatchEvent(new Event("input", { bubbles: true }));
-  assert.equal(a.dataset.dirty, "true", "incoming status must not destroy unsaved profile edits");
-  model.dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(Boolean(a.querySelector('[data-action="save-profiles"]')), false);
-  assert.equal(sent[0].profiles[0].model, "new model");
-  assert.equal(sent[0].profiles[0].docker_service, "dev");
+  const render = load("renderAgentsSettingsPanel");
+  render(a, { profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "retired", reasoning: "custom", runtime_target: "Docker", docker_service: "saved-service", prefer_for: ["type:fix"] }, { agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices, send: message => sent.push(message) });
+  render(b, { profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices, send: () => assert.fail("wrong project") });
+  assert.equal(a.querySelector('[data-profile-field="model"]'), null);
+  assert.equal(a.querySelector('[data-profile-field="reasoning"]'), null);
+  const docker = a.querySelector('[data-profile-field="docker_service"]');
+  assert.deepEqual([...docker.options].map(option => option.value), ["", "dev", "worker", "saved-service"]);
+  selectValue(docker, "worker"); docker.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent[0].profiles[0].docker_service, "worker");
   assert.deepEqual(sent[0].profiles[0].prefer_for, ["type:fix"]);
-  assert.equal(Object.hasOwn(sent[0], "usage_threshold_percent"), false);
-  assert.equal(a.querySelector('[data-profile-field="threshold"]'), null);
-  assert.match(a.textContent, /The first member in the list fixes the launch tool\. Only selected members using that tool are tried in order\. If none is available, new launches wait; tools never switch automatically\./);
-  assert.equal(b.querySelector('[aria-label="Model codex"]').value, "B model");
+  assert.equal(Object.hasOwn(sent[0].profiles[0], "model"), false);
+  assert.equal(Object.hasOwn(sent[0].profiles[0], "reasoning"), false);
   a.querySelector('[aria-label="Move down codex"]').click();
-  assert.deepEqual(sent.at(-1).profiles.map(p => p.agent_id), ["claude", "codex"]);
-  assert.match(a.textContent, /Candidates/);
-  assert.ok(a.querySelector('[aria-label="Prefer for codex"]'));
-  assert.ok(a.querySelector('[data-action="add-candidate"]'));
-});
-
-test("Codex warns about a saved model even when the public catalog is empty", () => {
-  const { document } = parseHTML("<section></section>");
-  const choices = structuredClone(candidateChoices);
-  choices.agents.find(agent => agent.id === "codex").models = [];
-  const panel = document.querySelector("section");
-  load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "retired-model" }],
-    choices,
-    send: () => {},
-  });
-  assert.equal(panel.querySelector("[data-model-unavailable]").hidden, false);
-  assert.match(panel.querySelector("[data-model-unavailable]").textContent, /retired-model/);
-});
-
-test("Candidates restore shared choices, preserve saved values, and gate dependent controls", () => {
-  const { document, Event } = parseHTML("<section></section>");
-  const panel = document.querySelector("section"), sent = [];
-  load("renderAgentsSettingsPanel", { crypto: {} })(panel, {
-    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "retired-model", reasoning: "retired-effort", docker_service: "saved-service" },
-      { agent_member_id: "m-custom", agent_id: "custom", fast_mode: true }, { agent_member_id: "m-saved-unknown-agent", agent_id: "saved-unknown-agent", model: "historic" }],
-    choices: candidateChoices,
-    send: message => sent.push(message),
-  });
-  const control = key => panel.querySelector(`fieldset [data-profile-field="${key}"]`);
-  for (const key of ["agent_member_id", "model", "reasoning", "docker_service"]) {
-    assert.equal(control(key).localName, "select", key);
-    assert.equal(control(key).className, "settings-select", "reuse Operator controls");
-  }
-  assert.equal(control("model").value, "retired-model");
-  assert.equal(control("reasoning").value, "retired-effort");
-  // Issue #6933 AC-3: a saved model the tool no longer lists is announced, never swapped.
-  const retiredNotice = () => control("model").closest("fieldset").querySelector("[data-model-unavailable]");
-  assert.equal(retiredNotice().hidden, false);
-  assert.equal(retiredNotice().textContent,
-    "Saved model retired-model is no longer offered by Codex. It is kept as saved and not replaced; choose a listed model before launching.");
-  assert.ok([...control("agent_member_id").options].some(option => option.value === "m-hermes"),
-    "shared choices populate Agent before the separate catalog response arrives");
-  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
-    "registered members do not wait for provider detection catalogs");
-  const unknown = panel.querySelector('[data-agent-id="saved-unknown-agent"]');
-  assert.equal(unknown.querySelector('[data-profile-field="agent_member_id"]').value, "m-saved-unknown-agent");
-  assert.equal(unknown.querySelector('[data-profile-field="model"]').value, "historic");
-  assert.equal(control("docker_service").disabled, true);
-  selectValue(control("runtime_target"), "Docker");
-  control("runtime_target").dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(control("docker_service").disabled, false);
-  assert.deepEqual([...control("docker_service").options].map(option => option.value), ["", "dev", "worker", "saved-service"]);
-  selectValue(control("model"), "gpt-6-luna");
-  control("model").dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(control("reasoning").value, "medium", "a new model uses its shared default");
-  assert.equal(retiredNotice().hidden, true, "choosing a listed model clears the notice");
-  assert.equal(sent.at(-1).profiles[0].reasoning, "medium");
-  const custom = panel.querySelector('[data-agent-id="custom"]');
-  for (const key of ["reasoning", "fast_mode", "skip_permissions"]) assert.equal(custom.querySelector(`[data-profile-field="${key}"]`).disabled, true, key);
-  assert.equal(custom.querySelector('[data-profile-field="fast_mode"]').checked, true, "disabled saved values survive unrelated edits");
-  selectValue(control("agent_member_id"), "m-claude");
-  control("agent_member_id").dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(control("model").value, "", "Claude default is the empty CLI alias");
-  selectValue(control("model"), "haiku");
-  control("model").dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(control("reasoning").disabled, true);
-  assert.equal(sent.at(-1).profiles[0].reasoning, null, "unsupported models do not inherit the previous model's effort");
-  selectValue(control("agent_member_id"), "m-hermes");
-  control("agent_member_id").dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(control("model").localName, "input", "Hermes retains arbitrary model input");
-  const suggestions = document.getElementById(control("model").getAttribute("list"));
-  assert.ok(suggestions, "Hermes offers the configured default provider's model suggestions");
-  assert.deepEqual([...suggestions.querySelectorAll("option")].map(option => option.value), ["fixture-model", "other-model"]);
-  control("model").value = "custom-hermes-model";
-  control("model").dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(sent.at(-1).profiles[0].model, "custom-hermes-model");
-  load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: null, reasoning: null }], choices: candidateChoices,
-    send: message => sent.push(message),
-  });
-  assert.equal(control("model").value, "gpt-6-astra");
-  assert.equal(control("reasoning").value, "medium");
-  selectValue(control("runtime_target"), "Docker");
-  control("runtime_target").dispatchEvent(new Event("change", { bubbles: true }));
-  assert.equal(sent.at(-1).profiles[0].model, null, "displaying a default does not pin it on unrelated saves");
-  assert.equal(sent.at(-1).profiles[0].reasoning, null);
+  assert.deepEqual(sent.at(-1).profiles.map(profile => profile.agent_id), ["claude", "codex"]);
+  assert.match(a.textContent, /The first member in the list fixes the launch tool/);
+  assert.equal(b.querySelector('[data-profile-field="agent_member_id"]').value, "m-claude");
 });
 
 test("candidate fields save exactly once on change, never on incomplete input", () => {
@@ -450,26 +360,26 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "old", reasoning: "high" }], choices: candidateChoices,
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", docker_service: "old", windows_shell: "high", runtime_target: "Docker" }], choices: candidateChoices,
     send: () => { panel.dataset.pendingRequest = "7"; panel.dataset.saving = "true"; },
   });
-  const model = panel.querySelector('[data-profile-field="model"]');
-  const reasoning = panel.querySelector('[data-profile-field="reasoning"]');
+  const model = panel.querySelector('[data-profile-field="docker_service"]');
+  const reasoning = panel.querySelector('[data-profile-field="windows_shell"]');
   selectValue(model, "saved");
   model.dispatchEvent(new Event("change", { bubbles: true }));
   selectValue(reasoning, "unfinished");
   reasoning.dispatchEvent(new Event("input", { bubbles: true }));
   const reconcile = load("reconcileCandidateSave");
-  reconcile(panel, { request_id: 6, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "stale" }] });
+  reconcile(panel, { request_id: 6, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", docker_service: "stale" }] });
   assert.equal(model.value, "saved", "stale ACK is ignored");
-  reconcile(panel, { request_id: 7, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  reconcile(panel, { request_id: 7, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", docker_service: "normalized", windows_shell: "high" }] });
   assert.equal(model.value, "normalized");
   assert.equal(reasoning.value, "unfinished");
   assert.equal(panel.dataset.dirty, "true");
   assert.equal(panel.dataset.saving, "false");
   selectValue(reasoning, "high");
   model.dispatchEvent(new Event("change", { bubbles: true }));
-  reconcile(panel, { request_id: 7, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  reconcile(panel, { request_id: 7, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", docker_service: "normalized", windows_shell: "high" }] });
   assert.equal(panel.dataset.dirty, "false");
   assert.match(panel.querySelector('[data-candidate-status]').textContent, /Saved candidates/);
 });
@@ -488,7 +398,7 @@ test("a rejected autosave identifies the edited field and retains its value", ()
   assert.equal(input.value, "invalid");
   assert.equal(input.getAttribute("aria-invalid"), "true");
   assert.match(input.closest("label").nextElementSibling.textContent, /prefer_for entry "invalid"/);
-  const model = panel.querySelector('[aria-label="Model claude"]');
+  const model = panel.querySelector('[aria-label="Docker service claude"]');
   selectValue(model, "valid-model");
   model.dispatchEvent(new Event("change", { bubbles: true }));
   load("renderCandidateSaveError")(panel, { request_id: 1, message: 'prefer_for entry "invalid" must match a supported tag' });
@@ -504,7 +414,7 @@ test("structural saves wait for their correlated response before allowing row ed
     send: message => { sent.push(message); panel.dataset.pendingRequest = "1"; },
   });
   panel.querySelector('[aria-label="Move up codex"]').click();
-  const model = panel.querySelector('[aria-label="Model claude"]');
+  const model = panel.querySelector('[aria-label="Docker service claude"]');
   assert.equal(model.disabled, true);
   model.dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(sent.length, 1);
@@ -517,10 +427,18 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   const window = document.defaultView, sent = [];
   const frames = new Set(), flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
   const rosterModel = createUiStateStore({ revision: null, members: [] }, { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } });
+  let activeTuning = 0, tuningRenders = 0;
+  const tuningModel = createUiStateStore({ targets: {} }, { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } });
+  const subscribeTuning = tuningModel.subscribeFrame.bind(tuningModel);
+  tuningModel.subscribeFrame = (selector, listener) => {
+    activeTuning++; const unsubscribe = subscribeTuning(selector, value => { tuningRenders++; listener(value); }); let active = true;
+    return () => { if (active) { active = false; activeTuning--; unsubscribe(); } };
+  };
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", "createRepositoryLabelChip", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason, uiContent.createRepositoryLabelChip);
-  const surface = factory({ send: message => sent.push(message), rosterModel,
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", "createRepositoryLabelChip", "SETUP_REVIEW_STEPS", "firstRunSetupUrlPath", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason, uiContent.createRepositoryLabelChip,
+    SETUP_REVIEW_STEPS, firstRunSetupUrlPath);
+  const surface = factory({ send: message => sent.push(message), rosterModel, tuningController: { model: tuningModel },
     scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); },
     createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },
     focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {}, renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
@@ -553,9 +471,9 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   flush();
   assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false);
   assert.deepEqual([...panel.querySelector('[data-profile-field="new"]').options].map(option => option.value), ["", "m-codex", "m-hermes", "m-custom"]);
-  const model = panel.querySelector('[data-profile-field="model"]'); selectValue(model, "draft"); model.dispatchEvent(new Event("input", { bubbles: true }));
+  const model = panel.querySelector('[data-profile-field="docker_service"]'); selectValue(model, "draft"); model.dispatchEvent(new Event("input", { bubbles: true }));
   rosterModel.update(state => ({ revision: 2, members: state.members.map(member => ({ ...member, name: `New ${member.name}` })) })); flush();
-  assert.ok(panel.querySelector('[data-profile-field="model"]') === model);
+  assert.ok(panel.querySelector('[data-profile-field="docker_service"]') === model);
   assert.equal(model.value, "draft");
   surface.applyIssueSettingsStatus({ enabled: true, autonomous_mode: true }, "/A");
   surface.applySettingsRepositoryLabels({ project_root: "/A", loaded: true, labels: [{ name: "bug", color: "d73a4a" }] });
@@ -566,7 +484,7 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A");
   assert.equal(document.querySelector('[aria-label="bug"]').checked, false, "server status replaces an unconfirmed selection");
   assert.equal(document.querySelector('[aria-label="Autonomous"]').checked, false);
-  assert.equal(document.querySelector('[aria-label="Monitoring"]').checked, false);
+  assert.equal(document.querySelector('[aria-label="Monitoring"]'), null);
   const rosterReads = () => sent.filter(message => message.kind === "agent_roster");
   const beforeProfileAck = rosterReads().length;
   const ack = { project_root: "/A", request_id: 701, profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices };
@@ -587,7 +505,7 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
     { agent_member_id: "m-claude", agent_id: "claude" },
     { agent_member_id: "m-codex", agent_id: "codex" },
   ], choices: candidateChoices }); flush();
-  const input = panel.querySelector('[data-profile-field="model"]');
+  const input = panel.querySelector('[data-profile-field="docker_service"]');
   Object.defineProperty(document, "activeElement", { value: input, configurable: true });
   surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A"); flush();
   const body = panel.closest("[data-settings-project-root]");
@@ -607,6 +525,26 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   move.click();
   assert.equal(writes().length, beforeMove + 1);
   assert.deepEqual(writes().at(-1).profiles.map(profile => profile.agent_id), ["codex", "claude"]);
+  Object.defineProperty(document, "activeElement", { value: document.body, configurable: true });
+  const liveSubscriptions = activeTuning;
+  assert.ok(liveSubscriptions > 0);
+  surface.renderSettingsWindow(body, { id: "settings" });
+  assert.equal(activeTuning, liveSubscriptions, "rebuild releases subscriptions of removed panels");
+  body.dataset.issuesRenderDeferred = "true";
+  body.querySelector('[data-profile-field="prefer_for"]').dispatchEvent(new Event("focusout", { bubbles: true }));
+  surface.disposeSettingsBody(body); body.remove(); await Promise.resolve(); flush();
+  assert.equal(activeTuning, 0, "close releases all candidate tuning subscriptions");
+  const afterClose = tuningRenders; tuningModel.update(() => ({ targets: {} })); flush();
+  assert.equal(tuningRenders, afterClose, "removed panels no longer render on tuning updates");
+  const reopened = document.createElement("main"); document.body.append(reopened);
+  surface.renderSettingsWindow(reopened, { id: "settings-reopened" });
+  assert.equal(activeTuning, liveSubscriptions, "reopen retains only the live panels");
+  reopened.remove(); surface.renderAgentBackendsPanelInAllSettingsWindows();
+  assert.equal(activeTuning, 0, "detached-body purge also releases tuning subscriptions");
+  document.body.append(reopened); surface.renderSettingsWindow(reopened, { id: "settings-reopened-again" });
+  assert.equal(activeTuning, liveSubscriptions);
+  surface.disposeSettingsBody(reopened); reopened.remove();
+  assert.equal(activeTuning, 0);
 });
 
 test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {
@@ -618,6 +556,40 @@ test("Candidates disable addition with an accessible reason when the catalog is 
   });
   assert.equal(panel.querySelector('[data-action="add-candidate"]').disabled, true);
   assert.match(panel.querySelector('[data-candidate-status]').textContent, /All registered members.*candidate pool/);
+});
+
+test("Use registered profiles repairs stale fixed tools without changing the pool order", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  const render = load("renderAgentsSettingsPanel");
+  const profiles = [
+    { agent_member_id: "m-claude", agent_id: "codex", codex_speed: "ultrafast", prefer_for: ["label:bug"],
+      model: "codex-only", reasoning: "high", version: "0.1.0", session_mode: "Continue", fast_mode: true,
+      runtime_target: "Docker", docker_service: "worker" },
+    { agent_member_id: "m-codex", agent_id: "Codex", codex_speed: "fast" },
+  ];
+  const options = { profiles, choices: candidateChoices, send: message => sent.push(message) };
+  render(panel, options);
+  assert.deepEqual(sent, [], "loading stale settings does not write them");
+  const repair = panel.querySelector('button[aria-label="Use registered profiles"]');
+  assert.ok(repair);
+  repair.click();
+  assert.equal(repair.disabled, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "issue_monitor_profiles_set");
+  assert.deepEqual(sent[0].profiles.map(({ agent_member_id, agent_id, codex_speed }) =>
+    [agent_member_id, agent_id, codex_speed]), [["m-claude", "claude", "off"], ["m-codex", "codex", "fast"]]);
+  const { model, reasoning, version, session_mode, fast_mode, prefer_for, runtime_target, docker_service } = sent[0].profiles[0];
+  assert.deepEqual({ model, reasoning, version, session_mode, fast_mode, prefer_for, runtime_target, docker_service }, {
+    model: null, reasoning: null, version: null, session_mode: "Normal", fast_mode: false,
+    prefer_for: ["label:bug"], runtime_target: "Docker", docker_service: "worker",
+  });
+
+  render(panel, { ...options, profiles: sent[0].profiles });
+  assert.equal(panel.querySelector('[data-action="repair-candidates"]'), null);
+  const unavailable = candidateMembers.map(member => member.agent_id === "claude" ? { ...member, is_pm: true } : member);
+  render(panel, { ...options, availableMembers: unavailable });
+  assert.equal(panel.querySelector('[data-action="repair-candidates"]'), null);
 });
 
 test("a rejected candidate save shows its reason inline and preserves the draft", () => {
@@ -732,15 +704,15 @@ test("Agents Settings binds registered members and keeps tool choices fixed", ()
   selectValue(member, "b"); member.dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(panel.querySelector("legend").textContent, "1. Birch");
   assert.equal(member.getAttribute("aria-label"), "Agent Birch");
-  assert.ok(panel.querySelector('[aria-label="Model Birch"]'));
+  assert.ok(panel.querySelector('[aria-label="Docker service Birch"]'));
   assert.equal(panel.querySelector('[aria-label="Move up Birch"]').textContent, "Move up Birch");
   assert.ok(panel.querySelector('[aria-label="Remove Birch"]'));
 
-  assert.deepEqual(sent.at(-1).profiles[0], { agent_member_id: "b", agent_id: "codex", model: "gpt-6-astra", reasoning: "high", docker_service: null, prefer_for: [], session_mode: "Normal", runtime_target: "Host", windows_shell: null, skip_permissions: false, fast_mode: false });
+  assert.deepEqual(sent.at(-1).profiles[0], { agent_member_id: "b", agent_id: "codex", docker_service: null, docker_lifecycle_intent: "Connect", prefer_for: [], session_mode: "Normal", runtime_target: "Host", runtime_inherit: false, windows_shell: null, skip_permissions: false, fast_mode: false });
   selectValue(member, "c"); member.dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(sent.at(-1).profiles[0].agent_id, "claude");
-  assert.equal(sent.at(-1).profiles[0].model, null, "different tools use their own default");
-  assert.equal(sent.at(-1).profiles[0].reasoning, "auto");
+  assert.equal(Object.hasOwn(sent.at(-1).profiles[0], "model"), false);
+  assert.equal(Object.hasOwn(sent.at(-1).profiles[0], "reasoning"), false);
   assert.equal(panel.querySelector('[data-profile-tool]').textContent, "Claude Code");
   const add = panel.querySelector('[data-profile-field="new"]');
   selectValue(add, "a"); panel.querySelector('[data-action="add-candidate"]').click();
@@ -748,17 +720,237 @@ test("Agents Settings binds registered members and keeps tool choices fixed", ()
   assert.equal(sent.at(-1).profiles[1].agent_id, "codex");
 });
 
-test("Agents Settings preserves unavailable and resting members without provider substitution", () => {
+test("Agents Settings preserves unavailable and legacy members without provider substitution", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, { choices: candidateChoices,
-    availableMembers: [{ member_id: "rest", name: "Resting member", agent_id: "codex", enabled: false }],
+    availableMembers: [{ member_id: "rest", name: "Legacy member", agent_id: "codex", enabled: false }],
     profiles: [{ agent_member_id: "rest", agent_id: "codex" }, { agent_member_id: "missing", agent_id: "claude", model: "saved-model" }],
     send: () => assert.fail("rendering must not substitute a member") });
-  assert.match(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Resting/);
+  assert.match(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Legacy member/);
+  assert.doesNotMatch(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Resting/);
   assert.match(panel.querySelector('[data-agent-member-id="missing"]').textContent, /unavailable/i);
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="agent_member_id"]').value, "missing");
-  assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="model"]').value, "saved-model");
+  assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-member-tuning-field="model"]').disabled, true);
+});
+
+test("Issue #7729 AC-4: a candidate names Inherit, Host or Docker, its service and its lifecycle", () => {
+  const { document, Event } = parseHTML('<section id="docker"></section><section id="plain"></section>');
+  const panel = document.getElementById("docker"), plain = document.getElementById("plain"), sent = [];
+  const render = load("renderAgentsSettingsPanel");
+  const change = (control, value) => { selectValue(control, value); control.dispatchEvent(new Event("change", { bubbles: true })); };
+  render(panel, { profiles: [{ agent_member_id: "m-codex", agent_id: "codex", runtime_target: "Docker", docker_service: "worker", docker_lifecycle_intent: "Restart" }],
+    choices: candidateChoices, send: message => sent.push(message) });
+  const runtime = panel.querySelector('[data-profile-field="runtime_target"]');
+  assert.equal(runtime.getAttribute("aria-label"), "Runs on codex");
+  assert.deepEqual([...runtime.options].map(option => [option.value, option.textContent]),
+    [["Inherit", "Inherit (this project's last launch)"], ["Host", "Host"], ["Docker", "Docker"]]);
+  assert.equal(runtime.value, "Docker");
+  const service = panel.querySelector('[data-profile-field="docker_service"]');
+  const lifecycle = panel.querySelector('[data-profile-field="docker_lifecycle_intent"]');
+  assert.deepEqual([...lifecycle.options].map(option => [option.value, option.textContent]), [
+    ["Connect", "Connect only"], ["Start", "Start then launch"], ["Restart", "Restart then launch"],
+    ["Recreate", "Recreate then launch"], ["CreateAndStart", "Create and start then launch"],
+  ]);
+  assert.equal(lifecycle.value, "Restart");
+  assert.equal(service.closest("label").hidden, false);
+  assert.equal(lifecycle.closest("label").hidden, false);
+
+  change(lifecycle, "Recreate");
+  assert.deepEqual([sent.at(-1).profiles[0].runtime_target, sent.at(-1).profiles[0].runtime_inherit,
+    sent.at(-1).profiles[0].docker_service, sent.at(-1).profiles[0].docker_lifecycle_intent], ["Docker", false, "worker", "Recreate"]);
+
+  change(runtime, "Inherit");
+  assert.equal(sent.at(-1).profiles[0].runtime_inherit, true);
+  assert.equal(sent.at(-1).profiles[0].runtime_target, "Docker", "the place it last named is kept for the day it stops inheriting");
+  assert.equal(service.closest("label").hidden, true, "an inheriting candidate names no service");
+  assert.equal(lifecycle.closest("label").hidden, true);
+  assert.match(panel.querySelector("[data-profile-runtime-note]").textContent, /where this project's last launch ran/);
+
+  // Item 197 (1): without a Docker setup, Docker is not offered at all.
+  render(plain, { profiles: [{ agent_member_id: "m-codex", agent_id: "codex", runtime_inherit: true, runtime_target: "Host" },
+    { agent_member_id: "m-claude", agent_id: "claude", runtime_target: "Docker", docker_service: "gone" }],
+    choices: { ...candidateChoices, docker_services: [], default_docker_service: null }, send: message => sent.push(message) });
+  const [inherit, saved] = plain.querySelectorAll('[data-profile-field="runtime_target"]');
+  assert.deepEqual([...inherit.options].map(option => option.value), ["Inherit", "Host"]);
+  assert.equal(inherit.value, "Inherit");
+  assert.equal(plain.querySelector('[data-profile-field="docker_service"]').closest("label").hidden, true);
+  // Item 197 (2): a saved Docker choice is shown as saved, and the fallback is named.
+  assert.deepEqual([...saved.options].map(option => option.value), ["Inherit", "Host", "Docker"]);
+  assert.equal(saved.value, "Docker");
+  assert.match(plain.querySelectorAll("[data-profile-runtime-note]")[1].textContent, /no Docker setup.*host/i);
+});
+
+test("candidate vector omits implementation tuning even when inherited from its saved profile", () => {
+  const { document, Event } = parseHTML('<section></section>');
+  const panel = document.querySelector('section'), sent = [];
+  load('renderAgentsSettingsPanel')(panel, { profiles: [{ agent_member_id: 'm-codex', agent_id: 'codex', model: 'saved', reasoning: 'custom' }], choices: candidateChoices, send: value => sent.push(value) });
+  const runtime = panel.querySelector('[data-profile-field="runtime_target"]');
+  selectValue(runtime, 'Docker'); runtime.dispatchEvent(new Event('change', { bubbles: true }));
+  assert.equal(Object.hasOwn(sent[0].profiles[0], 'model'), false);
+  assert.equal(Object.hasOwn(sent[0].profiles[0], 'reasoning'), false);
+});
+
+test("shared member tuning preserves custom values and target revision without candidate writes", () => {
+  const { document, Event } = parseHTML('<section></section>');
+  const panel = document.querySelector('section'), edits = [];
+  const target = { canonical: { role: 'implementation', member_id: 'm', agent_id: 'claude', revision: 'exact-token' }, draft: { agent_id: 'claude', model: 'opusplan', reasoning: 'custom-effort' }, status: 'saved' };
+  load('renderMemberTuningControls')(panel, { target, choices: candidateChoices.agents, onEdit: (...args) => edits.push(args) });
+  const model = panel.querySelector('[data-member-tuning-field="model"]');
+  assert.equal(model.value, 'opusplan');
+  assert.ok(model.parentElement.querySelector('datalist option[value=haiku]'), 'roster tuning choices use the shared list projection');
+  assert.equal(model.parentElement.querySelector('datalist option[value=haiku]').label, 'Haiku');
+  assert.equal(panel.querySelector('[data-member-tuning-field="reasoning"]').value, 'custom-effort');
+  assert.equal(panel.querySelector('[data-member-tuning-field="agent_id"]').disabled, false);
+  model.value = 'unlisted'; model.dispatchEvent(new Event('input'));
+  assert.deepEqual(edits[0], [{ model: 'unlisted' }, { composing: false }]);
+  assert.equal(panel.querySelector('[data-profile-field]'), null);
+  assert.match(panel.textContent, /exact-token/);
+});
+
+test("implementation execution controls preserve inheritance and offer only supported permission skipping", () => {
+  const { document, Event } = parseHTML('<section></section>');
+  const panel = document.querySelector('section'), edits = [], navigations = [], commands = [];
+  document.addEventListener('settings:open', event => navigations.push(event.detail));
+  document.addEventListener('op:command', event => commands.push(event.detail));
+  const target = { canonical: { role: 'implementation', member_id: 'm', revision: 'r1' },
+    draft: { agent_id: 'codex', model: null, reasoning: null, runtime_target: null, skip_permissions: null }, status: 'saved' };
+  const render = () => load('renderMemberTuningControls')(panel, { target, choices: candidateChoices, onEdit: patch => edits.push(patch) });
+  render();
+  const tool = panel.querySelector('[data-member-tuning-field="agent_id"]');
+  const runtime = panel.querySelector('[data-member-tuning-field="runtime_target"]');
+  const permissions = panel.querySelector('[data-member-tuning-field="skip_permissions"]');
+  assert.equal(tool.tagName, 'SELECT'); assert.equal(tool.disabled, false);
+  assert.deepEqual([...tool.options].map(option => option.value), candidateChoices.agents.map(agent => agent.id));
+  assert.equal(runtime.value, ''); assert.equal(permissions.value, '');
+  selectValue(runtime, 'Docker'); runtime.dispatchEvent(new Event('change'));
+  selectValue(permissions, 'false'); permissions.dispatchEvent(new Event('change'));
+  selectValue(tool, 'claude'); tool.dispatchEvent(new Event('change'));
+  assert.deepEqual(edits, [{ runtime_target: 'Docker' }, { skip_permissions: false }, { agent_id: 'claude' }]);
+  target.draft = { ...target.draft, agent_id: 'custom', runtime_target: 'Docker', skip_permissions: true }; render();
+  assert.equal(panel.querySelector('[data-member-tuning-field="runtime_target"]'), runtime);
+  assert.equal([...permissions.options].find(option => option.value === 'true').disabled, true);
+  assert.equal(permissions.disabled, false, 'inherit and require remain available to clear unsupported skipping');
+  assert.match(panel.querySelector('[data-permissions-support]').textContent, /does not support/i);
+  selectValue(permissions, 'true'); permissions.dispatchEvent(new Event('change'));
+  assert.equal(edits.length, 3, 'unsupported synthetic selection is refused');
+  selectValue(permissions, ''); permissions.dispatchEvent(new Event('change'));
+  assert.deepEqual(edits.at(-1), { skip_permissions: null });
+  const model = panel.querySelector('[data-member-tuning-field="model"]');
+  model.dispatchEvent(new Event('compositionstart')); edits.length = 0;
+  selectValue(tool, 'claude'); tool.dispatchEvent(new Event('change'));
+  model.dispatchEvent(new Event('compositionend'));
+  assert.deepEqual(edits, [{ agent_id: 'claude' }], 'a provider change retires the previous model composition');
+  panel.querySelector('[data-action="manage-tools"]').click();
+  assert.deepEqual(navigations, [{ target: 'supported-agents' }]);
+  const signIn = panel.querySelector('[data-action="sign-in-shell"]');
+  assert.ok(signIn, 'member settings provide the existing shell route for native sign-in');
+  signIn.click();
+  assert.deepEqual(commands, [{ id: 'spawn-shell' }]);
+  assert.deepEqual(edits, [{ agent_id: 'claude' }], 'navigation never changes settings or sends a command');
+  panel.remove(); signIn.click();
+  assert.equal(commands.length, 1, 'a detached editor cannot open a shell');
+});
+
+test("Codex shared tuning keeps catalog order without treating unlisted models as unsupported", () => {
+  const { document, Event } = parseHTML('<section></section>');
+  const panel = document.querySelector('section'), edits = [];
+  const target = { canonical: { role: 'implementation', member_id: 'm-codex', agent_id: 'codex', revision: 'core-token' },
+    draft: { agent_id: 'codex', model: 'retired-model', reasoning: 'high' }, status: 'saved' };
+  const render = () => load('renderMemberTuningControls')(panel, { target, choices: candidateChoices.agents,
+    onEdit: (...args) => edits.push(args) });
+  render();
+  const model = panel.querySelector('[data-member-tuning-field="model"]');
+  assert.deepEqual([...model.parentElement.querySelectorAll('datalist option')].map(option => ({ value: option.value, label: option.label })),
+    candidateChoices.agents[0].models.map(({ value, label }) => ({ value, label })));
+  assert.equal(model.value, 'retired-model');
+  const notice = panel.querySelector('[data-model-unavailable]');
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent,
+    'Model retired-model is not listed in the current Codex catalog. Your value is kept and not replaced; an unlisted model may still be supported.');
+  assert.deepEqual(edits, [], 'catalog refresh must not replace a saved model');
+  model.value = 'gpt-6-luna'; model.dispatchEvent(new Event('input'));
+  assert.deepEqual(edits, [[{ model: 'gpt-6-luna' }, { composing: false }]], 'edits keep the model id, not its display label');
+  target.draft.model = 'gpt-6-luna'; render();
+  assert.equal(notice.hidden, true, 'choosing a listed model clears the notice');
+});
+
+test("Codex shared tuning warns about a saved model even when the public catalog is empty", () => {
+  const { document } = parseHTML('<section></section>');
+  const choices = structuredClone(candidateChoices);
+  choices.agents.find(agent => agent.id === 'codex').models = [];
+  const panel = document.querySelector('section');
+  const target = { canonical: { role: 'implementation', member_id: 'm-codex', agent_id: 'codex', revision: 'core-token' },
+    draft: { agent_id: 'codex', model: 'retired-model', reasoning: 'high' }, status: 'saved' };
+  load('renderMemberTuningControls')(panel, { target, choices, onEdit: () => assert.fail('render must not write tuning') });
+  assert.equal(panel.querySelector('[data-member-tuning-field="model"]').value, 'retired-model');
+  assert.equal(panel.querySelector('[data-model-unavailable]').hidden, false);
+  assert.match(panel.querySelector('[data-model-unavailable]').textContent, /retired-model/);
+  assert.match(panel.querySelector('[data-model-unavailable]').textContent, /an unlisted model may still be supported/);
+});
+
+test("shared tuning reports catalog failure and retries without changing either role's draft", () => {
+  for (const role of ['implementation', 'pm']) {
+    const { document, Event } = parseHTML('<section></section>'), host = document.querySelector('section');
+    const choices = structuredClone(candidateChoices), edits = [];
+    choices.agents[0].model_catalog_warning = 'The live Codex model catalog is unavailable. Saved values are kept.';
+    const target = { canonical: { role, member_id: 'member', revision: 'r1' },
+      draft: { agent_id: 'codex', model: 'private-draft', reasoning: 'high' }, status: 'editing' };
+    let retries = 0;
+    const options = { target, choices, onEdit: patch => edits.push(patch), onReloadCatalog: () => retries++ };
+    const render = load('renderMemberTuningControls'); render(host, options);
+    const input = host.querySelector('[data-member-tuning-field="model"]');
+    input.dispatchEvent(new Event('compositionstart')); edits.length = 0;
+    const status = host.querySelector('[data-model-catalog-status]');
+    assert.equal(status?.getAttribute('role'), 'status');
+    assert.match(status.textContent, /live Codex model catalog is unavailable/);
+    const retry = host.querySelector('[data-action="retry-model-catalog"]');
+    assert.equal(retry.classList.contains('wizard-button'), true);
+    retry.click(); assert.equal(retries, 1); assert.deepEqual(edits, []);
+    delete choices.agents[0].model_catalog_warning; render(host, options);
+    assert.equal(host.querySelector('[data-member-tuning-field="model"]'), input);
+    assert.equal(input.value, 'private-draft'); assert.equal(input.memberComposing, true);
+    assert.equal(status.hidden, true); assert.equal(retry.hidden, true); assert.deepEqual(edits, []);
+  }
+});
+
+test("implementation candidate choices exclude configured or retained PM roles", () => {
+  const { document } = parseHTML('<section></section>'), panel = document.querySelector('section');
+  load('renderAgentsSettingsPanel')(panel, { profiles: [], availableMembers: [
+    { member_id: 'pm', agent_id: 'codex', name: 'PM', enabled: true, pm_project_key: 'project' },
+    { member_id: 'held', agent_id: 'codex', name: 'Held PM', enabled: true, assignment: { role: 'pm' } },
+    { member_id: 'impl', agent_id: 'codex', name: 'Implementation', enabled: true },
+  ], choices: candidateChoices, send: () => assert.fail('render is read only') });
+  assert.deepEqual([...panel.querySelector('[data-profile-field="new"]').options].map(option => option.value), ['', 'impl']);
+});
+
+test("retired shared tuning inputs cannot finish another member's composition", async () => {
+  const { createMemberTuningModel } = await import('../agent-activity-model.js');
+  const { document, Event } = parseHTML('<section></section>'), host = document.querySelector('section'), sent = [];
+  const c = createMemberTuningModel('project', { onSave: request => sent.push(request) });
+  for (const member_id of ['a', 'b']) c.applyTuningSnapshot({ project_key: 'project', role: 'implementation', member_id, agent_id: 'codex', revision: member_id, model: member_id });
+  const render = memberId => load('renderMemberTuningControls')(host, { target: c.model.read().targets[`implementation:${memberId}`], onEdit: (patch, options) => c.editTuning('implementation', memberId, patch, options) });
+  render('a'); const old = host.querySelector('[data-member-tuning-field="model"]');
+  old.dispatchEvent(new Event('compositionstart')); old.value = 'unfinished a'; old.dispatchEvent(new Event('input'));
+  render('b'); old.dispatchEvent(new Event('compositionend')); old.dispatchEvent(new Event('input'));
+  assert.equal(sent.length, 0, 'retired composition must save neither member');
+  assert.equal(c.model.read().targets['implementation:a'].draft.model, 'unfinished a');
+  assert.equal(c.model.read().targets['implementation:b'].draft.model, 'b');
+  const current = host.querySelector('[data-member-tuning-field="model"]'); current.value = 'proper b'; current.dispatchEvent(new Event('input'));
+  assert.equal(sent[0].action.member_id, 'b'); assert.equal(sent[0].action.model, 'proper b');
+  render('a'); const restored = host.querySelector('[data-member-tuning-field="model"]');
+  assert.equal(restored.value, 'unfinished a'); restored.value = 'proper a'; restored.dispatchEvent(new Event('input'));
+  assert.equal(sent[1].action.member_id, 'a'); assert.equal(sent[1].action.model, 'proper a');
+});
+
+test("legacy PM Settings target opens Agents and never creates a PM tab", () => {
+  const { document, CustomEvent } = parseHTML('<div></div>'); const opened = [];
+  load("installSettingsOpenHandler", { switchSettingsTab: () => assert.fail("no PM tab") })({
+    document, settingsWindowBodies: new Set(), activeProjectTab: () => null,
+    focusOrSpawnPreset: preset => opened.push(preset), setPendingTarget: () => assert.fail("no pending PM tab") });
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager" } }));
+  assert.deepEqual(opened, ["agents"]);
+  assert.doesNotMatch(source, /buildSettingsTab\(\s*"project-manager"/);
 });
 
 

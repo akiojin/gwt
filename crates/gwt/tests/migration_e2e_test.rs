@@ -1,9 +1,6 @@
 //! End-to-end tests for the SPEC-1934 US-6 migration orchestrator.
 
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::path::Path;
 
 use gwt::migration::execute_migration;
 use gwt_core::config::BareProjectConfig;
@@ -411,16 +408,31 @@ fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
     // wiped by the rollback (it should be preserved as it pre-existed).
     std::fs::write(bare_target.join("preexisting.txt"), "marker").unwrap();
 
-    let started = Instant::now();
+    let mut seen = Vec::new();
     let result = execute_migration(
         project.path(),
         MigrationOptions::default(),
-        |_phase, _pct| {},
+        |phase, _pct| seen.push(phase),
     );
-    let elapsed = started.elapsed();
 
     let err = result.expect_err("migration must fail when bare target exists");
-    assert_eq!(err.phase, MigrationPhase::Bareify);
+    assert_eq!(err.phase, MigrationPhase::Bareify, "{err:?}");
+    assert!(
+        err.message.contains(&format!(
+            "bareify_local: target {} already exists",
+            bare_target.display()
+        )),
+        "failure must come from the injected collision: {err:?}"
+    );
+    assert_eq!(
+        seen,
+        [
+            MigrationPhase::Validate,
+            MigrationPhase::Backup,
+            MigrationPhase::Bareify,
+        ],
+        "validation and backup must finish before the injected failure"
+    );
     // Recovery should reflect that rollback ran. Either RolledBack or
     // Partial is acceptable for this assertion; the important invariant is
     // that the original .git/ and tracked files are still in place.
@@ -449,10 +461,16 @@ fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
         !project.path().join(".gwt/project.toml").exists(),
         "no project.toml must be written when migration fails"
     );
-    assert!(
-        elapsed <= Duration::from_secs(30),
-        "rollback should complete within 30 seconds for the typical E2E fixture; took {elapsed:?}"
-    );
+}
+
+#[test]
+fn t104_bareify_rollback_passes_twenty_consecutive_runs() {
+    // Issue #3889 AC-2: required CI must run all twenty attempts even when
+    // the separate flake detector exhausts its repetition budget.
+    for attempt in 1..=20 {
+        t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout();
+        eprintln!("t104 rollback attempt {attempt}/20 passed");
+    }
 }
 
 #[test]

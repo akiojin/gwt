@@ -3,11 +3,12 @@ use crate::{
     agent_capability::{
         AgentCapabilityGrant, AgentCapabilityIssuer, AgentPmSendResponder, AgentSessionPrincipal,
     },
+    monitor_duplicate_runtime::HeldMonitorPromptSession,
     project_transport::OutboundEvent,
     BackendEvent, ProjectTabView,
 };
 use base64::Engine as _;
-use gwt_terminal::{Pane, PtyHandle};
+use gwt_terminal::{Pane, PtyHandle, TerminalError};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -34,6 +35,9 @@ pub struct PmDeliveryReplayGuard {
     // A wake retains ordinary input until its exact provider turn ACK. Partial
     // body writes permit readback only; a complete body permits CR-only retry.
     pub retained_input: Option<(gwt_terminal::pty::PtyInputReservation, bool)>,
+    /// Issue #7701: retained input never outlives this instant, even when no
+    /// human input or turn boundary arrives to release it first.
+    pub retained_until: Instant,
 }
 
 pub type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;
@@ -720,8 +724,7 @@ pub fn authenticated_pm_pane_send_input_events(
                     }
                     let prepared = pm_registry::PmDeliveryReceipt {
                         operation_id: worker_operation_id.clone(),
-                        recorded_at: chrono::Utc::now()
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                         status: pm_registry::PmDeliveryReceiptStatus::Prepared,
                         grok_prompt: None,
                         principal_session_id: principal_session_id.clone(),
@@ -746,6 +749,9 @@ pub fn authenticated_pm_pane_send_input_events(
                 .expect("Prepared PM delivery has a target Session");
             let expected_pty = expected_pty.as_ref().ok_or_else(|| {
                 "pm.message.send refused: target is not an authorized live agent pane".to_string()
+            })?;
+            let target_entry = expected_entry.as_ref().ok_or_else(|| {
+                "pm.message.send refused: target has no captured physical writer".to_string()
             })?;
             let ordinary_revision = replay
                 .as_ref()
@@ -780,90 +786,7 @@ pub fn authenticated_pm_pane_send_input_events(
                     let owned_submit = bytes == b"\r" && (body_written || replay.is_some());
                     let written = reservation
                         .write_input_authorized(bytes, |commit| {
-                            if target_is_grok {
-                                if owned_submit {
-                                    expected_pty.ensure_grok_prompt_submit_ready()?;
-                                } else {
-                                    expected_pty.ensure_grok_prompt_input_ready()?;
-                                }
-                            }
-                            if Instant::now() >= deadline
-                                || worker_responder
-                                    .as_ref()
-                                    .is_some_and(|responder| !responder.mutation_is_current())
-                            {
-                                return Err(gwt_terminal::TerminalError::PtyIoError {
-                                    details: "PM delivery deadline expired before input mutation"
-                                        .to_string(),
-                                });
-                            }
-                            let current_registration = pm_registry::load_pm_prefs(&prefs_path)
-                                .map_err(|error| gwt_terminal::TerminalError::PtyIoError {
-                                    details: format!(
-                                        "PM registration revalidation failed: {error}"
-                                    ),
-                                })?
-                                .registration;
-                            if current_registration.as_ref() != Some(&registration) {
-                                return Err(gwt_terminal::TerminalError::PtyIoError {
-                                    details:
-                                        "registered PM authority changed before input mutation"
-                                            .to_string(),
-                                });
-                            }
-                            {
-                                let current = writers.read().map_err(|_| {
-                                    gwt_terminal::TerminalError::PtyIoError {
-                                        details: "PM delivery PTY registry is unavailable"
-                                            .to_string(),
-                                    }
-                                })?;
-                                if !current.get(&worker_window_id).is_some_and(|entry| {
-                                    expected_entry.as_ref().is_some_and(|expected| {
-                                        Arc::ptr_eq(entry, expected)
-                                            && entry
-                                                .current
-                                                .load(std::sync::atomic::Ordering::Acquire)
-                                    })
-                                }) || !current.get(&principal_window_id).is_some_and(|entry| {
-                                    Arc::ptr_eq(&entry.handle, &principal_pty)
-                                        && entry.current.load(std::sync::atomic::Ordering::Acquire)
-                                }) {
-                                    return Err(gwt_terminal::TerminalError::PtyIoError {
-                                        details: "PM caller or target runtime generation changed"
-                                            .to_string(),
-                                    });
-                                }
-                            }
-                            if Instant::now() >= deadline
-                                || worker_responder
-                                    .as_ref()
-                                    .is_some_and(|responder| !responder.mutation_is_current())
-                            {
-                                return Err(gwt_terminal::TerminalError::PtyIoError {
-                                    details: "PM delivery deadline expired before input commit"
-                                        .to_string(),
-                                });
-                            }
-                            if !issuer.commit_mutation_if_current(&grant, || {
-                                worker_responder
-                                    .as_ref()
-                                    .is_none_or(AgentPmSendResponder::try_commit_mutation)
-                            }) {
-                                return Err(gwt_terminal::TerminalError::PtyIoError {
-                                    details:
-                                        "PM capability or origin changed before input mutation"
-                                            .to_string(),
-                                });
-                            }
-                            let mut mark_attempted = || {
-                                if bytes != b"\r" {
-                                    body_attempted = true;
-                                }
-                            };
-                            reservation.with_unchanged_ordinary_input(ordinary_revision, || {
-                                // Recheck after the body/submit settle and at
-                                // every retry, including submit-only recovery.
+                            let authorize = |commit_mutation: bool| {
                                 if target_is_grok {
                                     if owned_submit {
                                         expected_pty.ensure_grok_prompt_submit_ready()?;
@@ -871,7 +794,119 @@ pub fn authenticated_pm_pane_send_input_events(
                                         expected_pty.ensure_grok_prompt_input_ready()?;
                                     }
                                 }
-                                commit(&mut mark_attempted)
+                                if Instant::now() >= deadline
+                                    || worker_responder
+                                        .as_ref()
+                                        .is_some_and(|responder| !responder.mutation_is_current())
+                                {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details:
+                                            "PM delivery deadline expired before input mutation"
+                                                .to_string(),
+                                    });
+                                }
+                                let current_registration = pm_registry::load_pm_prefs(&prefs_path)
+                                    .map_err(|error| gwt_terminal::TerminalError::PtyIoError {
+                                        details: format!(
+                                            "PM registration revalidation failed: {error}"
+                                        ),
+                                    })?
+                                    .registration;
+                                if current_registration.as_ref() != Some(&registration) {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details:
+                                            "registered PM authority changed before input mutation"
+                                                .to_string(),
+                                    });
+                                }
+                                {
+                                    let current = writers.read().map_err(|_| {
+                                        gwt_terminal::TerminalError::PtyIoError {
+                                            details: "PM delivery PTY registry is unavailable"
+                                                .to_string(),
+                                        }
+                                    })?;
+                                    if !current.get(&worker_window_id).is_some_and(|entry| {
+                                        expected_entry.as_ref().is_some_and(|expected| {
+                                            Arc::ptr_eq(entry, expected)
+                                                && entry
+                                                    .current
+                                                    .load(std::sync::atomic::Ordering::Acquire)
+                                        })
+                                    }) || !current.get(&principal_window_id).is_some_and(
+                                        |entry| {
+                                            Arc::ptr_eq(&entry.handle, &principal_pty)
+                                                && entry
+                                                    .current
+                                                    .load(std::sync::atomic::Ordering::Acquire)
+                                        },
+                                    ) {
+                                        return Err(gwt_terminal::TerminalError::PtyIoError {
+                                            details:
+                                                "PM caller or target runtime generation changed"
+                                                    .to_string(),
+                                        });
+                                    }
+                                }
+                                if Instant::now() >= deadline
+                                    || worker_responder
+                                        .as_ref()
+                                        .is_some_and(|responder| !responder.mutation_is_current())
+                                {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "PM delivery deadline expired before input commit"
+                                            .to_string(),
+                                    });
+                                }
+                                let current_grant = if commit_mutation {
+                                    issuer.commit_mutation_if_current(&grant, || {
+                                        worker_responder
+                                            .as_ref()
+                                            .is_none_or(AgentPmSendResponder::try_commit_mutation)
+                                    })
+                                } else {
+                                    issuer.grant_is_current(&grant)
+                                };
+                                if !current_grant {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details:
+                                            "PM capability or origin changed before input mutation"
+                                                .to_string(),
+                                    });
+                                }
+                                Ok(())
+                            };
+                            if target_entry
+                                .monitor_runtime
+                                .as_ref()
+                                .is_some_and(|registration| !registration.review_dispatch)
+                            {
+                                authorize(false)?;
+                                #[cfg(any(test, feature = "test-gh-guard"))]
+                                super::agent_frontend::run_owner_agent_dispatch_test_hook(
+                                    &grant,
+                                    super::agent_frontend::OwnerAgentDispatchTestStage::BeforeMonitorPromptAcceptance,
+                                );
+                            }
+                            with_current_monitor_prompt_input(target_entry, None, || {
+                                authorize(true)?;
+                                let mut mark_attempted = || {
+                                    if bytes != b"\r" {
+                                        body_attempted = true;
+                                    }
+                                };
+                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                    // Recheck after the body/submit settle and at
+                                    // every retry, including submit-only recovery.
+                                    if target_is_grok {
+                                        if owned_submit {
+                                            expected_pty.ensure_grok_prompt_submit_ready()?;
+                                        } else {
+                                            expected_pty.ensure_grok_prompt_input_ready()?;
+                                        }
+                                    }
+                                    commit(&mut mark_attempted)
+                                })
                             })
                         })
                         .map_err(|error| error.to_string());
@@ -911,6 +946,7 @@ pub fn authenticated_pm_pane_send_input_events(
                         ordinary_revision,
                         transaction_revision: reservation.transaction_revision(),
                         retained_input: None,
+                        retained_until: Instant::now(),
                     });
             }
             outcome
@@ -1292,7 +1328,18 @@ fn prepare_pane_name_for_window(
             .into_iter()
             .find(|member| member.agent_member_id == member_id)
             .ok_or("Registered Agent is missing")?;
-        if member.agent_id.as_deref() != session.as_ref().map(|session| session.agent_id.command())
+        let tool = session.as_ref().map(|session| session.agent_id.command());
+        // Issue #7647: an agent may run any of the project's environments.
+        if member.agent_id.as_deref() != tool
+            && !tool.is_some_and(|tool| {
+                crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                    &pane.project_root,
+                ))
+                .is_ok_and(|prefs| {
+                    prefs.environment_lists_tool(tool)
+                        || prefs.member_environment_overrides_tool(member_id, tool)
+                })
+            })
         {
             return Err("Registered Agent has a different fixed tool".into());
         }
@@ -1517,7 +1564,7 @@ pub fn agent_close_board_check(
         principal.session_id(),
         target_session,
         target_owner,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     ) {
         Ok(entries) if !entries.is_empty() => Some(
             crate::board_read_receipts::read_required_message("pane.close", &entries),
@@ -1888,12 +1935,16 @@ pub fn record_work_close(
 ) -> Result<bool, String> {
     use gwt_core::workspace_projection as work;
     let changed = match close_kind {
-        work::WorkCloseKind::Done => {
-            work::emit_workspace_done_event_if_absent(project_root, work_id, chrono::Utc::now())
-        }
-        work::WorkCloseKind::Discarded => {
-            work::emit_workspace_discard_event_if_absent(project_root, work_id, chrono::Utc::now())
-        }
+        work::WorkCloseKind::Done => work::emit_workspace_done_event_if_absent(
+            project_root,
+            work_id,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        ),
+        work::WorkCloseKind::Discarded => work::emit_workspace_discard_event_if_absent(
+            project_root,
+            work_id,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        ),
     }
     .map_err(|error| error.to_string())?;
     let items = work::load_workspace_work_items(project_root)
@@ -2012,7 +2063,7 @@ pub fn supersede_invalid_work_for_pm(
                             container.clone(),
                             super::workspace::SuccessorSupersessionAuthority::RegisteredPm,
                             live_session_ids,
-                            chrono::Utc::now(),
+                            gwt_core::timestamp::UtcTimestamp::now(),
                         )?;
                         if locked_target.events.iter().any(|event| {
                             event.work_item_id == locked_target.id
@@ -2536,6 +2587,93 @@ fn with_current_writer<T>(
     write(&entry.handle)
 }
 
+/// Invalidate only the Monitor's current hook observation before an explicit
+/// prompt commit. Existing callers supply their already-held Session context.
+pub(crate) fn with_current_monitor_prompt_input<T>(
+    entry: &PtyWriterEntry,
+    held_session: Option<HeldMonitorPromptSession<'_>>,
+    commit: impl FnOnce() -> Result<T, TerminalError>,
+) -> Result<T, TerminalError> {
+    let check_current = || {
+        if !entry.current.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "pane runtime changed before prompt commit".into(),
+            });
+        }
+        Ok(())
+    };
+    check_current()?;
+    let commit = || {
+        check_current()?;
+        commit()
+    };
+    let Some(registration) = entry
+        .monitor_runtime
+        .as_ref()
+        .filter(|registration| !registration.review_dispatch)
+    else {
+        return commit();
+    };
+    let child_pid = entry
+        .handle
+        .process_id()
+        .ok_or_else(|| TerminalError::PtyIoError {
+            details: "Monitor prompt target process is unavailable".into(),
+        })?;
+    crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+        registration,
+        child_pid,
+        held_session,
+        || commit().map_err(std::io::Error::other),
+    )
+    .map_err(|error| TerminalError::PtyIoError {
+        details: error.to_string(),
+    })
+}
+
+/// Observe the real confirming-input path in an explicitly armed Switch fixture.
+/// No wait or authorization is added, and ordinary builds do not contain it.
+#[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+fn observe_checkpoint_raw_input_for_test(
+    entry: &PtyWriterEntry,
+    phase: &str,
+) -> Result<(), TerminalError> {
+    let Some(path) = std::env::var_os("GWT_TEST_SWITCH_BODY_GATE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let Some(registration) = &entry.monitor_runtime else {
+        return Ok(());
+    };
+    let observe = || -> std::io::Result<()> {
+        let armed: serde_json::Value = match std::fs::read(path.with_extension("claimed")) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if armed["observe_raw"].as_bool() != Some(true)
+            || armed["root"].as_str() != registration.project_root.to_str()
+            || armed["session_id"].as_str() != Some(registration.session_id.as_str())
+            || armed["incarnation"].as_u64() != Some(registration.incarnation)
+        {
+            return Ok(());
+        }
+        let marker = path.with_extension(phase);
+        let temporary = path.with_extension(format!("{phase}.tmp"));
+        std::fs::write(
+            &temporary,
+            serde_json::to_vec(&serde_json::json!({
+                "operation": armed["operation"], "session_id": registration.session_id,
+                "incarnation": registration.incarnation, "host_pid": std::process::id(),
+                "input_revision": entry.handle.ordinary_input_revision(),
+            }))?,
+        )?;
+        std::fs::rename(temporary, marker)
+    };
+    observe().map_err(|error| TerminalError::PtyIoError {
+        details: error.to_string(),
+    })
+}
+
 /// The private GUI and agent commands use the same ordinary-input revision.
 /// A captured entry cannot target a same-address replacement.
 pub fn write_current_raw_input(
@@ -2544,9 +2682,105 @@ pub fn write_current_raw_input(
     entry: &Arc<PtyWriterEntry>,
     bytes: &[u8],
 ) -> Result<(), String> {
+    write_current_raw_input_with_session(writers, id, entry, bytes, None)
+}
+
+fn write_current_raw_input_with_session(
+    writers: &PtyWriterRegistry,
+    id: &str,
+    entry: &Arc<PtyWriterEntry>,
+    bytes: &[u8],
+    held_session: Option<HeldMonitorPromptSession<'_>>,
+) -> Result<(), String> {
     with_current_writer(writers, id, entry, |handle| {
-        handle.write_input(bytes).map_err(|error| error.to_string())
+        if entry
+            .monitor_runtime
+            .as_ref()
+            .is_none_or(|registration| registration.review_dispatch)
+        {
+            return handle.write_input(bytes).map_err(|error| error.to_string());
+        }
+        handle
+            .write_input_with_acceptance(bytes, |confirms, commit| {
+                let mut accept = || {
+                    let registered = writers.read().map_err(|error| TerminalError::PtyIoError {
+                        details: error.to_string(),
+                    })?;
+                    if !registered
+                        .get(id)
+                        .is_some_and(|current| Arc::ptr_eq(current, entry))
+                        || !entry.current.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return Err(TerminalError::PtyIoError {
+                            details: "pane runtime changed before raw input acceptance".into(),
+                        });
+                    }
+                    // Keep this exact entry registered through the short queue
+                    // commit, never through runtime I/O or physical writer waits.
+                    commit()
+                };
+                if confirms {
+                    #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                    observe_checkpoint_raw_input_for_test(entry, "raw-entered")?;
+                    let result = with_current_monitor_prompt_input(entry, held_session, accept);
+                    #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                    if result.is_ok() {
+                        observe_checkpoint_raw_input_for_test(entry, "raw-accepted")?;
+                    }
+                    result
+                } else {
+                    accept()
+                }
+            })
+            .map_err(|error| error.to_string())
     })
+}
+
+/// One attachment body on the reserved physical writer; ordinary protected queues
+/// are never used. A settled false flag proves refusal, never a timeout result.
+pub(crate) fn write_current_attachment_input(
+    writers: &PtyWriterRegistry,
+    id: &str,
+    entry: &Arc<PtyWriterEntry>,
+    session_current: &std::sync::atomic::AtomicBool,
+    bytes: &[u8],
+) -> super::events::OwnerAttachmentInputOutcome {
+    use super::events::OwnerAttachmentInputOutcome;
+    let mut attempted = false;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Issue #7701: a human attachment outranks an unconfirmed wake.
+        super::pm_delivery::release_retained_wake(
+            entry,
+            None,
+            super::pm_delivery::RetainedWakeRelease::HumanInput,
+            Instant::now(),
+        )?;
+        let reservation = with_current_writer(writers, id, entry, |handle| {
+            Arc::clone(handle)
+                .reserve_input_transaction()
+                .map_err(|error| error.to_string())
+        })?;
+        with_current_writer(writers, id, entry, |_| {
+            reservation
+                .write_ordinary_input_authorized(bytes, |commit| {
+                    if !entry.current.load(std::sync::atomic::Ordering::Acquire)
+                        || !session_current.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return Err(gwt_terminal::TerminalError::PtyIoError {
+                            details: "attachment target changed before physical input".into(),
+                        });
+                    }
+                    commit(&mut || attempted = true)
+                })
+                .map_err(|error| error.to_string())
+        })
+    }))
+    .unwrap_or_else(|_| Err("attachment physical writer panicked".into()));
+    match result {
+        Ok(()) => OwnerAttachmentInputOutcome::Written,
+        Err(_) if attempted => OwnerAttachmentInputOutcome::OutcomeUnknown,
+        Err(_) => OwnerAttachmentInputOutcome::NotStarted,
+    }
 }
 
 /// Synchronous accepted prompt delivery; the final CR stays inside its grant
@@ -2556,13 +2790,14 @@ pub fn write_current_pane_input(
     id: &str,
     entry: &Arc<PtyWriterEntry>,
     text: &str,
+    held_session: Option<HeldMonitorPromptSession<'_>>,
 ) -> Result<(), String> {
     let (body, submit) = split_pane_submit(text);
     let Some(submit) = submit else {
         return if body.is_empty() {
             Ok(())
         } else {
-            write_current_raw_input(writers, id, entry, body.as_bytes())
+            write_current_raw_input_with_session(writers, id, entry, body.as_bytes(), held_session)
         };
     };
     let reservation = with_current_writer(writers, id, entry, |handle| {
@@ -2575,12 +2810,7 @@ pub fn write_current_pane_input(
         with_current_writer(writers, id, entry, |_| {
             reservation
                 .write_input_authorized(&bytes, |commit| {
-                    if !entry.current.load(std::sync::atomic::Ordering::Acquire) {
-                        return Err(gwt_terminal::TerminalError::PtyIoError {
-                            details: "pane runtime changed before body commit".into(),
-                        });
-                    }
-                    commit(&mut || {})
+                    with_current_monitor_prompt_input(entry, held_session, || commit(&mut || {}))
                 })
                 .map_err(|error| error.to_string())
         })?;
@@ -2589,12 +2819,7 @@ pub fn write_current_pane_input(
     with_current_writer(writers, id, entry, |_| {
         reservation
             .write_input_authorized(submit.as_bytes(), |commit| {
-                if !entry.current.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(gwt_terminal::TerminalError::PtyIoError {
-                        details: "pane runtime changed before submit commit".into(),
-                    });
-                }
-                commit(&mut || {})
+                with_current_monitor_prompt_input(entry, held_session, || commit(&mut || {}))
             })
             .map_err(|error| error.to_string())
     })
@@ -2950,7 +3175,27 @@ impl AgentDispatchCapture {
                                     .get(id)
                                     .cloned()
                                     .ok_or_else(|| format!("no live runtime for pane {id}"))?;
-                                write_current_pane_input(&self.writers, id, &entry, &text)
+                                // SendInput requires producing authority: dispatch_if_current
+                                // already holds this principal's exact Session lease.
+                                let held_identity = if split_pane_submit(&text).1.is_some()
+                                    && entry.monitor_runtime.as_ref().is_some_and(|registration| {
+                                        !registration.review_dispatch
+                                    })
+                                {
+                                    let session = gwt_agent::Session::load(
+                                        &self.sessions_dir.join(format!(
+                                            "{}.toml", principal.session_id(),
+                                        )),
+                                    ).map_err(|error| error.to_string())?;
+                                    Some(gwt_agent::SessionExecutionIdentity::from_session(&session)?
+                                        .ok_or("Monitor prompt producing Session identity is unavailable")?)
+                                } else {
+                                    None
+                                };
+                                write_current_pane_input(
+                                    &self.writers, id, &entry, &text,
+                                    held_identity.as_ref().map(HeldMonitorPromptSession::Bound),
+                                )
                             });
                             vec![OutboundEvent::reply(
                                 client_id,
@@ -3547,6 +3792,7 @@ pub(crate) fn owned_process_window_state(
         linked_issue_number: session.and_then(|session| session.linked_issue_number),
         runtime_started_at_ms: None,
         is_pm: false,
+        pm_activity: None,
     })
 }
 

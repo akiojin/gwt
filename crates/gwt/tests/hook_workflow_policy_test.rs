@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use gwt::cli::{
     governance::GovernanceEffect,
     hook::{
@@ -512,7 +511,7 @@ fn workspace_agent(
         coordination_scope: None,
         affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
         workspace_id: Some("workspace-existing".to_string()),
-        updated_at: Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 
@@ -532,7 +531,7 @@ fn unassigned_workspace_agent(session_id: &str) -> WorkspaceAgentSummary {
         coordination_scope: None,
         affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
         workspace_id: None,
-        updated_at: Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 
@@ -1123,6 +1122,33 @@ fn allows_leading_comment_line_before_read_only_pipeline_without_owner() {
         decision.is_none(),
         "a leading shell comment must not poison classification"
     );
+}
+
+#[test]
+fn allows_importing_temporary_verification_logs_into_worktree() {
+    let worktree = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = TempDir::new().unwrap();
+    let baseline = temp.path().join("baseline.log");
+    let policy = temp.path().join("policy-red.log");
+    std::fs::write(&baseline, "baseline result\n").unwrap();
+    std::fs::write(&policy, "policy result\n").unwrap();
+    let destination = worktree.join("target/verification-evidence");
+    let command = format!(
+        "mkdir -p '{}'\ncp '{}' '{}' '{}'",
+        destination.display(),
+        baseline.display(),
+        policy.display(),
+        destination.display(),
+    );
+    let event = event("Bash", json!({ "command": command }));
+
+    let decision = workflow_policy::evaluate_with_context(
+        &event,
+        worktree,
+        &workflow_policy::WorkflowContext::default(),
+    )
+    .unwrap();
+    assert_eq!(decision, HookOutput::Silent);
 }
 
 #[test]

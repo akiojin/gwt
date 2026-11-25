@@ -34,6 +34,92 @@ pub fn config_path() -> Result<PathBuf, ProfileServiceError> {
     })
 }
 
+pub fn migrate_environment_assignments<'a>(
+    path: &Path,
+    registered_projects: impl IntoIterator<Item = &'a Path>,
+) -> Result<(), ProfileServiceError> {
+    if load_settings_or_default(path)?
+        .profiles
+        .project_environments
+        .is_some()
+    {
+        return Ok(());
+    }
+    let keys: Vec<_> = registered_projects
+        .into_iter()
+        .map(|root| gwt_core::paths::project_scope_hash(root).to_string())
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    Settings::update_project_environment_assignments(path, |profiles| {
+        profiles.migrate_environment_assignments(keys.iter().map(String::as_str));
+        Ok(())
+    })?;
+    Ok(())
+}
+
+pub fn register_environment_project(path: &Path, root: &Path) -> Result<(), ProfileServiceError> {
+    let key = gwt_core::paths::project_scope_hash(root).to_string();
+    let settings = load_settings_or_default(path)?;
+    if settings
+        .profiles
+        .project_environments
+        .as_ref()
+        .is_some_and(|assignments| assignments.contains_key(&key))
+    {
+        return Ok(());
+    }
+    Settings::update_project_environment_assignments(path, |profiles| {
+        profiles.migrate_environment_assignments([]);
+        profiles.register_environment_project(&key);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+pub fn project_environment_set(
+    root: &Path,
+    change: Option<Option<String>>,
+) -> crate::protocol::BackendEvent {
+    let key = gwt_core::paths::project_scope_hash(root).to_string();
+    let result = config_path().and_then(|path| {
+        let error = change.and_then(|name| {
+            Settings::update_project_environment_assignments(&path, |profiles| {
+                profiles
+                    .assign_environment(&key, name.as_deref())
+                    .map_err(|reason| gwt_config::ConfigError::ValidationError { reason })
+            })
+            .err()
+        });
+        let mut settings = load_settings_or_default(&path)?;
+        settings.profiles.normalize_active_profile();
+        Ok((settings, error))
+    });
+    let (names, assigned, error) = match result {
+        Ok((settings, error)) => (
+            settings
+                .profiles
+                .profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect(),
+            settings
+                .profiles
+                .environment_profile(Some(&key))
+                .map(|profile| profile.name.clone()),
+            error.map(|error| error.to_string()),
+        ),
+        Err(error) => (Vec::new(), None, Some(error.to_string())),
+    };
+    crate::protocol::BackendEvent::ProjectEnvironmentSet {
+        project_root: root.to_string_lossy().into_owned(),
+        names,
+        assigned,
+        error,
+    }
+}
+
 pub fn load_snapshot(
     selected_profile: Option<&str>,
 ) -> Result<ProfileSnapshotView, ProfileServiceError> {
@@ -55,21 +141,22 @@ pub fn create_profile(name: &str) -> Result<(), ProfileServiceError> {
 }
 
 pub fn create_profile_at(path: &Path, name: &str) -> Result<(), ProfileServiceError> {
-    let mut settings = load_settings_or_default(path)?;
-    let name = require_non_empty("profile name", name)?;
-    if settings
-        .profiles
-        .profiles
-        .iter()
-        .any(|profile| profile.name == name)
-    {
-        return Err(ProfileServiceError::Duplicate(name.to_string()));
-    }
-    settings
-        .profiles
-        .add(Profile::new(name))
-        .map_err(ProfileServiceError::InvalidInput)?;
-    settings.save(path).map_err(ProfileServiceError::from)
+    Settings::try_update_at_path(path, |settings| {
+        let name = require_non_empty("profile name", name)?;
+        if settings
+            .profiles
+            .profiles
+            .iter()
+            .any(|profile| profile.name == name)
+        {
+            return Err(ProfileServiceError::Duplicate(name.to_string()));
+        }
+        settings
+            .profiles
+            .add(Profile::new(name))
+            .map_err(ProfileServiceError::InvalidInput)?;
+        Ok(())
+    })
 }
 
 pub fn switch_active_profile(name: &str) -> Result<(), ProfileServiceError> {
@@ -78,21 +165,22 @@ pub fn switch_active_profile(name: &str) -> Result<(), ProfileServiceError> {
 }
 
 pub fn switch_active_profile_at(path: &Path, name: &str) -> Result<(), ProfileServiceError> {
-    let mut settings = load_settings_or_default(path)?;
-    let name = require_non_empty("profile name", name)?;
-    if settings
-        .profiles
-        .profiles
-        .iter()
-        .all(|profile| profile.name != name)
-    {
-        return Err(ProfileServiceError::NotFound(name.to_string()));
-    }
-    settings
-        .profiles
-        .switch(name)
-        .map_err(ProfileServiceError::InvalidInput)?;
-    settings.save(path).map_err(ProfileServiceError::from)
+    Settings::try_update_at_path(path, |settings| {
+        let name = require_non_empty("profile name", name)?;
+        if settings
+            .profiles
+            .profiles
+            .iter()
+            .all(|profile| profile.name != name)
+        {
+            return Err(ProfileServiceError::NotFound(name.to_string()));
+        }
+        settings
+            .profiles
+            .switch(name)
+            .map_err(ProfileServiceError::InvalidInput)?;
+        Ok(())
+    })
 }
 
 pub fn save_profile(
@@ -121,53 +209,54 @@ pub fn save_profile_at(
     env_vars: &[ProfileEnvEntryView],
     disabled_env: &[String],
 ) -> Result<(), ProfileServiceError> {
-    let mut settings = load_settings_or_default(path)?;
-    let current_name = require_non_empty("profile name", current_name)?;
-    if settings
-        .profiles
-        .profiles
-        .iter()
-        .all(|profile| profile.name != current_name)
-    {
-        return Err(ProfileServiceError::NotFound(current_name.to_string()));
-    }
-
-    let name = require_non_empty("profile name", name)?;
-    if current_name == "default" && name != "default" {
-        return Err(ProfileServiceError::InvalidInput(
-            "default profile cannot be renamed".to_string(),
-        ));
-    }
-    if current_name != name
-        && settings
+    Settings::try_update_at_path(path, |settings| {
+        let current_name = require_non_empty("profile name", current_name)?;
+        if settings
             .profiles
             .profiles
             .iter()
-            .any(|profile| profile.name == name)
-    {
-        return Err(ProfileServiceError::Duplicate(name.to_string()));
-    }
+            .all(|profile| profile.name != current_name)
+        {
+            return Err(ProfileServiceError::NotFound(current_name.to_string()));
+        }
 
-    let env_vars = normalize_env_vars(env_vars)?;
-    let disabled_env = normalize_disabled_env(disabled_env)?;
+        let name = require_non_empty("profile name", name)?;
+        if current_name == "default" && name != "default" {
+            return Err(ProfileServiceError::InvalidInput(
+                "default profile cannot be renamed".to_string(),
+            ));
+        }
+        if current_name != name
+            && settings
+                .profiles
+                .profiles
+                .iter()
+                .any(|profile| profile.name == name)
+        {
+            return Err(ProfileServiceError::Duplicate(name.to_string()));
+        }
 
-    settings
-        .profiles
-        .update_profile(current_name, name, description.trim())
-        .map_err(ProfileServiceError::InvalidInput)?;
+        let env_vars = normalize_env_vars(env_vars)?;
+        let disabled_env = normalize_disabled_env(disabled_env)?;
 
-    let Some(profile) = settings
-        .profiles
-        .profiles
-        .iter_mut()
-        .find(|profile| profile.name == name)
-    else {
-        return Err(ProfileServiceError::NotFound(name.to_string()));
-    };
-    profile.env_vars = env_vars;
-    profile.disabled_env = disabled_env;
+        settings
+            .profiles
+            .update_profile(current_name, name, description.trim())
+            .map_err(ProfileServiceError::InvalidInput)?;
 
-    settings.save(path).map_err(ProfileServiceError::from)
+        let Some(profile) = settings
+            .profiles
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == name)
+        else {
+            return Err(ProfileServiceError::NotFound(name.to_string()));
+        };
+        profile.env_vars = env_vars;
+        profile.disabled_env = disabled_env;
+
+        Ok(())
+    })
 }
 
 pub fn delete_profile(name: &str) -> Result<(), ProfileServiceError> {
@@ -176,26 +265,35 @@ pub fn delete_profile(name: &str) -> Result<(), ProfileServiceError> {
 }
 
 pub fn delete_profile_at(path: &Path, name: &str) -> Result<(), ProfileServiceError> {
-    let mut settings = load_settings_or_default(path)?;
-    let name = require_non_empty("profile name", name)?;
-    if name == "default" {
-        return Err(ProfileServiceError::InvalidInput(
-            "default profile cannot be deleted".to_string(),
-        ));
-    }
-    if settings
-        .profiles
-        .profiles
-        .iter()
-        .all(|profile| profile.name != name)
-    {
-        return Err(ProfileServiceError::NotFound(name.to_string()));
-    }
-    settings
-        .profiles
-        .delete_profile(name)
-        .map_err(ProfileServiceError::InvalidInput)?;
-    settings.save(path).map_err(ProfileServiceError::from)
+    Settings::try_update_at_path(path, |settings| {
+        let name = require_non_empty("profile name", name)?;
+        if name == "default" {
+            return Err(ProfileServiceError::InvalidInput(
+                "default profile cannot be deleted".to_string(),
+            ));
+        }
+        if settings.profiles.project_environments.is_some()
+            && settings.profiles.active.as_deref() == Some(name)
+        {
+            return Err(ProfileServiceError::InvalidInput(
+                "Choose another device default before deleting this environment variable set."
+                    .to_string(),
+            ));
+        }
+        if settings
+            .profiles
+            .profiles
+            .iter()
+            .all(|profile| profile.name != name)
+        {
+            return Err(ProfileServiceError::NotFound(name.to_string()));
+        }
+        settings
+            .profiles
+            .delete_profile(name)
+            .map_err(ProfileServiceError::InvalidInput)?;
+        Ok(())
+    })
 }
 
 fn load_settings_or_default(path: &Path) -> Result<Settings, ProfileServiceError> {
@@ -274,6 +372,15 @@ where
             disabled_env: sorted_disabled_env(&profile.disabled_env),
             is_default: profile.name == "default",
             is_active: profile.name == active_profile,
+            assigned_project_count: settings.profiles.project_environments.as_ref().map_or(
+                0,
+                |assignments| {
+                    assignments
+                        .values()
+                        .filter(|name| *name == &profile.name)
+                        .count()
+                },
+            ),
         })
         .collect();
 

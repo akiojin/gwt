@@ -177,6 +177,13 @@ pub enum IssueCommand {
         issue_number: u64,
         reviewed_sha: String,
         verdict_raw: String,
+        evidence_review_token: Option<String>,
+    },
+    MonitorReviewMergedEvidence {
+        issue_number: u64,
+        pr_number: u64,
+        reviewed_sha: String,
+        evidence_revision: String,
     },
     MonitorStatus {
         project_root: Option<std::path::PathBuf>,
@@ -347,6 +354,12 @@ pub enum IssueCommand {
         number: u64,
         reason: String,
         force: bool,
+    },
+    /// Record who verifies each remaining external criterion of a settled delivery.
+    MonitorVerificationDeclare {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        criteria: Vec<(String, String)>,
     },
     /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
     /// evidence it was formed from.

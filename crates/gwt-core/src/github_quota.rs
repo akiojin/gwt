@@ -22,7 +22,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
-use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 
 /// Machine-readable prefix that marks a rate-limit failure. Callers (and the
 /// humans reading their errors) can match on this instead of guessing from a
@@ -129,28 +131,25 @@ pub struct RateLimitBlock {
     /// Budget left at the time of measurement.
     pub remaining: u64,
     /// Absolute time the window resets.
-    pub reset_at: DateTime<Utc>,
+    pub reset_at: UtcTimestamp,
 }
 
 impl RateLimitBlock {
     /// Seconds a caller must wait before retrying. Never negative.
-    pub fn retry_after_secs(&self, now: DateTime<Utc>) -> i64 {
-        (self.reset_at - now).num_seconds().max(0)
+    pub fn retry_after_secs(&self, now: UtcTimestamp) -> i64 {
+        (self.reset_at - now).whole_seconds().max(0)
     }
 
     /// Machine-readable one-line explanation: leads with
     /// [`RATE_LIMITED_ERROR_CODE`] and always carries the absolute reset time
     /// plus the remaining seconds (Issue #3604 AC-1 / AC-2).
-    pub fn detail(&self, now: DateTime<Utc>) -> String {
+    pub fn detail(&self, now: UtcTimestamp) -> String {
         let mut detail = format!("{RATE_LIMITED_ERROR_CODE}: resource={}", self.resource);
         if self.limit > 0 {
             detail.push_str(&format!(" limit={}", self.limit));
         }
         detail.push_str(&format!(" remaining={}", self.remaining));
-        detail.push_str(&format!(
-            " reset_at={}",
-            self.reset_at.to_rfc3339_opts(SecondsFormat::Secs, true)
-        ));
+        detail.push_str(&format!(" reset_at={}", self.reset_at.to_rfc3339_seconds()));
         detail.push_str(&format!(" retry_after_secs={}", self.retry_after_secs(now)));
         detail
     }
@@ -172,7 +171,7 @@ pub fn parse_rate_limit_probe(payload: &str, quota: GitHubQuota) -> Option<RateL
             .get("remaining")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
-        reset_at: Utc.timestamp_opt(reset, 0).single()?,
+        reset_at: UtcTimestamp::from_unix_seconds(reset)?,
     })
 }
 
@@ -191,7 +190,7 @@ pub fn parse_rate_limit_probe(payload: &str, quota: GitHubQuota) -> Option<RateL
 pub fn block_from_probe(
     quota: GitHubQuota,
     probe: Option<RateLimitBlock>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> RateLimitBlock {
     if let Some(block) = probe {
         if block.reset_at > now && block.remaining == 0 {
@@ -202,7 +201,7 @@ pub fn block_from_probe(
         resource: quota.resource_name().unwrap_or("unknown").to_string(),
         limit: 0,
         remaining: 0,
-        reset_at: now + chrono::Duration::seconds(UNKNOWN_RESET_BACKOFF_SECS),
+        reset_at: now + Duration::seconds(UNKNOWN_RESET_BACKOFF_SECS),
     }
 }
 
@@ -232,7 +231,7 @@ impl QuotaGate {
     }
 
     /// The active block for `quota`, or `None` when the budget is usable.
-    pub fn active_block(&self, quota: GitHubQuota, now: DateTime<Utc>) -> Option<RateLimitBlock> {
+    pub fn active_block(&self, quota: GitHubQuota, now: UtcTimestamp) -> Option<RateLimitBlock> {
         let resource = quota.resource_name()?;
         let mut blocks = self
             .blocks
@@ -272,7 +271,7 @@ pub fn global() -> &'static QuotaGate {
 pub fn suppressed_spawn_detail<S: AsRef<str>>(
     gate: &QuotaGate,
     args: &[S],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<String> {
     let quota = classify_gh_args(args);
     gate.active_block(quota, now).map(|block| block.detail(now))
@@ -292,7 +291,7 @@ pub fn observe_failure<S, F>(
     gate: &QuotaGate,
     args: &[S],
     stderr: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     probe: F,
 ) -> Option<String>
 where
@@ -315,7 +314,7 @@ where
 pub fn annotate_rate_limited_stderr(
     block: &RateLimitBlock,
     original_stderr: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> String {
     let detail = block.detail(now);
     let original = original_stderr.trim();

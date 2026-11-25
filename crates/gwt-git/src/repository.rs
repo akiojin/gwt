@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{config::BareProjectConfig, GwtError, Result};
 
 pub mod git_health;
@@ -303,7 +304,7 @@ fn clone_project_as_nested_bare_inner(
     BareProjectConfig {
         bare_repo_name: format!("{}.git", target.repo_name),
         remote_url: Some(url.to_string()),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: UtcTimestamp::now().to_rfc3339(),
         migrated_from: None,
     }
     .save(&target.workspace_home)?;

@@ -1,5 +1,7 @@
 //! Explicit Board reads, separate from automatic prompt injection (Issue #3713).
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{
     collections::BTreeMap,
     fs, io,
@@ -7,11 +9,11 @@ use std::{
     time::Instant,
 };
 
-use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 use gwt_core::coordination::{BoardAudienceScope, BoardEntry, BoardEntryKind, BoardProjection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use time::Duration;
 
 use crate::cli::hook::HookOutput;
 
@@ -35,7 +37,7 @@ struct ReadReceipt {
 
 #[derive(Deserialize, Serialize)]
 struct CompleteCoverage {
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
     total_entries: usize,
     newest_entry_id: Option<String>,
 }
@@ -98,7 +100,7 @@ pub fn record_complete_read(
     repo: &Path,
     session: &str,
     entries: &[BoardEntry],
-    started_at: DateTime<Utc>,
+    started_at: UtcTimestamp,
     hot: &BoardProjection,
 ) -> io::Result<()> {
     let latest = latest_entries(entries.to_vec());
@@ -179,7 +181,7 @@ fn covered_hot_tail(hot: &BoardProjection, coverage: &CompleteCoverage) -> Optio
 fn observation_entries(
     repo: &Path,
     receipt: &ReadReceipt,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
 ) -> io::Result<Vec<BoardEntry>> {
     if let Some(coverage) = &receipt.complete {
         let hot = crate::board_provider::load_snapshot(repo)
@@ -247,7 +249,7 @@ fn unread_entries(
     repo: &Path,
     session: &str,
     scope: &BoardAudienceScope,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
 ) -> io::Result<Vec<BoardEntry>> {
     gwt_core::operation_deadline::ensure_remaining("Board unread observation")?;
     let receipt = load_receipt(repo, session)?;
@@ -280,7 +282,7 @@ pub(crate) fn registered_pm(repo: &Path, session: &str) -> bool {
 fn pm_unread(repo: &Path, session: &str) -> io::Result<Vec<BoardEntry>> {
     let scope = crate::board_audience::current_session_board_scope(repo, Some(session))
         .map_err(io::Error::other)?;
-    unread_entries(repo, session, &scope, DateTime::<Utc>::MIN_UTC)
+    unread_entries(repo, session, &scope, UtcTimestamp::MIN)
 }
 
 pub fn warning(error: impl std::fmt::Display) -> String {
@@ -409,7 +411,7 @@ pub fn recent_owner_unread(
     caller_session: &str,
     target_session: Option<&str>,
     target_owner: Option<u64>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> io::Result<Vec<BoardEntry>> {
     if target_session.is_none() && target_owner.is_none() {
         return Ok(Vec::new());
@@ -481,7 +483,7 @@ mod tests {
             tmp.path(),
             "reader-a",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC
+            UtcTimestamp::MIN
         )
         .unwrap()
         .is_empty());
@@ -490,7 +492,7 @@ mod tests {
                 tmp.path(),
                 "reader-b",
                 &BoardAudienceScope::All,
-                DateTime::<Utc>::MIN_UTC
+                UtcTimestamp::MIN
             )
             .unwrap()
             .len(),
@@ -505,7 +507,7 @@ mod tests {
                 tmp.path(),
                 "reader-a",
                 &BoardAudienceScope::All,
-                DateTime::<Utc>::MIN_UTC
+                UtcTimestamp::MIN
             )
             .unwrap()
             .len(),
@@ -517,7 +519,7 @@ mod tests {
                 tmp.path(),
                 "reader-a",
                 &BoardAudienceScope::All,
-                DateTime::<Utc>::MIN_UTC
+                UtcTimestamp::MIN
             )
             .unwrap()
             .is_empty(),
@@ -568,7 +570,7 @@ mod tests {
     fn issue_3713_scope_and_exact_target_evidence_exclude_unrelated_and_expired_posts() {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let current = entry(BoardEntryKind::Handoff, "42").with_audience(vec!["workspace-a"]);
         let other = entry(BoardEntryKind::Blocked, "43")
             .with_audience(vec!["workspace-b"])
@@ -583,7 +585,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::Workspace("workspace-a".into()),
-            DateTime::<Utc>::MIN_UTC,
+            UtcTimestamp::MIN,
         )
         .unwrap();
         assert_eq!(scoped.len(), 2);
@@ -592,7 +594,7 @@ mod tests {
             "reader",
             Some("owner-session"),
             Some(42),
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .unwrap();
         assert_eq!(recent, vec![current.clone()]);
@@ -602,19 +604,19 @@ mod tests {
             "reader",
             Some("owner-session"),
             Some(42),
-            Utc::now()
+            UtcTimestamp::now()
         )
         .unwrap()
         .is_empty());
         assert!(
-            recent_owner_unread(tmp.path(), "reader", None, None, Utc::now())
+            recent_owner_unread(tmp.path(), "reader", None, None, UtcTimestamp::now())
                 .unwrap()
                 .is_empty()
         );
         let newer = entry(BoardEntryKind::Status, "42");
         crate::board_provider::post_entry(tmp.path(), newer.clone()).unwrap();
         assert_eq!(
-            recent_owner_unread(tmp.path(), "reader", None, Some(42), Utc::now()).unwrap(),
+            recent_owner_unread(tmp.path(), "reader", None, Some(42), UtcTimestamp::now()).unwrap(),
             vec![newer]
         );
     }
@@ -672,7 +674,7 @@ mod tests {
         let hot = crate::board_provider::post_entry(tmp.path(), first.clone())
             .unwrap()
             .board;
-        let started = Utc::now();
+        let started = UtcTimestamp::now();
         record_complete_read(tmp.path(), "reader", &[first], started, &hot).unwrap();
         assert!(load_receipt(tmp.path(), "reader")
             .unwrap()
@@ -686,7 +688,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC,
+            UtcTimestamp::MIN,
         )
         .unwrap();
         assert_eq!(unread, vec![backdated.clone()]);
@@ -703,7 +705,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC
+            UtcTimestamp::MIN
         )
         .unwrap()
         .is_empty());
@@ -717,7 +719,7 @@ mod tests {
         let hot = crate::board_provider::post_entry(tmp.path(), first.clone())
             .unwrap()
             .board;
-        let started = Utc::now();
+        let started = UtcTimestamp::now();
         record_complete_read(tmp.path(), "reader", &[first], started, &hot).unwrap();
         let coverage = load_receipt(tmp.path(), "reader")
             .unwrap()
@@ -744,7 +746,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC
+            UtcTimestamp::MIN
         )
         .is_err());
     }

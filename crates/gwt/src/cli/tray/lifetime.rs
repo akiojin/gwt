@@ -132,6 +132,31 @@ mod tests {
         assert!(lifetime.ended(2, false, now + RECONNECT_GRACE * 2));
     }
 
+    /// Issue #7352: a headed suite closes every page between theme projects.
+    /// The browser-check guidance must state this grace and hold one session.
+    #[test]
+    fn browser_check_guidance_holds_a_session_across_the_reconnect_grace() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for provider in [".claude", ".codex"] {
+            let path = root
+                .join(provider)
+                .join("skills/browser-check/references/readiness.md");
+            let text = std::fs::read_to_string(&path).expect("browser-check readiness guidance");
+            let grace = format!("{}s reconnect grace", RECONNECT_GRACE.as_secs());
+            assert!(
+                text.contains(&grace),
+                "{} must state the {grace}",
+                path.display()
+            );
+            let keeper = text
+                .split("# browser-check-session-keeper-begin")
+                .nth(1)
+                .and_then(|rest| rest.split("# browser-check-session-keeper-end").next())
+                .unwrap_or_else(|| panic!("{} must hold a browser session", path.display()));
+            assert!(keeper.contains("/ws") && keeper.contains("KEEPER_PID=$!"));
+        }
+    }
+
     #[test]
     fn missing_parent_is_terminal_and_live_parent_is_detected() {
         assert!(!ParentProcess(Ok(None)).is_alive());

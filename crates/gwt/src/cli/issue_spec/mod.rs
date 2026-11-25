@@ -702,7 +702,7 @@ fn run_spec_lint<E: CliEnv>(
             marker_header: header,
             roundtrip,
         },
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
 
     out.push_str(&format!(
@@ -728,7 +728,7 @@ fn run_spec_lint<E: CliEnv>(
             .iter()
             .map(|section| (section.name.clone(), section_sha256(&section.content)))
             .collect();
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let captured = IntakeInspectionSnapshot::capture(number, hashes, &report, now)
             .with_context(directive_epoch, phase_slice, Vec::new());
         let ledger = FindingDispositionLedger::seed_from_lint(&report, now);
@@ -805,7 +805,7 @@ fn run_spec_inspection_complete<E: CliEnv>(
     let operability = crate::cli::artifact_operability::load(env.repo_path(), number)
         .ok()
         .flatten();
-    let observed_at = chrono::Utc::now();
+    let observed_at = gwt_core::timestamp::UtcTimestamp::now();
 
     let mut sections = Vec::new();
     for name in snapshot.section_hashes.keys() {

@@ -148,8 +148,19 @@ fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
         session.branch = format!("work/{id}");
         session.project_state_root = Some(repo.clone());
         session.save(&runtime.sessions_dir).unwrap();
+        gwt::agent_names::adopt_project_member_session(&repo, &runtime.sessions_dir, &mut session)
+            .expect("register the saved identity before restoring its runtime");
     }
 
+    let before = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
+    assert_eq!(before.members.len(), 2);
+    // Physical resume capacity is independent of the registered roster size.
+    gwt::machine_agent_settings::set(
+        Some(2),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-11-10T00:00:00Z",
+    )
+    .expect("admit both saved Sessions without enlarging their member roster");
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
     let events = drain_startup_auto_resume(&mut runtime);
 
@@ -175,14 +186,17 @@ fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
     assert!(runtime.restore_launch_windows.is_empty());
     let roster = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
     assert_eq!(
-        roster.enabled_count(),
-        1,
-        "restore does not enlarge the configured capacity"
-    );
-    assert_eq!(
-        roster.members.len(),
-        2,
-        "the excess restored member is retained"
+        roster
+            .members
+            .iter()
+            .map(|member| &member.agent_member_id)
+            .collect::<Vec<_>>(),
+        before
+            .members
+            .iter()
+            .map(|member| &member.agent_member_id)
+            .collect::<Vec<_>>(),
+        "restoring Sessions preserves the registered roster"
     );
     for window_id in runtime.runtimes.keys().cloned().collect::<Vec<_>>() {
         close_test_owner_runtime(&mut runtime, &window_id);
@@ -610,6 +624,21 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
         let _owner = project_owner_fixture(&mut runtime, "tab-1::agent-restore");
+        let existing_names: HashSet<_> =
+            gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir)
+                .expect("initialized shared roster")
+                .members
+                .into_iter()
+                .map(|member| member.name)
+                .collect();
+        // Imported roster members may predate the machine name history.
+        fs::write(gwt::agent_registry::history_path(), "").expect("history predates import");
+        // The shared registry owns name allocation; obsolete project history
+        // must not prevent an otherwise admissible restore.
+        let legacy_history =
+            gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("agent-names.jsonl");
+        fs::write(&legacy_history, "obsolete project name history\n")
+            .expect("legacy history fixture");
         save_restore_fixture_session(
             &runtime.sessions_dir,
             "session-restore",
@@ -646,7 +675,22 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
             .expect("pending restore")
             .clone();
         let completed = capture_tracing_events(|| {
-            drain_owner_launch_fixtures(&mut runtime, &tasks);
+            drain_queued_blocking_tasks(&tasks);
+            let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+                AppEventProxy::Stub(events) => events,
+                _ => panic!("recorded restore completion"),
+            });
+            let refusal = completion
+                .restore_refusal
+                .as_ref()
+                .expect("restore failure");
+            assert!(
+                refusal.remove_placeholder,
+                "startup={startup}, code={}, error={:?}",
+                refusal.code,
+                completion.result.as_ref().err()
+            );
+            runtime.handle_remote_owner_launch_complete(completion);
         });
         let summary = restore_admission_summary(&completed);
         assert_eq!(
@@ -659,6 +703,19 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
             Some("launch_not_started=1")
         );
         assert!(!runtime.window_lookup.contains_key(&window_id));
+        let restored = gwt_agent::Session::load(&path).expect("retired restore source");
+        let name = restored.agent_name.expect("allocated restore name");
+        let history: HashSet<String> = fs::read_to_string(gwt::agent_registry::history_path())
+            .expect("canonical Agent name history")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("reserved name"))
+            .collect();
+        let mut expected_names = existing_names;
+        expected_names.insert(name);
+        assert!(
+            expected_names.is_subset(&history),
+            "startup={startup}: shared names {expected_names:?} must stay reserved: {history:?}"
+        );
     }
 }
 
@@ -1132,7 +1189,7 @@ fn startup_restore_limits_windows_to_the_last_open_set() {
         age_restore_fixture_session(
             &runtime.sessions_dir,
             &session_id,
-            chrono::Duration::hours(48),
+            time::Duration::hours(48),
         );
     }
 
@@ -1230,7 +1287,7 @@ fn startup_restore_collapses_duplicate_owner_issue_windows() {
         age_restore_fixture_session(
             &runtime.sessions_dir,
             &session_id,
-            chrono::Duration::minutes(10 * (2 - index as i64)),
+            time::Duration::minutes(10 * (2 - index as i64)),
         );
     }
 
@@ -2247,4 +2304,40 @@ fn startup_auto_resume_drain_evaluates_admission_off_the_gui_thread() {
         "a policy-deferred Session is requeued for the next round trip"
     );
     assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "no retry without another ready event"
+    );
+
+    runtime.startup_auto_resume_ready_events();
+    drain_queued_blocking_tasks(&tasks);
+    let stale = take_startup_auto_resume_admission_prepared(&runtime).unwrap();
+    assert!(
+        !stale.sessions[0].1,
+        "the worker ran before a view was accepted"
+    );
+    runtime.seed_fixture_project_views();
+    runtime.startup_auto_resume_ready_events();
+    runtime.startup_auto_resume_ready_events();
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "ready events coalesce while admission is in flight"
+    );
+    runtime.startup_auto_resume_admission_prepared_events(stale);
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the newer ready event must recheck the deferred Session"
+    );
+    assert_eq!(
+        super::super::startup::startup_admission_evaluations(),
+        before + 2,
+        "the recheck stays off the GUI thread"
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let current = take_startup_auto_resume_admission_prepared(&runtime).unwrap();
+    assert!(
+        current.sessions[0].1,
+        "the next worker sees the accepted view"
+    );
 }

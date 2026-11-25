@@ -5,7 +5,8 @@
 //! (no IO) and takes preloaded Board entries plus the current reminders
 //! sidecar through [`ReminderInputs`]. The IO wrapper lives in `mod.rs`.
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
+
 use gwt_core::coordination::{BoardEntry, RemindersState};
 
 use super::format::{filter_and_cap_latest, injection_text, session_start_text};
@@ -21,7 +22,7 @@ use super::{HookOutput, IntentBoundaryEvent};
 #[derive(Debug, Clone)]
 pub struct ReminderInputs {
     pub event: IntentBoundaryEvent,
-    pub now: DateTime<Utc>,
+    pub now: UtcTimestamp,
     pub self_session_id: String,
     pub display_name: String,
     /// Identifiers used to detect self-targeted entries (SPEC-1974 FR-041).
@@ -149,7 +150,6 @@ pub(super) fn plan_event(output: &HookOutput) -> IntentBoundaryEvent {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
     use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
 
     use super::*;
@@ -160,7 +160,7 @@ mod tests {
         body: &str,
         origin_branch: &str,
         origin_session: &str,
-        timestamp: DateTime<Utc>,
+        timestamp: UtcTimestamp,
         target_owners: Vec<String>,
     ) -> BoardEntry {
         let mut e = BoardEntry::new(
@@ -187,7 +187,7 @@ mod tests {
         body: &str,
         origin_branch: &str,
         origin_session: &str,
-        timestamp: DateTime<Utc>,
+        timestamp: UtcTimestamp,
     ) -> BoardEntry {
         entry_with_target(
             author,
@@ -218,7 +218,7 @@ mod tests {
     fn plan_user_prompt_submit_contains_phase_and_do_not_guard() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -237,7 +237,7 @@ mod tests {
     fn plan_stop_reminder_is_user_facing() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::Stop,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -258,7 +258,7 @@ mod tests {
     fn plan_user_prompt_submit_includes_coordination_axes() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -289,7 +289,7 @@ mod tests {
     fn plan_user_prompt_submit_promotes_readable_multiline_body_as_canonical_message() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -319,7 +319,7 @@ mod tests {
     fn plan_user_prompt_submit_includes_workspace_policy_guidance() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -341,7 +341,7 @@ mod tests {
     fn plan_reminders_include_workspace_update_guidance() {
         let session_start = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::SessionStart,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -353,7 +353,7 @@ mod tests {
         });
         let user_prompt = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -365,7 +365,7 @@ mod tests {
         });
         let stop = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::Stop,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -398,7 +398,7 @@ mod tests {
     fn plan_user_prompt_submit_short_reminder_mentions_coordination() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn plan_session_start_marks_for_you_when_target_matches_session_id() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let other = entry_with_target(
             "OtherAgent",
             BoardEntryKind::Claim,
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn plan_session_start_marks_for_you_when_target_matches_branch() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let other = entry_with_target(
             "OtherAgent",
             BoardEntryKind::Handoff,
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn plan_session_start_no_for_you_marker_when_target_owners_empty() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let other = entry(
             "OtherAgent",
             BoardEntryKind::Status,
@@ -528,7 +528,7 @@ mod tests {
     fn plan_user_prompt_submit_short_reminder_when_redundant() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn plan_session_start_excludes_self_and_renders_origin() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let entries = vec![
             entry(
                 "Codex",
@@ -586,7 +586,7 @@ mod tests {
     fn plan_user_prompt_submit_empty_diff_still_emits_reminder() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -605,7 +605,7 @@ mod tests {
     fn plan_session_start_appends_language_directive_for_en() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::SessionStart,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -627,7 +627,7 @@ mod tests {
     fn plan_session_start_appends_language_directive_for_ja() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::SessionStart,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -651,7 +651,7 @@ mod tests {
     fn plan_user_prompt_submit_keeps_english_reminder_when_language_is_ja() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -675,7 +675,7 @@ mod tests {
     fn plan_user_prompt_submit_short_keeps_english_reminder_when_language_is_ja() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -697,7 +697,7 @@ mod tests {
     fn plan_user_prompt_submit_appends_language_directive() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -715,7 +715,7 @@ mod tests {
     fn plan_user_prompt_submit_short_also_carries_language_directive() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -734,7 +734,7 @@ mod tests {
     fn plan_stop_does_not_emit_language_directive() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::Stop,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -755,7 +755,7 @@ mod tests {
     fn plan_unknown_language_falls_back_to_en_in_directive() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -771,8 +771,8 @@ mod tests {
 
     #[test]
     fn plan_stop_does_not_bump_last_injected_at() {
-        let before = Utc.with_ymd_and_hms(2026, 4, 20, 9, 0, 0).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 4, 20, 13, 0, 0).unwrap();
+        let before = "2026-04-20T09:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let now = "2026-04-20T13:00:00Z".parse::<UtcTimestamp>().unwrap();
         let reminders = RemindersState {
             last_injected_at: Some(before),
             ..Default::default()

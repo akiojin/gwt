@@ -362,20 +362,23 @@ fn classify_cargo_scope(
             }
             continue;
         }
-        if matches!(
-            flag,
-            "--features"
-                | "-F"
-                | "--jobs"
-                | "-j"
-                | "--target"
-                | "--manifest-path"
-                | "--target-dir"
-                | "--profile"
-                | "--config"
-                | "--color"
-                | "--message-format"
-        ) {
+        // Issue #7317: nextest's retry count selects no target.
+        if (nextest && flag == "--retries")
+            || matches!(
+                flag,
+                "--features"
+                    | "-F"
+                    | "--jobs"
+                    | "-j"
+                    | "--target"
+                    | "--manifest-path"
+                    | "--target-dir"
+                    | "--profile"
+                    | "--config"
+                    | "--color"
+                    | "--message-format"
+            )
+        {
             if inline_value.or_else(|| args.next()).is_none() {
                 return CommandWeight::Heavy;
             }
@@ -1207,6 +1210,17 @@ fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
             .and_then(control_dir_for)
             .is_some();
     Ok(snapshot)
+}
+
+/// Observe the same pool and legacy holders as `verify.lease.status`, without
+/// entering admission. An unreadable pool remains unknown rather than empty.
+pub fn capacity_snapshot() -> Option<crate::issue_monitor::VerificationCapacity> {
+    let snapshot = status().ok()?;
+    Some(crate::issue_monitor::VerificationCapacity {
+        capacity: snapshot.capacity?,
+        running: snapshot.running,
+        available: snapshot.available,
+    })
 }
 
 /// A representative holder is unsuitable for control and renewal: another
@@ -2358,6 +2372,25 @@ mod tests {
             ),
             CommandWeight::Light,
         );
+    }
+
+    #[test]
+    fn nextest_retry_count_does_not_widen_a_named_target() {
+        // Issue #7317 (#6044): the canonical Windows matrix appends
+        // `--profile gwt-verify --retries 0`; a retry count selects no target.
+        for command in [
+            "cargo nextest run -p gwt-core --test test_hygiene_test --profile gwt-verify --retries 0",
+            "cargo nextest run -p gwt-core --test test_hygiene_test --retries=0",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Light, "{command}");
+        }
+        for command in [
+            "cargo nextest run -p gwt-core --all-features --profile gwt-verify --retries 0",
+            "cargo nextest run -p gwt-core --test test_hygiene_test --retries",
+            "cargo test -p gwt-core --test test_hygiene_test --retries 0",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+        }
     }
 
     /// Issue #4196 AC-1 / AC-3: what a requested command weighs follows the

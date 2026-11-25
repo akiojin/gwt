@@ -8,6 +8,7 @@
 //! logic is deterministic under test. The GUI process owns the polling loop
 //! and converts [`UsageSnapshot`] into frontend protocol views.
 
+pub mod account_limits;
 pub mod api_error;
 pub mod cache;
 pub mod claude;
@@ -28,6 +29,14 @@ pub use limit_notice::{
 };
 pub use snapshot_store::{ProviderUsageReading, ProviderUsageWindowReading};
 pub use types::{
-    CodexCredits, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
-    UsageWindow, WindowKind,
+    CodexCredits, LimitObservation, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot,
+    UsageState, UsageWindow, WindowKind,
 };
+
+// Resolve the offset at this instant so local calendar operations respect
+// historical and seasonal offset changes.
+fn local_time_at(seconds: i64) -> time::OffsetDateTime {
+    let utc = time::OffsetDateTime::from_unix_timestamp(seconds)
+        .expect("UTC timestamp in the supported range");
+    utc.to_offset(time::UtcOffset::local_offset_at(utc).unwrap_or(time::UtcOffset::UTC))
+}

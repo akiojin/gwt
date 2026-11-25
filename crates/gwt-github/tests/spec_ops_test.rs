@@ -16,6 +16,53 @@ fn n(s: &str) -> SectionName {
 }
 
 #[test]
+fn legacy_artifact_plan_reads_and_edits_through_canonical_sections() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let number = IssueNumber(1);
+    let mut snapshot = seed_spec(&client, &cache, 1, "spec", "tasks");
+    snapshot.body =
+        "<!-- GWT_SPEC_ID:#1 -->\n\n## Artifact Index\n\n- `doc:spec.md`\n- `doc:plan.md`".into();
+    for (id, name, content) in [
+        (7, "plan", "older"),
+        (9, "spec", "spec"),
+        (8, "plan", "latest"),
+    ] {
+        snapshot.comments.push(CommentSnapshot {
+            id: CommentId(id),
+            body: format!(
+                "<!-- GWT_SPEC_ARTIFACT:doc:{name}.md -->\r\ndoc:{name}.md\r\n\r\n{content}"
+            ),
+            updated_at: UpdatedAt::new("legacy"),
+        });
+    }
+    cache.write_snapshot(&snapshot).unwrap();
+    // A pre-upgrade cache holds the raw comments without materialized sections.
+    let cached_plan = tmp.path().join("1/sections/plan.md");
+    if cached_plan.exists() {
+        std::fs::remove_file(cached_plan).unwrap();
+    }
+    client.seed(snapshot.clone());
+    let ops = SpecOps::new(client, cache);
+    assert_eq!(ops.read_section(number, &n("plan")).unwrap(), "latest");
+    let receipt = ops.write_section(number, &n("plan"), "updated").unwrap();
+    assert_eq!(receipt.verification_error, None);
+    assert_eq!(ops.read_section(number, &n("plan")).unwrap(), "updated");
+    assert_eq!(ops.read_section(number, &n("spec")).unwrap(), "spec");
+    let gwt_github::client::FetchResult::Updated(after) = ops.client().fetch(number, None).unwrap()
+    else {
+        panic!("expected unconditional snapshot");
+    };
+    assert!(after.body.contains("## Artifact Index"));
+    assert!(after.body.contains("spec=comment:9"));
+    assert!(snapshot
+        .comments
+        .iter()
+        .all(|comment| after.comments.contains(comment)));
+}
+
+#[test]
 fn section_markers_are_rejected_before_any_write() {
     let tmp = TempDir::new().unwrap();
     let cache = Cache::new(tmp.path().to_path_buf());

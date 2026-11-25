@@ -91,8 +91,8 @@ pub fn ensure_codex_context_management_experimental_mode(
 ) -> io::Result<CodexManagedConfigReport> {
     // Issue #4071: the hook trust registration mutates this same shared file,
     // so both writers take the same lock or one of them loses its update.
-    let outcome = with_codex_config_lock(config_path, || {
-        let mut root = read_codex_config(config_path)?;
+    let outcome = with_codex_config_lock(config_path, |resolved| {
+        let mut root = read_codex_config(resolved)?;
         let root_table = root.as_table_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -109,7 +109,7 @@ pub fn ensure_codex_context_management_experimental_mode(
                 Some(true) => Ok(CodexManagedConfigOutcome::Preserved),
                 Some(false) => {
                     features.remove("context_management");
-                    write_codex_config(config_path, &root)?;
+                    write_codex_config(resolved, &root)?;
                     Ok(CodexManagedConfigOutcome::Repaired)
                 }
             };
@@ -120,7 +120,7 @@ pub fn ensure_codex_context_management_experimental_mode(
         }
         context_management.insert("experimental_mode".to_string(), toml::Value::Boolean(true));
 
-        write_codex_config(config_path, &root)?;
+        write_codex_config(resolved, &root)?;
         Ok(CodexManagedConfigOutcome::Written)
     })?;
 
@@ -168,6 +168,62 @@ trust_level = "trusted"
             .get("features")?
             .get("context_management")?
             .get("experimental_mode")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_account_config_keeps_its_link_and_uses_the_default_config_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let _home = gwt_config::home::ScopedGwtHome::set(&home);
+        let shared = home.join(".codex/config.toml");
+        let account = home.join(".gwt/accounts/codex/account-a/config.toml");
+        for path in [&shared, &account] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        fs::write(&shared, EXISTING_CONFIG).unwrap();
+        std::os::unix::fs::symlink(&shared, &account).unwrap();
+
+        ensure_codex_context_management_experimental_mode(
+            &account,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
+        crate::codex_hook_trust::register_codex_managed_project_trust(&home, &account).unwrap();
+
+        assert_eq!(fs::read_link(&account).unwrap(), shared);
+        assert!(shared.with_extension("toml.gwt-lock").is_file());
+        assert!(!account.with_extension("toml.gwt-lock").exists());
+        let shared = parsed(&shared);
+        assert_eq!(
+            experimental_mode(&shared),
+            Some(&toml::Value::Boolean(true))
+        );
+        assert_eq!(
+            shared["projects"][home.to_str().unwrap()]["trust_level"].as_str(),
+            Some("trusted")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_account_config_refuses_a_link_to_any_other_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let _home = gwt_config::home::ScopedGwtHome::set(&home);
+        let unrelated = home.join("unrelated.toml");
+        let account = home.join(".gwt/accounts/codex/account-a/config.toml");
+        fs::create_dir_all(account.parent().unwrap()).unwrap();
+        fs::write(&unrelated, EXISTING_CONFIG).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &account).unwrap();
+
+        assert!(ensure_codex_context_management_experimental_mode(
+            &account,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .is_err());
+        assert_eq!(fs::read_link(&account).unwrap(), unrelated);
+        assert_eq!(fs::read_to_string(unrelated).unwrap(), EXISTING_CONFIG);
     }
 
     // AC-1

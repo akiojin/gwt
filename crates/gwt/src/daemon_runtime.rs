@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
     Session, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
@@ -116,6 +115,9 @@ impl AgentBridgeFailureReason {
     }
 }
 
+const WORKSPACE_BRIDGE_UNREACHABLE: &str =
+    "Host workspace bridge is unreachable; the update was not delivered and no local fallback was attempted";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentBridgeFailure {
     reason: AgentBridgeFailureReason,
@@ -184,6 +186,13 @@ impl AgentBridgeFailure {
             exact_workspace_ensure_required,
             message,
         }
+    }
+
+    /// A connection that was never established cannot have delivered the update,
+    /// so no Host publication can appear for its operation id (#7330).
+    pub(crate) fn request_never_delivered(&self) -> bool {
+        self.reason == AgentBridgeFailureReason::TransportFailure
+            && self.message == WORKSPACE_BRIDGE_UNREACHABLE
     }
 
     pub(crate) fn reason(&self) -> AgentBridgeFailureReason {
@@ -1071,13 +1080,16 @@ pub(crate) fn send_workspace_update_via_agent_bridge_with_operation_id(
             if let Some(id) = operation_id {
                 post = post.header(crate::workspace_update_receipt::OPERATION_HEADER, id);
             }
-            let response = post.send()
-        .map_err(|_| {
-            AgentBridgeFailure::new(
-                AgentBridgeFailureReason::TransportFailure,
-                "Host workspace bridge response is unavailable; no update retry or local fallback was attempted",
-            )
-        })?;
+            let response = post.send().map_err(|error| {
+                AgentBridgeFailure::new(
+                    AgentBridgeFailureReason::TransportFailure,
+                    if error.is_connect() {
+                        WORKSPACE_BRIDGE_UNREACHABLE
+                    } else {
+                        "Host workspace bridge response is unavailable; no update retry or local fallback was attempted"
+                    },
+                )
+            })?;
             let status = response.status();
             if status.is_success() {
                 break response;
@@ -1771,7 +1783,7 @@ impl RuntimeHookEvent {
                 .as_ref()
                 .and_then(|event| event.tool_name().map(str::to_string)),
             message,
-            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            occurred_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         }
     }
 }

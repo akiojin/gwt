@@ -887,7 +887,7 @@ mod store_consolidation {
                 gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
                     .expect("load orphan WorkItems")
                     .expect("orphan WorkItems present");
-            let at = chrono::Utc::now();
+            let at = gwt_core::timestamp::UtcTimestamp::now();
             projection.work_items.push(WorkItem {
                 id: work_id.to_string(),
                 title: title.to_string(),
@@ -950,7 +950,11 @@ mod store_consolidation {
     }
 
     fn start_event(work_id: &str, title: &str) -> WorkEvent {
-        let mut event = WorkEvent::new(WorkEventKind::Start, work_id, chrono::Utc::now());
+        let mut event = WorkEvent::new(
+            WorkEventKind::Start,
+            work_id,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         event.id = format!("event-{work_id}");
         event.title = Some(title.to_string());
         event

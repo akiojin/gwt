@@ -230,7 +230,7 @@ test("live backend replays fresh index health after reconnect and completes offl
     }, status.project_root);
     expect(burst.unchanged).toBe(true);
     expect(burst.renders).toEqual({ summary: 1, table: 1 });
-    expect(burst.summary).toContain("2 ready");
+    expect(burst.summary).toContain("Ready 2/9");
     expect(burst.table).toContain("50 docs");
     expect(burst.focusPreserved).toBe(true);
     await testInfo.attach("index-health-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
@@ -246,7 +246,7 @@ test("live backend replays fresh index health after reconnect and completes offl
     try {
       await expect(reconnected.table.locator("tr[data-scope='issues']")).toContainText("51 docs", { timeout: 1000 });
       expect(Date.now() - fallbackStarted).toBeLessThan(1000);
-      await expect(reconnected.root.locator(".index-search-health-summary")).toContainText("1 ready");
+      await expect(reconnected.root.locator(".index-search-health-summary")).toContainText("Ready 1/9");
       await expect(reconnected.root.locator(".index-search-input")).toBeFocused();
     } finally {
       await page.evaluate(() => { window.requestAnimationFrame = (window as any).__indexRestoreRaf; });
@@ -335,7 +335,7 @@ test.describe("Project Index status surface", () => {
         specs: { healthy: true, repair_required: false, document_count: 6 },
       }, worktrees: {},
     }));
-    await expect(root.locator(".index-search-health-summary")).toContainText("2 ready");
+    await expect(root.locator(".index-search-health-summary")).toContainText("Ready 2/9");
     await expect(table.locator("tr[data-scope='specs'] .settings-index-cell.ready")).toHaveCount(1);
     await root.locator("[data-index-tab='health']").click();
     await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
@@ -415,8 +415,16 @@ test.describe("Project Index status surface", () => {
 
     const summary = panel.locator("[data-role='index-search-health-summary']");
     await expect(summary).toBeVisible({ timeout: 10_000 });
-    await expect(summary).toContainText("1 ready");
-    await expect(summary).toContainText("2 degraded");
+    await expect(summary).toContainText("Ready 1/9");
+    await expect(summary).toContainText("8 need attention");
+    // Issue #7729 AC-3 (SPEC #7007 item 15): the search offers the nine scopes
+    // the health summary counts, files and docs outside the default selection.
+    const chips = panel.locator(".index-scope-button");
+    await expect(chips).toHaveText(["Issues", "SPECs", "Board", "Discussions", "Work", "Reports", "Memory", "Files", "Docs"]);
+    await expect(panel.locator('.index-scope-button[aria-pressed="true"]')).toHaveCount(7);
+    await expect(panel.locator('.index-scope-button[data-scope="files"]')).toHaveAttribute("aria-pressed", "false");
+    await expect(panel.locator('.index-scope-button[data-scope="files-docs"]')).toHaveAttribute("aria-pressed", "false");
+    await expect(summary).toContainText("board (status unavailable)");
     await expect(summary).toContainText("specs");
     await expect(summary).toContainText("files · develop");
     await expect(panel.locator(".settings-index-rebuild")).toHaveCount(0);
@@ -472,7 +480,7 @@ test.describe("Project Index status surface", () => {
     await page.evaluate(() => {
       window.__gwtFixtureWebSocket.flushRefreshStatus();
     });
-    await expect(summary).toContainText("1 ready", { timeout: 10_000 });
+    await expect(summary).toContainText("Ready 1/9", { timeout: 10_000 });
   });
 
   test("Index window Health scope-row Rebuild all dispatches without worktree_hash", async ({ page }) => {
@@ -574,7 +582,7 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
-  test("Index window Health shows Work and Reports status and Search opens Reports", async ({ page }, testInfo) => {
+  test("Index window Health shows Work and Reports status and Search opens Board", async ({ page }, testInfo) => {
     const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
     const errors: string[] = [];
     page.on("console", (message) => {
@@ -590,16 +598,13 @@ test.describe("Project Index status surface", () => {
         works: { healthy: true, repair_required: false, document_count: 7, reason: "ready" },
         reports: { healthy: true, repair_required: false, document_count: 3, reason: "ready" },
       },
-    }, { includePm: true });
+    }, { includeBoard: true });
 
     const url = configuredUrl
       ? new URL(new URL(APP_URL).pathname, configuredUrl).toString()
       : APP_URL;
     await page.goto(url);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    const pm = page.locator(".workspace-window[data-id='pm-fixture']");
-    await page.locator("#op-pm-entry").click();
-    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
     const { root, table } = await openIndexHealthPanel(page);
     const worksRow = table.locator("tr[data-scope='works']");
     await expect(worksRow.locator(".settings-index-cell.ready")).toContainText("7 docs");
@@ -618,7 +623,7 @@ test.describe("Project Index status surface", () => {
     );
     expect(reportRebuild).toEqual({ kind: "rebuild_index_cell", project_root: "/fixture", scope: "reports" });
     await root.locator("[data-index-tab='search']").click();
-    await expect(root.locator("[data-role='index-search-health-summary']")).toContainText("2 ready");
+    await expect(root.locator("[data-role='index-search-health-summary']")).toContainText("Ready 2/9");
     await expect(root.locator(".index-scope-button[data-scope='reports']")).toHaveAttribute("aria-pressed", "true");
     await root.locator(".index-search-input").fill("release decision");
     const request = await page.waitForFunction(() =>
@@ -639,9 +644,9 @@ test.describe("Project Index status surface", () => {
     await expect(root.locator(".index-detail-preview")).toContainText("Can we release?");
     await expect(root.locator(".index-detail-preview")).toContainText("Required checks pass.");
     await root.locator("[data-action='open-index-result']").click();
-    await expect(pm).toHaveClass(/focused/);
-    await expect(pm.getByRole("button", { name: "Reports", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(pm.getByRole("log", { name: "PM reports" })).toBeVisible();
+    const board = page.locator(".workspace-window[data-id='board-fixture']");
+    await expect(board).toBeVisible();
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "board");
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
@@ -893,6 +898,103 @@ test.describe("Project Index status surface", () => {
     });
   });
 
+  // SPEC #6476 T-005ix (AC-1): on a phone the Index tabs were 30px, the search
+  // controls 24-32px, and the two result columns needed 580px.
+  test.describe("Index touch targets", () => {
+    test.use({ hasTouch: true });
+    test("Index controls are 44px tap targets and the results stack on a phone", async ({ page }, info) => {
+      const errors: string[] = [];
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      page.on("pageerror", error => errors.push(String(error)));
+      await installEmbeddedRoutes(page);
+      await installIndexStatusBackend(page, {
+        state: "repair_required",
+        scopes: {
+          issues: { healthy: true, repair_required: false, document_count: 27 },
+          specs: { healthy: false, repair_required: true, document_count: 5, reason: "count_mismatch" },
+          files: { wtAhash: { healthy: false, repair_required: true, document_count: 0, reason: "manifest_missing" } },
+        },
+        worktrees: { wtAhash: { branch: "develop", path: "/abs/wtA" } },
+      });
+      await page.goto(APP_URL);
+      const { root } = await openIndexSearchPanel(page);
+      await root.locator(".index-scope-button[data-scope='files']").click();
+      await root.locator(".index-search-input").fill("phone layout");
+      const request = await page.waitForFunction(() =>
+        window.__gwtFixtureWebSocket.recordedSends.map(raw => JSON.parse(raw))
+          .findLast(message => message.kind === "search_project_index" && message.query === "phone layout"),
+      ).then(handle => handle.jsonValue());
+      await page.evaluate(payload => window.__gwtFixtureWebSocket.emit(payload), {
+        kind: "project_index_search_results", id: request.id, request_id: request.request_id,
+        query: request.query, suggestions: [],
+        results: [
+          { scope: "issues", title: "Phone layout issue", subtitle: "Issue #6476", preview: "Stack the panes.", distance: 0.1 },
+          { scope: "specs", title: "Touch target spec", subtitle: "SPEC #6476", preview: "44px controls.", distance: 0.2 },
+          // Enough rows to overflow the stacked list pane.
+          ...Array.from({ length: 13 }, (_, index) =>
+            ({ scope: "issues", title: `Filler result ${index + 1}`, preview: "Filler.", distance: 0.3 + index / 100 })),
+        ],
+      });
+      await expect(root.locator(".index-result-row")).toHaveCount(15);
+      const measure = (selector: string) => page.locator(selector).evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 24) || node.className,
+          left: box.left, right: box.right, width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
+      }));
+      const tabs = ".index-search-root .index-window-tabs .settings-tab:visible";
+      const search = `${tabs}, .index-search-root [data-index-panel='search'] :is(input, select, button):visible`;
+      const health = `${tabs}, .index-search-root [data-index-panel='health'] button:visible`;
+      const desktop = (await measure(search)).map(control => control.minHeight);
+      expect(desktop).not.toContain("44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      await expect.poll(async () => (await measure(search)).map(control => control.minHeight),
+        { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+      expect(await root.locator(".index-search-layout").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
+        "601px keeps the result list and detail side by side").toBe(2);
+      // Opening a panel re-renders it (Health refreshes its table), so a node
+      // measured mid-render can be detached; retry until the DOM settles.
+      const assertTargets = (selector: string, width: number, required: string[]) =>
+        expect(() => assertTargetsOnce(selector, width, required)).toPass({ timeout: 5_000 });
+      const assertTargetsOnce = async (selector: string, width: number, required: string[]) => {
+        const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+        const measured = await measure(selector);
+        expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(required));
+        for (const control of measured) {
+          expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+          "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+        expect(await root.evaluate(node => node.scrollWidth - node.clientWidth),
+          "the Index surface must not scroll sideways").toBeLessThanOrEqual(0);
+      };
+      for (const [width, height] of [[320, 568], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        await root.locator("[data-index-tab='search']").tap();
+        await assertTargets(search, width, ["Search", "Health", "Search indexed content", "Semantic", "All terms",
+          "Files", "Files and Docs worktree", "Open"]);
+        const list = (await root.locator(".index-result-list").boundingBox())!;
+        const detail = (await root.locator(".index-result-detail").boundingBox())!;
+        expect(list.width, `the result list uses the window width at ${width}px`).toBeGreaterThanOrEqual(width / 2);
+        expect(detail.width, `the detail uses the window width at ${width}px`).toBeGreaterThanOrEqual(width / 2);
+        expect(detail.y, `the detail sits below the results at ${width}px`).toBeGreaterThanOrEqual(list.y + list.height - 1);
+        for (const pane of [list, detail]) expect(pane.height, `neither pane collapses at ${width}x${height}`).toBeGreaterThanOrEqual(120);
+        expect(await root.locator(".index-result-list").evaluate(node => node.scrollHeight > node.clientHeight),
+          `the result list scrolls inside its pane at ${width}px`).toBe(true);
+        await root.locator(".index-result-row", { hasText: "Touch target spec" }).tap();
+        await expect(root.locator(".index-detail-title")).toHaveText("Touch target spec");
+        await page.screenshot({ path: info.outputPath(`index-search-${width}.png`) });
+        await root.locator("[data-index-tab='health']").tap();
+        await expect(root.locator("[data-role='index-settings-table']")).toBeVisible();
+        await assertTargets(health, width, ["Refresh index status"]);
+        await page.screenshot({ path: info.outputPath(`index-health-${width}.png`) });
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
+  });
+
 });
 
 async function openIndexHealthPanel(page, createWindow = true, live = false) {
@@ -962,9 +1064,9 @@ async function installIndexStatusBackend(page, indexStatus, options = {}) {
       kind: "git",
       workspace: {
         viewport: { x: 0, y: 0, zoom: 1 },
-        windows: optionsPayload.includePm ? [{
-          id: "pm-fixture", title: "Project Manager", preset: "agent", is_pm: true,
-          session_id: "pm-session", status: "running", persist: true, z_index: 1,
+        windows: optionsPayload.includeBoard ? [{
+          id: "board-fixture", title: "Board", preset: "board",
+          status: "running", persist: true, z_index: 1,
           geometry: { x: 20, y: 20, width: 760, height: 620 },
         }, {
           id: "index-fixture", title: "Index", preset: "index", status: "running", persist: true, z_index: 2,

@@ -3,20 +3,27 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { readFileSync } from "node:fs";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createPmSettingsPanel } from "../pm-settings-panel.js";
+import { installSettingsOpenHandler } from "../settings-surface.js";
 import { createAgentsSurface } from "../agents-surface.js";
-import { createAgentRosterModel } from "../agent-activity-model.js";
+import { createAgentRosterModel, createMemberTuningModel } from "../agent-activity-model.js";
 
 const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
+
+test("mobile Agents checkboxes override the shared form's last-child minimum", () => {
+  assert.match(styles, /@media \(max-width: 600px\)\s*\{[^}]*:root\[data-theme\] \.agents-surface input\.settings-checkbox\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/);
+});
+
 const members = [
-  { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-    { session_id: "s0", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+  { member_id: "m1", name: "One", assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
+    { session_id: "s0", role: "pm", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
     { session_id: "s2", issue_number: 4600, title: "Later", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
   ] },
-  { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
+  { member_id: "m2", name: "Two", provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, environmentView, onSetEnvironmentPriority, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -26,20 +33,42 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const frames = new Set(); const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
   const renamed = [], rosterController = createAgentRosterModel("project", { ...options, onRename: request => renamed.push(request) });
   const rosterModel = rosterController.model;
-  rosterController.applyAgentRosterSnapshot({ project_key: "project", members: members.map(member => ({ ...member, agent_member_id: member.member_id })), revision: 3, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] });
+  rosterController.applyAgentRosterSnapshot({ project_key: "project", members: members.map(member => ({ ...member, agent_member_id: member.member_id })), revision: 3, revision_decimal: "3", capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] });
   const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
   const switchModel = switching ? createUiStateStore(switching, options) : undefined;
+  const executionEnvironmentsModel = environmentView ? createUiStateStore({ view: environmentView }, options) : undefined;
   const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name) => { added.push({ tool, name }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const opened = [], traitsSaved = [], avatarsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
+  const surface = createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, onSetEnvironmentPriority, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onSetAvatar: (id, avatar) => avatarsSaved.push([id, avatar]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { traitsSaved, avatarsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, added, reassigned, refreshed, switchModel, switched, saved, continued, executionEnvironmentsModel };
 }
+
+test("Agent environment priority removes the last override and shows a deletion fallback on its member row", async () => {
+  const writes = [];
+  const environmentView = {
+    environments: [{ id: "codex", name: "Codex pool" }],
+    agent_priorities: { m1: { environment_ids: ["codex"], reverted_to_project: false } },
+  };
+  const f = await fixture({ environmentView, onSetEnvironmentPriority: (memberId, ids) => writes.push([memberId, ids]) });
+  const panel = f.surface.element.querySelector(".roster-detail [data-member-environments]");
+  panel.querySelector('[aria-label="Remove Codex pool"]').click();
+  assert.deepEqual(writes, [["m1", []]]);
+  f.executionEnvironmentsModel.update(() => ({
+    view: { environments: [], agent_priorities: { m1: { environment_ids: [], reverted_to_project: true } } },
+  }));
+  f.flush();
+  assert.match(panel.textContent, /Returned to the project's order/);
+  assert.match(f.surface.element.querySelector('[data-member-id="m1"]').textContent, /Returned to the project's order/);
+  assert.doesNotMatch(f.surface.element.querySelector('[data-member-id="m2"]').textContent, /Returned to the project's order/);
+  f.surface.dispose();
+});
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
   const f = await fixture(), input = f.surface.element.querySelector('[aria-label="Display name"]');
@@ -105,7 +134,7 @@ test("Project window titles follow current member names only for an exact assign
   const data = { preset: "agent", session_id: "s1", agent_name: "Historical name", dynamic_title: "Current issue" };
   assert.equal(title(data), "Maple — Current issue");
   assert.equal(title({ ...data, session_id: "s2", agent_member_id: "m1" }), "Historical name — Current issue");
-  assert.equal(title({ ...data, is_pm: true }), "Historical name");
+  assert.equal(title({ ...data, is_pm: true }), "Project Manager · Historical name — Starting");
   assert.equal(data.agent_name, "Historical name", "current display never mutates Session or window history");
   const renderKeyFunctions = ["appendRenderKeyPart", "appendWindowPlacementRenderKey", "workspaceWindowsRenderKey"]
     .map(name => app.match(new RegExp(`      function ${name}\\([^]*?\\n      \\}`))[0]).join("\n");
@@ -144,12 +173,19 @@ test("Agents identifies the exact PM before the implementation pool without addi
   assert.equal(identity.querySelector(".window-role-badge").textContent, "PM");
   const children = [...f.surface.element.children];
   assert.ok(children.indexOf(identity) < children.indexOf(f.surface.element.querySelector(".roster-team")));
-  assert.equal(identity.querySelectorAll("button").length, 0, "PM is not a selectable or restable member");
+  assert.deepEqual([...identity.querySelectorAll("button")].map(button => button.textContent), ["Open PM terminal"]);
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
   assert.equal(f.surface.element.querySelectorAll(".roster-list .roster-row").length, 2);
   assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");
   withPm("Yuu updated"); f.flush();
   assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu updated");
+  pm.status = "error";
+  withPm("Yuu updated");
+  f.activityModel.update(() => ({ count: 1, agents: [current] }));
+  f.flush();
+  assert.equal(identity.hidden, false, "an errored PM keeps its terminal action");
+  pm.status = "running";
+  withPm("Yuu updated");
   f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
   f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: state.catalog.version + 1,
     appState: { ...state.catalog.appState, tabs: state.catalog.appState.tabs.map(tab => ({ ...tab, project_key: "another-project" })) } } }));
@@ -161,31 +197,31 @@ test("Agents identifies the exact PM before the implementation pool without addi
 
 test("Agents keeps Team and Past tabs, capacity, member details, four real aggregates and reverse history", async () => {
   const f = await fixture();
+  assert.equal(f.surface.element.querySelector('.roster-member-id')?.textContent, 'Member ID: m1');
+  assert.equal(f.surface.element.querySelector('.roster-current-role')?.textContent, 'Role: —');
   assert.deepEqual([...f.surface.element.querySelectorAll('[role="tab"]')].map(tab => tab.textContent), ["Team", "Past"]);
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
   assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
   assert.equal(f.surface.element.querySelectorAll(".roster-row").length, 2);
   assert.equal(f.surface.element.querySelectorAll(".roster-detail .roster-stat").length, 4);
-  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Codex.*2026-10-20/s);
+  // Issue #7647 AC-3: a member has no tool of its own in the ledger.
+  assert.match(f.surface.element.querySelector(".roster-detail-heading").textContent, /Member since 2026-10-20/);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail-heading").textContent, /Registered tool|Codex/);
+  for (const key of ["agent_id", "model", "reasoning"])
+    assert.equal(f.surface.element.querySelector(`[data-member-tuning-field="${key}"]`)?.closest("[data-member-tuning-launch]")?.hidden, true, `${key} is not offered for an implementation member`);
+  assert.doesNotMatch(f.surface.element.textContent, /registered tool|Choose a name and tool/i);
   assert.doesNotMatch(f.surface.element.querySelector(".roster-detail-heading").textContent, /GPT-6/);
-  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Saved manual candidate.*Unavailable.*Automatic launches use tier settings/s);
+  assert.equal(f.surface.element.querySelector(".roster-saved-settings"), null, "no saved tool, model or reasoning is shown for a member");
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: — · Tool: — · Recorded model: —");
-  const revisionInput = f.surface.element.querySelector(".roster-saved-revision input");
-  assert.ok(revisionInput, "saved manual settings have a revision readout");
-  assert.equal(revisionInput.value, "—");
-  assert.ok(revisionInput.hasAttribute("readonly"), "revision is never an editable setting");
-  assert.equal(revisionInput.getAttribute("aria-label"), "Saved manual candidate revision");
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id !== "m1" ? member : { ...member,
     saved_manual_profile: { agent_id: "codex", model: "saved-model", reasoning: "high", runtime_target: "Docker", docker_service: "worker", skip_permissions: false },
     saved_manual_revision: `manual-profile-v1:${"a".repeat(64)}`,
-    history: [...member.history, { session_id: "s1", name: "Launch author", provider: "codex", model: "launch-model" }],
+    history: [...member.history, { session_id: "s1", role: "implementation", name: "Launch author", provider: "codex", model: "launch-model" }],
   }) })); f.flush();
-  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model.*Reasoning: high.*Runtime: Docker.*worker.*Permissions: Ask/s);
-  assert.equal(f.surface.element.querySelector(".roster-saved-revision input"), revisionInput, "revision readout retains the keyboard target");
-  assert.equal(revisionInput.value, `manual-profile-v1:${"a".repeat(64)}`);
-  assert.ok(f.surface.element.querySelector(".roster-saved-settings").previousElementSibling.classList.contains("roster-stats"), "refresh preserves aggregates before saved settings");
-  assert.match(revisionInput.title, /Same settings.*same revision/);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail").textContent, /saved-model/);
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
+  assert.equal(f.surface.element.querySelector('.roster-current-role').textContent, 'Role: Implementation');
+  assert.deepEqual([...f.surface.element.querySelectorAll('.roster-history-role')].map(node => node.textContent), ['Role: —', 'Role: Project Manager']);
   const history = [...f.surface.element.querySelectorAll(".roster-history li")];
   assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
   assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);
@@ -193,15 +229,12 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.equal(history[2].querySelector(".roster-history-config")?.textContent, "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model");
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, name: "Renamed current", provider: "codex", model: "current-model" })) })); f.flush();
   assert.equal(f.surface.element.querySelector(".roster-detail h3").textContent, "Renamed current");
-  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model/);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail").textContent, /saved-model/);
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent), [
     "Recorded name: — · Tool: — · Recorded model: —", "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
   ]);
   const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
-  assert.equal(preview.querySelector(".roster-saved-settings").textContent, f.surface.element.querySelector(".roster-saved-settings").textContent);
-  assert.equal(preview.querySelector(".roster-saved-revision input").value, revisionInput.value);
-  assert.ok(preview.querySelector(".roster-saved-revision input").disabled);
   assert.equal(preview.querySelector(".roster-current-config").textContent, f.surface.element.querySelector(".roster-current-config").textContent);
   assert.deepEqual([...preview.querySelectorAll(".roster-history-config")].map(node => node.textContent), [...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent));
   assert.equal(f.surface.selectMember("m2"), true);
@@ -308,7 +341,26 @@ test("Issue #7035 Agents lists slot-occupying review windows with name, target a
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="r1"]'), null, "a reviewer is not a roster member");
   assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 2 \/ Team 2/,
     "Busy counts the implementation member and the review window that both hold slots");
+  const target = f.activityModel.read().agents[1], open = row.querySelector("button.roster-purpose");
+  assert.ok(open, "a review task is keyboard reachable like a member's current task");
+  open.click();
+  assert.deepEqual(f.opened, [target]);
+  assert.equal(f.surface.selectReview(target), true);
+  assert.equal(f.document.activeElement, open);
+  f.surface.sync();
+  assert.ok(f.document.activeElement === f.surface.element.querySelector(".roster-review button"), "readback preserves keyboard focus on the same review");
+  assert.equal(f.surface.selectReview({ ...target, runtime_incarnation: 2 }), false);
+  f.activityModel.update(state => ({ ...state, count: null }));
+  open.click();
+  assert.equal(f.opened.length, 1, "unknown activity cannot authorize the retained review button");
+  assert.equal(f.surface.selectReview(target), false);
+  f.activityModel.update(state => ({ ...state, count: 2 }));
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector(".roster-review button").disabled, true);
   f.activityModel.update(state => ({ ...state, count: 1, agents: state.agents.filter(agent => !agent.review_dispatch) }));
+  open.click();
+  assert.deepEqual(f.opened, [target], "a detached button cannot open a retired review");
+  assert.equal(f.surface.selectReview(target), false);
   f.flush();
   assert.equal(reviews.hidden, true, "the list hides once no review window runs");
   assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
@@ -396,7 +448,10 @@ test("Agents planned controls use Operator styles and stay inert in split previe
   assert.match(styles, /\.roster-plan-controls\s*\{[^}]*flex-wrap:\s*wrap/s);
   assert.match(styles, /\.agents-surface select\s*\{[^}]*var\(--color-/s);
   assert.doesNotMatch(styles, /#[0-9a-f]{3,8}\b|rgba?\(/i);
-  assert.doesNotMatch(source, /role=["']dialog|modal-backdrop|position:\s*fixed/);
+  assert.doesNotMatch(source, /position:\s*fixed/);
+  // Issue #7646: the only modal is the delete confirmation on the shared primitive.
+  assert.equal(source.match(/modal-backdrop/g).length, 1);
+  assert.equal(f.surface.element.querySelector('[role="dialog"], .modal-backdrop'), null, "planned controls stay inline");
   f.surface.dispose();
 });
 
@@ -421,8 +476,7 @@ test("Agents add and rest actions target a member and Past shows measured contri
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
   name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
   f.surface.element.querySelector('[data-action="add"]').click();
-  f.surface.element.querySelector('.roster-detail [data-action="rest"]').click();
-  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple" }]); assert.deepEqual(f.rested, ["m1"]);
+  assert.deepEqual(f.added, [{ name: "Maple", pm_eligible: false }]);
   f.surface.element.querySelector('[data-tab="past"]').click();
   assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
   assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
@@ -450,7 +504,7 @@ test("Agents batches shared updates, keeps stable member selection, and releases
 });
 
 
-test("a resting busy member remains reachable from Works until its exact assignment ends", async () => {
+test("legacy roster entries are waiting once work ends and retain their identity across readback", async () => {
   let workSurface;
   const f = await fixture({ onOpenWork: assignment => workSurface.openWork(assignment) });
   f.surface.selectMember("m2");
@@ -465,15 +519,81 @@ test("a resting busy member remains reachable from Works until its exact assignm
   f.document.querySelector("main").append(workSurface.element); workSurface.sync();
   workSurface.element.querySelector(".work-member").click();
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]')?.getAttribute("aria-selected"), "true");
-  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
-  assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Resting.*Finishing/);
-  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), null);
-  assert.equal(f.surface.element.querySelector('.roster-detail [data-action="rest"]').disabled, true);
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "3");
+  assert.equal(f.surface.element.querySelector(".roster-capacity-value").textContent, "1");
+  assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /In Works/);
+  const rested = f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]');
+  assert.ok(rested, "a legacy member remains registered without a live assignment");
+  assert.equal(rested.querySelector(".roster-state").textContent, "Waiting");
+  assert.match(rested.querySelector(".roster-purpose").textContent, /Waiting for the next issue/);
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Registered 3/);
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-row")].map(row => row.dataset.memberId), ["m1", "m2", "rested-idle"]);
+  assert.equal(f.surface.element.querySelector('[data-action="rest"], [data-action="activate"]'), null);
   f.surface.element.querySelector(".roster-now button").click();
   assert.deepEqual(f.opened, [current]); assert.equal(workSurface.isVisible("one"), true);
   f.activityModel.update(() => ({ agents: [], count: 0 })); f.flush();
-  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]'), null);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-state').textContent, "Waiting");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').getAttribute("aria-selected"), "true");
+  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Recorded author/);
+  f.surface.selectMember("rested-idle");
+  f.activityModel.update(() => ({ agents: [], count: null })); f.flush();
+  const saved = f.rosterModel.read();
+  f.rosterController.applyAgentRosterSnapshot({ ...saved, project_key: "project", revision: 4,
+    members: saved.members.map(member => ({ ...member, agent_member_id: member.member_id })) }); f.flush();
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), rested);
+  assert.equal(rested.getAttribute("aria-selected"), "true");
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "3");
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy —/);
+  assert.deepEqual(f.added, []);
   workSurface.dispose(); f.surface.dispose();
+});
+
+
+test("Agents restores the selected member without writes during unknown hydration", async () => {
+  const values = new Map(), writes = [];
+  const storage = { get: key => values.get(key), set: (key, value) => { values.set(key, value); writes.push(value); }, delete: key => { values.delete(key); writes.push(null); } };
+  const first = await fixture({ storage });
+  first.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, enabled: false } : member) })); first.flush();
+  first.surface.selectMember("m2");
+  const known = first.rosterModel.read(); first.surface.dispose();
+  const restored = await fixture({ storage, unknownRoster: true });
+  const beforeHydration = [...writes];
+  restored.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } })); restored.flush();
+  assert.deepEqual(writes, beforeHydration, "unknown roster must not discard the selection");
+  restored.rosterModel.update(() => known); restored.flush();
+  assert.equal(restored.surface.element.querySelector('[data-member-id="m2"]').getAttribute("aria-selected"), "true");
+  assert.equal(restored.surface.element.querySelector('.roster-detail h3').textContent, "Two");
+  assert.deepEqual(restored.added, []);
+  const preview = restored.document.createElement("aside"); restored.surface.setPreviewHost(preview);
+  preview.querySelector('[data-member-id="m1"]').click();
+  assert.deepEqual(writes, beforeHydration, "read-only preview cannot change selection");
+  restored.rosterModel.update(state => ({ ...state, revision: 4, members: [state.members[0]] })); restored.flush();
+  assert.equal(restored.surface.element.querySelector('[data-member-id="m1"]').getAttribute("aria-selected"), "true");
+  assert.equal(writes.at(-1), "m1", "known removal saves the existing fallback");
+  restored.rosterModel.update(state => ({ ...state, revision: 5, members: [] })); restored.flush();
+  assert.equal(writes.at(-1), null, "a known empty roster clears the stale preference");
+  restored.surface.dispose();
+});
+
+test("registration collisions identify the existing member without writing", async () => {
+  const f = await fixture();
+  f.rosterModel.update(state => ({ ...state, members: [
+    ...state.members,
+    { member_id: "rest-first", name: "Earlier", agent_id: "claude", enabled: false, history: [] },
+    { member_id: "rest-target", name: "Maple", agent_id: "codex", enabled: false, history: [] },
+  ] })); f.flush();
+  const input = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  input.value = " MAPLE "; input.dispatchEvent(new f.window.Event("input"));
+  const error = f.surface.element.querySelector("#roster-registration-error");
+  assert.match(error.textContent, /Maple is already registered/i);
+  assert.doesNotMatch(error.textContent, /codex/i);
+  assert.equal(f.surface.element.querySelector('[data-action="add"]').disabled, true);
+  error.querySelector("button").click();
+  const row = f.surface.element.querySelector('[data-member-id="rest-target"]');
+  assert.equal(row.getAttribute("aria-selected"), "true");
+  assert.equal(f.document.activeElement, row);
+  assert.deepEqual(f.added, []);
+  f.surface.dispose();
 });
 
 
@@ -489,6 +609,35 @@ test("an observation timestamp alone preserves roster detail, controls and selec
   assert.ok(f.surface.element.querySelector(".roster-now button") === currentControl);
   assert.ok(f.surface.element.querySelector('.roster-row[data-member-id="m1"]') === row);
   assert.equal(row.getAttribute("aria-selected"), "true");
+  f.surface.dispose();
+});
+
+test("one member row shows both project assignments without granting foreign terminal access", async () => {
+  const navigated = [], f = await fixture({ onNavigateProject: key => navigated.push(key) });
+  const summaries = [
+    { project_key: "project", project_name: "Alpha", session_id: "s1", issue_number: 4777, state: "Recorded Running" },
+    { project_key: "project-b", project_name: "Beta", session_id: "foreign", issue_number: null, state: "Recorded Waiting" },
+  ];
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member =>
+    member.member_id === "m1" ? { ...member, active_assignments: summaries } : member) })); f.flush();
+  const row = f.surface.element.querySelector('.roster-row[data-member-id="m1"]');
+  const local = row.querySelector('[data-assignment-project="project"]');
+  const foreign = row.querySelector('[data-assignment-project="project-b"]');
+  assert.equal(local?.textContent, "Alpha · #4777 · Recorded Running");
+  assert.equal(foreign?.textContent, "Beta · No issue · Recorded Waiting");
+  assert.equal(f.surface.element.querySelectorAll('.roster-row[data-member-id="m1"]').length, 1);
+  assert.equal(row.querySelectorAll(".roster-purpose").length, 1, "the local current-work control stays distinct");
+  foreign.click();
+  assert.deepEqual(navigated, ["project-b"]);
+  assert.deepEqual(f.opened, [], "foreign summary only navigates to its own project");
+  local.click();
+  assert.deepEqual(f.opened, [current], "local input still requires the exact current census");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[data-assignment-project="project-b"]').disabled, true);
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member =>
+    member.member_id === "m1" ? { ...member, active_assignments: summaries.slice(1) } : member) })); f.flush();
+  assert.equal(row.querySelectorAll("[data-assignment-project]").length, 1);
+  assert.equal(row.querySelector('[data-assignment-project="project-b"]').textContent, "Beta · No issue · Recorded Waiting");
   f.surface.dispose();
 });
 
@@ -608,12 +757,15 @@ test("Agents continues only server-eligible saved work through the existing corr
 });
 
 
-test("Agents registers an explicit name with its selected catalog tool and preserves rejected drafts", async () => {
+test("Agents registers an explicit name alone, with no tool, model or reasoning, and preserves rejected drafts", async () => {
   const f = await fixture();
-  const select = f.surface.element.querySelector('[aria-label="Tool for new member"]');
+  for (const label of ["Tool for new member", "Model for new member", "Reasoning for new member"])
+    assert.equal(f.surface.element.querySelector(`[aria-label="${label}"]`), null, `${label} is not asked`);
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
   assert.ok(name, "registration exposes an accessible display name field");
   assert.equal(name.classList.contains("settings-input"), true, "registration reuses the tokenized shared input primitive");
+  const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]');
+  assert.ok(eligible, "registration exposes the eligibility draft"); assert.equal(eligible.checked, false);
   const register = f.surface.element.querySelector('[data-action="add"]');
   const input = value => { name.value = value; name.dispatchEvent(new f.window.Event("input")); };
   assert.equal(register.disabled, true, "empty names cannot register");
@@ -621,17 +773,13 @@ test("Agents registers an explicit name with its selected catalog tool and prese
   assert.equal(register.disabled, true, "normalized duplicates are rejected");
   assert.equal(name.getAttribute("aria-invalid"), "true");
   input("  Maple  ");
-  assert.deepEqual([...select.options].map(option => option.value), ["codex", "claude", "custom-cli"]);
-  select.querySelector('[value="custom-cli"]').selected = true;
+  assert.equal(register.title, "Register this name.");
   register.click();
-  assert.deepEqual(f.added, [{ tool: "custom-cli", name: "Maple" }]);
+  assert.deepEqual(f.added, [{ name: "Maple", pm_eligible: false }]);
   f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
   assert.equal(name.value, "  Maple  ", "backend rejection retains the draft");
   name.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null })); f.flush();
   assert.ok(f.surface.element.querySelector('[aria-label="Name for new member"]') === name && f.document.activeElement === name);
-  select.focus();
-  assert.ok(f.surface.element.querySelector('[aria-label="Tool for new member"]') === select && f.document.activeElement === select);
-  assert.equal(select.value, "custom-cli");
   const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
   assert.equal(preview.querySelector('[aria-label="Name for new member"]').disabled, true);
   assert.equal(register.disabled, false, "a rejected request can be retried");
@@ -639,11 +787,191 @@ test("Agents registers an explicit name with its selected catalog tool and prese
     members: [...state.members, { member_id: "other-writer", name: "Maple", enabled: true }] })); f.flush();
   assert.equal(name.value, "  Maple  ", "a later read must not mistake another writer's member for the rejected registration");
   f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
-  input("Cedar"); register.click();
+  input("Cedar"); eligible.checked = true; register.click();
+  assert.equal(f.added.at(-1).pm_eligible, true);
+  f.rosterModel.update(state => ({ ...state, error: "Refused" })); f.flush();
+  assert.equal(eligible.checked, true, "rejection retains checked eligibility");
+  register.click();
   f.activityModel.update(state => ({ ...state, count: 2 })); f.flush();
   f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null,
     members: [...state.members, { member_id: "retry", name: "Cedar", enabled: true }] })); f.flush();
   assert.equal(name.value, "", "retry success clears the submitted draft after unrelated activity redraw");
+});
+
+test("configured PM remains a selectable named member with lossless roster revision and role controls", async () => {
+  const f = await fixture();
+  f.rosterController.applyAgentRosterSnapshot({ project_key: 'project', revision_decimal: '18446744073709551614', members: [{ ...members[0], agent_member_id: 'm1', is_pm: true, pm_project_key: 'project', pm_eligible: true, assignment: { role: 'pm' } }], capacity: 0 });
+  f.flush();
+  assert.equal(f.surface.element.querySelectorAll('.roster-row').length, 1);
+  assert.equal(f.surface.selectMember('m1'), true);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').disabled, false);
+  assert.equal(f.surface.element.querySelector('[data-action="pm-eligible"]').checked, true);
+  assert.equal(f.surface.element.querySelector('[data-action="pm-eligible"]').disabled, true);
+  assert.match(f.surface.element.querySelector('.roster-row').textContent, /Project Manager/);
+});
+
+test("project app shares one tuning controller and routes role receipts without reconnect replay", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  assert.equal((app.match(/= createMemberTuningModel\(routeProjectKey/g) || []).length, 1);
+  assert.match(app, /case "pm_status":\s*tuningController\.applyPmTuningStatus\(event\)/);
+  assert.match(app, /case "pm_launch_profile_result":\s*tuningController\.applyPmTuningResult\(event\)/);
+  assert.match(app, /tuningController\.applyRosterTuningSnapshot\(event\.roster, event\.request_id, \{ accepted \}\)/);
+  assert.match(app, /tuningController\.applyRosterTuningError\(event\)/);
+  assert.match(app, /tuningController\.disconnectTuning\(\)/);
+  assert.match(app, /if \(!beginAgentRosterRequest\(request\)\) return;/);
+  assert.match(app, /message\.kind === "set_pm_launch_profile"/);
+  assert.match(app, /project_key: routeProjectKey, request_id: createLaunchOperationId\("roster"\)/);
+});
+
+test("a deconfigured retained PM keeps its assignment and role", async () => {
+  const f = await fixture();
+  const assignment = { role: 'pm', session_id: 'old-pm' };
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === 'm1' ? { ...member, pm_project_key: null, assignment } : { ...member, pm_project_key: 'project', pm_eligible: true }) })); f.flush();
+  assert.doesNotMatch(f.surface.element.querySelector('[data-action="select-pm"]').textContent, /Configured Project Manager/);
+  assert.deepEqual(f.rosterModel.read().members[0].assignment, assignment);
+  assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /retained|Finishing/);
+});
+
+
+test("shared PM availability disables Agents edits and Retry until a fresh canonical reload", async () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  c.setPmMember("m1");
+  const snapshot = { project_key: "project", role: "pm", member_id: "m1", agent_id: "codex", revision: "known", model: "saved" };
+  c.applyTuningSnapshot(snapshot);
+  const f = await fixture({ tuningController: c });
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1" ? { ...member, pm_project_key: "project" } : member) })); f.flush();
+  c.editTuning("pm", "m1", { model: "draft" });
+  c.applyTuningError({ project_key: "project", role: "pm", member_id: "m1", request_id: sent[0].request_id, message: "Refused" });
+  const panel = createPmSettingsPanel({ document: f.document, projectKey: "project" });
+  const receiveStatus = status => { c.applyPmTuningStatus(status); panel.applyStatus(status); };
+  receiveStatus({ project_key: "project", available: false }); f.surface.sync();
+  const input = f.surface.element.querySelector('[data-member-tuning-field="model"]');
+  assert.equal(input.value, "draft"); assert.equal(input.disabled, true);
+  assert.equal(f.surface.element.querySelector('[data-action="retry-tuning"]').disabled, true);
+  c.editTuning("pm", "m1", { model: "unsafe" }); c.retryTuning("pm", "m1");
+  assert.equal(sent.length, 1); assert.equal(c.model.read().targets["pm:m1"].draft.model, "draft");
+  receiveStatus({ project_key: "project", available: true, configured_member_id: "m1", profile_revision: "fresh", configured_agent_id: "codex", configured_model: "saved" }); f.surface.sync();
+  assert.equal(input.disabled, false); assert.equal(input.value, "draft");
+});
+
+
+test("ordinary roster rejection receipts show current role/registration diagnostics without replaying stale errors", async () => {
+  const f = await fixture({ schedule: planned(), switching: switchingState() });
+  const begin = (kind, request_id, rest = {}) => f.rosterController.beginAgentRosterRequest({ kind: "agent_roster", project_key: "project", request_id, action: { kind, ...rest }, expected_revision: f.rosterModel.read().revision });
+  const rosterSnapshot = (revision, error = null) => ({ project_key: "project", revision, members: f.rosterModel.read().members.map(member => ({ ...member, agent_member_id: member.member_id })), error });
+  const name = f.surface.element.querySelector('[aria-label="Name for new member"]'); name.value = "New member"; name.dispatchEvent(new f.window.Event("input"));
+  const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]'); eligible.checked = true;
+  assert.equal(begin("activate", "activate-current", { member_id: "m2" }), false);
+  assert.equal(begin("rest", "rest-current", { member_id: "m2" }), false);
+  assert.equal(begin("add", "add-current", { name: "New member", agent_id: "codex", pm_eligible: true }), true);
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "add-current", message: "Roster changed. Reload before retrying registration." }); f.flush();
+  assert.match(f.surface.element.querySelector('.roster-error').textContent, /Reload before retrying registration/);
+  assert.equal(name.value, "New member"); assert.equal(eligible.checked, true);
+  begin("select_pm", "select-current", { member_id: "m2" });
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(4, "Member is selected in an implementation pool; remove it before selecting PM."), "select-current"); f.flush();
+  assert.match(f.surface.element.querySelector('.roster-error').textContent, /implementation pool/);
+  assert.equal(f.rosterModel.read().members[1].pm_project_key, undefined);
+  begin("read", "recovery-read");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(4), "recovery-read"); f.flush();
+  assert.equal(f.rosterModel.read().error, null, "fresh matching Reload clears the refusal");
+  f.scheduleModel.update(state => ({ ...state, snapshot: { ...state.snapshot, roster_revision: 4 } })); f.flush();
+  assert.equal(f.surface.element.querySelector('[data-action="switch-next"]').disabled, false, "fresh Reload recovers the existing roster.error-dependent switch path");
+  assert.equal(name.value, "New member"); assert.equal(eligible.checked, true);
+  f.surface.selectMember("m2");
+  const memberEligible = f.surface.element.querySelector('[data-action="pm-eligible"]');
+  begin("set_pm_eligibility", "delayed-current", { member_id: "m2", eligible: true });
+  f.flush();
+  assert.equal(memberEligible.checked, true, "pending eligibility survives a redraw");
+  assert.notEqual(f.rosterModel.read().members[1].pm_eligible, true, "pending display does not change canonical eligibility");
+  assert.equal(f.surface.element.querySelector('[data-action="select-pm"]').disabled, true, "PM selection waits for canonical approval");
+  begin("read", "parallel-read");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "parallel-read");
+  f.flush(); assert.equal(memberEligible.checked, true, "parallel read preserves the pending intent");
+  assert.equal(f.rosterModel.read().pending_roster.request_id, "delayed-current", "Read never consumes the mutation");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(5, "Eligibility refused: configured member cannot change."), "delayed-current"); f.flush();
+  assert.equal(f.rosterModel.read().revision, 6, "old response does not hydrate old canonical");
+  assert.equal(f.rosterModel.read().pending_roster, null);
+  assert.equal(memberEligible.checked, false, "correlated refusal restores canonical eligibility");
+  assert.match(f.rosterModel.read().error, /Eligibility refused/);
+  begin("read", "superseded-read"); begin("read", "current-read");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "superseded-read");
+  assert.match(f.rosterModel.read().error, /Eligibility refused/, "superseded Read cannot clear the banner");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "current-read");
+  assert.equal(f.rosterModel.read().error, null);
+  begin("move", "move-current", { member_id: "m2", direction: "up" });
+  f.rosterController.applyAgentRosterUsage([], "/project");
+  assert.equal(f.rosterModel.read().error, null, "usage refresh cannot revive the prior operation rejection");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(7), "move-current"); f.flush();
+  assert.equal(f.rosterModel.read().error, null);
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "select-current", message: "Old role rejection" });
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(4, "Old snapshot rejection"), "add-current");
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "unrelated-name", message: "Old name rejection" });
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "unrelated-tuning", message: "Old tuning rejection" }); f.flush();
+  assert.equal(f.rosterModel.read().error, null); assert.equal(f.surface.element.querySelector('.roster-error').hidden, true);
+  begin("read", "read-before-next-failure");
+  begin("select_pm", "next-current", { member_id: "m2" });
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "next-current", message: "New current refusal" });
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(7), "read-before-next-failure");
+  assert.equal(f.rosterModel.read().error, "New current refusal", "older Read cannot clear a newer operation refusal");
+  begin("read", "current-recovery");
+  f.rosterController.applyAgentRosterSnapshot({ ...rosterSnapshot(8), project_key: "foreign" }, "current-recovery");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "current-recovery");
+  assert.equal(f.rosterModel.read().error, "New current refusal", "foreign/old Reads cannot recover the current banner");
+});
+
+test("Agents owns a stable project operations host and readonly preview", async () => {
+  let mount, unmount;
+  const panel = { mount: host => { mount = host; host.innerHTML = '<button>Pause</button>'; }, unmount: host => { unmount = host; } };
+  const f = await fixture({ pmSettingsPanel: panel });
+  const host = f.surface.element.querySelector('[data-role="pm-project-operations"]');
+  assert.equal(host, mount); const input = f.surface.element.querySelector('[aria-label="Display name"]');
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[data-role="pm-project-operations"] button').disabled, true);
+  f.surface.selectMember("m2"); f.surface.selectMember("m1");
+  assert.equal(f.surface.element.querySelector('[data-role="pm-project-operations"]'), host);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]'), input);
+  f.surface.dispose(); assert.equal(unmount, host);
+});
+
+test("PM navigation retains its member through initial roster hydration and respects explicit selection", async () => {
+  const writes = [], storage = { get: () => "m1", set: (_, value) => writes.push(value), delete() {} };
+  const f = await fixture({ storage }), loaded = f.rosterModel.read();
+  f.rosterModel.update(state => ({ ...state, revision: null, members: [] })); f.flush();
+  f.surface.element.querySelector('[data-tab="past"]').click();
+  f.surface.openPmSettings("m2");
+  assert.equal(writes.at(-1), "m2", "explicit PM navigation replaces the saved selection");
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } })); f.flush();
+  f.rosterModel.update(() => loaded); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-team").hidden, false);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
+  f.rosterModel.update(state => ({ ...state, revision: null, members: [state.members[0]] })); f.flush();
+  f.surface.openPmSettings("m2");
+  assert.equal(f.surface.selectMember("m1"), true);
+  f.rosterModel.update(() => loaded); f.flush();
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "One");
+  f.surface.openPmSettings("missing");
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "One");
+  f.surface.dispose();
+});
+
+test("PM entries reveal Team from Past with known and unknown members", async () => {
+  const f = await fixture(), sent = [];
+  const gear = f.document.createElement("button"); gear.id = "op-pm-settings-button"; f.document.body.append(gear);
+  const panel = createPmSettingsPanel({ document: f.document, projectKey: "project", send: message => sent.push(message), onOpenAgents: id => f.surface.openPmSettings(id) });
+  panel.bindEntryPoints({ document: f.document });
+  installSettingsOpenHandler({ document: f.document, settingsWindowBodies: new Set(), onOpenAgents: () => panel.openAgents(), focusOrSpawnPreset: () => assert.fail("no settings window"), setPendingTarget: () => assert.fail("no pending tab") });
+  const past = f.surface.element.querySelector('[data-tab="past"]'), team = f.surface.element.querySelector('.roster-team');
+  const name = f.surface.element.querySelector('[aria-label="Display name"]');
+  name.dispatchEvent(new f.window.Event("compositionstart")); name.value = "unfinished"; name.dispatchEvent(new f.window.Event("input"));
+  past.click(); assert.equal(team.hidden, true); gear.click(); assert.equal(team.hidden, false);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]'), name); assert.equal(name.value, "unfinished");
+  panel.applyStatus({ project_key: "project", available: true, paused: false, auto_start: true, loop_interval_secs: 60, configured_member_id: "m2" });
+  past.click(); f.document.dispatchEvent(new f.window.CustomEvent("op:command", { detail: { id: "pm-settings" } }));
+  assert.equal(team.hidden, false); assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
+  panel.applyStatus({ project_key: "project", available: true, paused: false, auto_start: true, loop_interval_secs: 60, configured_member_id: "not-in-roster" });
+  past.click(); gear.click(); assert.equal(team.hidden, false); assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
+  past.click(); f.document.dispatchEvent(new f.window.CustomEvent("settings:open", { detail: { target: "project-manager" } }));
+  assert.equal(team.hidden, false); assert.deepEqual(sent, []); f.surface.dispose();
 });
 
 
@@ -656,4 +984,246 @@ test("Agents labels its project execution and opens the existing shared PM edito
   [...f.surface.element.querySelectorAll('button')].find(button => button.textContent === 'Project Manager settings').click();
   assert.deepEqual(request, { target: 'project-manager', surface_owner: 'pm' });
   assert.deepEqual(f.added, []); f.surface.dispose();
+});
+
+// Issue #7646 AC-3: the ledger order is the assignee priority, so every row
+// carries its own move controls.
+test("ledger rows reorder members and disable moves at the list edges", async () => {
+  const f = await fixture();
+  const control = (id, action) => f.surface.element.querySelector(`.roster-row[data-member-id="${id}"] [data-action="${action}"]`);
+  assert.equal(control("m1", "move-up").disabled, true);
+  assert.equal(control("m1", "move-down").disabled, false);
+  assert.equal(control("m2", "move-up").disabled, false);
+  assert.equal(control("m2", "move-down").disabled, true);
+  assert.equal(control("m2", "move-up").getAttribute("aria-label"), "Move Two up");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-order-position').textContent, "2");
+  control("m2", "move-up").click();
+  control("m1", "move-down").click();
+  assert.deepEqual(f.moved, [["m2", "up"], ["m1", "down"]]);
+  f.rosterModel.update(state => ({ ...state, members: [...state.members].reverse() })); f.flush();
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-list .roster-row")].map(row => row.dataset.memberId), ["m2", "m1"]);
+  assert.equal(control("m2", "move-up").disabled, true);
+  assert.equal(control("m1", "move-down").disabled, true);
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(control("m1", "move-up").disabled, true, "a pending member change holds further moves");
+  f.surface.dispose();
+});
+
+// Issue #7646 (A-26): deletion is confirmed in the shared dialog, and the
+// Project Manager guard reads the live assignment instead of a static flag.
+test("ledger deletion confirms in a shared dialog and follows the current Project Manager", async () => {
+  const f = await fixture();
+  const dialog = () => f.document.querySelector("#roster-delete-modal");
+  const remove = id => f.surface.element.querySelector(`.roster-row[data-member-id="${id}"] [data-action="remove"]`);
+  assert.equal(dialog().classList.contains("modal-backdrop"), true);
+  assert.equal(dialog().classList.contains("open"), false);
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_eligible: true, pm_project_key: "project" } : member) })); f.flush();
+  remove("m2").click();
+  const shell = dialog().querySelector(".modal-shell");
+  assert.equal(dialog().classList.contains("open"), true);
+  assert.equal(shell.getAttribute("role"), "dialog"); assert.equal(shell.getAttribute("aria-modal"), "true");
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Two cannot be deleted");
+  assert.match(shell.querySelector(".modal-body").textContent, /Two is the Project Manager.*Select another Project Manager/);
+  assert.equal(shell.querySelector('[data-role="roster-delete-confirm"]'), null, "the current Project Manager offers no delete");
+  shell.querySelector('[data-role="roster-delete-cancel"]').click();
+  assert.equal(dialog().classList.contains("open"), false);
+  // Reassigning the Project Manager lifts the guard without a reload.
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: null } : member) })); f.flush();
+  remove("m2").click();
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Delete Two?");
+  assert.match(shell.querySelector(".modal-body").textContent, /every project/);
+  // The guard is read again at confirmation, not at the time the dialog opened.
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: "project" } : member) }));
+  shell.querySelector('[data-role="roster-delete-confirm"]').click();
+  assert.deepEqual(f.removed, []);
+  assert.equal(f.document.getElementById(shell.getAttribute("aria-labelledby")).textContent, "Two cannot be deleted");
+  shell.querySelector('[data-role="roster-delete-cancel"]').click();
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, pm_project_key: null } : member) })); f.flush();
+  remove("m2").click(); shell.querySelector('[data-role="roster-delete-confirm"]').click();
+  assert.deepEqual(f.removed, ["m2"]);
+  assert.equal(dialog().classList.contains("open"), false);
+  // A member with live work is not deletable either.
+  remove("m1").click();
+  assert.match(shell.querySelector(".modal-body").textContent, /One is assigned to work/);
+  assert.equal(shell.querySelector('[data-role="roster-delete-confirm"]'), null);
+  f.surface.dispose();
+  assert.equal(dialog(), null, "the dialog leaves with its surface");
+});
+
+test("ledger row controls keep Operator tokens and touch targets", () => {
+  assert.match(styles, /\.roster-order\s*\{[^}]*var\(--space-/);
+  const block = styles.match(/\.roster-order[^{]*\{[^}]*\}/g).join("\n");
+  assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i);
+});
+
+// Issue #7649 (SPEC #7007 T-031): history and planned assignments belong to
+// the project's agents screen. The ledger shows neither.
+const historyAndPlans = surface => ({
+  pastTab: surface.element.querySelector(".roster-tabs"),
+  past: surface.element.querySelector(".roster-past"),
+  plans: surface.element.querySelector(".roster-plans"),
+  current: surface.element.querySelector(".roster-current-work"),
+  history: surface.element.querySelector(".roster-history:not(.roster-current-work)"),
+  project: surface.element.querySelector(".agent-history-plans-host"),
+});
+
+test("AC-3: the ledger shows no history, current work or planned assignments", async () => {
+  const f = await fixture({ schedule: planned() });
+  assert.equal(f.surface.element.dataset.view, "project");
+  f.surface.element.querySelector('[data-tab="past"]').click();
+  f.surface.setView("ledger");
+  assert.equal(f.surface.element.dataset.view, "ledger");
+  assert.equal(f.surface.element.querySelector("h2").textContent, "Agents");
+  for (const [name, node] of Object.entries(historyAndPlans(f.surface))) {
+    assert.ok(node, `${name} exists`);
+    assert.equal(node.hidden, true, `${name} is hidden in the ledger`);
+  }
+  assert.equal(f.surface.element.querySelector(".roster-team").hidden, false, "the ledger always shows the member list");
+  assert.match(styles, /\.agents-surface \[hidden\],[^{]*\{ display: none !important; \}/, "hidden parts take no space");
+});
+
+test("AC-1/AC-2: the project's agents screen lists every member's history and the assignment plan", async () => {
+  const f = await fixture({ schedule: planned() });
+  f.surface.setView("ledger"); f.surface.setView("project");
+  assert.equal(f.surface.element.querySelector("h2").textContent, "Agent history & plans");
+  for (const [name, node] of Object.entries(historyAndPlans(f.surface))) assert.equal(node.hidden, name === "past", `${name} follows the project view`);
+  const host = f.surface.element.querySelector(".agent-history-plans-host");
+  assert.equal(host.closest(".roster-team") !== null, true);
+  const rows = [...host.querySelectorAll('table[aria-label="Agent history"] tbody tr')].map(row => row.dataset.sessionId);
+  assert.deepEqual(rows, ["s2", "s0"]);
+  assert.equal(host.querySelector('tr[data-session-id="s0"]').dataset.role, "pm");
+  assert.match(host.querySelector('tr[data-session-id="s0"]').textContent, /recorded-model/);
+  assert.deepEqual([...host.querySelectorAll('[aria-label="Planned assignments"] li')].map(item => `${item.dataset.memberId}:${item.dataset.issueNumber}`),
+    ["m1:5002", "m1:5003", "m1:5004"]);
+  f.surface.dispose();
+});
+
+// Issue #7647 AC-1 / AC-2: the ledger shows and saves an agent's fixed traits.
+test("the ledger shows and saves each member's traits and keeps the draft until it is saved", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const traits = () => root.querySelector(".roster-detail [data-member-traits]");
+  const field = name => traits().querySelector(`[data-trait="${name}"]`);
+  const save = () => traits().querySelector('[data-action="save-traits"]');
+  // linkedom selects have no value setter and report no value before a choice.
+  const value = name => field(name).value ?? "";
+  const choose = (name, value) => { [...field(name).options].find(option => option.value === value).selected = true; field(name).dispatchEvent(new f.window.Event("change")); };
+  assert.deepEqual([...field("reasoning_level").options].map(option => [option.value, option.textContent]),
+    [["", "Tool default"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["max", "Max"]]);
+  assert.deepEqual([...field("speed").options].map(option => [option.value, option.textContent]),
+    [["", "Tool default"], ["normal", "Normal"], ["fast", "Fast"], ["fastest", "Fastest"]]);
+  assert.equal(field("personality").tagName, "TEXTAREA");
+  assert.equal(field("personality").getAttribute("maxlength"), "4000");
+  assert.equal(value("reasoning_level"), ""); assert.equal(value("personality"), "");
+  assert.equal(save().disabled, true, "nothing to save until a trait changes");
+  assert.match(traits().textContent, /never changes what is saved here/);
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-row-traits').hidden, true);
+
+  choose("reasoning_level", "max");
+  field("personality").value = "  Verify before changing.\nReport early.  "; field("personality").dispatchEvent(new f.window.Event("input"));
+  assert.equal(save().disabled, false);
+  assert.deepEqual(f.traitsSaved, [], "editing alone sends nothing");
+  f.activityModel.update(state => ({ ...state })); f.flush();
+  assert.equal(value("reasoning_level"), "max", "an unrelated update keeps the draft");
+  save().click();
+  assert.deepEqual(f.traitsSaved, [["m1", { reasoning_level: "max", personality: "Verify before changing.\nReport early." }]]);
+
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, traits: { reasoning_level: "max", personality: "Verify before changing.\nReport early." } } : member) })); f.flush();
+  assert.equal(save().disabled, true, "the draft is settled once the ledger holds it");
+  assert.equal(value("personality"), "Verify before changing.\nReport early.");
+  const summary = root.querySelector('.roster-row[data-member-id="m1"] .roster-row-traits');
+  assert.equal(summary.hidden, false);
+  assert.equal(summary.textContent, "Reasoning Max · Verify before changing.");
+  assert.equal(root.querySelector('.roster-row[data-member-id="m2"] .roster-row-traits').hidden, true);
+
+  choose("speed", "fast");
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(save().disabled, true, "another pending ledger change holds the save");
+  save().click(); assert.equal(f.traitsSaved.length, 1);
+  f.rosterModel.update(state => ({ ...state, pending_roster: null })); f.flush();
+  save().click();
+  assert.deepEqual(f.traitsSaved[1], ["m1", { reasoning_level: "max", speed: "fast", personality: "Verify before changing.\nReport early." }]);
+
+  root.querySelector('.roster-row[data-member-id="m2"]').click(); f.flush();
+  assert.equal(value("reasoning_level"), "", "each member has its own traits");
+  assert.match(styles, /\.roster-traits textarea\s*\{[^}]*resize:\s*vertical/s);
+  assert.match(source, /querySelectorAll\("button, select, input, textarea"\)/, "a split preview keeps the personality read-only");
+  f.surface.dispose();
+});
+
+// Issue #7635 AC-1 / AC-2 / AC-4: every ledger row and the detail draw the
+// member's avatar, and the detail chooses a preset or the default.
+test("the ledger draws each member's avatar and saves a chosen preset", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const rowAvatar = id => root.querySelector(`.roster-row[data-member-id="${id}"] .roster-avatar`);
+  const detailAvatar = () => root.querySelector(".roster-detail .roster-detail-heading .roster-avatar");
+  const picker = () => root.querySelector(".roster-detail [data-member-avatar]");
+  const choice = id => picker().querySelector(`[data-avatar-choice="${id}"]`);
+  assert.equal(rowAvatar("m1").textContent, "O", "an unset member shows its initial");
+  assert.equal(rowAvatar("m2").textContent, "T");
+  assert.deepEqual([...picker().querySelectorAll("[data-avatar-choice]")].map(button => button.dataset.avatarChoice),
+    ["default", "cat", "owl", "bear", "fox", "penguin", "robot", "upload"]);
+  assert.equal(choice("default").getAttribute("aria-checked"), "true");
+
+  choice("fox").click();
+  assert.deepEqual(f.avatarsSaved, [["m1", { kind: "preset", preset_id: "fox" }]]);
+  f.rosterModel.update(state => ({ ...state, revision: "4", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "preset", preset_id: "fox" } } : member) })); f.flush();
+  assert.equal(rowAvatar("m1").textContent, "🦊", "the row follows the saved preset");
+  assert.equal(detailAvatar().textContent, "🦊", "the detail follows the saved preset");
+  assert.equal(choice("fox").getAttribute("aria-checked"), "true");
+  assert.equal(choice("default").getAttribute("aria-checked"), "false");
+  choice("fox").click();
+  assert.equal(f.avatarsSaved.length, 1, "choosing the current avatar sends nothing");
+
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(choice("cat").disabled, true, "another pending ledger change holds the choice");
+  f.rosterModel.update(state => ({ ...state, pending_roster: null })); f.flush();
+  choice("default").click();
+  assert.deepEqual(f.avatarsSaved[1], ["m1", { kind: "default" }]);
+  assert.equal(rowAvatar("m2").textContent, "T", "each member keeps its own avatar");
+  f.surface.dispose();
+});
+
+// Issue #7636 AC-1 / AC-2 / AC-3: an uploaded image is drawn in the row and
+// the detail, a refused file says why without saving, and a preset or the
+// initial can be chosen again at any time.
+test("the ledger draws an uploaded avatar, refuses a bad file and returns to a preset", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const image = "data:image/png;base64,iVBORw0KGgo=";
+  const picker = () => root.querySelector(".roster-detail [data-member-avatar]");
+  const choice = id => picker().querySelector(`[data-avatar-choice="${id}"]`);
+  const error = () => picker().querySelector(".roster-avatar-error");
+  assert.equal(choice("upload").getAttribute("aria-label"), "Upload image");
+  assert.equal(error().hidden, true);
+
+  const file = picker().querySelector("input[type=file][data-avatar-file]");
+  assert.match(file.accept, /image\/png/);
+  let opened = 0; file.click = () => { opened++; };
+  choice("upload").click();
+  assert.equal(opened, 1, "the upload choice opens the file picker");
+  Object.defineProperty(file, "files", { configurable: true, value: [{ type: "image/svg+xml", size: 10 }] });
+  file.dispatchEvent(new f.window.Event("change"));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(error().hidden, false, "an unsupported file says why");
+  assert.match(error().textContent, /PNG, JPEG, WebP or GIF/);
+  assert.equal(f.avatarsSaved.length, 0, "a refused file saves nothing");
+
+  f.rosterModel.update(state => ({ ...state, revision: "4", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "upload", image } } : member) })); f.flush();
+  for (const node of [root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar'), root.querySelector(".roster-detail .roster-detail-heading .roster-avatar"), choice("upload")]) {
+    assert.equal(node.querySelector("img.agent-avatar-image")?.getAttribute("src"), image);
+  }
+  assert.equal(choice("upload").getAttribute("aria-checked"), "true");
+  assert.equal(choice("default").getAttribute("aria-checked"), "false");
+
+  choice("owl").click();
+  assert.equal(error().hidden, true, "a new choice clears the message");
+  assert.deepEqual(f.avatarsSaved, [["m1", { kind: "preset", preset_id: "owl" }]]);
+  f.rosterModel.update(state => ({ ...state, revision: "5", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "preset", preset_id: "owl" } } : member) })); f.flush();
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar').textContent, "🦉");
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar img'), null);
+  assert.equal(choice("upload").textContent, "＋");
+  f.surface.dispose();
 });

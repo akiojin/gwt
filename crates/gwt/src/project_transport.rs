@@ -287,6 +287,10 @@ pub enum TransportEvent {
         >,
     },
     RuntimeHook(RuntimeHookEvent),
+    AuthenticatedRuntimeHook {
+        grant: AgentCapabilityGrant,
+        event: RuntimeHookEvent,
+    },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -517,6 +521,7 @@ fn defers_serialization(event: &BackendEvent) -> bool {
     matches!(
         event,
         BackendEvent::ActiveWorkProjectionPatch { .. }
+            | BackendEvent::BoardEntries { .. }
             | BackendEvent::TerminalSnapshot { .. }
             | BackendEvent::IssueMonitorInbox { .. }
             | BackendEvent::IssueMonitorStatus { .. }
@@ -562,6 +567,11 @@ fn prepare_outbound_with_payload(
         }
         crate::BackendEvent::AttachmentProgress { operation_id, .. } => {
             (Some(operation_id.clone()), None, None)
+        }
+        // Issue #5561: an inbox replaces the previous one and carries every
+        // Issue body, so a client that is not draining keeps only the newest.
+        crate::BackendEvent::IssueMonitorInbox { .. } => {
+            (Some("issue_monitor_inbox".to_string()), None, None)
         }
         _ => (None, None, None),
     };
@@ -1637,9 +1647,10 @@ async fn hook_live_handler(
     State(state): State<TransportState>,
     Json(mut event): Json<RuntimeHookEvent>,
 ) -> StatusCode {
-    let Some(principal) = agent_capability_principal(&headers, &state) else {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
         return StatusCode::UNAUTHORIZED;
     };
+    let principal = grant.principal();
     if event.gwt_session_id.as_deref() != Some(principal.session_id()) {
         tracing::warn!(
             target: "gwt_security",
@@ -1665,11 +1676,12 @@ async fn hook_live_handler(
         None => "none",
         _ => "other",
     };
-    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
-        event.occurred_at.as_str()
-    } else {
-        "invalid"
-    };
+    let occurred_at =
+        if gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&event.occurred_at).is_ok() {
+            event.occurred_at.as_str()
+        } else {
+            "invalid"
+        };
     tracing::info!(
         target: "gwt.hook.delivery",
         stage = "receipt",
@@ -1679,7 +1691,22 @@ async fn hook_live_handler(
         occurred_at,
         "runtime hook delivery"
     );
-    state.send(TransportEvent::RuntimeHook(event));
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    {
+        let captured = grant.clone();
+        if tokio::task::spawn_blocking(move || {
+            crate::project_runtime::agent_frontend::run_owner_agent_dispatch_test_hook(
+                &captured,
+                crate::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::BeforeHookDispatch,
+            );
+        })
+        .await
+        .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+    state.send(TransportEvent::AuthenticatedRuntimeHook { grant, event });
     StatusCode::NO_CONTENT
 }
 
@@ -2683,6 +2710,27 @@ impl ClientSessionScope {
     }
 }
 
+/// Malformed tuning can only be correlated on its own authenticated browser project.
+/// Payload identity is never routing authority, and parser diagnostics are not echoed.
+fn rejected_tuning_parse(scope: &ClientSessionScope, text: &str) -> Option<BackendEvent> {
+    let ClientSessionScope::Browser(ClientScope::Project(key)) = scope else {
+        return None;
+    };
+    let raw: serde_json::Value = serde_json::from_str(text).ok()?;
+    if raw.get("kind")?.as_str()? != "agent_roster"
+        || raw.get("action")?.get("kind")?.as_str()? != "set_tuning"
+        || raw.get("project_key")?.as_str()? != key.as_str()
+    {
+        return None;
+    }
+    let request_id = raw.get("request_id")?.as_str()?;
+    if request_id.trim().is_empty() || request_id.len() > 256 {
+        return None;
+    }
+    Some(BackendEvent::AgentRosterError { project_key: key.to_string(), request_id: Some(request_id.to_string()),
+        message: "Invalid tuning request. Reload registered members and retry with explicit model and reasoning fields.".into() })
+}
+
 fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
     let event = serde_json::from_str(text)?;
     if matches!(&event, FrontendEvent::PaneName { .. }) {
@@ -3240,6 +3288,9 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(event) = rejected_tuning_parse(&scope, text.as_ref()) {
+                                    send_agent_terminal_result(&mut sender, event, Duration::from_secs(1)).await;
+                                }
                                 if let Some(request_id) = name_request_id {
                                     pending_names.remove(&request_id);
                                     send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
@@ -3251,7 +3302,15 @@ async fn client_session_with_scope(
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) => {
+                        // Issue #7346: the transport queues the Close reply on
+                        // receipt but only writes it on the next flush.
+                        // Dropping the socket here would reset the connection
+                        // and the client would observe abnormal 1006.
+                        let _ = tokio::time::timeout(Duration::from_secs(1), sender.close()).await;
+                        break;
+                    }
+                    None => break,
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         eprintln!("websocket error: {error}");
@@ -3617,10 +3676,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         assert!(matches!(
+            // test-hygiene: allow-wall-clock-deadline Bound delivery of the actual authenticated HTTP request; channel receipt establishes progress.
             tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
                 .await
                 .unwrap(),
-            Some(TransportEvent::RuntimeHook(_))
+            Some(TransportEvent::AuthenticatedRuntimeHook { .. })
         ));
         let text = std::fs::read_to_string(hook_log.path()).unwrap();
         let records: Vec<serde_json::Value> = text
@@ -4458,6 +4518,7 @@ mod tests {
         BackendEvent::AttachmentProgress {
             id: pane.to_string(),
             operation_id: operation_id.to_string(),
+            expected_target: None,
             phase,
             file_index: Some(0),
             file_count: 1,
@@ -4528,6 +4589,11 @@ mod tests {
                 state: crate::WindowProcessStatus::Stopped,
             },
             BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            BackendEvent::BoardEntries {
+                id: "board".into(),
+                entries: Vec::new(),
+                has_more_before: false,
+            },
             BackendEvent::IssueMonitorStatus {
                 status: Box::new(
                     crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
@@ -4563,7 +4629,11 @@ mod tests {
         // these new kinds directly so eager encoding cannot pass with zero.
         for queue in [&first, &second] {
             let state = queue.state.lock().unwrap();
-            for kind in ["issue_monitor_inbox", "issue_monitor_status"] {
+            for kind in [
+                "issue_monitor_inbox",
+                "issue_monitor_status",
+                "board_entries",
+            ] {
                 let queued = state
                     .entries
                     .iter()
@@ -4576,7 +4646,7 @@ mod tests {
             }
         }
 
-        for (queue, encodings) in [(first, 3), (second, 0)] {
+        for (queue, encodings) in [(first, 4), (second, 0)] {
             let expected = expected.clone();
             std::thread::spawn(move || {
                 DEFERRED_SERIALIZATIONS.with(|count| count.set(0));
@@ -5067,6 +5137,41 @@ mod tests {
         assert!(
             payloads[0].contains("project_index_status"),
             "replacement keeps the original queue position"
+        );
+    }
+
+    // Issue #5561: every inbox broadcast carries every Issue body. A client
+    // that stops draining must hold only the newest inbox, not one per scan.
+    #[test]
+    fn client_queue_keeps_only_the_latest_issue_monitor_inbox() {
+        let queue = ClientQueue::default();
+        let mut latest = None;
+        for _ in 0..3 {
+            let prepared = prepare_owned_outbound(OutboundEvent::project(
+                project_a(),
+                BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            ));
+            latest = Some(prepared.payload.clone());
+            queue.enqueue(&prepared);
+        }
+
+        let state = queue.state.lock().unwrap();
+        let inboxes: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "issue_monitor_inbox")
+            .collect();
+        assert_eq!(inboxes.len(), 1, "queued inboxes must not accumulate");
+        let (
+            SharedOutboundPayload::Deferred(queued),
+            Some(SharedOutboundPayload::Deferred(latest)),
+        ) = (&inboxes[0].payload, latest.as_ref())
+        else {
+            panic!("inbox encoding must stay deferred");
+        };
+        assert!(
+            Arc::ptr_eq(queued, latest),
+            "the queued inbox is the newest one"
         );
     }
 
@@ -5909,5 +6014,30 @@ mod tests {
         assert_eq!(hub.scope("a"), None);
         hub.register("a".into());
         assert_eq!(hub.scope("a"), Some(ClientScope::Hub));
+    }
+}
+
+#[cfg(test)]
+mod tuning_parse_tests {
+    use super::*;
+    #[test]
+    fn malformed_tuning_correlates_only_the_authenticated_browser_project() {
+        let key = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+        let scope = ClientSessionScope::Browser(ClientScope::Project(key.clone()));
+        let request = serde_json::json!({"kind":"agent_roster","project_key":key.as_str(),"request_id":"tune-1",
+            "action":{"kind":"set_tuning","member_id":"member","model":null,"expected_core_revision":"token","authority":"forged"}});
+        assert!(decode_frontend_event(&request.to_string()).is_err());
+        let event = rejected_tuning_parse(&scope, &request.to_string()).unwrap();
+        assert!(
+            matches!(event, BackendEvent::AgentRosterError { project_key, request_id: Some(id), .. } if project_key == key.as_str() && id == "tune-1")
+        );
+        assert!(rejected_tuning_parse(
+            &ClientSessionScope::Browser(ClientScope::Hub),
+            &request.to_string()
+        )
+        .is_none());
+        let mut foreign = request;
+        foreign["project_key"] = serde_json::json!("fedcba9876543210");
+        assert!(rejected_tuning_parse(&scope, &foreign.to_string()).is_none());
     }
 }

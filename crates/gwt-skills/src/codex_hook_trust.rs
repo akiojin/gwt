@@ -11,6 +11,7 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::asset_io::{ensure_safe_mutation, AssetRoute};
 use crate::settings_local::{
     codex_event_hook_commands, codex_event_hook_commands_with_bin,
     codex_hooks_paths_for_codex_discovery, codex_self_improvement_stop_hook_commands,
@@ -481,88 +482,115 @@ fn register_codex_managed_hook_trust_with_writer(
     config_path: &Path,
     mode: CodexHookDiscoveryMode,
     expected_gwt_bin: Option<&str>,
-    write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
+    mut write_config: impl FnMut(&Path, &str) -> io::Result<()>,
 ) -> io::Result<CodexHookTrustReport> {
-    let scan = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
+    let mut scan = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
 
     // Issue #4071: read, mutate and publish as one critical section. A
     // concurrent launch that reads between our read and our write would
     // otherwise write back a copy without our entries.
-    with_codex_config_lock(config_path, || {
-        let mut root = read_codex_config(config_path)?;
-        // Codex's existing review is authority for this exact handler identity.
-        // Do not make a new trust decision for an unrecognized command.
-        let trusted_entries: Vec<_> = scan
-            .hooks
-            .iter()
-            .filter(|hook| {
-                hook.generated
-                    || stored_hook_hash(&root, &hook.entry.key)
-                        == Some(hook.entry.trusted_hash.as_str())
-            })
-            .map(|hook| hook.entry.clone())
-            .collect();
-        if trusted_entries.is_empty() {
-            return Ok(hook_trust_report(scan, config_path, &root, false));
-        }
-        let root_table = root.as_table_mut().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Codex config root must be a TOML table",
-            )
-        })?;
-        collect_missing_codex_managed_hook_state(root_table, expected_gwt_bin)?;
-        let hooks_table = ensure_child_table(root_table, "hooks")?;
-        let state_table = ensure_child_table(hooks_table, "state")?;
+    with_codex_config_lock(config_path, |resolved| {
+        let mut wrote_trust_state = false;
+        // Issue #7270: a concurrent `Both`-mode refresh (startup self-heal)
+        // can create the other discovery copy after the scan. A hooks file
+        // that appeared since the scan gets the same decision, bounded.
+        for attempt in 1..=CODEX_HOOK_TRUST_REGISTRATION_PASSES {
+            let mut root = read_codex_config(resolved)?;
+            // Codex's existing review is authority for this exact handler identity.
+            // Do not make a new trust decision for an unrecognized command.
+            let trusted_entries: Vec<_> = scan
+                .hooks
+                .iter()
+                .filter(|hook| {
+                    hook.generated
+                        || stored_hook_hash(&root, &hook.entry.key)
+                            == Some(hook.entry.trusted_hash.as_str())
+                })
+                .map(|hook| hook.entry.clone())
+                .collect();
+            if trusted_entries.is_empty() {
+                return Ok(hook_trust_report(
+                    scan,
+                    config_path,
+                    &root,
+                    wrote_trust_state,
+                ));
+            }
+            let root_table = root.as_table_mut().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Codex config root must be a TOML table",
+                )
+            })?;
+            collect_missing_codex_managed_hook_state(root_table, expected_gwt_bin)?;
+            let hooks_table = ensure_child_table(root_table, "hooks")?;
+            let state_table = ensure_child_table(hooks_table, "state")?;
 
-        for entry in &trusted_entries {
-            let hook_state = ensure_child_table(state_table, &entry.key)?;
-            enable_hook_unless_explicitly_disabled(hook_state);
-            hook_state.insert(
-                "trusted_hash".to_string(),
-                toml::Value::String(entry.trusted_hash.clone()),
-            );
-        }
+            for entry in &trusted_entries {
+                let hook_state = ensure_child_table(state_table, &entry.key)?;
+                enable_hook_unless_explicitly_disabled(hook_state);
+                hook_state.insert(
+                    "trusted_hash".to_string(),
+                    toml::Value::String(entry.trusted_hash.clone()),
+                );
+            }
 
-        let rendered = toml::to_string_pretty(&root).map_err(|err| {
-            io::Error::other(format!("Codex config TOML serialize failed: {err}"))
-        })?;
-        write_config(config_path, &rendered)?;
-        // The shared lock prevents gwt writers from losing each other's rows.
-        // A successful writer alone still does not prove what Codex will read.
-        let recovery = codex_hook_trust_recovery(config_path);
-        let persisted = read_codex_config(config_path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "Codex hook trust write verification failed for {}: {error}. {recovery}",
-                    config_path.display()
-                ),
-            )
-        })?;
-        let missing: Vec<_> = trusted_entries
-            .iter()
-            .filter(|entry| {
-                stored_hook_hash(&persisted, &entry.key) != Some(entry.trusted_hash.as_str())
-            })
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            return Err(io::Error::other(format!(
-                "Codex hook trust write verification failed for {}: {}. {recovery}",
-                config_path.display(),
-                hook_hash_diagnostics(&persisted, &missing).join("; ")
-            )));
+            let rendered = toml::to_string_pretty(&root).map_err(|err| {
+                io::Error::other(format!("Codex config TOML serialize failed: {err}"))
+            })?;
+            write_config(resolved, &rendered)?;
+            wrote_trust_state = true;
+            // The shared lock prevents gwt writers from losing each other's rows.
+            // A successful writer alone still does not prove what Codex will read.
+            let recovery = codex_hook_trust_recovery(config_path);
+            let persisted = read_codex_config(resolved).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "Codex hook trust write verification failed for {}: {error}. {recovery}",
+                        config_path.display()
+                    ),
+                )
+            })?;
+            let missing: Vec<_> = trusted_entries
+                .iter()
+                .filter(|entry| {
+                    stored_hook_hash(&persisted, &entry.key) != Some(entry.trusted_hash.as_str())
+                })
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                return Err(io::Error::other(format!(
+                    "Codex hook trust write verification failed for {}: {}. {recovery}",
+                    config_path.display(),
+                    hook_hash_diagnostics(&persisted, &missing).join("; ")
+                )));
+            }
+            let current_scan = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
+            // A changed identity in a file we already decided on still blocks.
+            let appeared = current_scan.expectations.iter().any(|current| {
+                !scan
+                    .expectations
+                    .iter()
+                    .any(|seen| seen.hooks_path == current.hooks_path)
+            });
+            if !appeared || attempt == CODEX_HOOK_TRUST_REGISTRATION_PASSES {
+                return Ok(hook_trust_report(
+                    current_scan,
+                    config_path,
+                    &persisted,
+                    true,
+                ));
+            }
+            scan = current_scan;
         }
-        let current_scan = scan_codex_hook_trust_for_mode(worktree, mode, expected_gwt_bin)?;
-        Ok(hook_trust_report(
-            current_scan,
-            config_path,
-            &persisted,
-            true,
-        ))
+        unreachable!("the final registration pass always returns")
     })
 }
+
+/// Issue #7270: a launch and a concurrent refresh write at most both discovery
+/// copies, so one extra pass covers a copy created during registration.
+const CODEX_HOOK_TRUST_REGISTRATION_PASSES: usize = 2;
 
 /// Reclaim trust for missing generated hooks without registering any new trust.
 /// Unknown fingerprints and existing files are retained. The missing-file check
@@ -588,8 +616,8 @@ fn garbage_collect_codex_managed_hook_trust_with_writer(
         Err(error) => return Err(error),
         Ok(_) => {}
     }
-    with_codex_config_lock(config_path, || {
-        let mut root = read_codex_config(config_path)?;
+    with_codex_config_lock(config_path, |resolved| {
+        let mut root = read_codex_config(resolved)?;
         let removed = collect_missing_codex_managed_hook_state(
             root.as_table_mut().ok_or_else(|| {
                 io::Error::new(
@@ -601,7 +629,7 @@ fn garbage_collect_codex_managed_hook_trust_with_writer(
         )?;
         if removed > 0 {
             let rendered = toml::to_string_pretty(&root).map_err(io::Error::other)?;
-            write_config(config_path, &rendered)?;
+            write_config(resolved, &rendered)?;
         }
         Ok(removed)
     })
@@ -772,12 +800,12 @@ pub fn revoke_codex_managed_project_trust_with_cleanup<T>(
     config_path: &Path,
     cleanup: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    with_codex_config_lock(config_path, || {
+    with_codex_config_lock(config_path, |resolved| {
         let project_path = codex_project_path_for_revocation(worktree)?;
         revoke_codex_managed_project_trust_under_lock(
             &project_path,
             worktree,
-            config_path,
+            resolved,
             write_text_atomically,
         )?;
         cleanup()
@@ -789,12 +817,12 @@ fn revoke_codex_managed_project_trust_with_writer(
     config_path: &Path,
     write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
 ) -> io::Result<CodexProjectTrustReport> {
-    with_codex_config_lock(config_path, || {
+    with_codex_config_lock(config_path, |resolved| {
         let project_path = codex_project_path_for_revocation(worktree)?;
         revoke_codex_managed_project_trust_under_lock(
             &project_path,
             worktree,
-            config_path,
+            resolved,
             write_config,
         )?;
         Ok(CodexProjectTrustReport {
@@ -1203,8 +1231,8 @@ fn update_codex_config_with_writer<T>(
     update: impl FnOnce(&mut toml::Table) -> io::Result<T>,
     write_config: impl FnOnce(&Path, &str) -> io::Result<()>,
 ) -> io::Result<T> {
-    with_codex_config_lock(config_path, || {
-        let mut root = read_codex_config(config_path)?;
+    with_codex_config_lock(config_path, |resolved| {
+        let mut root = read_codex_config(resolved)?;
         let root_table = root.as_table_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1216,7 +1244,7 @@ fn update_codex_config_with_writer<T>(
         let rendered = toml::to_string_pretty(&root).map_err(|err| {
             io::Error::other(format!("Codex config TOML serialize failed: {err}"))
         })?;
-        write_config(config_path, &rendered)?;
+        write_config(resolved, &rendered)?;
         Ok(result)
     })
 }
@@ -1249,8 +1277,13 @@ fn command_hook_trusted_hash_for_test(
 /// from ever seeing a half-written file.
 pub(crate) fn with_codex_config_lock<T>(
     config_path: &Path,
-    body: impl FnOnce() -> io::Result<T>,
+    body: impl FnOnce(&Path) -> io::Result<T>,
 ) -> io::Result<T> {
+    // Paths come from CODEX_HOME / OS home, not gwt_home, so tests need their own guard.
+    gwt_config::home::assert_test_path(config_path);
+    let shared_path = managed_shared_codex_config(config_path)?;
+    let config_path = shared_path.as_deref().unwrap_or(config_path);
+    gwt_config::home::assert_test_path(config_path);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1280,9 +1313,38 @@ pub(crate) fn with_codex_config_lock<T>(
         }
     }
 
-    let result = body();
+    let result = body(config_path);
     let _ = FileExt::unlock(&lock);
     result
+}
+
+/// Resolve only the sharing link created for a gwt-managed Codex account.
+/// Other symlinks remain subject to the normal managed-asset write guard.
+fn managed_shared_codex_config(config_path: &Path) -> io::Result<Option<PathBuf>> {
+    let Some(account) = config_path
+        .parent()
+        .filter(|_| config_path.ends_with("config.toml"))
+    else {
+        return Ok(None);
+    };
+    let Ok(link_target) = fs::read_link(config_path) else {
+        return Ok(None);
+    };
+    let Some(home) = gwt_config::home::user_home().and_then(|path| dunce::canonicalize(path).ok())
+    else {
+        return Ok(None);
+    };
+    let default = home.join(".codex/config.toml");
+    let accounts = home.join(".gwt/accounts/codex");
+    if dunce::simplified(&link_target) != default
+        || !dunce::canonicalize(account)
+            .is_ok_and(|account| account.parent() == Some(accounts.as_path()))
+    {
+        return Ok(None);
+    }
+    ensure_safe_mutation(account, AssetRoute::Write)?;
+    ensure_safe_mutation(&default, AssetRoute::Write)?;
+    Ok(Some(default))
 }
 
 fn codex_config_lock_path(config_path: &Path) -> PathBuf {
@@ -1771,6 +1833,24 @@ mod tests {
             0
         );
         assert!(!absent.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn shared_config_writes_panic_before_unisolated_test_io() {
+        // SPEC #5082 AC-22: an inherited CODEX_HOME must not reach the real trust config.
+        let config = Path::new("/__gwt_protected_test_home__/.codex/config.toml");
+        let worktree = tempfile::tempdir().unwrap();
+        assert!(std::panic::catch_unwind(|| {
+            let _ = with_codex_config_lock(config, |_| -> io::Result<()> {
+                panic!("body must not run for an unisolated config")
+            });
+        })
+        .is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _ = register_codex_managed_project_trust(worktree.path(), config);
+        })
+        .is_err());
+        assert!(!config.parent().unwrap().exists());
     }
 
     #[test]
@@ -4124,6 +4204,51 @@ enabled = false
         assert!(!reason.contains("wrote 5 trusted entries"), "{reason}");
     }
 
+    /// Issue #7270: the startup self-heal refreshes both discovery copies and
+    /// can create the repo-root copy while a restore launch registers trust for
+    /// a linked worktree. A generated copy that appears after the scan must be
+    /// trusted too, or the launch is refused on `Hooks need review`.
+    #[test]
+    fn registration_trusts_a_generated_copy_created_during_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_checkout = dir.path().join("project");
+        let common_git_dir = root_checkout.join(".git");
+        let worktree = dir.path().join("worker-1");
+        fs::create_dir_all(common_git_dir.join("worktrees/worker-1")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                common_git_dir.join("worktrees/worker-1").display()
+            ),
+        )
+        .unwrap();
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal).unwrap();
+        assert!(!root_checkout.join(".codex/hooks.json").exists());
+
+        let mut created = false;
+        let report = register_codex_managed_hook_trust_with_writer(
+            &worktree,
+            &dir.path().join("config.toml"),
+            CodexHookDiscoveryMode::Both,
+            None,
+            |path, content| {
+                write_text_atomically(path, content)?;
+                if !created {
+                    created = true;
+                    generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::Both)?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(root_checkout.join(".codex/hooks.json").exists());
+        assert_eq!(report.hooks_need_review_reason(), None);
+        assert_eq!(report.trusted_entries.len(), 10);
+    }
+
     #[test]
     fn registration_checks_the_current_hook_identity_after_writing_trust() {
         let dir = tempfile::tempdir().unwrap();
@@ -4615,7 +4740,7 @@ trusted_hash = "sha256:08adeab2"
         let holder_has_lock = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                with_codex_config_lock(&config_path, || {
+                with_codex_config_lock(&config_path, |_| {
                     holder_has_lock.wait();
                     // Long enough for an unserialized registration to read the
                     // pre-write file and publish over this entry.

@@ -1,7 +1,7 @@
 //! Bounded, read-only summaries. TaskStore remains the tracking authority.
 
-use chrono::{DateTime, Utc};
 use gwt_core::pm_request_tasks::{ActorKind, Snapshot, TaskStatus, TaskStore};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -71,6 +71,7 @@ impl PmTaskBoundedText {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PmTaskDetail {
+    pub status: TaskStatus,
     pub original: Option<PmTaskBoundedText>,
     pub purpose: PmTaskBoundedText,
     pub completion_conditions: Vec<PmTaskBoundedText>,
@@ -87,7 +88,7 @@ pub struct PmTaskHistoryEntry {
     pub action: String,
     pub actor_kind: ActorKind,
     pub actor_id: PmTaskBoundedText,
-    pub at: DateTime<Utc>,
+    pub at: UtcTimestamp,
     pub reason: PmTaskBoundedText,
 }
 
@@ -126,6 +127,7 @@ pub fn task_detail(state: &Snapshot, selected_key: &str) -> Option<PmTaskDetail>
         }
     }
     Some(PmTaskDetail {
+        status: task.status,
         original: state
             .sources
             .get(&task.source_id)
@@ -283,6 +285,10 @@ mod tests {
         assert_eq!(detail.history[0].actor_id.total_chars, 241);
         assert_eq!(detail.history[0].reason.text, "由".repeat(1000));
         let serialized = serde_json::to_string(&detail).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&serialized).unwrap()["status"],
+            "completed"
+        );
         for excluded in [
             "PRIVATE-",
             "private-",

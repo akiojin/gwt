@@ -1917,6 +1917,18 @@ _SEARCH_WORKER_QOS: Optional[str] = None
 _MODEL_LOAD_MS = 0
 _model_load_clock = time.monotonic
 _SEARCH_WORKER_ENDPOINT: Optional[Path] = None
+# Issue #7493: set when an interactive caller left while this worker's first
+# model load was still running. The load finishes so the retry finds a warm
+# worker, but no embedding may follow on the abandoned request.
+_SEARCH_WORKER_ABANDONED: Optional[threading.Event] = None
+_MODEL_LOADING = False
+# A load that still has not settled this long after its caller left is stuck
+# rather than warming.
+_COLD_START_GRACE_SECONDS = 120.0
+
+
+class _SearchCallerGone(RuntimeError):
+    """The caller dropped its heavy lease before the model was ready."""
 
 
 def _publish_search_model_state(state: str) -> None:
@@ -1958,12 +1970,20 @@ def _background_default_model_revision() -> Optional[str]:
 
 
 def _get_embedding_model(revision: Optional[str] = None) -> Any:
+    """Return the retained model unless this request's caller already left."""
+    model = _load_embedding_model(revision)
+    if _SEARCH_WORKER_ABANDONED is not None and _SEARCH_WORKER_ABANDONED.is_set():
+        raise _SearchCallerGone("search caller disconnected during model load")
+    return model
+
+
+def _load_embedding_model(revision: Optional[str] = None) -> Any:
     """Lazily load and retain each model revision for this process.
 
     Honors GWT_INDEX_FAKE_EMBEDDING=1 to substitute a deterministic
     hash-based fake. Otherwise loads ``intfloat/multilingual-e5-base``.
     """
-    global _MODEL_CACHE, _MODEL_LOAD_MS
+    global _MODEL_CACHE, _MODEL_LOAD_MS, _MODEL_LOADING
     if _MODEL_CACHE is None:
         _MODEL_CACHE = {}
     if revision in _MODEL_CACHE:
@@ -1971,6 +1991,7 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
         return _MODEL_CACHE[revision]
 
     _publish_search_model_state("warming")
+    _MODEL_LOADING = True
     try:
         model_revision = revision
         if (_SEARCH_WORKER_QOS == "background" and revision is None
@@ -1994,10 +2015,19 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
             started = _model_load_clock()
             from sentence_transformers import SentenceTransformer  # type: ignore
 
-            if model_revision is None:
-                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+            options = {} if model_revision is None else {"revision": model_revision}
+            if _SEARCH_WORKER_QOS == "background":
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, **options)
             else:
-                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=model_revision)
+                # A ready local index already has its model cached. Hub metadata
+                # probes must not consume a cold search's bounded heavy lease.
+                try:
+                    model = SentenceTransformer(
+                        FILE_INDEX_V2_MODEL_ID, local_files_only=True, **options
+                    )
+                except OSError:
+                    # Preserve first-use provisioning for an incomplete cache.
+                    model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, **options)
             _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
         _MODEL_CACHE[revision] = model
         if revision is None and model_revision is not None:
@@ -2005,6 +2035,8 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
     except Exception:
         _publish_search_model_state("cold")
         raise
+    finally:
+        _MODEL_LOADING = False
     _publish_search_model_state("warm")
     return model
 
@@ -2733,12 +2765,24 @@ def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] =
 def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     """Pin the first available canonical local ref without fetching."""
     boundary_fields = []
+    head_tree_oid = None
     try:
         boundary_probe = _git_command(
-            root, ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix"]
+            root, ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix",
+                   "--verify", "--quiet", "HEAD^{tree}"]
         )
-        if boundary_probe.returncode == 0 and isinstance(boundary_probe.stdout, bytes):
+        if boundary_probe.returncode in (0, 1) and isinstance(boundary_probe.stdout, bytes):
             boundary_fields = boundary_probe.stdout.split(b"\n")
+            if boundary_probe.returncode == 0:
+                if len(boundary_fields) == 5 and boundary_fields[-1] == b"":
+                    candidate = boundary_fields[3].lower()
+                    if len(candidate) in (40, 64) and all(char in b"0123456789abcdef" for char in candidate):
+                        head_tree_oid = candidate.decode("ascii")
+                        del boundary_fields[3]
+                    else:
+                        boundary_fields = []
+                else:
+                    boundary_fields = []
     except RuntimeError:
         # Keep the original boundary/error classification on probe failure.
         pass
@@ -2746,6 +2790,7 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
             and boundary_fields[0] in (b"true", b"false")):
         root_output, prefix_bytes = boundary_fields[1:3]
     else:
+        head_tree_oid = None
         repository_probe = _git_command(root, ["rev-parse", "--is-inside-work-tree"])
         if repository_probe.returncode != 0:
             if (root / ".git").exists():
@@ -2799,6 +2844,9 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     for reference, exists in candidate_presence:
         if not exists:
             continue
+        if reference == "HEAD" and head_tree_oid is not None:
+            return {"reference": reference, "root_tree_oid": head_tree_oid,
+                    "tree_prefix": tree_prefix}
         expression = f"{reference}^{{tree}}"
         completed = _git_command(root, ["rev-parse", "--verify", "--quiet", expression])
         if completed.returncode != 0:
@@ -3667,16 +3715,19 @@ def _prune_file_record_pool(v2_root: Path) -> int:
             for pool in pools_root.iterdir():
                 if not pool.is_dir() or pool.is_symlink() or not _is_sha256(pool.name):
                     continue
-                for scope, collection_name in (
-                    ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
-                ):
-                    client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
-                    try:
+                opened = []
+                try:
+                    for scope, collection_name in (
+                        ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
+                    ):
+                        client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
+                        opened.append(client)
                         retained = marks.get(pool.name, {}).get(scope, set())
                         removed = _prune_unreferenced_record_block(collection, retained)
                         if removed:
                             return removed
-                    finally:
+                finally:
+                    for client in opened:
                         _close_chroma_client(client)
     except Exception:
         # Cleanup cannot invalidate a completed refresh. Contention, malformed
@@ -3812,11 +3863,6 @@ def _staged_artifact_vectors_are_verified(
     )
     opened: Dict[str, tuple[Any, Any]] = {}
     try:
-        for bucket, collection_name in (
-            ("code", V2_FILES_CODE_COLLECTION),
-            ("docs", V2_FILES_DOCS_COLLECTION),
-        ):
-            opened[bucket] = _open_file_index_v2_collection(store, collection_name)
         for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
             stop = start + FILE_INDEX_V2_VECTOR_BATCH
             indexes = range(start, min(stop, len(records)))
@@ -3839,6 +3885,9 @@ def _staged_artifact_vectors_are_verified(
                     if vector is None:
                         return False
                     expected_vectors.append(vector)
+                if bucket not in opened:
+                    collection_name = V2_FILES_CODE_COLLECTION if bucket == "code" else V2_FILES_DOCS_COLLECTION
+                    opened[bucket] = _open_file_index_v2_collection(store, collection_name)
                 collection = opened[bucket][1]
                 stored = collection.get(
                     ids=[_file_record_id(manifest_entries[index]) if pooled else records[index]["path"] for index in selected],
@@ -3906,6 +3955,7 @@ def _materialize_file_artifact_pair(
     progress_total: Optional[int] = None,
     on_checkpoint: Optional[Callable[[int], None]] = None,
     reuse_entries: Optional[Dict[str, Dict[str, Any]]] = None,
+    invalid_paths: Optional[set[str]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
@@ -3935,7 +3985,11 @@ def _materialize_file_artifact_pair(
                 and not candidate.is_symlink()
             ):
                 shutil.rmtree(candidate, ignore_errors=True)
-        if _artifact_pair_metadata_is_verified(
+        # IDs alone cannot clear payload failures observed by this build.
+        has_invalid_payloads = bool(invalid_paths) and not invalid_paths.isdisjoint(
+            record["path"] for record in records
+        )
+        if not has_invalid_payloads and _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
             if on_checkpoint is not None:
@@ -3943,11 +3997,6 @@ def _materialize_file_artifact_pair(
             return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
-        if artifact_dir.exists():
-            quarantine = artifact_dir.with_name(
-                f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
-            )
-            os.replace(artifact_dir, quarantine)
         staging = artifact_dir.with_name(
             f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
         )
@@ -3957,6 +4006,7 @@ def _materialize_file_artifact_pair(
         computed = 0
         hits = 0
         opened: Dict[str, tuple[Any, Any]] = {}
+        quarantine: Optional[Path] = None
         try:
             for bucket, collection_name in (
                 ("code", V2_FILES_CODE_COLLECTION),
@@ -4126,6 +4176,12 @@ def _materialize_file_artifact_pair(
                 _fsync_file_index_v2_directory(store)
                 for parent in list(store.parents)[:4]:
                     _fsync_directory(parent)
+            # Keep the published metadata in place across yields and staging failures.
+            if artifact_dir.exists():
+                quarantine = artifact_dir.with_name(
+                    f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+                )
+                os.replace(artifact_dir, quarantine)
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits, False
         finally:
@@ -4134,6 +4190,9 @@ def _materialize_file_artifact_pair(
             # Windows cannot delete SQLite files while Chroma owns their handles.
             # A process kill or delayed native close is retried under the next lock.
             shutil.rmtree(staging, ignore_errors=True)
+            if quarantine is not None and not artifact_dir.exists():
+                os.replace(quarantine, artifact_dir)
+                _fsync_directory(artifact_dir.parent)
 
 
 _BASE_DESCRIPTOR_FIELDS = {
@@ -5589,11 +5648,7 @@ def _action_index_files_protocol_v2_pinned(
     reuse_inputs = _file_index_v2_reuse_inputs(repo_hash, worktree_hash, descriptor, db_root)
     canonical = _canonical_git_tree(root)
     if canonical is not None and canonical.get("root_tree_oid") is not None:
-        base_reuse = reuse_inputs.get("base")
-        if base_reuse is not None and base_reuse["descriptor"]["root_tree_oid"] != canonical["root_tree_oid"]:
-            base_records = _canonical_base_records(root, canonical, reuse_inputs=base_reuse)
-        else:
-            base_records = _canonical_base_records(root, canonical)
+        base_records = _canonical_base_records(root, canonical, reuse_inputs=reuse_inputs.get("base"))
     else:
         base_records = []
     base_by_path = {record["path"]: record for record in base_records}
@@ -5729,7 +5784,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(done, "base"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["base"]["entries"].items()
-                            if path not in reuse_inputs["base"]["invalid_paths"]}} if "base" in reuse_inputs else {}),
+                            if path not in reuse_inputs["base"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["base"]["invalid_paths"]} if "base" in reuse_inputs else {}),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -5765,7 +5821,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["overlay"]["entries"].items()
-                            if path not in reuse_inputs["overlay"]["invalid_paths"]}} if "overlay" in reuse_inputs else {}),
+                            if path not in reuse_inputs["overlay"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["overlay"]["invalid_paths"]} if "overlay" in reuse_inputs else {}),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -8401,7 +8458,17 @@ def _layered_document_count(
     for store, hidden in _active_store_layers(db_path):
         client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
         try:
-            total += int(collection.count())
+            count = int(collection.count())
+            if count:
+                # count() only reads metadata: a broken HNSW segment can still
+                # report the expected size. Exercise the query reader with a
+                # stored vector so health matches search without loading E5.
+                sample = collection.get(limit=1, include=["embeddings"])
+                vectors = E5EmbeddingFunction._native_finite_query_vectors(sample["embeddings"])
+                if len(vectors) != 1:
+                    raise ValueError("missing scope health probe vector")
+                collection.query(query_embeddings=vectors, n_results=1, include=[])
+            total += count
             if hidden:
                 total -= len(collection.get(ids=sorted(hidden), include=[])["ids"])
         finally:
@@ -10955,6 +11022,34 @@ def _clear_search_worker_read_clients() -> None:
             _close_chroma_client(client)
 
 
+def _spawn_search_worker(worker_dir: Path, qos: str) -> subprocess.Popen:
+    """Start a resident worker; an interactive one outlives its first caller.
+
+    Issue #7493: the caller's deadline kills its whole process tree. A cold
+    interactive worker inside that tree lost its model load on every attempt
+    and never became warm, so it leaves the tree. Background workers stay
+    inside it: their index work must end with the caller's lease.
+    """
+    command = [sys.executable, str(Path(__file__).resolve()),
+               "--action", "serve-search-worker", "--worker-dir", str(worker_dir),
+               "--qos", qos]
+    options: Dict[str, Any] = dict(
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    detached = qos == "interactive"
+    if os.name != "nt":
+        return subprocess.Popen(command, start_new_session=detached, **options)
+    hidden = subprocess.CREATE_NO_WINDOW
+    if detached:
+        try:
+            return subprocess.Popen(
+                command, creationflags=hidden | subprocess.CREATE_BREAKAWAY_FROM_JOB, **options)
+        except OSError:
+            pass  # The enclosing Job forbids breakaway; stay inside it.
+    return subprocess.Popen(command, creationflags=hidden, **options)
+
+
 def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
     """Reuse one model process while Rust retains the request's heavy lease."""
     qos = args.qos or default_qos_for_action(args.action)
@@ -10986,16 +11081,7 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
         try:
             connection, token = connect()
         except (OSError, ValueError, KeyError, TypeError):
-            process = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()),
-                 "--action", "serve-search-worker", "--worker-dir", str(worker_dir),
-                 "--qos", qos],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
+            process = _spawn_search_worker(worker_dir, qos)
             deadline = time.monotonic() + 10
             while True:
                 try:
@@ -11038,6 +11124,7 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
 def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300, qos: str = "interactive") -> int:
     """Serve searches or background index requests; release models after idle expiry."""
     global _SEARCH_WORKER_ENDPOINT, _SEARCH_WORKER_QOS, emit_progress, _FILE_INDEX_V2_YIELDED
+    global _SEARCH_WORKER_ABANDONED
     _SEARCH_WORKER_QOS = qos
     worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     worker_dir.chmod(0o700)
@@ -11087,15 +11174,28 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300, qos: str =
                             raise ValueError("invalid search worker request")
                         connection.settimeout(None)
 
-                        def cancel_on_disconnect(connection=connection, completed=completed):
+                        abandoned = threading.Event()
+                        _SEARCH_WORKER_ABANDONED = None if index_request else abandoned
+
+                        def cancel_on_disconnect(connection=connection, completed=completed,
+                                                 abandoned=abandoned, cold_search=not index_request):
                             try:
                                 connection.recv(1)
                             except OSError:
                                 pass
-                            if not completed.is_set():
-                                # A killed/timed-out Rust caller has dropped its
-                                # heavy lease. No embedding may outlive it.
-                                os._exit(1)
+                            if completed.is_set():
+                                return
+                            # A killed/timed-out Rust caller has dropped its
+                            # heavy lease. No embedding may outlive it.
+                            abandoned.set()
+                            if cold_search and _MODEL_LOADING:
+                                # Issue #7493: only a model load in progress
+                                # may finish; `_get_embedding_model` then
+                                # refuses the abandoned request before it can
+                                # embed.
+                                if completed.wait(_COLD_START_GRACE_SECONDS):
+                                    return
+                            os._exit(1)
 
                         disconnect_watcher = threading.Thread(target=cancel_on_disconnect, daemon=True)
                         disconnect_watcher.start()
@@ -11127,6 +11227,7 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300, qos: str =
                     except Exception as error:
                         payload = {"ok": False, "error_code": "RUNTIME_ERROR", "error": str(error)}
                     finally:
+                        _SEARCH_WORKER_ABANDONED = None
                         emit_progress = previous_progress
                         if index_request:
                             _clear_search_worker_read_clients()

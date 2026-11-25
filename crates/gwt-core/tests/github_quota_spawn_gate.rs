@@ -3,11 +3,12 @@
 //! This test owns the process-global [`gwt_core::github_quota::global`] gate,
 //! so it lives in its own test binary.
 
-use chrono::{TimeZone, Utc};
 use gwt_core::github_quota::{self, GitHubQuota, RateLimitBlock, RATE_LIMITED_ERROR_CODE};
 use gwt_core::process_console::{
     spawn_logged_blocking, ProcessConsoleHub, ProcessKind, SpawnOptions,
 };
+use gwt_core::timestamp::UtcTimestamp;
+use time::Duration;
 
 /// A program name that certainly does not exist. If the gate fails to suppress
 /// the call, the spawn surfaces a "not found" OS error instead of the
@@ -17,7 +18,7 @@ const MISSING_PROGRAM: &str = "gwt-nonexistent-gh-3604";
 #[test]
 fn exhausted_graphql_budget_suppresses_the_spawn_but_leaves_rest_open() {
     let hub = ProcessConsoleHub::new();
-    let reset_at = Utc::now() + chrono::Duration::seconds(300);
+    let reset_at = UtcTimestamp::now() + Duration::seconds(300);
     github_quota::global().record_exhaustion(RateLimitBlock {
         resource: "graphql".to_string(),
         limit: 5000,
@@ -70,12 +71,12 @@ fn exhausted_graphql_budget_suppresses_the_spawn_but_leaves_rest_open() {
 
 #[test]
 fn rate_limited_stderr_is_annotated_with_the_reset_window() {
-    let now = Utc.timestamp_opt(1_755_280_000, 0).single().expect("now");
+    let now = UtcTimestamp::from_unix_seconds(1_755_280_000).expect("now");
     let block = RateLimitBlock {
         resource: "graphql".to_string(),
         limit: 5000,
         remaining: 0,
-        reset_at: Utc.timestamp_opt(1_755_280_163, 0).single().expect("reset"),
+        reset_at: UtcTimestamp::from_unix_seconds(1_755_280_163).expect("reset"),
     };
     let annotated = github_quota::annotate_rate_limited_stderr(
         &block,
@@ -97,12 +98,12 @@ fn rate_limited_stderr_is_annotated_with_the_reset_window() {
 #[test]
 fn suppression_detail_is_only_produced_for_the_exhausted_resource() {
     let gate = github_quota::QuotaGate::default();
-    let now = Utc.timestamp_opt(1_755_280_000, 0).single().expect("now");
+    let now = UtcTimestamp::from_unix_seconds(1_755_280_000).expect("now");
     gate.record_exhaustion(RateLimitBlock {
         resource: "graphql".to_string(),
         limit: 5000,
         remaining: 0,
-        reset_at: Utc.timestamp_opt(1_755_280_163, 0).single().expect("reset"),
+        reset_at: UtcTimestamp::from_unix_seconds(1_755_280_163).expect("reset"),
     });
 
     assert!(github_quota::suppressed_spawn_detail(&gate, &["pr", "list"], now).is_some());

@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    body::{Comment as BodyComment, SectionLocation, SectionsIndex, SpecMeta},
+    body::{
+        legacy_artifact, legacy_spec_id, Comment as BodyComment, SectionLocation, SectionsIndex,
+        SpecMeta,
+    },
     cache::{Cache, CacheError},
     client::{
         ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
@@ -26,6 +29,10 @@ pub enum SpecOpsError {
     /// A local operation failure, without implying a network or API cause.
     #[error("{0}")]
     Operation(String),
+    /// Preserve the local I/O kind for structured callers. Retain the legacy
+    /// display prefix used before these failures were separated from Network.
+    #[error("network error: {0}")]
+    LocalIo(#[source] std::io::Error),
     #[error(transparent)]
     Api(#[from] ApiError),
     #[error(transparent)]
@@ -120,10 +127,22 @@ impl<C: IssueClient> SpecOps<C> {
     ) -> Result<String, SpecOpsError> {
         self.refresh_cache(number)?;
         self.check_cached_index(number)?;
-        match self.cache.read_section(number, name)? {
-            Some(s) => Ok(s),
-            None => Err(SpecOpsError::SectionNotFound(name.0.clone())),
+        if let Some(content) = self.cache.read_section(number, name)? {
+            return Ok(content);
         }
+        if self.cache.load_entry(number).is_some_and(|entry| {
+            legacy_spec_id(&entry.snapshot.body).is_some()
+                && entry.spec_body.sections.contains_key(name)
+        }) {
+            // A cache written before legacy support has the comments but
+            // lacks section files even when the conditional fetch is current.
+            self.force_refresh_cache(number)?;
+            self.check_cached_index(number)?;
+            if let Some(content) = self.cache.read_section(number, name)? {
+                return Ok(content);
+            }
+        }
+        Err(SpecOpsError::SectionNotFound(name.0.clone()))
     }
 
     /// Replace the content of a section.
@@ -183,7 +202,19 @@ impl<C: IssueClient> SpecOps<C> {
 
         // Read the previous location (if any) so we can decide between
         // create_comment / patch_comment / patch_body.
-        let prev_location = spec_body.sections_index.0.get(name).cloned();
+        let prev_location = spec_body
+            .sections_index
+            .0
+            .get(name)
+            .cloned()
+            .filter(|location| {
+                // Legacy comments remain intact as history. Existing indexed
+                // canonical comments still use the normal update protocol.
+                !matches!(location, SectionLocation::Comments(ids) if
+                legacy_spec_id(&entry.snapshot.body).is_some()
+                    && entry.snapshot.comments.iter().any(|comment|
+                        ids.contains(&comment.id.0) && legacy_artifact(&comment.body).is_some()))
+            });
 
         let new_location = new_routing
             .0
@@ -196,6 +227,17 @@ impl<C: IssueClient> SpecOps<C> {
         let original_body = entry.snapshot.body.clone();
         let mut issue_body = entry.snapshot.body;
         let mut new_sections_index = spec_body.sections_index.clone();
+        if legacy_spec_id(&issue_body).is_some()
+            && matches!(
+                crate::body::parse_index_map(&issue_body),
+                Err(crate::body::ParseError::MissingIndex)
+            )
+        {
+            issue_body.push_str(&format!(
+                "\n\n<!-- {} -->\n<!-- sections:\n-->\n",
+                spec_body.meta
+            ));
+        }
 
         let prev_ids: Vec<u64> = match &prev_location {
             Some(SectionLocation::Comments(ids)) => ids.clone(),
@@ -453,7 +495,14 @@ impl<C: IssueClient> SpecOps<C> {
             return Ok(());
         }
         let fresh = self.fetch_fresh(number)?;
-        let index = crate::body::parse_index_map(&fresh.body)?;
+        let index = match crate::body::parse_index_map(&fresh.body) {
+            Err(crate::body::ParseError::MissingIndex) if legacy_spec_id(&fresh.body).is_some() => {
+                // A failed first write may have left the original legacy
+                // body in place. Staged canonical comments are unreferenced.
+                SectionsIndex::default()
+            }
+            result => result?,
+        };
         for id in ids {
             if !index.0.values().any(
                 |location| matches!(location, SectionLocation::Comments(refs) if refs.contains(id)),

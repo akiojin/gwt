@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 
 use super::oauth::{self, FormPoster, OAuthConfig};
 use super::token_store;
@@ -78,7 +78,7 @@ pub fn complete_callback(
     state: &str,
     poster: &dyn FormPoster,
     credentials_dir: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> std::result::Result<String, String> {
     let pending = sessions
         .take(state)
@@ -99,7 +99,7 @@ pub fn complete_callback(
 mod tests {
     use super::*;
     use crate::board_remote::oauth::OAuthConfig;
-    use chrono::TimeZone;
+
     use tempfile::tempdir;
 
     struct MockPoster {
@@ -158,7 +158,7 @@ mod tests {
             body: r#"{"ok":true,"access_token":"xoxb-final","expires_in":3600}"#.to_string(),
         };
         let dir = tempdir().unwrap();
-        let now = Utc.timestamp_opt(1_000, 0).unwrap();
+        let now = gwt_core::timestamp::UtcTimestamp::from_timestamp(1_000, 0).unwrap();
         let key =
             complete_callback(&sessions, "code-1", "state-1", &poster, dir.path(), now).unwrap();
         assert_eq!(key, "slack");
@@ -175,7 +175,7 @@ mod tests {
             body: "{}".to_string(),
         };
         let dir = tempdir().unwrap();
-        let now = Utc.timestamp_opt(1_000, 0).unwrap();
+        let now = gwt_core::timestamp::UtcTimestamp::from_timestamp(1_000, 0).unwrap();
         let err = complete_callback(&sessions, "code", "bad-state", &poster, dir.path(), now)
             .unwrap_err();
         assert!(err.contains("state mismatch"));

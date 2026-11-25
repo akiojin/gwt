@@ -27,6 +27,9 @@ const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_SESSION_ATTENDED",
     CODEX_THREAD_ID_ENV,
+    "GWT_AGENT_MEMBER_ID",
+    "GWT_AGENT_RESERVATION_ID",
+    "GWT_AGENT_NAME",
     GWT_BIN_PATH_ENV,
     GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
@@ -358,14 +361,45 @@ impl LaunchEnvironment {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        Self::from_environment_profile_with_base(config_path, None, base_env)
+    }
+
+    pub fn for_project(
+        config_path: &Path,
+        project_root: &Path,
+        runtime_target: LaunchRuntimeTarget,
+    ) -> Result<Self, String> {
+        let key = gwt_core::paths::project_scope_hash(project_root).to_string();
+        let base_env = match runtime_target {
+            LaunchRuntimeTarget::Host => host_process_env(),
+            LaunchRuntimeTarget::Docker => HashMap::new(),
+        };
+        Self::from_environment_profile_with_base(config_path, Some(&key), base_env)
+    }
+
+    fn from_environment_profile_with_base<I>(
+        config_path: &Path,
+        project: Option<&str>,
+        base_env: I,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
         let mut settings = if config_path.exists() {
             gwt_config::Settings::load_from_path(config_path).map_err(|error| error.to_string())?
         } else {
             gwt_config::Settings::default()
         };
-        let active_name = settings.profiles.normalize_active_profile().name;
-        let Some(profile) = settings.profiles.get(&active_name) else {
-            return Err(format!("active profile not found: {active_name}"));
+        settings.profiles.normalize_active_profile();
+        let Some(profile) = settings.profiles.environment_profile(project) else {
+            if let Some(name) =
+                project.and_then(|key| settings.profiles.project_environments.as_ref()?.get(key))
+            {
+                if !name.is_empty() {
+                    return Err(format!("assigned environment set not found: {name}"));
+                }
+            }
+            return Ok(Self::from_base_env(base_env));
         };
 
         let inherited_remove_env = inherited_launch_scope_remove_env();
@@ -1101,6 +1135,15 @@ mod tests {
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("KEEP".to_string(), "base".to_string()),
             ("SECRET".to_string(), "old".to_string()),
+            (
+                "GWT_AGENT_MEMBER_ID".to_string(),
+                "parent-member".to_string(),
+            ),
+            (
+                "GWT_AGENT_RESERVATION_ID".to_string(),
+                "parent-reservation".to_string(),
+            ),
+            ("GWT_AGENT_NAME".to_string(), "Parent Agent".to_string()),
         ];
         let launch_env = LaunchEnvironment::from_active_profile_with_base(&config_path, base_env)
             .unwrap()
@@ -1108,6 +1151,15 @@ mod tests {
         let mut env_vars = HashMap::from([
             ("PATH".to_string(), "/explicit/bin".to_string()),
             ("EXPLICIT".to_string(), "1".to_string()),
+            (
+                "GWT_AGENT_MEMBER_ID".to_string(),
+                "child-member".to_string(),
+            ),
+            (
+                "GWT_AGENT_RESERVATION_ID".to_string(),
+                "child-reservation".to_string(),
+            ),
+            ("GWT_AGENT_NAME".to_string(), "Child Agent".to_string()),
             (
                 "GWT_PROJECT_ROOT".to_string(),
                 "/tmp/stale-root".to_string(),
@@ -1128,6 +1180,18 @@ mod tests {
             Some("/tmp/new-root")
         );
         assert!(!env_vars.contains_key("SECRET"));
+        assert_eq!(
+            env_vars.get("GWT_AGENT_MEMBER_ID").map(String::as_str),
+            Some("child-member")
+        );
+        assert_eq!(
+            env_vars.get("GWT_AGENT_RESERVATION_ID").map(String::as_str),
+            Some("child-reservation")
+        );
+        assert_eq!(
+            env_vars.get("GWT_AGENT_NAME").map(String::as_str),
+            Some("Child Agent")
+        );
         assert_eq!(
             remove_env,
             expected_launch_remove_env(&["EXPLICIT_REMOVE", "SECRET"])
@@ -1230,6 +1294,36 @@ mod tests {
         );
         assert_eq!(env_vars.get("KEEP").map(String::as_str), Some("base"));
         assert_eq!(remove_env, expected_launch_remove_env(&["PATH", "SECRET"]));
+    }
+
+    #[test]
+    fn migrated_project_environment_suppresses_the_inherited_token() {
+        let mut profile = Profile::new("legacy");
+        profile.disabled_env.push("GITHUB_TOKEN".into());
+        let (_dir, config_path) = write_profile_config(profile);
+        gwt_config::Settings::update_at_path(&config_path, |settings| {
+            settings
+                .profiles
+                .migrate_environment_assignments(["existing"]);
+            settings.profiles.register_environment_project("new");
+            Ok(())
+        })
+        .unwrap();
+
+        for project in [Some("existing"), None, Some("unregistered"), Some("new")] {
+            let (env, removed) = LaunchEnvironment::from_environment_profile_with_base(
+                &config_path,
+                project,
+                [("GITHUB_TOKEN".into(), "synthetic".into())],
+            )
+            .unwrap()
+            .into_parts();
+            assert_eq!(env.contains_key("GITHUB_TOKEN"), project == Some("new"));
+            assert_eq!(
+                removed.iter().any(|name| name == "GITHUB_TOKEN"),
+                project != Some("new"),
+            );
+        }
     }
 
     #[test]
@@ -1399,6 +1493,15 @@ mod tests {
                 "ws://127.0.0.1:45123/ws".to_string(),
             ),
             (GWT_PROJECT_ROOT_ENV.to_string(), "/old/project".to_string()),
+            (
+                "GWT_AGENT_MEMBER_ID".to_string(),
+                "parent-member".to_string(),
+            ),
+            (
+                "GWT_AGENT_RESERVATION_ID".to_string(),
+                "parent-reservation".to_string(),
+            ),
+            ("GWT_AGENT_NAME".to_string(), "Parent Agent".to_string()),
         ]);
 
         let path_entries = env
@@ -1412,6 +1515,9 @@ mod tests {
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
         assert!(!env.contains_key(GWT_PANE_WS_URL_ENV));
         assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
+        assert!(!env.contains_key("GWT_AGENT_MEMBER_ID"));
+        assert!(!env.contains_key("GWT_AGENT_RESERVATION_ID"));
+        assert!(!env.contains_key("GWT_AGENT_NAME"));
     }
 
     #[cfg(windows)]
@@ -1501,14 +1607,20 @@ mod tests {
 
     #[test]
     fn launch_environment_removes_parent_launch_scope_from_the_spawn_contract() {
+        let identity_keys = [
+            "GWT_AGENT_MEMBER_ID",
+            "GWT_AGENT_RESERVATION_ID",
+            "GWT_AGENT_NAME",
+        ];
         let base_env = INHERITED_LAUNCH_ENV_KEYS
             .iter()
+            .chain(identity_keys.iter())
             .map(|key| ((*key).to_string(), format!("parent-{key}")))
             .collect::<Vec<_>>();
 
         let (env, remove_env) = LaunchEnvironment::from_base_env(base_env).into_parts();
 
-        for key in INHERITED_LAUNCH_ENV_KEYS {
+        for key in INHERITED_LAUNCH_ENV_KEYS.iter().chain(identity_keys.iter()) {
             assert!(
                 !env.contains_key(*key),
                 "parent launch-scoped value must not remain in explicit env: {key}"

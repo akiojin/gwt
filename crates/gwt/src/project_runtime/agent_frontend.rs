@@ -307,7 +307,9 @@ fn run_agent_dispatch_test_hook(slot: &'static std::thread::LocalKey<AgentDispat
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum OwnerAgentDispatchTestStage {
     BeforeDispatch,
+    BeforeHookDispatch,
     BeforeDispatchResult,
+    BeforeMonitorPromptAcceptance,
     AfterDurableCheck,
     LeasedMutation,
     PeerCloseAccepted,

@@ -16,6 +16,6 @@ Use only this checkout’s binaries and an isolated home. Preserve managed-hook 
 - Before choosing a launch target or sharing evidence: [safety](references/safety.md).
 - When preparing checkout binaries and isolated state: [isolation](references/isolation.md).
 - When resolving hook authority and starting the owned process: [launch](references/launch.md).
-- Before trusting startup, hook convergence, or a fresh URL: [readiness](references/readiness.md).
+- Before trusting startup, hook convergence, or a fresh URL, and before automated browser suites: [readiness](references/readiness.md).
 - For manual inspection, failure reporting, and shutdown: [handoff cleanup](references/handoff-cleanup.md).
 - For the constraint review: [router audit](references/router-audit.md).

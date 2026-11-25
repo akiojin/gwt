@@ -923,13 +923,59 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
             .any(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: true, .. })),
         "pane.write into the actual resumed agent must succeed: {pane_send_events:?}"
     );
-    let attachment_events =
-        runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("pasted.png"));
+    let uploaded_path = temp.path().join("resumed-image-upload");
+    fs::write(&uploaded_path, [1_u8]).unwrap();
+    runtime
+        .attachment_uploads
+        .insert(
+            "resumed-image-upload".into(),
+            UploadedAttachment {
+                path: uploaded_path,
+                filename: "pasted.png".into(),
+                mime_type: Some("image/png".into()),
+                size: 1,
+            },
+        )
+        .unwrap();
+    let event = super::work_projection_tests::qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind":"paste_image_uploaded", "id":window_id, "operation_id":"resumed-attachment",
+            "upload_id":"resumed-image-upload", "mime_type":"image/png", "filename":"pasted.png", "size":1
+        }),
+    );
+    let attachment_before = probe.pty.ordinary_input_revision().unwrap();
+    let attachment_events = runtime.handle_frontend_event("client-1".into(), event);
     assert!(
-        attachment_events.is_empty(),
+        attachment_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Queued,
+                ..
+            }
+        )),
         "restored attachment staging must not be denied: {attachment_events:?}"
     );
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    let completed = super::work_projection_tests::drain_attachment_work(&mut runtime);
+    assert!(
+        completed.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Attached,
+                ..
+            }
+        )),
+        "the resumed owner must acknowledge its physical attachment write: {completed:?}"
+    );
+    assert_eq!(
+        probe.pty.ordinary_input_revision().unwrap(),
+        attachment_before + 1
+    );
+    assert!(
+        probe.pty.has_unsent_user_input(),
+        "attachment never appends CR"
+    );
     assert!(
         worktree.join(".gwt/drop-files").exists(),
         "attachment bytes are staged in the actual resumed worktree"
@@ -1014,6 +1060,7 @@ fn browser_terminal_input_ignores_unrelated_acks_and_discards_a_failed_tail() {
             },
             approval_resolution_started: false,
             input_command_id,
+            attachment_outcome: None,
             result,
         };
     for unrelated in [None, Some(uuid::Uuid::new_v4())] {
@@ -1068,6 +1115,7 @@ fn browser_terminal_input_discards_the_tail_when_next_worker_cannot_start() {
         },
         approval_resolution_started: false,
         input_command_id: Some(token),
+        attachment_outcome: None,
         result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
             revision: 1,
             has_unsent_user_input: false,
@@ -1112,6 +1160,7 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
             request_id: None,
         },
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id: Some(token),
         result: Ok(None),
     };
@@ -1168,6 +1217,7 @@ fn browser_terminal_final_ack_reconciles_a_newer_input_observation() {
             request_id: None,
         },
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id,
         result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
             revision,
@@ -1435,10 +1485,22 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
 
 #[test]
 fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics() {
+    retained_diagnostic_contract(false);
+}
+
+#[test]
+fn explicit_restart_drains_retained_diagnostic_before_exact_restore() {
+    retained_diagnostic_contract(true);
+}
+
+fn retained_diagnostic_contract(restart: bool) {
     use gwt::project_runtime::{
         events::{OwnerCommand, OwnerEvent},
         test_support::ProjectOwnerHarness,
     };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1458,6 +1520,16 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         ],
     );
     seed_owner_fixture_roster(&repo, 1);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
+    if restart {
+        gwt_agent::save_stored_custom_agents_to_path(
+            &gwt_core::paths::gwt_config_path(),
+            &[gwt_agent::StoredCustomAgent::new(
+                super::pane_control_tests::control_custom_agent(),
+            )],
+        )
+        .expect("persist the actual Custom provider used by saved-Session restart");
+    }
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start(&repo)).unwrap();
     let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
     config.pending_initial_prompt =
@@ -1550,6 +1622,30 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     );
     let prompt_path = &prompt_paths[0];
     let session = probe.session.as_ref().unwrap();
+    if restart {
+        let hook = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "retained-diagnostic-native",
+            "cwd": session.worktree_path,
+        })
+        .to_string();
+        probe.with_agent_environment(|| {
+            gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
+            gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
+        });
+        let learned = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        )
+        .unwrap();
+        assert_eq!(
+            learned.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        assert!(learned
+            .session_history
+            .iter()
+            .any(|entry| entry.agent_session_id == "retained-diagnostic-native"));
+    }
     let mut idle = runtime_hook_state_for_event("Idle", "Stop", &session.id);
     idle.project_root = Some(repo.display().to_string());
     idle.branch = Some(session.branch.clone());
@@ -1640,6 +1736,65 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     assert!(generation
         .write_input(b"late input after confirmed exit")
         .is_err());
+    if restart {
+        gui.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        gui.blocking_tasks = spawner;
+        let source =
+            gwt_agent::Session::load(&gui.sessions_dir.join(format!("{}.toml", session.id)))
+                .unwrap();
+        assert_eq!(
+            source.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        gui.restart_window_events(&gui_id);
+        assert!(
+            gui.active_agent_sessions.contains_key(&gui_id),
+            "routing must keep the old source reserved until the exact Closed ACK"
+        );
+        assert!(
+            gui.pending_launch_completions.contains_key(&gui_id),
+            "a confirmed retained diagnostic must reach the existing owner launch adapter"
+        );
+        let events = drain_owner_launch_fixtures(&mut gui, &tasks);
+        assert!(
+            gui.runtimes.contains_key(&gui_id),
+            "actual restore receipts: {events:?}"
+        );
+        let projection = &gui.runtimes[&gui_id];
+        assert_eq!(projection.owner_identity, identity);
+        let successor =
+            owner_fixture_block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+                .expect("the captured owner owns the exact replacement projection");
+        assert!(
+            successor.incarnation > probe.incarnation,
+            "actual restore receipts: {events:?}"
+        );
+        assert_eq!(
+            successor
+                .session
+                .as_ref()
+                .unwrap()
+                .exact_resume_session_id(),
+            source.exact_resume_session_id()
+        );
+        assert_eq!(
+            successor.session.as_ref().unwrap().agent_member_id,
+            source.agent_member_id
+        );
+        assert!(probe.pty.tree_exit_confirmed());
+        assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
+        assert!(generation.write_input(b"late input after restart").is_err());
+        assert!(successor.pty.try_wait().unwrap().is_none());
+        owner_fixture_block_on(owner.command(OwnerCommand::Close {
+            id: successor.id.clone(),
+            incarnation: successor.incarnation,
+        }))
+        .expect("close the exact successor through its captured physical owner");
+        assert!(successor.pty.tree_exit_confirmed());
+        owner_fixture_block_on(owner.shutdown());
+        return;
+    }
     owner_fixture_block_on(owner.command(OwnerCommand::Close {
         id: probe.id.clone(),
         incarnation: probe.incarnation,
@@ -1877,4 +2032,240 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         load_workspace_state(&workspace_state_path(&repo)).expect("persisted Work singleton state");
     assert_eq!(persisted.windows.len(), 1);
     assert_eq!(persisted.windows[0].id, first.id);
+}
+
+/// Run the queued decision-queue workers and feed their completions through
+/// the production handlers, the way the event loop does.
+fn drain_decision_queue(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued decision fixture workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("decision fixture event sink");
+    };
+    let completions = Arc::clone(completions);
+    let mut events = Vec::new();
+    loop {
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        let had_tasks = !queued.is_empty();
+        for task in queued {
+            task();
+        }
+        let completed = std::mem::take(&mut *completions.lock().unwrap());
+        let had_completions = !completed.is_empty();
+        for event in completed {
+            match runtime.accept_project_completion(event) {
+                Some(UserEvent::DecisionAnswersPending {
+                    project_root,
+                    deliveries,
+                }) => events.extend(runtime.deliver_decision_answers(&project_root, deliveries)),
+                Some(UserEvent::Dispatch(dispatched)) => events.extend(dispatched),
+                Some(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
+                    events.extend(runtime.handle_remote_runtime_command_complete(*completion))
+                }
+                _ => {}
+            }
+        }
+        if !had_tasks && !had_completions {
+            break;
+        }
+    }
+    events
+}
+
+fn decision_registration(session_id: &str, target: &str) -> gwt_core::decision_queue::Registration {
+    gwt_core::decision_queue::Registration {
+        issue: Some(7742),
+        kind: Some("product".into()),
+        target: Some(target.into()),
+        question: Some("Which storage should the queue use?".into()),
+        materials: Some("Both options pass the existing tests.".into()),
+        options: vec!["Keep JSON".into(), "Move to SQLite".into()],
+        recommendation: Some("Keep JSON".into()),
+        reason: None,
+        session_id: Some(session_id.into()),
+    }
+}
+
+/// Issue #7742 AC-2: the answer goes from gwtd straight into the pane of the
+/// session that waits for it. No PM session takes part in the delivery.
+#[test]
+fn decision_answer_is_delivered_to_the_waiting_session_without_a_pm() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let repo = temp.path().join("browser-input-project");
+    let session_id = probe.session.as_ref().unwrap().id.clone();
+    // The PM is gone: neither the registry nor this runtime knows one.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        &session_id,
+    )
+    .unwrap();
+    let context = runtime.test_context();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .pm_sessions
+        .clear();
+    assert!(
+        runtime.pm_session_for_root(&repo).is_none(),
+        "the delivery must not depend on a running PM"
+    );
+    let item = queue::register(&repo, &decision_registration(&session_id, "storage"))
+        .unwrap()
+        .item;
+    let queued = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::AnswerDecision {
+            id: window_id.clone(),
+            request_id: 5,
+            decision_id: item.id.clone(),
+            answer: "1. Keep JSON".into(),
+        },
+    );
+    assert!(
+        queued.is_empty(),
+        "the answer is recorded off the event loop"
+    );
+    // The answer is durable before any pane is written.
+    {
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            panic!("queued decision fixture workers");
+        };
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in queued {
+            task();
+        }
+    }
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+    let events = drain_decision_queue(&mut runtime);
+    let result = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::DecisionResult {
+                request_id: 5,
+                ok,
+                error,
+                decisions,
+                ..
+            } => Some((*ok, error.clone(), decisions.clone())),
+            _ => None,
+        })
+        .expect("the answer is acknowledged to its client");
+    assert_eq!((result.0, result.1), (true, None));
+    assert_eq!(result.2.unwrap().waiting_count, 0);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::WindowCommandError { .. })),
+        "the waiting session's own pane accepted the answer: {events:?}"
+    );
+    // The receipt is written only after the pane owner acknowledged the write.
+    assert!(
+        queue::pending_deliveries(&repo).unwrap().is_empty(),
+        "the answer reached the waiting session and is not delivered again"
+    );
+    assert!(runtime.decision_answers_in_flight.is_empty());
+    runtime.scan_decision_answers();
+    assert!(drain_decision_queue(&mut runtime).is_empty());
+
+    // An answer recorded by another process (the PM closing a decision through
+    // gwtd) is picked up by the scan and delivered the same way.
+    let second = queue::register(&repo, &decision_registration(&session_id, "ordering"))
+        .unwrap()
+        .item;
+    queue::answer(&repo, &second.id, "Newest first", queue::AnsweredBy::Pm).unwrap();
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+    runtime.scan_decision_answers();
+    drain_decision_queue(&mut runtime);
+    assert!(queue::pending_deliveries(&repo).unwrap().is_empty());
+
+    // A waiter without a live pane keeps its answer pending instead of losing it.
+    let third = queue::register(&repo, &decision_registration("gone-session", "retention"))
+        .unwrap()
+        .item;
+    queue::answer(&repo, &third.id, "Keep all", queue::AnsweredBy::Pm).unwrap();
+    runtime.scan_decision_answers();
+    drain_decision_queue(&mut runtime);
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+
+    // A foreign or missing window never reaches another project's queue.
+    let refused = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::DeferDecision {
+            id: "missing::window".into(),
+            request_id: 6,
+            decision_id: item.id,
+        },
+    );
+    assert!(refused
+        .iter()
+        .all(|event| !matches!(&event.event, BackendEvent::DecisionResult { ok: true, .. })));
+}
+
+/// Issue #7742 AC-3 / AC-4: the queue belongs to the project. Replacing the PM
+/// changes neither the waiting decisions nor their count, and deferring keeps
+/// the count while moving the decision to the tail.
+#[test]
+fn decision_queue_survives_pm_reassignment_and_defer_keeps_the_count() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let repo = temp.path().join("browser-input-project");
+    let session_id = probe.session.as_ref().unwrap().id.clone();
+    let first = queue::register(&repo, &decision_registration("waiting-agent", "storage"))
+        .unwrap()
+        .item;
+    let second = queue::register(&repo, &decision_registration("waiting-agent", "ordering"))
+        .unwrap()
+        .item;
+    let before = gwt::pm_current::load_decisions(&repo).unwrap();
+    assert_eq!(before.waiting_count, 2);
+
+    // The fixture's PM leaves and a different session takes over.
+    let prefs = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::deregister_pm(&prefs, &session_id).unwrap();
+    assert_eq!(gwt::pm_current::load_decisions(&repo).unwrap(), before);
+    let mut replacement = pm_registration_fixture("replacement-pm", &repo);
+    replacement.agent_id = "claude".into();
+    gwt::pm_registry::try_register_pm(&prefs, replacement, |_| false).unwrap();
+    assert_eq!(gwt::pm_current::load_decisions(&repo).unwrap(), before);
+
+    let queued = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::DeferDecision {
+            id: window_id,
+            request_id: 9,
+            decision_id: second.id.clone(),
+        },
+    );
+    assert!(queued.is_empty());
+    let events = drain_decision_queue(&mut runtime);
+    let after = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::DecisionResult {
+                request_id: 9,
+                ok: true,
+                action,
+                decisions,
+                ..
+            } if action == "defer" => decisions.clone(),
+            _ => None,
+        })
+        .expect("the deferral is acknowledged with the reordered queue");
+    assert_eq!(after.waiting_count, 2, "deferring is not a decision");
+    assert_eq!(
+        after
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.id.as_str(), second.id.as_str()],
+        "the deferred decision waits at the tail"
+    );
 }

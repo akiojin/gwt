@@ -16,6 +16,9 @@
 #[path = "windows_shell_observer.rs"]
 mod shell_observer;
 
+#[path = "support/installed_provider_fixture.rs"]
+mod installed_provider_fixture;
+
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -247,6 +250,7 @@ fn assert_public_ws_agent_route_boundary(
 ) {
     let (fixture, expectation) =
         prepare_public_ws_agent_route(temp_root, provider, npm_fixture, launch_env);
+    let fixture = RestoreApp::new(fixture);
     let socket = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1295,8 +1299,10 @@ fn install_fixture_provider(fixture: &WindowsNpmRegistryFixture, provider: Provi
     let installed_bin = prefix.join("node_modules").join(".bin");
     // This Windows fixture pins the spawnable .cmd installation entrypoint.
     // Remove npm's POSIX sibling so direct PATH lookup proves that exact path.
-    std::fs::remove_file(installed_bin.join(provider.agent_id().command()))
-        .expect("remove fixture POSIX shim");
+    installed_provider_fixture::remove_posix_shim(
+        &installed_bin.join(provider.agent_id().command()),
+    )
+    .expect("remove fixture POSIX shim");
     assert!(installed_bin
         .join(format!("{}.cmd", provider.agent_id().command()))
         .is_file());
@@ -1366,6 +1372,7 @@ fn native_shell_failure_diagnostics(
         log_dirs.extend(projects.flatten().map(|entry| entry.path().join("logs")));
     }
     let mut protocol = Vec::new();
+    let mut restore_admission = Vec::new();
     for dir in log_dirs {
         let Ok(files) = std::fs::read_dir(dir) else {
             continue;
@@ -1374,11 +1381,15 @@ fn native_shell_failure_diagnostics(
             let Ok(log) = gwt_core::logging::read_log_file(&file.path()) else {
                 continue;
             };
-            for event in log
-                .entries
-                .into_iter()
-                .filter(|event| event.source == "gwt_terminal_protocol")
-            {
+            for event in log.entries {
+                if event.source == "gwt.restore.admission" && restore_admission.len() < 32 {
+                    restore_admission.push(serde_json::json!({
+                        "timestamp":event.timestamp,"message":event.message,"fields":event.fields,
+                    }));
+                }
+                if event.source != "gwt_terminal_protocol" || protocol.len() == 64 {
+                    continue;
+                }
                 let fields = event
                     .fields
                     .into_iter()
@@ -1405,13 +1416,12 @@ fn native_shell_failure_diagnostics(
                         )
                     })
                     .collect::<serde_json::Map<_, _>>();
-                if protocol.len() < 64 {
-                    protocol.push(serde_json::json!({"timestamp":event.timestamp,"message":event.message,"fields":fields}));
-                }
+                protocol.push(serde_json::json!({"timestamp":event.timestamp,"message":event.message,"fields":fields}));
             }
         }
     }
     diagnostic["protocol"] = serde_json::json!(protocol);
+    diagnostic["restore_admission"] = serde_json::json!(restore_admission);
     let artifact = PathBuf::from("target/issue-4735-fixforward").join(format!(
         "windows-native-shell-{}-{phase}-diagnostic.json",
         provider.agent_id().command(),
@@ -1508,10 +1518,17 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
     // exclusively the production launch's output; do not synthesize restore.
     let home = first_app.home.clone();
     let workspace = first_app.workspace.clone();
-    drop(first_app);
+    // Stop the GUI before its owner so the old supervisor cannot replace the
+    // owner in the same HOME while the new GUI is starting.
+    // test-hygiene: allow-wall-clock-deadline exact Windows HANDLE exit signals establish order; the deadline only bounds a process exit hang
+    let exit_deadline = Instant::now() + TEST_PROVIDER_EXIT_TIMEOUT;
+    first_app.root.terminate();
+    first_app.root.assert_exited_by(exit_deadline);
     drop(first_socket);
     first.owner.terminate();
+    first.owner.assert_exited_by(exit_deadline);
     first.assert_tree_exited();
+    drop(first_app);
     assert_eq!(live_restore_gates([&first, &survivor]), 1);
     std::fs::remove_file(&capture).unwrap();
     std::fs::remove_file(capture.with_extension("tree.json")).unwrap();
@@ -1550,8 +1567,10 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
             &survivor_runtime,
         ))
         .unwrap_or_else(|error| {
+            let diagnostic =
+                native_shell_failure_diagnostics(&runtime, &restored_app, provider, "restored");
             panic!(
-                "real startup restore/public close failed: {error}\n{}",
+                "real startup restore/public close failed: {error}\nowner diagnostic: {diagnostic}\n{}",
                 restored_app.stderr()
             )
         });
@@ -2194,7 +2213,13 @@ async fn wait_startup_restore_and_close(
     while !capture.is_file() && Instant::now() < deadline {
         restore_send(&mut socket, serde_json::json!({"kind":"list_windows"})).await?;
         if let Some(event) = restore_event(&mut socket).await? {
-            if event["kind"] == "launch_error" {
+            if event["kind"] == "launch_error"
+                || (event["kind"] == "issue_monitor_toast"
+                    && event["level"] == "error"
+                    && event["message"]
+                        .as_str()
+                        .is_some_and(|message| message.starts_with("Agent restore failed:")))
+            {
                 return Err(format!("startup restore failed: {event}"));
             }
             if event["kind"] == "window_list" {
@@ -2216,7 +2241,9 @@ async fn wait_startup_restore_and_close(
         }
     }
     if !capture.is_file() {
-        return Err("startup restore never invoked the provider".into());
+        return Err(format!(
+            "startup restore did not produce a provider receipt; windows={windows:?}"
+        ));
     }
     let receipt: serde_json::Value =
         serde_json::from_slice(&std::fs::read(capture).map_err(|error| error.to_string())?)

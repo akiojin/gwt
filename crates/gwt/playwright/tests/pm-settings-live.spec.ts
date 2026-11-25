@@ -50,10 +50,10 @@ test.describe("Project Manager Settings", () => {
       const intervalError = panel.locator(
         '[data-role="pm-loop-interval-error"]',
       );
-      const pauseToggle = panel.locator('[data-role="pm-pause-toggle"]');
+      // Issue #7728 AC-2: the patrol has no Pause/Resume of its own.
       const autonomyStatus = panel.locator('[data-role="pm-autonomy-status"]');
-      const sharedPause = page.locator(
-        '#pm-settings-shared-test-mount [data-role="pm-pause-toggle"]',
+      const sharedStatus = page.locator(
+        '#pm-settings-shared-test-mount [data-role="pm-autonomy-status"]',
       );
       const launcher = page.locator("#op-pm-entry");
 
@@ -65,7 +65,8 @@ test.describe("Project Manager Settings", () => {
       await expect(interval).toHaveValue("60");
       await expect(sharedMount).toHaveValue("60");
       const originalInterval = await interval.inputValue();
-      await expect(pauseToggle).toHaveAttribute("aria-pressed", "false");
+      await expect(panel.locator('[data-role="pm-pause-toggle"]')).toHaveCount(0);
+      await expect(autonomyStatus).toHaveText("Autonomous loop active");
       const originalPmState = await launcher.getAttribute("data-pm-state");
       const originalPmCount = await page.locator('.workspace-window[data-pm="true"]').count();
       const originalMonitorEnabled = await monitorEnabled(page);
@@ -121,8 +122,8 @@ test.describe("Project Manager Settings", () => {
         await expect(interval).toBeDisabled();
         await expect(sharedMount).toHaveValue("60");
         await expect(sharedMount).toBeDisabled();
-        await expect(pauseToggle).toBeDisabled();
-        await expect(sharedPause).toBeDisabled();
+        await expect(autonomyStatus).toHaveText("Autonomous loop unavailable");
+        await expect(sharedStatus).toHaveText("Autonomous loop unavailable");
 
         const refreshCursor = await messageCursor(page);
         // Issue #4538: a Project tab re-hydrates through its own scope
@@ -133,8 +134,8 @@ test.describe("Project Manager Settings", () => {
         await expect(interval).toBeEnabled();
         await expect(sharedMount).toHaveValue(originalInterval);
         await expect(sharedMount).toBeEnabled();
-        await expect(pauseToggle).toBeEnabled();
-        await expect(sharedPause).toBeEnabled();
+        await expect(autonomyStatus).toHaveText("Autonomous loop active");
+        await expect(sharedStatus).toHaveText("Autonomous loop active");
 
         await interval.fill("9");
         await interval.press("Tab");
@@ -149,16 +150,17 @@ test.describe("Project Manager Settings", () => {
         await expect(intervalError).toBeHidden();
         await expect(interval).toHaveAttribute("aria-invalid", "false");
 
+        // Issue #7728: the one project stop pauses the patrol together with
+        // Issues assignment, and keeps the PM resident.
         const pauseCursor = await messageCursor(page);
-        await pauseToggle.click();
+        await sendLiveGwtEvent(page, { kind: "set_project_autonomy", running: false });
         await waitForPmPaused(page, pauseCursor, true);
-        await expect(pauseToggle).toHaveText("Resume");
-        await expect(sharedPause).toHaveText("Resume");
-        await expect(autonomyStatus).toHaveText("Autonomous loop paused");
+        await expect(autonomyStatus).toHaveText("Autonomous loop stopped with the project");
+        await expect(sharedStatus).toHaveText("Autonomous loop stopped with the project");
         await expect(launcher).toHaveAttribute("data-pm-paused", "true");
         await expect(launcher).toHaveAttribute("data-pm-state", originalPmState!);
         await expect(page.locator('.workspace-window[data-pm="true"]')).toHaveCount(originalPmCount);
-        expect(await monitorEnabled(page)).toBe(originalMonitorEnabled);
+        expect(await monitorEnabled(page)).toBe(false);
 
         await page.reload();
         await suppressStartupOverlays(page);
@@ -166,9 +168,7 @@ test.describe("Project Manager Settings", () => {
         await openProjectManagerSettings(page);
         const reloadedInterval = pmInterval(page);
         await expect(reloadedInterval).toHaveValue("10");
-        await expect(pauseToggle).toHaveText("Resume");
-        await expect(pauseToggle).toHaveAttribute("aria-pressed", "true");
-        await expect(autonomyStatus).toHaveText("Autonomous loop paused");
+        await expect(autonomyStatus).toHaveText("Autonomous loop stopped with the project");
         await expect(launcher).toHaveAttribute("data-pm-paused", "true");
 
         const expectedTheme = testInfo.project.name.endsWith("light")
@@ -190,10 +190,15 @@ test.describe("Project Manager Settings", () => {
           });
         }
 
+        // Restore the original state through the same operation.
         const resumeCursor = await messageCursor(page);
-        await pauseToggle.click();
-        await waitForPmPaused(page, resumeCursor, false);
-        await expect(pauseToggle).toHaveText("Pause");
+        await sendLiveGwtEvent(page, { kind: "set_project_autonomy", running: originalMonitorEnabled });
+        if (originalMonitorEnabled) await waitForPmPaused(page, resumeCursor, false);
+        else {
+          // A project that never assigned work restores only its PM patrol.
+          await sendLiveGwtEvent(page, { kind: "set_pm_paused", paused: false });
+          await waitForPmPaused(page, resumeCursor, false);
+        }
         await expect(autonomyStatus).toHaveText("Autonomous loop active");
         await expect(launcher).toHaveAttribute("data-pm-paused", "false");
         await expect(launcher).toHaveAttribute("data-pm-state", originalPmState!);

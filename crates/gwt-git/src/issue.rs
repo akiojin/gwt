@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,9 @@ pub struct Issue {
     pub url: String,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// GitHub's sub-issue parent (Issue #7845). Absent in cached snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_number: Option<u64>,
 }
 
 /// Issue rows together with the completeness of the underlying REST read.
@@ -141,7 +145,7 @@ fn fetch_issue_page(path: &str) -> std::result::Result<String, String> {
     fetch_issue_page_with_cache(
         &gwt_core::paths::gwt_cache_dir().join("rest-list-pages"),
         path,
-        chrono::Utc::now(),
+        UtcTimestamp::now(),
         || fetch_issue_page_uncached(path),
     )
 }
@@ -149,7 +153,7 @@ fn fetch_issue_page(path: &str) -> std::result::Result<String, String> {
 fn fetch_issue_page_with_cache(
     cache_dir: &Path,
     path: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: UtcTimestamp,
     fetch: impl FnOnce() -> std::result::Result<String, String>,
 ) -> std::result::Result<String, String> {
     // Queue membership and payloads remain authoritative on every control-driven
@@ -296,6 +300,7 @@ impl From<crate::gh_rest::RestIssueRow> for Issue {
             body: row.body,
             url: row.url,
             updated_at: row.updated_at,
+            parent_number: row.parent_number,
         }
     }
 }
@@ -413,6 +418,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
             body,
             url,
             updated_at,
+            parent_number: None,
         });
     }
 
@@ -421,12 +427,15 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::shift_test_timestamp;
+    use time::Duration;
+
     use super::*;
 
     #[test]
     fn issue_5603_cached_general_listing_keeps_queue_payload_live() {
         let cache = tempfile::tempdir().unwrap();
-        let start = chrono::Utc::now();
+        let start = UtcTimestamp::now();
         let mut general_calls = 0;
         let mut queued_calls = 0;
         for tick in 0..2 {
@@ -434,7 +443,7 @@ mod tests {
                 fetch_issue_page_with_cache(
                     cache.path(),
                     path,
-                    start + chrono::Duration::seconds(tick * 30),
+                    shift_test_timestamp(start, Duration::seconds(tick * 30)),
                     || {
                         let body = if path.contains("labels=gwt-queued") {
                             queued_calls += 1;
@@ -721,6 +730,7 @@ mod tests {
             body: Some("body".into()),
             url: "https://example.com".into(),
             updated_at: None,
+            parent_number: None,
         }];
         cache.write("owner", "repo", &issues).unwrap();
 
@@ -769,6 +779,7 @@ mod tests {
             body: None,
             url: "https://example.com".into(),
             updated_at: None,
+            parent_number: None,
         }];
 
         // Malicious owner/repo should not escape cache directory

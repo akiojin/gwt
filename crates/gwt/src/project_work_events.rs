@@ -3538,7 +3538,7 @@ mod tests {
         init_repo(&repo);
         let work_items_path = temp.path().join("state/works.json");
         let state_path = temp.path().join("state/work-events-intake.json");
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut projection = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
         projection.apply_event(gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
@@ -3780,7 +3780,11 @@ mod tests {
         let state = works.with_file_name("work-events-intake.json");
         let close_path = works.with_file_name("work-events-closed.jsonl");
         std::fs::create_dir_all(works.parent().unwrap()).unwrap();
-        let done = WorkEvent::new(WorkEventKind::Done, "work-kept", chrono::Utc::now());
+        let done = WorkEvent::new(
+            WorkEventKind::Done,
+            "work-kept",
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         std::fs::write(&close_path, serde_json::to_vec(&done).unwrap()).unwrap();
         assert!(ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
         let intake_before = load_work_events_intake_state(&state);
@@ -3815,15 +3819,14 @@ mod tests {
         init_repo(&repo);
         let events = repo.join(EVENTS_TREE_PATH);
         std::fs::create_dir_all(events.parent().unwrap()).unwrap();
-        let start = chrono::DateTime::parse_from_rfc3339("2026-11-08T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let start =
+            gwt_core::timestamp::UtcTimestamp::parse_rfc3339("2026-11-08T00:00:00Z").unwrap();
         let mut shared = vec![WorkEvent::new(WorkEventKind::Start, "closed-work", start)];
         for index in 0..=MAX_INLINE_WORK_EVENTS {
             shared.push(WorkEvent::new(
                 WorkEventKind::Update,
                 "closed-work",
-                start + chrono::Duration::seconds(index as i64 + 2),
+                start + time::Duration::seconds(index as i64 + 2),
             ));
         }
         shared.push(WorkEvent::new(
@@ -3843,7 +3846,7 @@ mod tests {
         let mut done = WorkEvent::new(
             WorkEventKind::Done,
             "closed-work",
-            start + chrono::Duration::seconds(1),
+            start + time::Duration::seconds(1),
         );
         done.status_category = Some(WorkspaceStatusCategory::Done);
         let pause = WorkEvent::new(WorkEventKind::Pause, "closed-work", start);
@@ -3941,7 +3944,7 @@ mod tests {
         let mut appended_done = WorkEvent::new(
             WorkEventKind::Done,
             "appended-close-work",
-            start + chrono::Duration::seconds(1000),
+            start + time::Duration::seconds(1000),
         );
         appended_done.status_category = Some(WorkspaceStatusCategory::Done);
         let appended = format!(
@@ -4267,7 +4270,6 @@ mod tests {
 
     #[test]
     fn version_mismatch_rebuilds_polluted_projection_with_local_close_state() {
-        use chrono::{TimeZone, Utc};
         use gwt_core::workspace_projection::{
             load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path,
             WorkEvent, WorkEventKind, WorkItemsProjection, WorkspaceStatusCategory,
@@ -4280,10 +4282,18 @@ mod tests {
         init_repo(&repo);
         std::fs::create_dir_all(repo.join(".gwt/work")).expect("work event dir");
 
-        let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
-        let t1 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 1, 0).unwrap();
-        let done_at = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
-        let polluted_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
+        let t0 = "2026-07-15T07:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
+        let t1 = "2026-07-15T07:01:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
+        let done_at = "2026-07-15T08:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
+        let polluted_at = "2026-07-15T09:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         let repo_container = WorkspaceExecutionContainerRef {
             branch: Some("main".to_string()),
             worktree_path: Some(repo.clone()),
@@ -4512,7 +4522,6 @@ mod tests {
 
     #[test]
     fn missing_projection_rebuilds_from_machine_local_log_without_shared_sources() {
-        use chrono::{TimeZone, Utc};
         use gwt_core::workspace_projection::{
             load_workspace_work_items_from_path, WorkEvent, WorkEventKind, WorkspaceStatusCategory,
         };
@@ -4529,7 +4538,9 @@ mod tests {
         let state_path = state_dir.join("work-events-intake.json");
         let close_path = state_dir.join("work-events-closed.jsonl");
         std::fs::create_dir_all(&state_dir).expect("state dir");
-        let done_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
+        let done_at = "2026-07-15T09:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         let mut done = WorkEvent::new(WorkEventKind::Done, "work-close-only", done_at);
         done.status_category = Some(WorkspaceStatusCategory::Done);
         std::fs::write(
@@ -4559,7 +4570,6 @@ mod tests {
 
     #[test]
     fn rebuild_records_local_lifecycle_created_after_source_discovery() {
-        use chrono::{TimeZone, Utc};
         use gwt_core::work_events_intake::{content_fingerprint, load_work_events_intake_state};
         use gwt_core::workspace_projection::{WorkEvent, WorkEventKind, WorkspaceStatusCategory};
 
@@ -4592,7 +4602,9 @@ mod tests {
         let mut done = WorkEvent::new(
             WorkEventKind::Done,
             "work-racing-close",
-            Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap(),
+            "2026-07-15T08:00:00Z"
+                .parse::<gwt_core::timestamp::UtcTimestamp>()
+                .unwrap(),
         );
         done.status_category = Some(WorkspaceStatusCategory::Done);
         let close_content = format!("{}\n", serde_json::to_string(&done).unwrap());
@@ -4666,11 +4678,12 @@ mod tests {
 
     #[test]
     fn appended_local_lifecycle_event_recovers_when_projection_save_was_missed() {
-        use chrono::{TimeZone, Utc};
         use gwt_core::workspace_projection::{
             load_workspace_work_items_from_path, WorkEvent, WorkEventKind, WorkspaceStatusCategory,
         };
 
+        let _tracing =
+            tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
         let temp = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -4697,9 +4710,11 @@ mod tests {
         let state_path = state_dir.join("work-events-intake.json");
         let close_path = state_dir.join("work-events-closed.jsonl");
         let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
-        assert!(first.projection_rebuilt);
+        assert!(first.projection_rebuilt, "initial rebuild: {first:?}");
 
-        let done_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
+        let done_at = "2026-07-15T09:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         let mut done = WorkEvent::new(WorkEventKind::Done, "work-durable-recovery", done_at);
         done.id = "evt-done-durable".to_string();
         done.status_category = Some(WorkspaceStatusCategory::Done);
@@ -4730,7 +4745,6 @@ mod tests {
     /// A cached local log may gain a durable close after discovery and before intake.
     #[test]
     fn issue_5335_shared_source_intake_recovers_local_close_appended_after_discovery() {
-        use chrono::{TimeZone, Utc};
         use gwt_core::workspace_projection::{
             load_workspace_work_items_from_path, WorkEvent, WorkEventKind, WorkspaceStatusCategory,
         };
@@ -4757,7 +4771,9 @@ mod tests {
         );
 
         write_shard(&repo, "evt-new-shared-source", "work-new-shared-source");
-        let done_at = Utc.with_ymd_and_hms(2026, 9, 15, 2, 0, 0).unwrap();
+        let done_at = "2026-09-15T02:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         let mut done = WorkEvent::new(WorkEventKind::Done, "work-local-race", done_at);
         done.status_category = Some(WorkspaceStatusCategory::Done);
         let summary =
@@ -4790,7 +4806,6 @@ mod tests {
 
     #[test]
     fn rebuild_reloads_local_shared_source_after_discovery_before_taking_lock() {
-        use chrono::{TimeZone, Utc};
         use gwt_core::workspace_projection::{
             load_workspace_work_items_from_path, record_workspace_work_event_paths, WorkEvent,
             WorkEventKind, WorkspaceStatusCategory,
@@ -4820,7 +4835,9 @@ mod tests {
         let state_dir = temp.path().join("state");
         let work_items_path = state_dir.join("works.json");
         let state_path = state_dir.join("work-events-intake.json");
-        let writer_at = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
+        let writer_at = "2026-07-15T08:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         let summary = ingest_project_work_events_paths_with_before_intake(
             &repo,
             &work_items_path,

@@ -8,13 +8,14 @@
 
 use std::sync::Mutex;
 
-use chrono::{DateTime, Duration, Utc};
+use gwt_core::timestamp::UtcTimestamp;
+use time::Duration;
 
 /// A single-slot cache that returns its value only within `ttl` of the last
 /// `put`. Cheap and lock-guarded; intended for one snapshot per provider.
 pub struct TimedCache<T> {
     ttl: Duration,
-    slot: Mutex<Option<(DateTime<Utc>, T)>>,
+    slot: Mutex<Option<(UtcTimestamp, T)>>,
 }
 
 impl<T: Clone> TimedCache<T> {
@@ -27,7 +28,7 @@ impl<T: Clone> TimedCache<T> {
     }
 
     /// Return the cached value if it was stored within the TTL of `now`.
-    pub fn get(&self, now: DateTime<Utc>) -> Option<T> {
+    pub fn get(&self, now: UtcTimestamp) -> Option<T> {
         let guard = self.slot.lock().ok()?;
         let (stored_at, value) = guard.as_ref()?;
         if now.signed_duration_since(*stored_at) < self.ttl {
@@ -38,7 +39,7 @@ impl<T: Clone> TimedCache<T> {
     }
 
     /// Store `value` stamped at `now`.
-    pub fn put(&self, now: DateTime<Utc>, value: T) {
+    pub fn put(&self, now: UtcTimestamp, value: T) {
         if let Ok(mut guard) = self.slot.lock() {
             *guard = Some((now, value));
         }
@@ -55,10 +56,9 @@ impl<T: Clone> TimedCache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
-    fn at(secs: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(secs, 0).unwrap()
+    fn at(secs: i64) -> UtcTimestamp {
+        gwt_core::timestamp::UtcTimestamp::from_timestamp(secs, 0).unwrap()
     }
 
     #[test]

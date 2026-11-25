@@ -111,6 +111,13 @@ fn handle_with_observation(
         });
         append_boundary_advisory(output, event, advisory)
     });
+    // Issue #7730: start the user's registered scripts once gwt's own handling
+    // let the event through. A Stop that gwt blocks is not a stop.
+    if matches!(&result, Ok(output) if !matches!(output, HookOutput::StopBlock { .. })) {
+        run_value(event, "user-hooks", || {
+            crate::user_hooks::run_for_event(worktree_root, event)
+        });
+    }
     let additional_context_bytes = result
         .as_ref()
         .ok()
@@ -190,6 +197,13 @@ fn handle_session_start(
         IntentBoundaryEvent::SessionStart,
         autonomous_decision_policy_context(),
     );
+    // Issue #7647 (SPEC #7007 item 43): the registered agent's personality is
+    // read when its session starts.
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::SessionStart,
+        run_value(event, "agent-personality", agent_personality_context),
+    );
     let pending_goal = run_value(event, "discussion-goal-start", || {
         load_pending_goal_for_hook_worktree(worktree_root)
     });
@@ -197,6 +211,23 @@ fn handle_session_start(
         output,
         IntentBoundaryEvent::SessionStart,
         pending_goal,
+    ))
+}
+
+/// The personality of the registered agent this session runs as, passed
+/// through as its owner wrote it (item 180). An unreadable ledger delivers
+/// nothing rather than stopping the session from starting.
+fn agent_personality_context() -> Option<String> {
+    let member_id = std::env::var("GWT_AGENT_MEMBER_ID").ok()?;
+    let personality = match crate::agent_registry::member_personality(member_id.trim()) {
+        Ok(personality) => personality?,
+        Err(error) => {
+            tracing::warn!(%error, "agent personality is unreadable; none is delivered");
+            return None;
+        }
+    };
+    Some(format!(
+        "# Agent personality\n\nThe owner set this as how you work, whichever tool you run on. Follow it for the whole session.\n\n{personality}"
     ))
 }
 
@@ -217,19 +248,8 @@ fn handle_user_prompt_submit(
     is_pm: bool,
     completion: Option<&super::runtime_state::HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
-    // PM reporting has its own settlement path; ordinary producing obligations
-    // deliberately remain unarmed in this window.
-    let reporting_started = Instant::now();
-    let reporting = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
-    diagnostics::record_handler_duration(
-        event,
-        "pm-reporting-prompt",
-        reporting_started.elapsed(),
-        if reporting.is_ok() { "ok" } else { "error" },
-    );
-    reporting?;
-    // Start the other bookkeeping together before the live RuntimeState
-    // notice. Grok records only pre-turn correlation here; its matching
+    // Start the bookkeeping together before the live RuntimeState notice.
+    // Grok records only pre-turn correlation here; its matching
     // PreToolUse/Stop later commits the ACK before that event's notice.
     let event_deadline = gwt_core::operation_deadline::current();
     #[cfg(test)]
@@ -237,6 +257,29 @@ fn handle_user_prompt_submit(
     #[cfg(test)]
     let bookkeeping_gate = tests::bookkeeping_gate();
     std::thread::scope(|scope| {
+        // PM reporting has its own settlement path; ordinary producing
+        // obligations deliberately remain unarmed in this window. Its turn
+        // receipt is a durable fsync sidecar, so it must not spend the
+        // aggregate deadline before RuntimeState publishes (Issue #7270).
+        let pm_reporting = scope.spawn(|| {
+            #[cfg(test)]
+            tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
+            let started = Instant::now();
+            let result = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
+            (started.elapsed(), result)
+        });
+        let join_pm_reporting = || {
+            let (duration, result) = pm_reporting
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            diagnostics::record_handler_duration(
+                event,
+                "pm-reporting-prompt",
+                duration,
+                if result.is_ok() { "ok" } else { "error" },
+            );
+            result
+        };
         let action_obligation = scope.spawn(|| {
             #[cfg(test)]
             tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
@@ -278,6 +321,9 @@ fn handle_user_prompt_submit(
         let prepared_session = run_step(event, "runtime-state", || {
             crate::daemon_runtime::handle_runtime_state_owned(event, input, completion)
         });
+        let prepared_session = join_pm_reporting()
+            .map_err(HookError::from)
+            .and(prepared_session);
         diagnostics::record_handler_duration(
             event,
             "pm-delivery-ack",
@@ -492,7 +538,7 @@ fn handle_autonomous_answer_receipt(worktree_root: &Path, input: &str) -> Result
             .expect("validated repository identity"),
         project_state_root: current_project_state_root.to_string_lossy().into_owned(),
     };
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     crate::issue_monitor::acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
         &prefs_path,
         &source.id,
@@ -668,10 +714,15 @@ fn handle_stop(
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
     // wins and the remaining checks must NOT run.
-    let stop_checks: [(&str, StopCheck<'_>); 10] = [
+    let stop_checks: [(&str, StopCheck<'_>); 11] = [
         (
             "pm-reporting-stop-check",
             Box::new(|| super::pm_reporting::handle_stop(worktree_root, current_session)),
+        ),
+        // Issue #7644: each human PM turn ends with a theme decision.
+        (
+            "pm-theme-stop-check",
+            Box::new(|| super::pm_reporting::handle_theme_stop(worktree_root, current_session)),
         ),
         (
             "board-read-stop-check",
@@ -1299,6 +1350,157 @@ mod tests {
         );
     }
 
+    /// Issue #7270: the PM turn receipt is a durable fsync sidecar. On a slow
+    /// Windows disk it consumed the whole 200ms prompt deadline before the
+    /// RuntimeState publication could start, so the PM never showed Running.
+    #[test]
+    fn pm_reporting_receipt_does_not_delay_the_live_runtime_notice() {
+        use gwt_core::deadline_budget::{ScopedDeadlineBudget, HANG_GUARD};
+        use gwt_core::test_support::ScopedGwtHome;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        let mut session = Session::new(&worktree, "pm/worktree", AgentId::Codex);
+        session.agent_session_id = Some("native-pm-reporting".into());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        register_pm(&worktree, &session.id);
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime_path = ScopedEnvVar::set(
+            GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::runtime_state_path(&sessions, &session.id),
+        );
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+            Rc::new(gwt_core::coordination::LocalProvider),
+        );
+        let gate = std::sync::Arc::new(BookkeepingGate::default());
+        BOOKKEEPING_GATE.with(|held| assert!(held.borrow_mut().replace(gate.clone()).is_none()));
+        let live_gate = gate.clone();
+
+        let runtime = Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(TcpListener::bind(("127.0.0.1", 0)))
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (calls, received) = mpsc::channel();
+        let app = Router::new().route(
+            "/internal/hook-live",
+            axum::routing::post(move |Json(event): Json<crate::RuntimeHookEvent>| {
+                live_gate.open();
+                calls.send(event.source_event).unwrap();
+                async { axum::http::StatusCode::OK }
+            }),
+        );
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server = runtime.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let _forward_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            format!("http://{address}/internal/hook-live"),
+        );
+        let _forward_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let _live_budget = ScopedDeadlineBudget::hang_guard(
+            &crate::daemon_runtime::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET,
+        );
+        let _attempt_budget =
+            ScopedDeadlineBudget::hang_guard(&crate::daemon_runtime::HOOK_LIVE_ATTEMPT_BUDGET);
+        let input = serde_json::json!({
+            "prompt": "review the fleet",
+            "session_id": session.agent_session_id,
+            "cwd": worktree,
+        })
+        .to_string();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            // test-hygiene: allow-wall-clock-deadline the clock is pinned above; this hang guard never orders the receipt and live publication.
+            Instant::now() + HANG_GUARD,
+        );
+        let completion =
+            super::super::runtime_state::begin_hook_event(&worktree, "UserPromptSubmit", &input);
+        let result = handle_user_prompt_submit(
+            "UserPromptSubmit",
+            &input,
+            &worktree,
+            false,
+            completion.as_ref(),
+        );
+        shutdown.send(()).unwrap();
+        runtime.block_on(server).unwrap();
+        BOOKKEEPING_GATE.with(|held| held.borrow_mut().take());
+        result.unwrap();
+        assert!(
+            !gate.starved_the_live_notice(),
+            "the live RuntimeState notice must not wait for the PM turn receipt",
+        );
+        assert_eq!(
+            received.try_recv().unwrap(),
+            Some("UserPromptSubmit".into())
+        );
+        assert!(
+            super::super::pm_reporting::capture_qa_turn(&worktree)
+                .unwrap()
+                .is_some(),
+            "the PM turn receipt must still be written before the hook returns",
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_keeps_board_context_when_runtime_writer_deadline_expires() {
+        use gwt_agent::session::{runtime_writer_lease, HookCompletionOutcome};
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::super::health::browser_preflight_tests::with_source(|input, _, runtime_path, _| {
+            let worktree = &input.worktree_root;
+            let _forward = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+                Rc::new(gwt_core::coordination::LocalProvider),
+            );
+            let event = "UserPromptSubmit";
+            let completion = super::super::runtime_state::begin_hook_event(worktree, event, "{}")
+                .expect("capture the pending prompt");
+            let state = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+            assert_eq!(state.current_hook_event.unwrap().event, event);
+            let pending = std::fs::read(runtime_path).unwrap();
+            let writer = runtime_writer_lease(runtime_path).unwrap();
+            let output = {
+                // Advance the operation clock to the aggregate deadline
+                // while another writer holds the sidecar lease.
+                let deadline = Instant::now();
+                let _clock = ScopedOperationClock::set(deadline);
+                let _deadline = ScopedOperationDeadline::enter(deadline);
+                handle_user_prompt_submit(event, "{}", worktree, false, Some(&completion))
+            };
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+            assert!(!completion.runtime_was_published());
+
+            drop(writer);
+            let result = output.expect("runtime writer deadline must leave the prompt usable");
+            assert!(matches!(result, HookOutput::HookSpecificAdditionalContext {
+                    event: IntentBoundaryEvent::UserPromptSubmit, text
+                } if text.contains("# Board Post Reminder")));
+            completion.record(HookCompletionOutcome::Normal);
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+        });
+    }
+
     #[test]
     fn only_user_prompt_submit_enters_the_aggregate_deadline() {
         assert!(gwt_core::operation_deadline::current().is_none());
@@ -1315,9 +1517,50 @@ mod tests {
         }
     }
 
+    /// A Codex session for `work/issue-<issue>` that holds the current
+    /// execution generation of its owner Issue, saved under the test HOME.
+    fn bound_issue_session(worktree: &Path, issue: u64) -> Session {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        let mut session = Session::new(worktree, format!("work/issue-{issue}"), AgentId::Codex);
+        session.linked_issue_number = Some(issue);
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: issue,
+        };
+        execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            &session.id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: "issue".into(),
+                owner_number: issue,
+                identity: execution_state::current_execution_binding(worktree, owner)
+                    .unwrap()
+                    .unwrap(),
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        session
+    }
+
     #[test]
     fn issue_5248_hook_delivers_gate_reason_and_current_criteria_only_to_its_owner() {
-        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
         use crate::issue_monitor::{AutonomousIssueRecord, AutonomousPhase, IssueMonitorPrefs};
         use crate::issue_monitor_gate::AcceptanceSnapshot;
         let _env_lock = crate::env_test_lock()
@@ -1342,41 +1585,7 @@ mod tests {
         let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
         let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
         let _forward = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
-        let mut session = Session::new(&worktree, "work/issue-5248", AgentId::Codex);
-        session.linked_issue_number = Some(5248);
-        let owner = ExecutionOwnerKey {
-            kind: ExecutionOwnerKind::Issue,
-            number: 5248,
-        };
-        execution_state::materialize_at_launch(
-            &worktree,
-            owner.kind,
-            owner.number,
-            &session.id,
-            "gwt-execute",
-            false,
-        )
-        .unwrap();
-        execution_state::ensure_generation_ledger(
-            &worktree,
-            owner,
-            execution_state::LegacyActiveDisposition::Live,
-        )
-        .unwrap();
-        session
-            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
-                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-                session_id: session.id.clone(),
-                repo_hash: session.repo_hash.clone().unwrap(),
-                owner_kind: "issue".into(),
-                owner_number: 5248,
-                identity: execution_state::current_execution_binding(&worktree, owner)
-                    .unwrap()
-                    .unwrap(),
-                capability_generation: 1,
-            }))
-            .unwrap();
-        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut session = bound_issue_session(&worktree, 5248);
         let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
         let mut record = AutonomousIssueRecord::new(5248);
         record.phase = AutonomousPhase::Implementing;
@@ -1489,6 +1698,117 @@ mod tests {
             gate_remediation_context(&worktree).is_none(),
             "another owner gets no remediation"
         );
+    }
+
+    /// Issue #7312 (#5978): a stale reviewed-SHA remediation reaches the
+    /// implementation window once. While the corrected head is still being
+    /// verified, every Monitor scan re-persists the record with its review
+    /// dispatch held, and every tool call runs the hook again; none of that is
+    /// a new remediation. A failed review of the corrected head is.
+    #[test]
+    fn issue_7312_stale_reviewed_sha_remediation_is_not_reinjected_during_verification() {
+        use crate::issue_monitor::{
+            AutonomousIssueRecord, AutonomousPhase, AutonomousReviewDispatchHold, IssueMonitorPrefs,
+        };
+        use crate::issue_monitor_gate::AcceptanceSnapshot;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/issue-7312.git"
+            ])
+            .current_dir(&worktree)
+            .status()
+            .unwrap()
+            .success());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+        let session = bound_issue_session(&worktree, 7312);
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let ids: Vec<String> = (1..=22).map(|n| format!("AC-{n}")).collect();
+        // The record `remediate_autonomous_gate` leaves for a live window.
+        let mut record = AutonomousIssueRecord::new(7312);
+        record.phase = AutonomousPhase::Implementing;
+        record.active_launch_id = Some("tab::agent-1".into());
+        record.pr_number = Some(5972);
+        record.reviewed_sha = Some("883aabe8859ea4445272e814b767b52197b17cf2".into());
+        record.review_passed = Some(true);
+        record.attempts = 1;
+        record.last_failure_message =
+            Some("HEAD advanced past the reviewed SHA — re-review".into());
+        record.acceptance_snapshot = Some(AcceptanceSnapshot {
+            ids: ids.clone(),
+            visual_surface: false,
+            criterion_texts: None,
+        });
+        let prefs_path = crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+        let mut prefs = IssueMonitorPrefs {
+            autonomous_records: vec![record],
+            ..IssueMonitorPrefs::default()
+        };
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let tool_call = || {
+            handle_with_input(
+                "PreToolUse",
+                r#"{"tool_name":"Bash","tool_input":{"command":"cargo test"}}"#,
+                &worktree,
+                Some(&session.id),
+            )
+            .unwrap()
+        };
+
+        let HookOutput::PreToolUseAdditionalContext(context) = tool_call() else {
+            panic!("the stale reviewed-SHA remediation must be delivered once");
+        };
+        assert!(
+            context.contains("HEAD advanced past the reviewed SHA"),
+            "{context}"
+        );
+        assert!(
+            context.contains(&ids.join(", ")),
+            "current criteria: {context}"
+        );
+
+        for scan in 0..11 {
+            prefs.autonomous_records[0].review_dispatch_hold = Some(AutonomousReviewDispatchHold {
+                reason: "max_active reached (3/3: 3 implementation launches + 0 review windows)"
+                    .into(),
+                since: "2026-10-22T03:35:00Z".into(),
+            });
+            prefs.autonomous_records[0].last_heartbeat =
+                Some(format!("2026-10-22T03:35:{scan:02}Z"));
+            crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+            let output = tool_call();
+            assert!(
+                !matches!(&output, HookOutput::PreToolUseAdditionalContext(text)
+                    if text.contains("requests remediation")),
+                "scan {scan} re-injected an unchanged remediation: {output:?}"
+            );
+        }
+
+        // The corrected head was reviewed and rejected: a new remediation.
+        let record = &mut prefs.autonomous_records[0];
+        record.review_dispatch_hold = None;
+        record.reviewed_sha = Some("34476902268ce816df3311d9e596eb263e0a3868".into());
+        record.review_passed = Some(false);
+        record.attempts = 2;
+        record.last_failure_message =
+            Some("CI failed or independent review rejected — remediate".into());
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(gate_remediation_context(&worktree)
+            .unwrap()
+            .contains("independent review rejected"));
+        assert!(gate_remediation_context(&worktree).is_none());
     }
 
     #[test]
@@ -1902,7 +2222,7 @@ mod tests {
             vec![],
             vec![],
         );
-        entry.created_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        entry.created_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(1);
         entry.updated_at = entry.created_at;
         gwt_core::coordination::post_entry(&worktree, entry).expect("seed 4 MiB Board history");
 
@@ -2354,7 +2674,7 @@ mod tests {
                 timeout_seconds: 900,
                 unavailable: None,
             },
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
         .unwrap();
         let event = IntentBoundaryEvent::UserPromptSubmit;
@@ -2482,6 +2802,72 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Question tools are blocked"), "{text}");
+    }
+
+    // Issue #7647 AC-1 (item 43): the personality is instructions the agent
+    // reads when its session starts.
+    #[test]
+    fn session_start_delivers_the_registered_agents_personality() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-personality");
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+        let root = gwt_core::paths::gwt_home().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["agent_roster"] = serde_json::json!({"schema_version":1,"revision":1,"members":[
+            {"agent_member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811", "agent_id":"codex",
+             "name":"Cedar", "enabled":true, "created_at":"2026-10-01T00:00:00Z",
+             "traits":{"personality":"Measure first, then change."}},
+            {"agent_member_id":"b5263a32-14e9-4bb0-ab78-ec3d4816e822", "agent_id":"codex",
+             "name":"Birch", "enabled":true, "created_at":"2026-10-01T00:00:00Z"}
+        ]});
+        let raw = serde_json::to_string_pretty(&prefs).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        std::fs::write(path.with_extension("committed.json"), &raw).unwrap();
+        crate::agent_registry::ensure_active_for_project(&root).unwrap();
+        // Importing a project's first roster gives its members new ids.
+        let members = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .registered_members();
+        let id = |name: &str| {
+            let (id, _) = members.iter().find(|(_, member)| member == name).unwrap();
+            id.clone()
+        };
+        let (cedar, birch) = (id("Cedar"), id("Birch"));
+        let context = |member: Option<&str>| {
+            let _member = match member {
+                Some(id) => ScopedEnvVar::set("GWT_AGENT_MEMBER_ID", id),
+                None => ScopedEnvVar::unset("GWT_AGENT_MEMBER_ID"),
+            };
+            match handle_with_input("SessionStart", "{}", worktree.path(), None).unwrap() {
+                HookOutput::HookSpecificAdditionalContext { text, .. } => text,
+                _ => String::new(),
+            }
+        };
+
+        let text = context(Some(&cedar));
+        assert!(text.contains("# Agent personality"), "{text}");
+        assert!(text.contains("Measure first, then change."), "{text}");
+        for other in [None, Some(birch.as_str())] {
+            let text = context(other);
+            assert!(
+                !text.contains("Agent personality"),
+                "a session without a personality gets no such section: {text}"
+            );
+        }
     }
 
     #[test]
@@ -2612,7 +2998,7 @@ mod tests {
             from_session_id: session_id.clone(),
             to_session_id: "replacement-session".to_string(),
             reason: "test stale predecessor".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         crate::cli::execution_state::prepare_generation_takeover(worktree.path(), owner, &takeover)
             .unwrap();

@@ -90,7 +90,7 @@ test.describe("Project open entry surfaces", () => {
     }
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    const trigger = page.locator("#op-palette-button");
+    const trigger = page.locator('.op-rail__item[data-cmd="open-logs"]');
     await expect(trigger).toBeEnabled();
     await trigger.focus();
     await expect(trigger).toBeFocused();
@@ -475,6 +475,26 @@ test('live backend-only context refuses a shell until a visible Project receipt'
       await expect.poll(() => actual.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 }).toMatch(/[^\n]+[>$#%]$/);
       await actual.screenshot({ path: testInfo.outputPath(`actual-view-admitted-${theme}.png`) });
       await sendLiveGwtEvent(actual, { kind: 'close_window', id });
+      // Issue #7665: a host restart reconnects this still-open page while its tab is
+      // in the background. It must re-register its view without becoming visible.
+      await actual.evaluate(() => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+        const sent: string[] = []; (window as any).__hiddenReconnectSent = sent;
+        const originalSend = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data: any) {
+          try { sent.push(JSON.parse(String(data)).kind); } catch { /* binary frames are irrelevant */ }
+          return originalSend.call(this, data);
+        };
+        (window as any).__gwtPlaywrightMessages.length = 0;
+        for (const socket of (window as any).__gwtPlaywrightSockets as WebSocket[]) {
+          if (socket.readyState === WebSocket.OPEN) socket.close();
+        }
+      });
+      await expect.poll(() => actual.evaluate(() => (window as any).__hiddenReconnectSent.includes('project_view_ready')
+        && document.visibilityState), { timeout: 30_000 }).toBe('hidden');
+      await expect.poll(() => actual.evaluate(() => (window as any).__gwtPlaywrightMessages?.filter((entry: any) =>
+        entry.payload.kind === 'project_execution_status').at(-1)?.payload.status.view_state), { timeout: 30_000 }).toBe('open');
+      await actual.evaluate(() => { delete (document as any).visibilityState; });
     } catch (error) {
       await actual.screenshot({ path: testInfo.outputPath('cold-failure.png') }).catch(() => {});
       await testInfo.attach('cold-backend-messages', { body: JSON.stringify(await page.evaluate(() => (window as any).__coldEvents).catch(() => [])), contentType: 'application/json' });
