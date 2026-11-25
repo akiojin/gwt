@@ -2897,6 +2897,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         attempts: 6,
         non_agent_attempts: 0,
         acceptance_snapshot: None,
+        review_criteria: None,
         retry_not_before: None,
         retry_hold_reason: None,
         retry_hold_provider: None,

@@ -2164,12 +2164,31 @@ impl PtyInputReservation {
         self.with_quiet_ordinary_input(expected, Duration::ZERO, operation)
     }
 
+    /// Use the same commit fence while reporting the exact input facts on refusal.
+    pub fn with_unchanged_ordinary_input_diagnostics<T>(
+        &self,
+        expected: u64,
+        operation: impl FnOnce() -> Result<T, TerminalError>,
+    ) -> Result<T, TerminalError> {
+        self.with_ordinary_input_fence(expected, Duration::ZERO, true, operation)
+    }
+
     /// Keep revision, composer and quiet-time checks in the same body commit
     /// critical section. The callback must not acquire input state again.
     pub fn with_quiet_ordinary_input<T>(
         &self,
         expected: u64,
         quiet_for: Duration,
+        operation: impl FnOnce() -> Result<T, TerminalError>,
+    ) -> Result<T, TerminalError> {
+        self.with_ordinary_input_fence(expected, quiet_for, false, operation)
+    }
+
+    fn with_ordinary_input_fence<T>(
+        &self,
+        expected: u64,
+        quiet_for: Duration,
+        diagnostics: bool,
         operation: impl FnOnce() -> Result<T, TerminalError>,
     ) -> Result<T, TerminalError> {
         let state = self
@@ -2179,13 +2198,19 @@ impl PtyInputReservation {
             .map_err(|error| TerminalError::PtyIoError {
                 details: format!("input state lock poisoned: {error}"),
             })?;
-        if state.ordinary_input_revision != expected
-            || state.unsent_user_input
+        let current = state.ordinary_input_revision;
+        let unsent = state.unsent_user_input;
+        if current != expected
+            || unsent
             || (!quiet_for.is_zero() && !state.human_input_is_quiet(quiet_for))
         {
-            return Err(TerminalError::PtyIoError {
-                details: "ordinary input changed before protected body commit".into(),
-            });
+            let mut details = "ordinary input changed before protected body commit".to_string();
+            if diagnostics {
+                details.push_str(&format!(
+                    " (expected_revision={expected}, current_revision={current}, unsent_user_input={unsent})"
+                ));
+            }
+            return Err(TerminalError::PtyIoError { details });
         }
         operation()
     }
@@ -3846,15 +3871,20 @@ mod tests {
         let revision = handle.ordinary_input_revision().unwrap();
         let reservation = Arc::clone(&handle).reserve_input_transaction().unwrap();
         let mut attempted = false;
-        reservation
+        let error = reservation
             .write_input_authorized(b"automatic body", |commit| {
                 // Browser input can queue while the physical writer is reserved.
                 handle.write_input(b"human prompt\r")?;
-                reservation
-                    .with_unchanged_ordinary_input(revision, || commit(&mut || attempted = true))
+                reservation.with_unchanged_ordinary_input_diagnostics(revision, || {
+                    commit(&mut || attempted = true)
+                })
             })
             .expect_err("new ordinary input must win before body commit");
         assert!(!attempted);
+        assert!(error.to_string().contains(&format!(
+            "expected_revision={revision}, current_revision={}, unsent_user_input=false",
+            revision + 1
+        )));
     }
 
     #[test]

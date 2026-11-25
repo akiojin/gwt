@@ -3019,6 +3019,8 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     let holder_pid = holder.pty.process_id();
     let holder_sid = holder.session.as_ref().unwrap().id.clone();
     seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
+    // Keep the pane census stable while exercising revalidation for an unrelated priority edit.
+    let census_pause = owner_fixture_block_on(owner.pause_runtime_reconciliation()).unwrap();
     let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = blocking_tasks;
     let delivery_id = fixture.delivery_id.clone().expect("durable delivery id");
@@ -3073,6 +3075,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
             if window_id == &holder_window_id
     ));
+    drop(census_pause);
     let diagnostics = (1..queued_tasks.lock().expect("queued tasks").len())
         .rev()
         .collect::<Vec<_>>();
