@@ -120,8 +120,7 @@ function Add({ view, ids, copy, onSave }) {
   );
 }
 
-function EnvironmentList({ copy, store, onSave, onManage }) {
-  const { view = null, error = null } = useStoreSelector(store, selectModel) || {};
+function EnvironmentList({ copy, view, error, onSave, onManage }) {
   const list = view?.[copy.id] || null;
   const entries = list?.entries || [];
   const ids = entries.map(entry => entry.environment_id);
@@ -141,9 +140,11 @@ function EnvironmentList({ copy, store, onSave, onManage }) {
           </ol>
           {list.saved ? null : <p className="settings-help">{copy.unsaved}</p>}
           <Add view={view} ids={ids} copy={copy} onSave={onSave} />
-          <button type="button" className="wizard-button" data-action="environment-manage" onClick={onManage}>
-            Manage execution environments
-          </button>
+          {onManage ? (
+            <button type="button" className="wizard-button" data-action="environment-manage" onClick={onManage}>
+              Manage execution environments
+            </button>
+          ) : null}
           {error ? <p className="settings-status" data-kind="error" role="alert">{error}</p> : null}
         </>
       )}
@@ -151,12 +152,23 @@ function EnvironmentList({ copy, store, onSave, onManage }) {
   );
 }
 
+function StoredList({ copy, store, onSave, onManage }) {
+  const { view = null, error = null } = useStoreSelector(store, selectModel) || {};
+  return <EnvironmentList copy={copy} view={view} error={error} onSave={onSave} onManage={onManage} />;
+}
+
 export function ProjectExecutionEnvironments({ store, onSave = () => {}, onManage = () => {} }) {
-  return <EnvironmentList copy={PROJECT} store={store} onSave={onSave} onManage={onManage} />;
+  return <StoredList copy={PROJECT} store={store} onSave={onSave} onManage={onManage} />;
+}
+
+// Issue #7648 AC-6: the same list on the Execution environments screen, drawn
+// from that screen's own view. It has no "Manage" link: it is already there.
+export function ProjectPriorityList({ view, onSave = () => {} }) {
+  return <EnvironmentList copy={PROJECT} view={view} error={null} onSave={onSave} onManage={null} />;
 }
 
 // Issue #7732 (SPEC #7007 items 194 and 233): the Project Manager's own
 // list, kept with this machine's settings.
 export function PmExecutionEnvironments({ store, onSave = () => {}, onManage = () => {} }) {
-  return <EnvironmentList copy={PM} store={store} onSave={onSave} onManage={onManage} />;
+  return <StoredList copy={PM} store={store} onSave={onSave} onManage={onManage} />;
 }

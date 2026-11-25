@@ -701,6 +701,46 @@ test.describe("shared header and footer", () => {
     expect(errors).toEqual([]);
   });
 
+  // Issue #7648 AC-7: the start page reaches the execution environments
+  // screen from its header, without a project.
+  test("the Hub opens the execution environments screen from its header", async ({ page }, testInfo) => {
+    const errors = await openRoute(page, testInfo, "/");
+    await page.evaluate(() => {
+      const socket = (window as any).__gwtRouteSockets.find((candidate: any) => !candidate.projectKey);
+      const send = socket.send.bind(socket);
+      socket.send = (raw: string) => {
+        send(raw);
+        const message = JSON.parse(raw);
+        if (message.kind !== "get_execution_environments") return;
+        (window as any).__gwtHubReply({ kind: "execution_environments", view: {
+          accounts: [{ id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1", sign_in: "signed_in" }],
+          environments: [{ id: "codex", name: "Codex 1", kind: "set", account_id: "codex", account_name: "Codex 1",
+            via_tool: "codex", via_tool_name: "Codex", runtime: {}, tool_installed: true, projects: [] }],
+          via_options: [],
+        } });
+        (window as any).__gwtHubReply({ kind: "provider_usage", accounts: [{ provider: "codex", plan: "pro",
+          windows: [{ kind: "weekly", used_percent: 42, resets_at: "2030-01-06T03:04:05Z" }], state: { kind: "ok" } }],
+          sessions: [], consumption: [] });
+      };
+    });
+    await expect(entry(page, "environments")).not.toHaveAttribute("aria-disabled", "true");
+    await entry(page, "environments").click();
+    const screen = page.locator("[data-hub] .exec-env");
+    await expect(screen.getByRole("heading", { level: 1, name: "Execution environments" })).toBeVisible();
+    await expect(entry(page, "environments")).toHaveAttribute("aria-current", "page");
+    const card = screen.locator('[data-environment="codex"]');
+    await expect(card).toContainText("Using Codex 1 · 1 account in pool · Via Codex");
+    await expect(card).toContainText("42% used");
+    // Without a project there is no project priority list to edit here.
+    await expect(screen.locator('[data-environment-list="project"]')).toHaveCount(0);
+    await screen.getByRole("button", { name: "Accounts", exact: true }).click();
+    await expect(screen.locator('[data-account="codex"]')).toContainText("Signed in");
+    await page.screenshot({ path: testInfo.outputPath("hub-environments.png"), fullPage: true });
+    await entry(page, "pm").click();
+    await expect(screen).toBeHidden();
+    expect(errors).toEqual([]);
+  });
+
   test("the Hub and the not-found page carry the same header and footer (AC-1, AC-2)", async ({ page }, testInfo) => {
     const errors = await openRoute(page, testInfo, "/");
     for (const path of ["/", "/p/aaaaaaaaaaaaaaaa"]) {
@@ -710,11 +750,13 @@ test.describe("shared header and footer", () => {
         nodes.map(node => (node as HTMLElement).dataset.destination))).toEqual(destinations);
       await expect(page.locator("footer.app-foot .app-foot__pm")).toHaveText("PM: —");
       // No project is open here: the entries that need one stay, disabled,
-      // with the reason. Home and Projects need none (Issue #7639).
-      for (const id of ["notifications", "agents", "environments"]) {
+      // with the reason. Home and Projects need none (Issue #7639), and the
+      // Hub opens Environments itself (Issue #7648 AC-7).
+      const hubScreens = path === "/" ? ["pm", "projects", "environments"] : ["pm", "projects"];
+      for (const id of ["notifications", "agents", "environments"].filter(id => !hubScreens.includes(id))) {
         await expect(entry(page, id)).toHaveAttribute("aria-disabled", "true");
       }
-      for (const id of ["pm", "projects"]) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
+      for (const id of hubScreens) await expect(entry(page, id)).not.toHaveAttribute("aria-disabled", "true");
       await entry(page, "agents").click({ force: true });
       await expect(page.locator('.app-head-popover[role="status"]')).toHaveText("Open a project to use this.");
       await entry(page, "menu").click();
