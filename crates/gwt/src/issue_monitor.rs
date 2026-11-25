@@ -10712,11 +10712,14 @@ impl IssueMonitorState {
     /// backoff keeps the retry off the scan that just saturated the host.
     /// Applies in every mode: the failure is about the host, not the Issue.
     pub fn record_transient_launch_retry(&mut self, issue_number: u64, message: String, now: &str) {
-        let backoff = autonomous_retry_backoff_secs(
+        let mut backoff = autonomous_retry_backoff_secs(
             1,
             self.autonomous_tuning.retry_backoff_base_secs,
             self.autonomous_tuning.retry_backoff_cap_secs,
         );
+        if message == crate::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE {
+            backoff = backoff.max(crate::project_runtime::installation::MONITOR_STALE_RETRY_SECS);
+        }
         self.push_autonomous_notice(
             "info",
             issue_number,
@@ -10768,6 +10771,20 @@ impl IssueMonitorState {
             (Ok(now_t), Ok(nb_t)) => now_t >= nb_t,
             _ => true,
         }
+    }
+
+    fn spawn_admission_retry_held_at(&self, issue_number: u64, now: &str) -> bool {
+        self.spawn_admission_retry(issue_number) && !self.retry_ready(issue_number, now)
+    }
+
+    fn spawn_admission_retry(&self, issue_number: u64) -> bool {
+        self.autonomous_record(issue_number).is_some_and(|record| {
+            record.retry_not_before.is_some()
+                && record.last_failure_message.as_deref()
+                    == Some(
+                        crate::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE,
+                    )
+        })
     }
 
     /// Whether `issue_number` may relaunch at `now` on the saved pool: its
@@ -17381,6 +17398,56 @@ impl IssueMonitorState {
         .then_some(declaration)
     }
 
+    fn delivered_verification_launch_held(&self, issue_number: u64) -> bool {
+        let delivered = (self.merged_deliveries.contains_key(&issue_number)
+            && self.merged_delivery_postdates_launch(issue_number))
+            || self
+                .merged_issue_settlements
+                .get(&issue_number)
+                .is_some_and(|settlement| {
+                    settlement.pr_number != 0
+                        && settlement
+                            .merge_sha
+                            .as_deref()
+                            .is_some_and(|sha| !sha.is_empty())
+                });
+        if !delivered {
+            return false;
+        }
+        let Some(item) = self.inbox_item(issue_number) else {
+            return false;
+        };
+        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+            item.issue.body.as_deref().unwrap_or(""),
+        );
+        let declaration = self.verification_declaration(issue_number);
+        !criteria.unchecked.is_empty()
+            && criteria.unchecked.iter().all(|id| {
+                let mut entries = criteria
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion, _)| criterion == id);
+                entries.next().is_some_and(|(_, text)| {
+                    let text = text.to_ascii_lowercase();
+                    let pm = text.split_once("確認主体:").is_some_and(|(_, verifier)| {
+                        verifier
+                            .trim_start()
+                            .split(['。', '、', '.', ' ', '　'])
+                            .next()
+                            == Some("pm")
+                    });
+                    text.contains("[main-verification]")
+                        || text.contains("(main-verification)")
+                        || pm
+                        || declaration.is_some_and(|declaration| {
+                            declaration.criteria.iter().any(|criterion| {
+                                criterion.id == *id && criterion.verifier.eq_ignore_ascii_case("PM")
+                            })
+                        })
+                }) && entries.next().is_none()
+            })
+    }
+
     /// Issue #3917: Open rows whose work branch has a merged delivery that is
     /// not settled yet. A pure join over the inbox; the caller decides the
     /// action with [`decide_merged_issue_settlement`].
@@ -18261,6 +18328,7 @@ impl IssueMonitorState {
             IssueMonitorEffectPayload::AcquireClaim { issue_number, heartbeat_at, .. }
                 if self.launch_admission_is_held_at(heartbeat_at)
                     || self.cancelled_claim_awaits_runtime(*issue_number)
+                    || self.delivered_verification_launch_held(*issue_number)
                     || self.open_pr_launch_held(*issue_number)
                     || self.launch_source_exclusion(*issue_number).is_some()
                     || self.scan_dependency_exclusion(*issue_number).is_some()
@@ -18936,6 +19004,9 @@ impl IssueMonitorState {
         }
         if review_dispatch {
             return self.review_dispatch_exclusion_reason(issue_number);
+        }
+        if self.delivered_verification_launch_held(issue_number) {
+            return Some("delivered Issue is awaiting PM or main verification".into());
         }
         self.agent_schedule_launch_exclusion(issue_number)
             .map(|reason| format!("schedule admission: {reason}"))
@@ -21372,6 +21443,8 @@ impl IssueMonitorState {
         let pending_claims = self.pending_claim_issue_numbers();
         let position = self.queue.iter().position(|issue| {
             !self.has_monitor_pane_for_issue(*issue)
+                && !self.delivered_verification_launch_held(*issue)
+                && !self.spawn_admission_retry_held_at(*issue, now)
                 && (!(self.autonomous_mode && self.is_launch_window_timeout_retry(*issue))
                     || (!pending_claims.contains(issue)
                         && self.retry_ready_for_saved_profile(*issue, now)))
@@ -21520,6 +21593,9 @@ impl IssueMonitorState {
 
     fn claim_candidate_exclusions_without_dependencies(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
+        if self.delivered_verification_launch_held(issue_number) {
+            reasons.push("delivered Issue is awaiting PM or main verification".into());
+        }
         if self.autonomous_record(issue_number).is_some_and(|record| {
             record.failed_review_veto() && !record.merged_evidence_reviews.is_empty()
         }) {
@@ -21813,6 +21889,7 @@ impl IssueMonitorState {
         while self.config.enabled && self.gui_connected && self.occupied_slot_count() < max_active {
             let Some(issue_number) = self.queue.iter().copied().find(|issue_number| {
                 self.terminal_queue_contains(*issue_number)
+                    && !self.delivered_verification_launch_held(*issue_number)
                     && !self.cancelled_claim_awaits_runtime(*issue_number)
                     && !self.has_monitor_pane_for_issue(*issue_number)
                     && !self.open_pr_launch_held(*issue_number)
@@ -22168,6 +22245,9 @@ impl IssueMonitorState {
         // Holding a new pane requires no cancellation authority. A cached
         // candidate exclusion must wait even before a complete Live scan
         // can compensate the claim; existing-pane ACKs above stay valid.
+        if self.delivered_verification_launch_held(delivery.issue_number) {
+            return false;
+        }
         // Cold prefs restore no candidates, so configured labels need a refresh.
         if self
             .inbox_item(delivery.issue_number)
@@ -22462,6 +22542,7 @@ impl IssueMonitorState {
             .filter(|item| {
                 item.state == MonitorInboxState::Queued
                     && !self.cancelled_claim_awaits_runtime(issue_number)
+                    && !self.delivered_verification_launch_held(issue_number)
                     && !self.launch_admission_is_held_at(now)
                     && self.retry_ready_for_saved_profile(issue_number, now)
                     && self.launch_source_exclusion(issue_number).is_none()
@@ -24902,6 +24983,9 @@ impl IssueMonitorState {
     /// healthy provider is the recovery, and it is useless if the hold still
     /// gates `retry_ready`. Returns whether a hold was actually cleared.
     pub fn clear_retry_hold(&mut self, issue_number: u64) -> bool {
+        if self.spawn_admission_retry(issue_number) {
+            return false;
+        }
         let Some(record) = self.autonomous_records.get_mut(&issue_number) else {
             return false;
         };
@@ -25564,6 +25648,9 @@ impl IssueMonitorState {
         issue_number: u64,
         now: &str,
     ) -> Option<IssueMonitorClearedRetryHold> {
+        if self.spawn_admission_retry_held_at(issue_number, now) {
+            return None;
+        }
         let max_attempts = self.autonomous_tuning.max_attempts;
         let record = self.autonomous_records.get(&issue_number)?;
         let cleared = IssueMonitorClearedRetryHold {
@@ -55959,9 +56046,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_7817_priority_launch_skips_delivered_main_verification() {
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        let mut candidate = checked_issue(42);
+        candidate.body = Some("## 受け入れ条件\n- [x] AC-1: 修正する\n- [ ] AC-2: [main-verification] PM が確認する\n".into());
+        let now = "2026-11-25T00:00:00Z";
+        scan_queued_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
+        monitor.record_merged_deliveries(&BTreeMap::from([(
+            "work/issue-42".into(),
+            merged_delivery(7, "aaa", now),
+        )]));
+        monitor.prioritize_launch_now(42);
+        assert!(monitor.terminal_queue_contains(42));
+        assert!(monitor
+            .claim_candidate_exclusions(42)
+            .iter()
+            .any(|reason| reason.contains("main verification")));
+        assert!(monitor.next_launch_request(now).is_none());
+
+        candidate.body = Some(
+            "## 受け入れ条件\n- [x] AC-1: 修正する\n- [ ] AC-2: 確認主体: PM。計測結果を確認する\n"
+                .into(),
+        );
+        monitor.record_candidate(candidate.clone());
+        assert!(monitor.next_launch_request(now).is_none());
+
+        candidate
+            .body
+            .as_mut()
+            .unwrap()
+            .push_str("- [ ] AC-3: 別の修正を実装する\n");
+        monitor.record_candidate(candidate);
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 42);
+    }
+
+    #[test]
+    fn issue_7817_stale_spawn_cooldown_survives_priority_launch_and_reload() {
+        let now = "2026-11-25T00:00:00Z";
+        let config = IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut monitor = test_monitor(config.clone());
+        monitor.autonomous_tuning.retry_backoff_base_secs = 1;
+        let candidate = issue(42);
+        scan_queued_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
+        monitor.record_transient_launch_retry(
+            42,
+            crate::project_runtime::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into(),
+            now,
+        );
+        let mut restored = test_monitor_with_prefs(config, monitor.prefs());
+        restored.set_gui_connected(true);
+        scan_queued_candidates(&mut restored, &[candidate], now);
+        restored.prioritize_launch_now(42);
+        assert!(!restored.clear_retry_hold(42));
+        assert!(restored
+            .release_retry_hold_for_operator(42, "2026-11-25T00:00:20Z")
+            .is_none());
+        assert!(restored
+            .next_launch_request("2026-11-25T00:00:20Z")
+            .is_none());
+        assert_eq!(
+            restored
+                .next_launch_request("2026-11-25T00:00:21Z")
+                .unwrap()
+                .issue_number,
+            42
+        );
+    }
+
     /// Issue #4477 AC-1: the delivered-but-open anomaly is read from the work
-    /// branch's own merged PR, never from GitHub's closing reference — which
-    /// cannot fire at all while deliveries merge into `develop`.
+    /// branch's own merged PR, never from GitHub's closing reference.
     #[test]
     fn delivered_open_row_reports_recoverable_merged_from_its_work_branch() {
         let mut monitor = test_monitor(IssueMonitorConfig::default());

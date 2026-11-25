@@ -4097,6 +4097,21 @@ impl AppRuntime {
         })
     }
 
+    fn issue_monitor_preparation_held(
+        &self,
+        context: &super::ProjectContext,
+        issue_number: u64,
+        now: std::time::Instant,
+    ) -> bool {
+        self.issue_monitor_stale_retry_at
+            .get(&(context.project_key.clone(), issue_number))
+            .is_some_and(|until| now < *until)
+            || self.issue_monitor_cleanup_retries.values().any(|retry| {
+                retry.issue_number == issue_number
+                    && retry.completion.context.project_key == context.project_key
+            })
+    }
+
     fn queue_issue_monitor_launch(
         &mut self,
         context: super::ProjectContext,
@@ -4148,10 +4163,17 @@ impl AppRuntime {
     /// Speculate only on the current FIFO prefix. Pending completions keep their
     /// slot until the GUI consumes them, even after the worker has returned.
     fn prefetch_issue_monitor_launch_facts(&mut self) {
+        let now = std::time::Instant::now();
         let mut positions = HashMap::new();
         for index in 0..self.issue_monitor_launch_queue.len() {
             let pending = &self.issue_monitor_launch_queue[index];
-            if !self.project_context_is_current(&pending.context) {
+            if !self.project_context_is_current(&pending.context)
+                || self.issue_monitor_preparation_held(
+                    &pending.context,
+                    pending.request.issue_number,
+                    now,
+                )
+            {
                 continue;
             }
             let limit = if self.issue_monitor_launch_lane_busy(&pending.context) {
@@ -4253,10 +4275,28 @@ impl AppRuntime {
     /// Independent branches can materialize concurrently; shared Git config
     /// writers and same-branch freshness are protected at their own boundaries.
     pub(super) fn advance_issue_monitor_launch_queue_events(&mut self) -> Vec<OutboundEvent> {
+        self.advance_issue_monitor_launch_queue_events_at(std::time::Instant::now())
+    }
+
+    pub(super) fn advance_issue_monitor_launch_queue_events_at(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<OutboundEvent> {
+        self.retry_issue_monitor_launch_cleanups(now);
+        self.issue_monitor_stale_retry_at
+            .retain(|_, until| now < *until);
         let mut events = Vec::new();
         let mut waiting = HashSet::new();
         for pending in std::mem::take(&mut self.issue_monitor_launch_queue) {
             if self.project_context_is_current(&pending.context) {
+                if self.issue_monitor_preparation_held(
+                    &pending.context,
+                    pending.request.issue_number,
+                    now,
+                ) {
+                    self.issue_monitor_launch_queue.push(pending);
+                    continue;
+                }
                 let duplicate_inflight_delivery =
                     pending
                         .request
@@ -4425,6 +4465,10 @@ impl AppRuntime {
                 delivery_id = request.delivery_id.as_deref().unwrap_or("none"),
                 reason = "startup generation reaper pending", "Issues preparation deferred");
             deferred.push(request);
+            return Vec::new();
+        }
+        if self.issue_monitor_preparation_held(&context, issue_number, std::time::Instant::now()) {
+            self.queue_issue_monitor_launch(context, request, reusable, queue_head);
             return Vec::new();
         }
         // A reserved writer has not started its replacement Pane yet. Keep
@@ -5282,6 +5326,12 @@ impl AppRuntime {
             let reusable = (!session_changed && provider_usage == self.provider_usage_accounts)
                 .then(|| delivery.reusable_fresh_launch(request.launch_session_strategy))
                 .flatten();
+            if admission_stale || source_changed {
+                self.issue_monitor_stale_retry_at.insert(
+                    (context.project_key.clone(), request.issue_number),
+                    std::time::Instant::now() + super::monitor_stale_retry_delay(),
+                );
+            }
             return self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
                 &request.project_root,
                 request.issue_number,
@@ -5603,6 +5653,10 @@ impl AppRuntime {
                 if error == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE
                     && failed_attempt.is_none()
                 {
+                    self.issue_monitor_stale_retry_at.insert(
+                        (context.project_key.clone(), issue_number),
+                        std::time::Instant::now() + super::monitor_stale_retry_delay(),
+                    );
                     recovery_events.extend(
                         self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
                             project_root,
