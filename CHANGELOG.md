@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.175.1] - 2026-11-25
+
+### Bug Fixes
+
+- **issue-monitor:** 配信後に残り AC が verification のみになった Issue を確認待ちにする
+- **ci:** Restore frontend naming and roster checks
+- **review:** SPEC の slice PR を slice 節の Acceptance で独立レビューする
+- **pm:** Deliver multiline messages and diagnose recovery refusals
+- **feedback:** LSUIElement バンドル内の gwtd でも native 同意画面を開けるようにする
+
+### Documentation
+
+- **readme:** Align navigation with the task-centered GUI
+- **readme:** 新GUIの画面構成と用語集をREADMEに追加する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #6071 の Work イベントを保存する
+- **work:** Issue #7936 の Work 記録を追加
+
+### Testing
+
+- **ci:** 回答送信の再検証を定期窓集計から切り離す
+- **ci:** Windows feedback 契約の固定テスト数を 41 件に更新する
+
 ## [9.175.0] - 2026-11-25
 
 ### Bug Fixes
