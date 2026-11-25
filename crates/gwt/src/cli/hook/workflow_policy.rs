@@ -254,7 +254,7 @@ Required command shape:\n\
 Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
 Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
-workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as a single-segment gwtd command.\n\n\
+workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as its own gwtd invocation.\n\n\
 While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, workspace.reopen, workspace.repair_close_proof, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
@@ -776,15 +776,49 @@ pub(crate) fn identity_gate_admits_operation(operation: &str) -> bool {
 
 fn is_workspace_identity_update_command(command: &str) -> bool {
     let segments = super::segments::split_command_segments(command);
-    if segments.len() == 1
-        && segments
-            .first()
-            .is_some_and(|segment| is_gwtd_only_segment(segment))
-        && is_workspace_identity_update_json_segment(command)
+    let payload = match segments.as_slice() {
+        [segment] if is_gwtd_only_segment(segment) => Some(command),
+        [_, segment] if matches!(segment.as_str(), r#""$GWT_BIN""# | r#""${GWT_BIN}""#) => {
+            resolved_gwtd_heredoc_body(command, segment)
+        }
+        _ => None,
+    };
+    payload.is_some_and(|payload| {
+        !has_file_output_redirection(command) && is_workspace_identity_update_json_segment(payload)
+    })
+}
+
+fn resolved_gwtd_heredoc_body<'a>(command: &'a str, binary: &str) -> Option<&'a str> {
+    let (assignment, invocation) = command.trim_start().split_once('\n')?;
+    let value = assignment.trim_end().strip_prefix("GWT_BIN=")?;
+    let quoted_path = ['\'', '"']
+        .into_iter()
+        .find_map(|quote| value.strip_prefix(quote)?.strip_suffix(quote));
+    let path = quoted_path.unwrap_or(value);
+    // Accept a literal resolved path without admitting shell expansions.
+    if !path.starts_with('/')
+        || !path.ends_with("/gwtd")
+        || !path.chars().all(|ch| {
+            ch.is_alphanumeric()
+                || matches!(ch, '/' | '.' | '_' | '-')
+                || (ch == ' ' && quoted_path.is_some())
+        })
     {
-        return true;
+        return None;
     }
-    false
+
+    let (header, body) = invocation.split_once('\n')?;
+    let delimiter = header
+        .trim()
+        .strip_prefix(binary)?
+        .trim_start()
+        .strip_prefix("<<")?;
+    if delimiter.trim() != "'JSON'" {
+        return None;
+    }
+    body.split_once("\nJSON\n")
+        .map(|(body, _)| body)
+        .or_else(|| body.strip_suffix("\nJSON"))
 }
 
 fn is_gwtd_only_segment(segment: &str) -> bool {
@@ -2201,6 +2235,47 @@ mod tests {
             evaluate_title_summary_guard(&bash_event(&update), true).unwrap(),
             HookOutput::PreToolUsePermission { .. }
         ));
+    }
+
+    #[test]
+    fn title_summary_guard_allows_resolved_binary_workspace_ensure() {
+        let ensure = envelope_command(
+            "workspace.ensure",
+            r#"{"purpose":"Identity recovery","current_focus":"Inspect owner"}"#,
+        );
+        let command = ensure.replacen(
+            "gwtd",
+            "GWT_BIN='/Applications/GWT.app/Contents/MacOS/gwtd'\n\"$GWT_BIN\"",
+            1,
+        );
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+            HookOutput::Silent
+        );
+        let pretty = r#"GWT_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
+"${GWT_BIN}" <<'JSON'
+{
+  "schema_version": 1,
+  "operation": "workspace.ensure",
+  "params": {
+    "purpose": "Identity recovery"
+  }
+}
+JSON"#;
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(pretty), true).unwrap(),
+            HookOutput::Silent
+        );
+        for rejected in [
+            format!("{command}\ncargo test -p gwt"),
+            format!("{command}\n> source.txt"),
+            format!("{ensure}\n> source.txt"),
+        ] {
+            assert!(matches!(
+                evaluate_title_summary_guard(&bash_event(&rejected), true).unwrap(),
+                HookOutput::PreToolUsePermission { .. }
+            ));
+        }
     }
 
     #[test]
