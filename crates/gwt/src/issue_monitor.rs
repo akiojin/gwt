@@ -24094,9 +24094,13 @@ impl IssueMonitorState {
             .unwrap_or(IssueCompletionDecision::Unknown);
         // Both branch reconciliation and the Delivering worker enter here.
         // Session evidence also vetoes release when the canvas is unavailable.
-        if self.active_launches.contains(&issue_number)
-            && (self.process_held_issues.contains(&issue_number)
-                || (decision != IssueCompletionDecision::Complete && live_pane))
+        let tracked_launch = self.active_launches.contains(&issue_number);
+        // A wait can be admitted from runtime observations before launch
+        // tracking is restored. Require proven process liveness in that case.
+        let runtime_wait = self.autonomous_wait(issue_number).is_some()
+            && !self.process_hold_unproven_issues.contains(&issue_number);
+        if (self.process_held_issues.contains(&issue_number) && (tracked_launch || runtime_wait))
+            || (tracked_launch && decision != IssueCompletionDecision::Complete && live_pane)
         {
             tracing::info!(
                 issue_number,
@@ -59648,6 +59652,36 @@ mod tests {
                 .as_deref(),
             Some("delivered_by_pr_7")
         );
+    }
+
+    #[test]
+    fn issue_7343_merge_keeps_the_wait_of_a_live_runtime_without_launch_tracking() {
+        let mut monitor = runtime_only_wait_monitor();
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        assert!(monitor.apply_autonomous_wait_subject(42, &wait_subject("live")));
+        assert!(matches!(
+            monitor.declare_autonomous_wait(
+                42,
+                "delivery coordination",
+                "PM ruling",
+                "2026-06-29T00:10:00Z"
+            ),
+            AutonomousWaitOutcome::Declared { .. }
+        ));
+
+        monitor.record_merged(42);
+        let status = monitor.agent_status_at("2026-06-29T00:25:00Z");
+        assert!(status.active_launches.contains(&42));
+        let row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert!(row.waiting.as_ref().is_some_and(|wait| wait.in_force));
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_merged(42);
+        assert!(monitor.autonomous_wait(42).is_none());
     }
 
     #[test]
