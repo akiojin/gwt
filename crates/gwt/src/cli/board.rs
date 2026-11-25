@@ -29,6 +29,8 @@ use crate::{
 pub enum BoardCommand {
     /// Best-effort Discussion synchronization, independent of local reads/writes.
     Sync,
+    /// Explicitly acknowledge one bounded page from the caller's read cursor.
+    ShowUnread { limit: usize },
     /// `board.show` with optional audience filters and latest-entry limit.
     /// `unresolved` keeps only `blocked` entries whose escalation is still open
     /// (Issue #4609).
@@ -144,6 +146,18 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             0
         }
+        BoardCommand::ShowUnread { limit } => {
+            let session =
+                crate::board_read_receipts::caller_session_from_env().ok_or_else(|| {
+                    io_as_spec_ops_error(io::Error::other("Board unread requires a caller Session"))
+                })?;
+            let rendered =
+                crate::board_read_receipts::render_unread_page(env.repo_path(), &session, limit)
+                    .map_err(io_as_spec_ops_error)?;
+            out.push_str(&rendered);
+            out.push('\n');
+            0
+        }
         BoardCommand::Show {
             json,
             workspace,
@@ -174,8 +188,13 @@ pub(super) fn run<E: CliEnv>(
                 load_snapshot_for_scope(env.repo_path(), &scope)
                     .map_err(gwt_error_to_spec_ops_error)?
             };
-            let complete_read = (all && limit.is_none() && !unresolved)
-                .then(|| (UtcTimestamp::now(), snapshot.board.clone()));
+            let complete_read = (all && limit.is_none() && !unresolved).then(|| {
+                (
+                    UtcTimestamp::now(),
+                    snapshot.board.clone(),
+                    crate::board_read_receipts::complete_read_cursor(env.repo_path()),
+                )
+            });
             // all:true is the recovery path for unread posts older than the hot projection.
             if all {
                 snapshot.board.entries =
@@ -233,13 +252,25 @@ pub(super) fn run<E: CliEnv>(
             }
             if let Some(session_id) = crate::board_read_receipts::caller_session_from_env() {
                 let recorded = match complete_read {
-                    Some((started_at, hot)) => crate::board_read_receipts::record_complete_read(
-                        env.repo_path(),
-                        &session_id,
-                        &snapshot.board.entries,
-                        started_at,
-                        &hot,
-                    ),
+                    Some((started_at, hot, cursor)) => {
+                        crate::board_read_receipts::record_complete_read(
+                            env.repo_path(),
+                            &session_id,
+                            &snapshot.board.entries,
+                            started_at,
+                            &hot,
+                        )
+                        .and_then(|covered| {
+                            match cursor.filter(|_| covered) {
+                                Some(cursor) => crate::board_read_receipts::record_complete_cursor(
+                                    env.repo_path(),
+                                    &session_id,
+                                    cursor,
+                                ),
+                                None => Ok(()),
+                            }
+                        })
+                    }
                     None => crate::board_read_receipts::record_returned_entries(
                         env.repo_path(),
                         &session_id,

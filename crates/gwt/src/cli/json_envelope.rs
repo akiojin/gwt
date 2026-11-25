@@ -2648,9 +2648,15 @@ fn required_nonempty_workspace_reopen_string(
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     reject_unknown_params(
         params,
-        &["workspace", "all", "limit", "unresolved"],
+        &["workspace", "all", "limit", "unresolved", "unread"],
         "board.show",
     )?;
+    if optional_bool(params, "unread")?.unwrap_or(false) {
+        reject_unknown_params(params, &["unread", "limit"], "board.show unread")?;
+        return Ok(CliCommand::Board(BoardCommand::ShowUnread {
+            limit: optional_usize(params, "limit")?.unwrap_or(20),
+        }));
+    }
     Ok(CliCommand::Board(BoardCommand::Show {
         json: true,
         workspace: optional_string(params, "workspace")?,
