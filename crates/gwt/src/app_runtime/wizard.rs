@@ -1295,11 +1295,17 @@ fn prepare_issue_monitor_launch(
 /// bound to the reviewed SHA) plus the instruction to report the verdict back to
 /// Issues daemon via the `ReviewVerdict` control for this exact SHA.
 fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> String {
-    let base = gwt::issue_monitor_review::build_review_prompt(
+    let mut base = gwt::issue_monitor_review::build_review_prompt(
         &dispatch.required_criteria,
         &dispatch.reviewed_sha,
         &dispatch.diff,
     );
+    if let Some(scope) = &dispatch.slice {
+        base = format!(
+            "{base}\n\n{}",
+            gwt::issue_monitor_review::build_slice_review_prompt(dispatch.issue_number, scope)
+        );
+    }
     let prompt = format!(
         "{base}\n\nReview completion order for PR #{pr}: inspect the diff now, but before \
          finalizing or publishing a verdict, wait for all required CI checks to finish \
@@ -8470,6 +8476,7 @@ mod review_dispatch_tests {
             diff: "diff --git a/x b/x".to_string(),
             merged_evidence: None,
             linked_issue_kind: gwt::LinkedIssueKind::Spec,
+            slice: None,
         };
         let prompt = build_review_dispatch_prompt(&dispatch);
         assert!(

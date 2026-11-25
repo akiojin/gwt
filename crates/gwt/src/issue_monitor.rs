@@ -6354,6 +6354,11 @@ pub struct AutonomousIssueRecord {
     /// Acceptance-criteria snapshot captured at launch; compared at gate time.
     #[serde(default)]
     pub acceptance_snapshot: Option<crate::issue_monitor_gate::AcceptanceSnapshot>,
+    /// Issue #7942: criteria the in-flight review is judged by when they are
+    /// not the launch snapshot's — a SPEC slice PR is judged by its slice id.
+    /// `None` judges the review by `acceptance_snapshot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_criteria: Option<Vec<String>>,
     /// SPEC #3200 T-043/FR-029: earliest RFC3339 time the issue may relaunch
     /// after a transient retry was scheduled (bounded backoff). `None` ⇒ ready.
     #[serde(default)]
@@ -6872,6 +6877,10 @@ pub struct AutonomousReviewDispatch {
     /// agent in the implementation agent's existing work-branch worktree.
     #[serde(default)]
     pub linked_issue_kind: LinkedIssueKind,
+    /// Issue #7942: the SPEC slice this PR delivers. Its id is the review's
+    /// only required criterion; parent SPEC acceptance does not judge it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slice: Option<crate::issue_monitor_review::SliceReviewScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7137,6 +7146,7 @@ impl AutonomousIssueRecord {
             attempts: 0,
             non_agent_attempts: 0,
             acceptance_snapshot: None,
+            review_criteria: None,
             retry_not_before: None,
             retry_hold_reason: None,
             retry_hold_provider: None,
@@ -19626,6 +19636,10 @@ impl IssueMonitorState {
         self.begin_review(issue_number, pr_number, dispatch.reviewed_sha.clone());
         let record = self.autonomous_record_mut(issue_number);
         record.review_dispatch_hold = None;
+        record.review_criteria = dispatch
+            .slice
+            .is_some()
+            .then(|| dispatch.required_criteria.clone());
         // Issue #4815 AC-2: the ladder belongs to one SHA; a dispatch for a
         // new head starts clean.
         if record
@@ -19990,9 +20004,14 @@ impl IssueMonitorState {
             return None;
         }
         let required = record
-            .acceptance_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.ids.clone())
+            .review_criteria
+            .clone()
+            .or_else(|| {
+                record
+                    .acceptance_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.ids.clone())
+            })
             .unwrap_or_default();
         let outcome = crate::issue_monitor_review::evaluate_review_verdict(verdict_raw, &required);
         let passed = matches!(
@@ -30383,6 +30402,7 @@ mod tests {
                 diff: String::new(),
                 merged_evidence: None,
                 linked_issue_kind: LinkedIssueKind::Issue,
+                slice: None,
             });
             assert!(
                 monitor.take_pending_review_dispatches().is_empty(),
@@ -32692,6 +32712,7 @@ mod tests {
             attempts: 2,
             non_agent_attempts: 0,
             acceptance_snapshot: None,
+            review_criteria: None,
             retry_not_before: None,
             retry_hold_reason: None,
             retry_hold_provider: None,
@@ -32821,6 +32842,7 @@ mod tests {
             attempts: 6,
             non_agent_attempts: 0,
             acceptance_snapshot: None,
+            review_criteria: None,
             retry_not_before: None,
             retry_hold_reason: None,
             retry_hold_provider: None,
@@ -32896,6 +32918,7 @@ mod tests {
                 attempts: 6,
                 non_agent_attempts: 0,
                 acceptance_snapshot: None,
+                review_criteria: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
                 retry_hold_provider: None,
@@ -32971,6 +32994,7 @@ mod tests {
             attempts: 4,
             non_agent_attempts: 0,
             acceptance_snapshot: None,
+            review_criteria: None,
             retry_not_before: None,
             retry_hold_reason: None,
             retry_hold_provider: None,
@@ -33035,6 +33059,7 @@ mod tests {
             attempts: 1,
             non_agent_attempts: 0,
             acceptance_snapshot: None,
+            review_criteria: None,
             retry_not_before: None,
             retry_hold_reason: None,
             retry_hold_provider: None,
@@ -33101,6 +33126,7 @@ mod tests {
             diff: "stale review diff".to_string(),
             merged_evidence: None,
             linked_issue_kind: LinkedIssueKind::Issue,
+            slice: None,
         });
         let disk = IssueMonitorPrefs {
             enabled: true,
@@ -60514,6 +60540,44 @@ mod tests {
             diff: "diff --git a/a b/a".to_string(),
             merged_evidence: None,
             linked_issue_kind: LinkedIssueKind::Issue,
+            slice: None,
+        }
+    }
+
+    #[test]
+    fn slice_review_verdict_is_judged_by_the_slice_not_parent_acceptance() {
+        // Issue #7942 AC-2: unchecked parent SPEC criteria alone never fail a
+        // slice PR whose slice verdict passes; a non-slice review still needs
+        // every parent criterion.
+        use crate::issue_monitor_gate::classify_acceptance_criteria;
+        use crate::issue_monitor_review::{SliceReviewScope, REVIEW_VERDICT_SCHEMA};
+        let slice_pass = format!(
+            r#"{{"schema":"{REVIEW_VERDICT_SCHEMA}","overall":"pass","criteria":[{{"id":"T-1","verdict":"pass"}}]}}"#
+        );
+        for (slice, expected) in [(true, Some(true)), (false, Some(false))] {
+            let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+            monitor.set_max_active_agents(3);
+            monitor.capture_acceptance_snapshot(
+                41,
+                classify_acceptance_criteria(
+                    "## Acceptance Criteria\n- [ ] AC-1: device\n- [ ] AC-2: relay\n",
+                )
+                .snapshot(),
+            );
+            let mut dispatch = review_dispatch_for(41, 410);
+            if slice {
+                dispatch.required_criteria = vec!["T-1".to_string()];
+                dispatch.slice = Some(SliceReviewScope {
+                    slice_id: "T-1".to_string(),
+                    section: "## T-1: x\nAcceptance: y".to_string(),
+                });
+            }
+            monitor.dispatch_review(dispatch, IDLE_NOW).unwrap();
+            assert_eq!(
+                monitor.apply_review_verdict(41, "sha-410", &slice_pass),
+                expected,
+                "slice={slice}"
+            );
         }
     }
 
