@@ -10,7 +10,10 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
-use super::{bounded_window_size, DECLINE_LABEL, FOOTER_HEIGHT, PADDING, SEND_LABEL, TITLE};
+use super::{
+    accessory_policy_ready, bounded_window_size, DECLINE_LABEL, FOOTER_HEIGHT, PADDING, SEND_LABEL,
+    TITLE,
+};
 
 define_class!(
     // SAFETY: NSObject imposes no subclass requirements. The class only runs
@@ -51,7 +54,10 @@ pub(super) fn confirm(prompt: &str) -> Result<bool, String> {
     let mtm = MainThreadMarker::new()
         .ok_or("Native feedback consent must run on the worker's main thread")?;
     let app = NSApplication::sharedApplication(mtm);
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+    let accessory = NSApplicationActivationPolicy::Accessory;
+    if !accessory_policy_ready(app.activationPolicy() == accessory, || {
+        app.setActivationPolicy(accessory)
+    }) {
         return Err("Cannot activate the native feedback consent application".into());
     }
     // This worker has no NSApplication::run loop. Complete application launch

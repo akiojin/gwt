@@ -624,7 +624,7 @@ fn process_with(
             Err(error) => {
                 record.state = FeedbackState::Failed;
                 record.error = Some(format!(
-                    "feedback to akiojin/gwt: approval unavailable: {error}"
+                    "feedback to akiojin/gwt: approval unavailable: {error}. The complete report remains saved locally; run feedback.retry with this request_id from a desktop session where the consent window can open."
                 ));
                 store.save(&record)?;
                 return Ok(record);
@@ -2725,6 +2725,12 @@ mod tests {
                 usize::from(consent == Ok(true))
             );
             assert_eq!(store.read(&record.id).unwrap().input, record.input);
+            if consent.is_err() {
+                let error = result.error.as_deref().unwrap();
+                assert!(error.contains("approval unavailable: No desktop display"));
+                assert!(error.contains("feedback.retry"), "{error}");
+                assert!(error.contains("remains saved locally"), "{error}");
+            }
             assert_eq!(
                 result.state,
                 match consent {
