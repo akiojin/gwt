@@ -348,6 +348,19 @@ jobs:
             --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
           node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
         timeout-minutes: 10
+      # Issue #7662: the trace and the fixture's attached backend logs
+      # (owner gwt.log, daemon stderr) are the only evidence of where a
+      # Linux-only launch stalled.
+      - name: Retain Issues operator hold evidence
+        if: ${{ failure() && matrix.shard == 1 }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-operator-hold
+          path: |
+            crates/gwt/playwright/test-results/
+            ${{ runner.temp }}/linux-operator-hold-headed.json*
+          if-no-files-found: warn
+          retention-days: 7
       - name: Voice accuracy regression (optional local dataset)
         if: matrix.shard == 1
         run: |

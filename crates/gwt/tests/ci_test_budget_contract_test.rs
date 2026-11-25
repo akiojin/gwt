@@ -669,6 +669,14 @@ fn required_linux_shard_runs_t94418_in_both_themes() {
             "missing T94418 requirement {argument}"
         );
     }
+    // Issue #7662: a Linux-only failure must leave its trace and backend logs.
+    let retain = position("Retain Issues operator hold evidence")
+        .expect("T94418 failures must retain trace and backend log evidence");
+    assert!(browser < retain);
+    assert_eq!(steps[retain]["if"], "${{ failure() && matrix.shard == 1 }}");
+    let paths = steps[retain]["with"]["path"].as_str().unwrap();
+    assert!(paths.contains("crates/gwt/playwright/test-results/"));
+    assert!(paths.contains("linux-operator-hold-headed.json"));
     let gate = &jobs["test-rust-required"];
     assert!(gate["needs"]
         .as_sequence()
