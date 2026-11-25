@@ -3301,7 +3301,15 @@ async fn client_session_with_scope(
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) => {
+                        // Issue #7346: the transport queues the Close reply on
+                        // receipt but only writes it on the next flush.
+                        // Dropping the socket here would reset the connection
+                        // and the client would observe abnormal 1006.
+                        let _ = tokio::time::timeout(Duration::from_secs(1), sender.close()).await;
+                        break;
+                    }
+                    None => break,
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         eprintln!("websocket error: {error}");
