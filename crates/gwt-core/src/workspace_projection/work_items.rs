@@ -607,6 +607,27 @@ impl WorkItemsProjection {
         self.apply_event_inner(event, false)
     }
 
+    /// A merge refresh for an already linked, completed Work belongs in its
+    /// machine-local history. First-time PR associations still travel with
+    /// the shared Work history.
+    pub fn is_completed_pr_merge_refresh(&self, event: &WorkEvent) -> bool {
+        let Some(incoming) = event.execution_container.as_ref() else {
+            return false;
+        };
+        event.kind == WorkEventKind::Pr
+            && incoming.pr_number.is_some()
+            && incoming.pr_state.as_deref() == Some("MERGED")
+            && self.work_items.iter().any(|item| {
+                item.id == event.work_item_id
+                    && item.status_category == WorkspaceStatusCategory::Done
+                    && !item.discarded
+                    && item.execution_containers.iter().any(|existing| {
+                        existing.pr_number == incoming.pr_number
+                            && workspace_execution_container_same(existing, incoming)
+                    })
+            })
+    }
+
     /// Apply one event inside an already globally ordered bulk fold.
     ///
     /// The caller must invoke [`Self::finalize_event_batch`] exactly once
@@ -1129,7 +1150,9 @@ pub(crate) fn merge_workspace_pr_metadata(
         if source.pr_url.is_some() {
             target.pr_url = source.pr_url.clone();
         }
-        if source.pr_state.is_some() {
+        // A merged PR cannot reopen. An older shared snapshot may be
+        // ingested after the machine-local merge refresh.
+        if source.pr_state.is_some() && target.pr_state.as_deref() != Some("MERGED") {
             target.pr_state = source.pr_state.clone();
         }
     }
@@ -1743,7 +1766,7 @@ mod tests {
             pr_url: Some("https://github.com/akiojin/gwt/pull/3672".to_string()),
             pr_state: Some("OPEN".to_string()),
         });
-        projection.apply_event(pr);
+        projection.apply_event(pr.clone());
 
         let item = projection
             .work_items
@@ -1789,6 +1812,22 @@ mod tests {
         assert_eq!(container.worktree_path.as_deref(), Some(worktree.as_path()));
         assert_eq!(container.pr_number, Some(3672));
         assert_eq!(container.pr_state.as_deref(), Some("CLOSED"));
+
+        let mut merged = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
+        let mut merged_container = container.clone();
+        merged_container.pr_state = Some("MERGED".to_string());
+        merged.execution_container = Some(merged_container);
+        projection.apply_event(merged);
+        let mut stale = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t0);
+        stale.execution_container = pr.execution_container;
+        projection.apply_event(stale);
+        assert_eq!(
+            projection.work_items[0].execution_containers[0]
+                .pr_state
+                .as_deref(),
+            Some("MERGED"),
+            "an older snapshot for the same PR must preserve its merge"
+        );
     }
 
     #[test]
