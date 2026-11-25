@@ -2538,8 +2538,9 @@ Do not ask agents to acquire a manual lease for these operations.
   the original start timestamp (`started_at`), and copies measured per-command
   headed/nextest/admission evidence. Run outstanding Light commands first,
   preserve Heavy commands' original relative order, and keep artifact restoration last.
-  The full registered matrix and required headed Chromium evidence in dark/light
-  must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
+  The full registered local matrix must pass. Local UI verification includes
+  the required headed Chromium evidence in dark/light. Protected CI may collect
+  that evidence after Ready; its exact-head check must pass before merge.
   Use the reported holder and wait reason to arbitrate a
   retry. There is no manual acquire loop or fixed retry schedule.
 - A holder with no live verification workload is a lease-lifecycle fault,

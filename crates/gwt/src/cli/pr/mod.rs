@@ -332,6 +332,10 @@ const CI_HEADED_REVIEW_PENDING: &str = "pending (ci headed)";
 const WEBVIEW_CHECK: &str = "Test (Frontend + WebView E2E)";
 const GITHUB_ACTIONS_APP_ID: i64 = 15368;
 
+pub(super) fn uses_ci_headed_evidence(body: &str) -> bool {
+    body.lines().any(|line| line == CI_HEADED_EVIDENCE)
+}
+
 fn protected_webview_check(policy: &serde_json::Value) -> bool {
     policy["checks"].as_array().is_some_and(|checks| {
         checks.iter().any(|check| {
@@ -654,7 +658,7 @@ pub(super) fn run_with_data<E: CliEnv>(
                 _ => None,
             };
             let body = mutation_body.as_deref().expect("Ready handoff body");
-            let ci_headed_delegated = body.lines().any(|line| line == CI_HEADED_EVIDENCE);
+            let ci_headed_delegated = uses_ci_headed_evidence(body);
             if ci_headed_delegated {
                 let policy = match &cmd {
                     PrCommand::Create { base, .. } | PrCommand::CreateBody { base, .. } => {

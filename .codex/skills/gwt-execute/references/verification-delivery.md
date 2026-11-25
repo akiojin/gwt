@@ -29,8 +29,9 @@ commands with `params.headed_e2e_commands`; each entry must exactly match an
 entry in `params.commands`. gwtd adds `--headed` and its embedded reporter and
 records actual Chromium results for both dark and light themes. Use
 `browser-check` for an isolated checkout instance; the E2E tests must assert the
-changed behavior and zero console/page errors. An autonomous UI Ready handoff
+changed behavior and zero console/page errors. For a local headed UI handoff, Ready
 requires those measured passing results in the same fresh verification record.
+For protected CI, the exact-head WebView check enforces review before merge.
 
 Before Ready PR creation or enabling auto-merge, compare the owner Issue's
 acceptance criteria with the fresh `verify.run` evidence. Update only proven

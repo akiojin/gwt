@@ -20,12 +20,17 @@ and put the following acknowledgement on its own line.
 
 `Agent Visual Check: pass (headed CI <run-id>/<attempt>, <PR-head-SHA>)`
 
-The WebView check requires that exact acknowledgement from the PR author
-before it passes. Record any defect and repair it before acknowledging a
-new head. On a re-run, inspect the new attempt's artifact and record that
-attempt. Keep the body selection `Headed Evidence: CI` for subsequent pushes.
-If the workflow is unavailable, is changed by the PR, or the target is an
-existing Draft or another repository, use explicit local headed evidence.
+The WebView check waits up to 12 minutes for that exact acknowledgement from
+the PR author. If review times out, use `actions.rerun` for the failed job and
+review the new attempt's artifact. Repair any defect before acknowledging a
+new head. After the check passes, update the PR body to `Agent Visual Check: pass`
+and keep `Headed Evidence: CI` for subsequent pushes.
+
+Check that the relevant tests run in the `Measure headed WebView E2E` step
+in `.github/workflows/test.yml`. Live-only tests skip unless their setup is
+available. Use explicit local headed evidence if CI skips the changed behavior,
+the workflow is unavailable or changed by the PR, or the target is an existing
+Draft or another repository.
 
 ### Explicit local headed verification
 

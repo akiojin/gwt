@@ -161,9 +161,17 @@ test("(2) scrolling does not get heavier as output accumulates", async ({ page }
       return cost;
     });
   const tail = () => page.evaluate(() => (window as any).__gwtTerminalTestApi.bufferText("agent-1", 4));
+  // A font or viewport refit may change the grid while the history grows.
+  const expectOnlyScreenRows = async () => {
+    const { renderedRows, screenRows } = await rowsRoot.evaluate(root => ({
+      renderedRows: root.childElementCount,
+      screenRows: (window as any).__gwtTerminalTestApi.metrics("agent-1").rows,
+    }));
+    expect(renderedRows).toBe(screenRows);
+  };
   await write(page, lines(0, 2_000));
   await expect.poll(tail).toContain("line 1999 ");
-  const rowCount = await rowsRoot.locator(":scope > div").count();
+  await expectOnlyScreenRows();
   const early = await scrollCost();
   // Twenty-five times the output. Each chunk is drawn before the next one
   // arrives, as a live PTY paces it: an unpaced flood past the page's
@@ -176,7 +184,7 @@ test("(2) scrolling does not get heavier as output accumulates", async ({ page }
   const late = await scrollCost();
   info.annotations.push({ type: "scroll-cost", description: `early ${early.toFixed(0)}ms, late ${late.toFixed(0)}ms` });
   // The rendered rows stay the screen's rows, however long the history is.
-  expect(await rowsRoot.locator(":scope > div").count()).toBe(rowCount);
+  await expectOnlyScreenRows();
   // The same scroll costs about the same. The bound leaves room for a busy
   // runner; an accumulating cost grows with the output and breaks it.
   expect(late, `early ${early.toFixed(0)}ms, late ${late.toFixed(0)}ms`).toBeLessThan(early * 3 + 500);

@@ -77,7 +77,7 @@ Rules:
   owner request. An actual `rejected(<reason>)` remains a known blocker.
   Autonomous launches record `n/a (autonomous)`; the legacy deferred value
   remains compatible under the same fresh automated evidence requirements.
-- When a UI surface is in scope, `Overall: PASS` additionally requires
+- For local headed UI verification, `Overall: PASS` additionally requires
   `Agent Visual Check: pass`. In `autonomous` mode that line carries the GUI
   quality bar on its own, so a missing or failing Agent Visual Check is
   `Overall: FAIL` even when the launch waives the human handoff. An autonomous
@@ -85,7 +85,9 @@ Rules:
   dark and light themes. Record them in the fresh `verify.run` record for
   local headed verification. For [protected gwt PRs](agent-visual.md), a
   matching CI artifact and exact-attempt PR comment are the visual evidence.
-  `pending (CI headed)` records the state before the CI check can pass.
+  For that route, the passing local matrix may report pre-PR `Overall: PASS`
+  with `Agent Visual Check: pending (CI headed)`. Delivery requires the exact
+  head's WebView check to pass.
 - Every acceptance boundary in scope must map to either a reachable manual
   checkbox or an Automated-only Evidence item that names the exact command and
   test. An Automated-only Evidence item must match a `PASS` entry under
