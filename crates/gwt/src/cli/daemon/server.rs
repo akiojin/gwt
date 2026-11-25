@@ -2111,6 +2111,7 @@ fn spawn_issue_monitor_worker(
             tokio::time::interval(Duration::from_secs(monitor.claim_heartbeat_interval_secs()));
         claim_heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut capacity_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut launch_stall = crate::issue_monitor::IssueMonitorLaunchStallTracker::default();
         let mut revision = 0_u64;
         let mut scan_requested = false;
         // Issue #6877 AC-2: timers, automatic retries and successful current
@@ -2938,6 +2939,7 @@ fn spawn_issue_monitor_worker(
                         admission_requested |= in_flight_scan.as_ref().is_some_and(|scan| scan.watchdog_fired);
                     }
                     effect_execution_requested = !monitor.pending_effects().is_empty();
+                    log_issue_monitor_launch_stall(&mut launch_stall, &monitor);
                     if in_flight_scan.is_some() {
                         // Re-project the canonical state while the scan is
                         // blocked so current-time stalled status remains
@@ -10314,6 +10316,32 @@ fn publish_issue_monitor_daemon_payloads(
                 payload,
             },
         );
+    }
+}
+
+/// Issue #7922: leave a timestamped record of why launchable backlog is not
+/// launching while a slot is free, so a stall can be diagnosed afterwards.
+fn log_issue_monitor_launch_stall(
+    tracker: &mut crate::issue_monitor::IssueMonitorLaunchStallTracker,
+    monitor: &crate::IssueMonitorState,
+) {
+    use crate::issue_monitor::IssueMonitorLaunchStallEvent as Event;
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+    match tracker.observe(monitor, &now) {
+        Some(Event::Started { reason, detail }) => {
+            tracing::warn!(?reason, %detail, "Issues launch stalled with launchable backlog");
+        }
+        Some(Event::Sustained {
+            reason,
+            since,
+            detail,
+        }) => {
+            tracing::warn!(?reason, %since, %detail, "Issues launch stall persists");
+        }
+        Some(Event::Ended { reason, since }) => {
+            tracing::info!(?reason, %since, "Issues launch stall ended");
+        }
+        None => {}
     }
 }
 
