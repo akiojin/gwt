@@ -1671,6 +1671,8 @@ mod tests {
             "`pr.*`",
             "`board.*`",
             "`GWT_BIN_PATH`",
+            // Issue #7335 (#6252): identity precedes the bootstrap build.
+            "`pane.name` \u{2192} `workspace.ensure` \u{2192} `cargo build -p gwt --bin gwtd`",
         ];
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
