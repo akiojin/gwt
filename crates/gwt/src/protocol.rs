@@ -2388,7 +2388,7 @@ pub struct ActiveWorkItemView {
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
-    pub board_refs: Vec<String>,
+    pub board_refs: std::sync::Arc<[String]>,
     pub agents: Vec<ActiveWorkAgentView>,
     /// Launch-scoped Works grouped under this canonical-branch Workspace.
     /// Empty for legacy payloads; consumers must not infer an operation target
@@ -6572,7 +6572,7 @@ mod tests {
                     pr_number: Some(2538),
                     pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
                     pr_state: Some("OPEN".to_string()),
-                    board_refs: vec!["board-1".to_string()],
+                    board_refs: vec!["board-1".to_string()].into(),
                     agents: Vec::new(),
                     works: Vec::new(),
                     lifecycle_state: "active".to_string(),

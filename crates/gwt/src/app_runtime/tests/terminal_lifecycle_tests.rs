@@ -532,7 +532,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents,
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),
@@ -624,7 +624,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             agent_with_conv(
                 "c1",
@@ -1144,7 +1144,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             agent_view(
                 "claude-old",
@@ -1242,7 +1242,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             bare_agent("gwt-ghost", ""),
             bare_agent("gwt-named", "Claude Code"),
@@ -1373,7 +1373,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             // Resume-created record agent: no display_name recorded yet.
             agent_view("gwt-new", "", "2026-06-12T02:05:00Z", "conv-shared"),
@@ -1511,7 +1511,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: vec![
             agent_view(
                 &issue_session.id,
@@ -1766,7 +1766,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: Vec::new(),
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),
@@ -1846,7 +1846,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         pr_number: None,
         pr_url: None,
         pr_state: pr_state.map(str::to_string),
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: Vec::new(),
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),
@@ -1919,7 +1919,7 @@ fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
         pr_number: Some(123),
         pr_url: None,
         pr_state: Some("MERGED".to_string()),
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: Vec::new(),
         works: Vec::new(),
         lifecycle_state: "paused".to_string(),

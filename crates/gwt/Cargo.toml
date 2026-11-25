@@ -94,7 +94,7 @@ gwt-clipboard.workspace = true
 gwt-skills.workspace = true
 gwt-terminal.workspace = true
 tracing.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_yaml.workspace = true
 thiserror.workspace = true

@@ -11619,9 +11619,9 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 projection,
             }) => {
-                let mut events = app.handle_workspace_state_loaded(&project_root);
+                let events = app.handle_workspace_state_loaded(&project_root);
                 if let Some(projection) = projection {
-                    events.extend(app.handle_workspace_projection_changed_events(&project_root, &projection));
+                    app.queue_workspace_projection_patch(&project_root, projection);
                 }
                 clients.dispatch(events);
             }
