@@ -1,6 +1,64 @@
 use super::ClientScope;
 
 #[test]
+fn owner_inventory_only_dispatches_changed_panes() {
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+
+    runtime.queue_owner_inventory(&context, Some(1), None, None);
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture");
+    };
+    drain_queued_blocking_tasks(&Arc::clone(tasks));
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("stub fixture");
+    };
+    let mut completion = recorded
+        .lock()
+        .unwrap()
+        .drain(..)
+        .find_map(|event| match event {
+            UserEvent::RemoteOwnerInventoryComplete(completion) => Some(*completion),
+            _ => None,
+        })
+        .expect("inventory completion");
+
+    runtime.handle_remote_owner_inventory_complete(completion.clone());
+    assert!(runtime
+        .handle_remote_owner_inventory_complete(completion.clone())
+        .is_empty());
+
+    completion.result.as_mut().unwrap()[0].0.purpose_title = Some("Changed purpose".into());
+    let events = runtime.handle_remote_owner_inventory_complete(completion.clone());
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
+    assert_eq!(
+        runtime
+            .tab(&context.tab_id)
+            .unwrap()
+            .workspace
+            .window("agent")
+            .unwrap()
+            .purpose_title
+            .as_deref(),
+        Some("Changed purpose")
+    );
+    assert!(!events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalSnapshot { id: pane, .. } if pane == &id
+    )));
+    assert!(runtime
+        .handle_remote_owner_inventory_complete(completion)
+        .is_empty());
+}
+
+#[test]
 fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     use super::{RemoteRuntimeCommandCompletion, RemoteRuntimeCommandKind};
     use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};

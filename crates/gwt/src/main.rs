@@ -11451,7 +11451,10 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_launch_permission_checked(*completion));
             }
             Event::UserEvent(UserEvent::RemoteOwnerInventoryComplete(completion)) => {
-                clients.dispatch(app.handle_remote_owner_inventory_complete(*completion));
+                let events = app.handle_remote_owner_inventory_complete(*completion);
+                if !events.is_empty() {
+                    clients.dispatch(events);
+                }
             }
             Event::UserEvent(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
                 clients.dispatch(app.handle_remote_runtime_command_complete(*completion));
