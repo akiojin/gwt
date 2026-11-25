@@ -27,8 +27,8 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator workspace** — レールから Themes、Issues、Works、Agents、Board、Settings を切り替え、
-  必要に応じて Split view と独立した PM 入口を使えます。
+- **Operator workspace** — ホームで PM に相談し、ヘッダーの Projects からプロジェクトを開きます。
+  プロジェクトのレールから Themes、Issues、Agents、Board、Settings などを切り替えられます。
 - **Execution environments** — プロジェクトの画面と開始画面のヘッダーの
   Environments から、エージェントが使う実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
   リセット時刻・制限状態を 1 か所で確認できます。アカウントの詳細では、全ての枠、
@@ -814,25 +814,20 @@ signal で停止できます。
 1. プロジェクトを開く、GitHub から clone する、または前回のプロジェクトを復元する
 2. `Board`、`Issue`、Knowledge search surface で現在の作業、
    関連 owner、過去の判断を把握する
-3. **Curate** レーンでは、Command Palette の `Intake` を
-   選ぶ。branchless で使い捨ての session で、議論・計画し GitHub Issue を
-   登録する。設計が必要な作業は同じ Issue に `gwt-spec` design-required label と
-   SPEC artifact を付ける。Intake は branch を作らない
+3. 新しい作業はホームで PM に相談します。設計が必要な作業は GitHub Issue に
+   `gwt-spec` ラベルを付け、SPEC を記録します。
 4. **Execute** レーンでは、登録済みの作業を実行する。`Open Workspace` が既存
    branch 上で `Agent` を起動する、背後の `Issues` が登録済み Issue を
    自動で拾う、または owner が既知なら Issue detail から `gwt-execute #N` で直接 Launch Agent する
-5. Execute 起動が確定した時にのみ、gwt が背後の `work/YYYYMMDD-HHMM[-n]`
-   branch / worktree を materialize する（Intake session は branchless で ephemeral）
+5. Execute 起動が確定すると、gwt が作業用の branch と worktree を用意します。
 6. Agent 実行中は shared Board に status、claim、next、blocked、
    handoff、decision を残して coordination する。Board 投稿を Slack / Teams
    にも流したい場合は、先に remote Board provider を設定します。手順は
    [Board プロバイダ](#board-プロバイダ-local--slack--teams) を参照してください
-7. Git の確認・filter・cleanup・低レベルな branch/worktree detail が必要な場合だけ
-   `Branches` を開く
 
 主なウィンドウ:
 
-- `Agent` — Intake / Open Workspace / Issues / Launch Agent から作成される実 coding-agent process window
+- `Agent` — Open Workspace / Issues / Launch Agent から作成される実 coding-agent process window
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
@@ -843,7 +838,6 @@ signal で停止できます。
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
 - `Environment variables`（レールでは **Env vars**） — 上書きする値と継承を無効にする変数を、名前付きのセットとして管理します。**Settings → Issues → Environment variables** でセットを割り当てると、そのプロジェクトで次に起動するエージェントに適用されます。アップグレード時は登録済みプロジェクトと端末の既定に旧セットを引き継ぎます。新規登録したプロジェクトは **None** から始まります。
-- `Branches` — branch 確認、filter、cleanup、Git detail
 - `Settings` — application と agent の設定。`System` タブで Workspace summary
   と Board 投稿本文の出力言語を `Auto / English / 日本語` から選択できます
   (Auto は OS locale を参照し、`C` / `POSIX` や未設定時は English にフォール
@@ -1771,8 +1765,7 @@ gwt は project knowledge を Agent workspace の近くに置きます。
   利用可能な結果を返し、除外した scope と理由を通知します。JSON 応答には
   `partial` と `unavailable_scopes` が含まれます。
   `reports` scope では保存済みの digest と Q&A の質問・回答・Issue 参照を検索できます。
-  Index window は report の kind・日時・関連 Issue を表示し、**Open** で PM の
-  Reports view へ戻れます。
+  Index には報告の種類・日時・関連 Issue が表示されます。
 - Work Item Knowledge Bridge は plain Issue と `gwt-spec` label 付き Issue の
   cache-backed list/detail、semantic ranking、exact match priority、match percentage
   を組み合わせます。
@@ -2252,63 +2245,11 @@ gwt が対処メッセージを表示）。
 
 ## PM のプロジェクト設定
 
-PM ウィンドウの **Tasks** では、保存済みの依頼タスクを閲覧できます。未完了を優先し、
-親子関係・担当・待ち理由・次の対応・PM の再評価待ちを表示します。**Include completed**
-で完了・取消も表示できます。親には、表示範囲外も含む保存済みの直接の子タスクについて、
-完了・取消・未完了・全件数を表示します。取消は達成完了と区別し、子がすべて完了しても親は自動完了しません。
-プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
-長い概要は短縮しますが、保存済みの内容は保持します。各タスクの **Purpose and completion
-criteria** を開くと、目的と先頭 5 件の完了条件を確認できます。条件の全件数を明示し、
-各項目は 240 文字まで（短縮時は省略記号付き）のプレビューとして表示します。
-読取り失敗時は最後に確認できた一覧を警告付きで残します。Tasks または Chat の
-**View task details** では、選んだタスクだけの原依頼・目的・完了条件・完了証拠・最近の変更を読み取ります。
-読取り専用プレビューの上限は原文 4,000 文字、条件 20 件、証拠 10 件、変更 20 件（新しい順）です。
-その他の文は各 1,000 文字、actor ID は 240 文字までで、件数と短縮を明示します。
-変更はそのタスクの保存済み差分を含む記録だけを対象とし、全操作の履歴ではありません。
-**Reload details** で再取得できます。更新や読取り失敗時は確認済みの詳細を古い情報と明示して残し、
-**Close details** で元のタスクにフォーカスを戻します。
-取消する場合は詳細画面に理由を入力し、**Cancel task** を選びます。
-完了したタスクは理由を入力して **Reopen task** を選ぶと、未完了＋PM の再評価待ちに
-戻せます。関連する Issue の再起動は行いません。
-ブラウザーで操作したユーザーと理由を記録し、原依頼と過去の変更は保持します。
-エージェントの停止や Issue・PR の変更は行いません。保存の確認後に状態を更新します。
-競合や応答未確認では最後に確認できた詳細を残すため、再接続して **Reload details** で
-確認してから再操作してください。タスクの編集・完了チェック・自動受付・過去履歴の取込みには対応していません。
-同じツールバーから **Reports** と **Execution log** に切り替えられます。
-
-PM ウィンドウは **Home** で開きます。ツールバーの **Chat** を選ぶ 1 操作で PM との会話を開けます。自分の発言は右、PM の応答は
-左のバブルに並び、PM の Markdown（見出し・箇条書き・表・コード）を整形します。PM セッション自身の
-会話記録を読み、ツール呼び出し・hook の注入文・自動プロンプトは表示しません。1 回のターンで PM が
-複数のメッセージを送った場合は最新の 1 件だけを開き、それ以前は **N earlier messages** に折りたたみます
-（クリックで展開）。下部の入力欄から
-PM へテキストを送れます（Enter で送信、Shift+Enter で改行）。届いたことが確認できるまで入力内容は残り、
-送れなかった場合は理由を表示します。Chat の **Open terminal in Works** で、同じ PM セッションの
-ターミナルを開けます。PM の入口から Chat に戻っても未送信の下書きは残ります。
-**Works** の PM 行からも同じターミナルを開けます。画像の添付には **Execution log** を使います。
-
-Chat には同じ **Tasks** 一覧も並びます（狭いウィンドウでは会話の上）。
-**Show in conversation** で Task の元の発言へ移動しても、未送信の下書きは残ります。
-元の発言が現在の会話の表示範囲にない場合は、ボタンを無効にして理由を表示します。
-
-PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
-**Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
-**Report kind** で種類を絞り込めます。閲覧専用で、ターミナル操作には **Execution log** を
-使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存します。
-指示を記録した Q&A は同じ machine-local project store の `project-state/user-instructions.json`
-を正本とし、1 回の原子的な保存で報告と指示を保持します。再起動後も保持し、自動失効・件数制限は
-ありません。Q&A 本文と各構造化イベントの詳細は 64 KiB、構造化投稿全体は 256 KiB までです。
-
-PM の更新は共通の短い概要で表示し、**Details** を開くと説明と参照をすべて読めます。
-**Copy** は概要と詳細の両方を含みます。同じ状態の観測では、再起動や Claude / Codex の
-切り替え後も報告を増やしません。新しい重大障害・判断依頼は即時に表示し、通常の更新は
-1 件の digest にまとめます。解決・再発・意味のある変化は新しい報告になります。
-判断依頼は推奨と理由に加え、2〜4 個の番号付き選択肢を表示します。**Reports**、
-**Decide**、Chat 内の **Decision reports** から選択でき、送信中・失敗・送信確認の状態は
-現在の PM セッションで共有されます。**Other: reply in chat** は下書きを保持して入力欄を
-開きます。送信確認だけで判断依頼を解決済みにしたり、人間の Q&A を保存したりはしません。
-Chat の判断依頼欄は Reports 由来で、ネイティブ会話のバブルとは別に表示します。
-**Execution log** でも番号または自由文を回答できます。**Copy** には番号付き選択肢と
-詳細を含めます。
+ホームで端末の Project Manager に相談できます。未回答の判断には、ホームの会話に
+ある選択肢か、共通ヘッダーの PM ボタンで開く **Decisions** から回答できます。
+どちらから回答しても同じ判断が解決済みになります。プロジェクトの PM の報告は
+**Board** で確認できます。PM のセッション出力は、課題詳細やプロジェクトの
+エージェント画面からターミナルで開けます。
 
 登録済み PM の Q&A 以外の更新は、`pm.report.post` の version 付き `submission` に
 `request_id`、project 内の event / episode identity、期待 revision、型付き状態、`summary`、
@@ -2326,18 +2267,6 @@ PM の Q&A 投稿には、原文 `original`、種別 `kind`（`standing` / `one_
 `actions`、`issue_numbers` を持つ `instruction` を含めます。任意の `supersedes` に旧指示の ID を
 指定すると、旧レコードを残したまま `superseded_by` で置換先を記録します。秘密値は保存前に伏せます。
 Memory 検索で原文と結果を検索でき、取り消されていない常設指示は PM の起動時と各ターンに再読込します。
-
-**PM status** カードと報告履歴は同じ領域でスクロールします。カードは要約表示で始まり、
-展開すると **PM notes**（PM の説明）と **Live facts**（稼働窓・キュー先頭・人への引き継ぎ件数・
-リリース PR・未適用の更新）を表示します。展開状態は窓ごとに保持し、取得できない情報は
-**Unknown** と表示します。UI の固定文言は英語、投稿本文は書かれた言語のまま表示します。
-PM は `pm.status.set` で説明を更新します。`items` は 1〜3 件で、
-`kind`（`working` / `waiting`）、`text`、RFC3339 の `started_at` を指定します。
-`next_trigger` は必須、`user_action` は任意です。更新停止の警告は既定で 15 分後に表示し、
-`stale_after_minutes` で変更できます。`pm.status` は最新の説明・保持された状態履歴・
-報告の診断情報を返します。説明と Monitor の状態が同じ場合は時刻を更新しません。
-人間との PM の各ターンは、Q&A 報告の保存に成功してから終了します。定期的な自動サイクルは
-この終了条件の対象外です。
 
 常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
 hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には
@@ -2359,18 +2288,17 @@ project 固有の規約を明示的に渡すには、
 
 ## サーフェス操作
 
-- レールから **Themes**、**Issues**、**Works**、**Agents**、**Board**、**Settings** を選びます。
+- レールから **Themes**、**Issues**、**Agents**、**Board**、**Settings** を選びます。
 - **Themes** は、プロジェクトのテーマ（sub-issue を持つ GitHub Issue と、ホームの会話から PM が記録したテーマ）を一覧します。依頼や決定をすると、PM が追加の操作なしにテーマ（`gwt-theme` ラベル付きの GitHub Issue）として記録するか、既存のテーマに追記します。テーマにしたくないものは PM にそう伝えてください。記録されたテーマには **Source of this theme** が表示され、**Show in conversation** で元のメッセージを PM の会話で開けます。各行には、テーマ配下の課題数と完了数を GitHub の集計どおりに表示します。テーマを選ぶと配下の課題が並び、課題を選ぶと Issues で開きます。**Issues completed today** は、gwt が今日取り込んだ Close の件数です。**Delete theme** は確認のあとで、テーマの GitHub Issue を not planned で閉じます。配下の課題は残り、GitHub で Issue を開き直すとテーマが戻ります。
 - **Logs**・**Index**・**Env vars** はサイドバーの各項目から直接開けます。高さが足りないときはサイドバーを縦にスクロールします。個別エージェントの停止・再起動は既存の操作から実行できます。
-- **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。割り当てられた名前と PM バッジは Agents の先頭にも表示します。
+- プロジェクトのフッターに Project Manager の名前が表示されます。レールの PM ボタンは
+  エージェント台帳を開きます。隣の歯車からは Project Manager の設定を開けます。
 - **Works** は端末上で稼働する Agent を1人1行で表示し、直近の出力を載せます。**Settings → System → Works output lines** で3〜10行（既定3行）を選べ、読み取り専用の一覧にも即時反映し、再読み込み・アプリ再起動後も保持します。出力は選択・スクロールでき、端末を開きません。出力欄以外の行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
-- **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。レビュー窓は専用の一覧に表示され、レビューのタスクから端末を開き、Works の名前から元のレビュー行へ戻れます。
-- **Agents** で表示名を入力し、**Register** で登録します。台帳ではメンバーにツール・モデル・推論を指定しません。セッションを始めるツールはプロジェクトの **Available execution environments** で決まり、推論と速度はメンバーの **Traits** で決まります。空いているメンバーは、プロジェクトの起動設定に従って新しい作業を担当できます。選択した人物の **Display name** はその場で編集すると自動保存され、同じ人物 ID と進行中の作業を保持します。無効な入力は欄に残り、保存失敗や競合は **Retry name** で再試行できます。担当履歴と Board は当時の名前を保持します。 **Current work** には現在の exact Session の起動時記録を別に表示します。 **Assignment history** には各 Session に記録された名前・ツール・起動モデルを表示します。未取得の値は **—** とし、ツール内でのモデル変更の実測値とは区別します。空名と、前後の空白・大文字小文字の違いを除いた重複名は登録できません。**Agents Settings** では登録済みの人物を名前で選び、候補ごとのツール・モデル・推論・実行環境を編集します。台帳の **Saved implementation settings** では、候補プール外も含めた登録メンバーの Runtime・Permissions を編集します。Inherit はプロジェクトの既存設定を使います。保存済みプロファイル候補は次の NEW から適用します。Launch Agent は現在のフォームと権限プロンプトを省略する既存方針、Auto は tier 設定を使います。現在の作業と同じ会話の再開は記録済み設定を保持します。**PM eligible** は登録時と人物詳細で指定でき、登録時の既定はオフです。登録だけでは PM に選定しません。PM eligible で利用可能なメンバーを **Select as Project Manager** で PM に選べます。PM も同じ人物・名前・履歴を Team に保持します。共有編集欄ではプロジェクト PM の保存済みツール・モデル・推論を変更でき、**Agents** の対象プロジェクトを明示した Project Manager 欄で自動開始・ループ間隔・一時停止・再起動を操作し、明示的な再起動で新しい会話に適用します。拒否された保存は内容確認後に **Retry profile** で再試行できます。他プロジェクトの PM は表示されたリンクから対象プロジェクトへ移動して編集します。選択したツールが利用できないときは待機理由を表示し、別ツールへ自動切替しません。既存の候補はプロジェクトごとの実行設定と現在の割当を保って移行します。
-- **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
+- 台帳の **Team** でメンバーを登録し、表示名や特性を編集できます。プロジェクトのレールの **Agents** で、そのプロジェクトの履歴や担当予定を確認できます。
 - **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
 - **Register** は共有名簿にメンバーを1人追加します。端末の安全上限により実際の割当数が少なくなる場合があります。
 - ヘッダーの **Agents** はエージェント台帳を開きます。**Team** の各行にある **▲** / **▼** でメンバーの並び順を変えられ、待機中のメンバーは上にあるほど先に割り当てられます。**Delete** は確認のうえ、そのメンバーをこの端末の全プロジェクトから削除します。現在の Project Manager、作業を担当中のメンバー、起動候補に入っているメンバーは、その役割や作業を外すまで削除できません。**Settings → System → Open agent ledger** からも同じ台帳を開けます。Home では、ヘッダーの **Agents** が最初に開いているプロジェクトで台帳を開きます。プロジェクトが開いていないときは **Projects** を表示します。
-- 待機中のメンバーなら誰でも Project Manager にできます。メンバーを選び **Select as Project Manager** を押します。PM 適格の設定はありません。選んだメンバーは、プロジェクトページのフッターにすぐ表示されます。プロジェクトの Project Manager 設定にも **Project Manager for this project** として表示されます。台帳の並び順は Project Manager の選出に使いません。
+- 待機中のメンバーなら誰でも Project Manager にできます。メンバーを選び **Select as Project Manager** を押します。選んだメンバーは、プロジェクトページのフッターにすぐ表示されます。プロジェクトの Project Manager 設定にも **Project Manager for this project** として表示されます。台帳の並び順は Project Manager の選出に使いません。
 - 台帳の各メンバーの **Traits**（特性）は、どのツールで動くときもそのエージェントに固定です。**Reasoning level**（Low / Standard / High / Max）と **Speed**（Normal / Fast / Fastest）は全ツール共通の段階で、Issues がそのエージェントで始めるセッションは、選んだ段階以下でそのツールが持つ最も近い段階を使います。**Tool default** はツール自身の設定のままにします。Speed が効くのは Claude Code と Codex です。Project Manager を務めるエージェントにも同じ特性が効き、起動プロファイルの推論と速度より優先されます（次の新しい会話から）。**Personality** は 4,000 文字までの指示文で、Claude Code・Codex・Grok のセッション開始時にエージェントが読み込みます。**Save traits** で保存します。起動時にそのセッションだけ値を上書きできますが、保存した特性は変わりません。
 - サイドバーの **Agents** は、プロジェクトの **Agent history & plans** を開きます。同じメンバーに、このプロジェクトでの作業を添えた画面です。**Agent history** には、Project Manager を含む全員のセッションが、課題・実行環境・モデル・推論・結果とともに並びます。**Planned assignments** には、各エージェントが次に始める課題が割当計画のとおりに並びます。台帳にはどちらも表示しません。
 - 登録済みの PM は `pm.agent.add` JSON operation に `name` と `agent_id` を渡し、共有名簿にメンバーを1人追加して ID を取得できます。保存済みのメンバープロファイルを使うプロジェクトでは、`issue.monitor.profiles.set` でその ID を指定できます。
@@ -2463,8 +2391,8 @@ Contrast) では system colors にフォールバックします。
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
 | `Esc` | 開いている Overlay / Drawer / Dropdown を閉じる |
 
-レールには **PM** の独立した入口と、ラベル付きの **Issues**、**Works**、**Agents**、
-**Board**、**Settings**、**Logs**、**Index**、**Env vars** が並びます。選択したサーフェスは固定ペインに表示し、
+プロジェクトのレールには **Themes**、**Issues**、**Agents**、**Board**、**Settings**、
+**Logs**、**Index**、**Env vars** が並びます。選択した画面は固定ペインに表示し、
 **Split view** で必要に応じて2つ目のペインを追加できます。Status Strip は
 コンテンツ領域の下に表示します。その他の操作はレールまたはホットキーから使えます。
 
