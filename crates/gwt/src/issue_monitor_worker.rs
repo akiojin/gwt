@@ -3929,7 +3929,8 @@ fn advance_one_autonomous_issue(
                         .find(|issue| issue.number == issue_number)
                         .and_then(|issue| issue.body.clone())
                         .map(|body| {
-                            crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
+                            crate::issue_monitor_gate::classify_acceptance_criteria(&body)
+                                .review_required_ids()
                         })
                         .unwrap_or_default();
                     // Issue #3933 (review follow-up): every readback the dispatch
