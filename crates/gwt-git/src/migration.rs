@@ -13,6 +13,22 @@ use std::{
 
 use gwt_core::{migration::WorktreeMigration, process::hidden_command, GwtError, Result};
 
+/// Build a `git` command for migration steps that write objects or refs into
+/// the bare repository being assembled.
+///
+/// Auto maintenance is disabled because commands such as `git fetch` would
+/// otherwise start `git maintenance run --auto --detach` in the background.
+/// Its worktree-prune task deletes `worktrees/<id>` entries that have no
+/// `gitdir` file, which is the state `git worktree add` leaves between
+/// creating the entry and writing `locked`. Migration adds worktrees right
+/// after these fetches, so the background prune raced it (Issue #7860).
+/// `gc.auto=0` covers older Git that runs `git gc --auto` directly.
+pub fn migration_git_command() -> std::process::Command {
+    let mut command = hidden_command("git");
+    command.args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"]);
+    command
+}
+
 /// Clone a Normal repository's `origin` URL into `<target>` as a bare repo
 /// (FR-021). The full history is preserved so subsequent worktree adds resolve
 /// every branch the original repository knew.
@@ -443,7 +459,7 @@ pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
     }
     drop(config_write);
 
-    let fetch = hidden_command("git")
+    let fetch = migration_git_command()
         .args(["fetch", "origin", "--prune"])
         .current_dir(repo)
         .output()
