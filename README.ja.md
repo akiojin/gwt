@@ -29,8 +29,8 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Themes、Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
-- **Execution environments** — ヘッダーの Environments から、エージェントが使う
-  実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
+- **Execution environments** — プロジェクトの画面と開始画面のヘッダーの
+  Environments から、エージェントが使う実行環境を確認できます。Accounts では、プロバイダーのアカウントごとの使用率・
   リセット時刻・制限状態を 1 か所で確認できます。アカウントの詳細では、全ての枠、
   有効な Usage credits、Codex の `Using credits` 残高と観測した 1 時間あたりの
   クレジット消費量、Claude アカウント枠の有効化を扱います。未提供の枠は `—` と表示します。
@@ -40,8 +40,8 @@ Agent workspace を materialize するために worktree を使いますが、�
   作られます。Hermes Agent / OpenClaw / OpenCode 経由で使う組は追加で登録できます。
   実行環境の編集では、モデル・Skip permissions・Fast mode を設定でき、次に始まる
   セッションから反映されます。自身の設定ファイルを読むツールの値は読み取り専用で
-  表示します。Settings → Issues execution settings の **Available execution
-  environments** には、プロジェクトが使う実行環境を優先度順に並べます。セッションは
+  表示します。Settings → Issues execution settings と、プロジェクトを開いた状態の
+  Environments 画面の **Available execution environments** には、プロジェクトが使う実行環境を優先度順に並べます。セッションは
   使える最初の実行環境で始まり、制限で保留中のものや未サインインのものは飛ばします。
   リストを保存したプロジェクトでは、登録済みのエージェントも、登録時のツールに
   かかわらずこの順で決まった実行環境のツールで始まります。

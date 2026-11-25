@@ -4,6 +4,7 @@ import { focusElement } from "../hosts/focus.js";
 import { fillLegacySlot } from "../hosts/legacy-slot.js";
 import { localTimeLabel } from "./time-labels.js";
 import { AddEnvironment, DeleteEnvironment, EditEnvironment } from "./ExecutionEnvironmentForms.jsx";
+import { ProjectPriorityList } from "./ProjectExecutionEnvironments.jsx";
 import { AccountLogin, AccountSessions, AddPoolAccount, CopilotSignIn, DeletePoolAccount } from "./AccountPool.jsx";
 
 // Execution environments (Issue #7648, SPEC #7007 T-030; Issue #7741). The
@@ -70,7 +71,7 @@ function poolLabel(environment) {
   return `Using ${environment.accountName || "unknown"} · ${count} account${count === 1 ? "" : "s"} in pool`;
 }
 
-function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
+function Environments({ model, headingRef, onNavigate, onOpenToolManagement, onSetProjectEnvironments }) {
   const environments = model.environments || [];
   return (
     <>
@@ -78,8 +79,8 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
         <p className="exec-env__eyebrow">What your agents run on</p>
         <h1 ref={headingRef} tabIndex={-1}>Execution environments</h1>
         <p className="exec-env__lead">
-          Each environment pairs an account with the tool agents reach it through. Projects choose which ones they use,
-          and in what order, in their settings.
+          Each environment pairs an account with the tool agents reach it through. Each project chooses which ones it uses,
+          and in what order.
         </p>
       </div>
       <div className="exec-env__actions">
@@ -146,6 +147,12 @@ function Environments({ model, headingRef, onNavigate, onOpenToolManagement }) {
           ))}
         </ul>
       )}
+      {/* Issue #7648 AC-6: the open project's priority list. A page without a project (the Hub) has none. */}
+      {model.definitions?.project ? (
+        <section className="exec-env__priority" aria-label="This project's priority">
+          <ProjectPriorityList view={model.definitions} onSave={onSetProjectEnvironments} />
+        </section>
+      ) : null}
       <section className="exec-env__manage" aria-label="Manage">
         <h2>Manage</h2>
         <div className="exec-env__manage-row">
@@ -339,6 +346,7 @@ export function ExecutionEnvironments({
   onAdd = () => {},
   onUpdate = () => {},
   onDelete = () => {},
+  onSetProjectEnvironments = () => {},
   onAddPoolAccount = () => {},
   onSignInPoolAccount = () => {},
   onSaveCopilotAccount = () => {},
@@ -388,7 +396,10 @@ export function ExecutionEnvironments({
       ) : view.name === "delete" ? (
         <DeleteEnvironment model={model} environment={environment} headingRef={headingRef} onNavigate={onNavigate} onDelete={onDelete} />
       ) : (
-        <Environments model={model} headingRef={headingRef} onNavigate={onNavigate} onOpenToolManagement={onOpenToolManagement} />
+        <Environments
+          model={model} headingRef={headingRef} onNavigate={onNavigate} onOpenToolManagement={onOpenToolManagement}
+          onSetProjectEnvironments={onSetProjectEnvironments}
+        />
       )}
     </section>
   );

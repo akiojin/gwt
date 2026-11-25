@@ -32,8 +32,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Themes, Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
-- **Execution environments** — open Environments from the header to see what
-  your agents run on. Accounts shows each provider account's usage, reset
+- **Execution environments** — open Environments from the header, on a project
+  page or on the start page, to see what your agents run on. Accounts shows each provider account's usage, reset
   times, and limit state in one place; an account's detail adds every window,
   enabled Usage credits, Codex's `Using credits` balance and observed
   credits/hour, and the Claude account usage opt-in. Missing limits show `—`.
@@ -44,7 +44,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
   or OpenCode. Edit an environment to set its model, Skip permissions, and Fast
   mode — changes apply from the next session. Tools that read their own
   settings file show those values read-only. In Settings → Issues execution
-  settings, **Available execution environments** lists the ones a project
+  settings, and on the Environments screen of an open project,
+  **Available execution environments** lists the ones a project
   uses in priority order: a session starts on the first one that can be used,
   skipping one that is held by a limit or signed out. Once a project has saved
   the list, a registered agent also starts on the environment chosen this way,

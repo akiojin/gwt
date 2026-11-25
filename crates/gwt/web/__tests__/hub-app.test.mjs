@@ -545,3 +545,23 @@ test("a project page opened with ?view=agents shows the agent ledger and drops t
   const appJs = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   assert.match(appJs, /searchParams\.get\("view"\) === "agents"[\s\S]{0,400}replaceState(?:\?\.)?\([\s\S]{0,200}openAgents\("ledger"\)/);
 });
+
+// Issue #7648 AC-7: the page at `/` opens the execution environments screen
+// without a project, and reads the definitions the screen draws.
+test("the Hub opens the execution environments screen and asks for its definitions", () => {
+  const { app, document, sockets } = fixture("?view=environments");
+  const screen = document.querySelector("[data-hub] > .gwt-hub__environments");
+  assert.ok(screen, "the screen is part of the Hub");
+  assert.equal(document.querySelector("[data-hub]").dataset.hubView, "environments");
+  assert.equal(screen.hidden, false);
+  assert.equal(document.querySelector("[data-hub-projects]").hidden, true);
+  sockets[0].open();
+  const kinds = sockets[0].sent.map(message => message.kind);
+  assert.ok(kinds.includes("get_execution_environments"), kinds.join(","));
+  assert.ok(kinds.includes("list_supported_agents"), kinds.join(","));
+  // Its answers and the broadcasts it is drawn from are taken by the screen.
+  sockets[0].deliver({ kind: "execution_environments", view: { accounts: [], environments: [], via_options: [] } });
+  sockets[0].deliver({ kind: "provider_usage", accounts: [], sessions: [], consumption: [] });
+  app.showView("home");
+  assert.equal(screen.hidden, true);
+});
