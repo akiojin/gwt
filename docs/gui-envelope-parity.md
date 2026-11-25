@@ -31,8 +31,6 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `ProjectClientAttention` | GUI 内部 | — | 可視性・フォーカス・通知許可を現在のブラウザ接続に記録する。 |
 | `RetryWorkspaceStateLoad` | GUI 内部 | — | ワークスペース表示の初期ロードを再試行する。 |
 | `ProjectAggregateAck` | GUI 内部 | — | 集約スナップショットの受領を接続ごとに伝える。 |
-| `LoadRecoveryCenter` | GUI 内部 | — | 接続に紐づく復旧画面のスナップショットと、その行を操作するハンドルを更新する。 |
-| `OpenRecoveryCenterBoardEntry` | GUI 内部 | — | 接続限定の行ハンドルを Board への GUI ナビゲーションに解決する。 |
 | `SetClaudeAccountUsageEnabled` | 対象外 | — | Claude アカウントの使用量収集はホストの設定とプロバイダー認証に依存する。 |
 | `RefreshUsage` | 対象外 | — | 現在のホストが持つ認証済みアカウントの使用量を再取得する。 |
 | `AgentRoster` | 一部対応 | `agent.registry.status` | 登録状況の診断ができる。メンバーの追加、休止、改名、選出、設定変更は GUI の roster 編集契約に従う。 |
@@ -74,7 +72,6 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `CloseFleetPane` | 対応 | `fleet.disposition` | fleet の正確なペインと session を指定して閉じる。 |
 | `RecoverRestoredWindow` | 対応 | `pane.recover` | 復元された対象を特定し、agent transport 上で復旧操作を行う。 |
 | `StopWindow` | 対象外 | — | GUI にウィンドウと出力を残したまま実行だけ停止する。 |
-| `StopAllWindows` | 対象外 | — | GUI の一括停止は複数のペインに作用し、停止後も表示を保持する。 |
 | `RestartWindow` | 対象外 | — | 現在のウィンドウと出力履歴を保って保存済みペインを再開する。 |
 | `TerminalInput` | 一部対応 | `pane.send` | 自分のペインに一行を送信できる。GUI の対話的な端末入力はキー入力や改行をそのまま扱う。 |
 | `LoadPmConversation` | 読み取り | — | 正規 PM ペインに結び付く会話の履歴を表示用に読む。 |
@@ -224,7 +221,6 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `UpdateSystemSettings` | 対象外 | — | 言語、hook の信頼設定、Board プロバイダー等のホスト設定を変更する。 |
 | `GetAutostartStatus` | 読み取り | — | OS のユーザー別自動起動登録の状態を取得する。 |
 | `UpdateAutostart` | 対象外 | — | OS のユーザー別自動起動登録を追加または削除する。 |
-| `WorkspaceProjectionPrune` | 対応 | `workspace.projection_prune` | 条件を満たす Workspace projection の整理をプレビューまたは適用する。 |
 | `SaveUiTrace` | GUI 内部 | — | ブラウザで採取した UI トレースをプロジェクトの診断ファイルに保存する。 |
 | `OpenReleaseNotes` | GUI 内部 | — | バンドル済み変更履歴の指定バージョンを GUI ウィンドウに表示する。 |
 | `ApplyUpdateToVersion` | 対象外 | — | 指定バージョンのプラットフォームアセットを解決し、ホストの更新フローへ進む。 |

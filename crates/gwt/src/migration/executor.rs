@@ -395,7 +395,7 @@ fn refresh_bare_refs_from_local(
     dot_git: &Path,
     bare_repo_path: &Path,
 ) -> Result<(), MigrationError> {
-    let output = gwt_core::process::hidden_command("git")
+    let output = git_migration::migration_git_command()
         .args(["fetch"])
         .arg(dot_git)
         .args(["+refs/*:refs/*"])

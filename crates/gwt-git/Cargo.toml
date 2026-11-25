@@ -17,6 +17,7 @@ time.workspace = true
 dirs.workspace = true
 libc.workspace = true
 notify.workspace = true
+pulldown-cmark.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

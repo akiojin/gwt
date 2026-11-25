@@ -651,3 +651,48 @@ fn t151_normalize_fetch_refspec_runs_fetch_origin_prune_after_rewrite() {
         "extra branch must be present after normalize + fetch: {after_refs}"
     );
 }
+
+#[test]
+fn t153_normalize_fetch_refspec_does_not_run_auto_maintenance_on_migrated_bare_repo() {
+    // Issue #7860: the fetch run by normalize_fetch_refspec used to start
+    // `git maintenance run --auto --detach` in the bare repository. Its
+    // worktree-prune task deletes `worktrees/<id>` entries that have no
+    // `gitdir` file, which is exactly the state `git worktree add` leaves
+    // between creating that directory and writing `locked`. Migration runs
+    // `git worktree add` next, so the background prune raced it and failed
+    // with "could not open 'worktrees/develop/locked' for writing".
+    //
+    // Auto-detach is disabled here so any auto maintenance runs in the
+    // foreground and the outcome is deterministic: the in-progress entry
+    // must survive the fetch.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+    run_git(&["branch", "-M", "develop"], upstream.path());
+    run_git(&["branch", "feature/hidden"], upstream.path());
+
+    let workspace = tempfile::tempdir().unwrap();
+    let bare = clone_bare_from_normal(
+        upstream.path().to_str().expect("upstream path"),
+        &workspace.path().join("repo.git"),
+    )
+    .expect("clone_bare_from_normal");
+    set_remote_fetch_refspec(
+        &bare,
+        "origin",
+        "+refs/heads/develop:refs/remotes/origin/develop",
+    );
+    run_git(&["config", "maintenance.autoDetach", "false"], &bare);
+    run_git(&["config", "gc.autoDetach", "false"], &bare);
+
+    let in_progress = bare.join("worktrees").join("develop");
+    std::fs::create_dir_all(&in_progress).expect("create in-progress worktree entry");
+
+    normalize_fetch_refspec(&bare).expect("normalize_fetch_refspec");
+
+    assert!(
+        in_progress.is_dir(),
+        "migration fetch must not run auto maintenance that prunes {}",
+        in_progress.display()
+    );
+}
