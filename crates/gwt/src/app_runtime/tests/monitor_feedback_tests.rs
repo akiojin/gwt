@@ -1808,6 +1808,28 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         1,
         "a changed selected person must reprepare before publishing a pane"
     );
+    let retry_at = *fixture
+        .runtime
+        .issue_monitor_stale_retry_at
+        .values()
+        .next()
+        .unwrap();
+    fixture
+        .runtime
+        .advance_issue_monitor_launch_queue_events_at(retry_at - std::time::Duration::from_secs(1));
+    drain_queued_blocking_tasks(&queued);
+    assert!(
+        !fixture
+            .recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_))),
+        "no preparation before the retry deadline"
+    );
+    fixture
+        .runtime
+        .advance_issue_monitor_launch_queue_events_at(retry_at);
     drain_queued_blocking_tasks(&queued);
     fixture
         .runtime

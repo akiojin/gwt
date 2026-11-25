@@ -49,6 +49,21 @@ Issues, SPECs, search, and Board context rather than from branch management.
   skipping one that is held by a limit or signed out. Once a project has saved
   the list, a registered agent also starts on the environment chosen this way,
   whatever tool it was registered with.
+  Accounts imports signed-in default accounts. Use **Add account** to open a
+  sign-in terminal for a separate Claude Code, Codex, or Grok Build account.
+  On macOS, add a GitHub Copilot account with its GitHub login and a
+  fine-grained personal access token with the Copilot Requests permission.
+  gwt verifies the login and stores the token in macOS Keychain.
+  The new account stays unavailable to sessions until sign-in succeeds. You
+  can reopen its sign-in terminal, change its priority, or remove it from the
+  pool. **Use this account** puts it first for future starts and resumes.
+  To move a running session, including the PM, choose **Resume with the next
+  account**. gwt waits for the current turn to finish before resuming the
+  conversation. On a provider rate limit, gwt tries the next signed-in account
+  and resubmits the rejected turn after resuming. If removing an active
+  account leaves only other tools, the session waits and lists the configured
+  alternatives. Starting a conversation with a different tool is a separate
+  action.
 
 ## Install
 
@@ -249,10 +264,12 @@ the tray menu:
   Continue work. A daemon shared with another connected GUI or started
   independently remains running.
 
-Project browser tabs show agent RUN / BLOCK counts in their titles and a
-status favicon. BLOCK includes waiting, stopped, and error states; shell
-windows are excluded. The status strip and the Works heading show the same
-RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
+Project browser tabs show agent counts in plain words in their titles (for
+example `gwt — 3 running · 1 blocked — gwt`) and a status favicon. Blocked
+includes waiting, stopped, and error states; shell windows are excluded. The
+status strip (Running / Idle / Blocked / Errors) and the Works heading show the
+same counts as the tab title. The strip's Auto-run cell reads like
+`Running · 9 queued · 3 of 6 active`. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
 The root URL `http://127.0.0.1:<port>/` is the **Hub**. It opens on **Home**,
@@ -889,7 +906,7 @@ Common windows include:
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
-- `Profile` — environment/profile management
+- `Environment variables` (**Env vars** in the rail) — manage named sets of overrides and inherited variables to disable. Assign a set under **Settings → Issues → Environment variables**. The choice applies to new launches in that project. On upgrade, registered projects and the device default retain the previous set. Newly registered projects start with **None**.
 - `Branches` — branch inspection, filtering, cleanup, and Git details
 - `Settings` — application and agent configuration. The `System` tab lets
   you choose the narrative output language (Auto / English / 日本語) used
@@ -1295,6 +1312,14 @@ to also reclaim the shared base-branch workspaces (`develop`, `main`), which
 are kept by default because their rebuild lands on whoever opens them next.
 Running worktrees, the main worktree, the calling worktree, and the worktree
 hosting the running `gwtd` are never touched, whatever the flags say.
+
+To remove the worktrees themselves, use `worktree.remove_merged`. It removes
+each `work/*` worktree whose HEAD is merged into `origin/<base>`, that has no
+uncommitted or untracked changes, and that has neither a running process nor a
+live gwt launch, together with its local branch. An unqualified call is a dry
+run listing the candidates and every kept worktree with its reason; pass
+`dry_run: false` to remove and `branches: [...]` to limit the sweep. Shared
+base-branch workspaces and the same protected worktrees are never removed.
 
 Automatic low-disk GC reclaims merged idle caches first. If disk space still
 falls below the configured `[build_artifact_gc]` thresholds, it then reclaims
@@ -1879,7 +1904,10 @@ dialog. Choose **Approve once** or remember approval for that repository and
 operation kind; ask the PM to inspect or revoke saved approvals through
 `pm.approval.status` / `pm.approval.revoke`. Required-check changes use
 `repository.required_checks.update` and preserve the branch's strict policy and
-retained checks' app bindings.
+retained checks' app bindings. Branch protection toggles (`allow_force_pushes`,
+`required_conversation_resolution`, `enforce_admins`, `strict`) on `develop` or
+`main` use `repository.branch_protection.update`, which keeps every other
+protection field unchanged.
 
 The same scoped permission route supports `pr.reopen` for a chosen PR,
 `pr.review.submit` for an authorized GitHub review, `release.metadata.set` for
@@ -2572,11 +2600,11 @@ an entry removes its copied policy on the next refresh.
 ## Surface Navigation
 
 - Select **Themes**, **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
-- **Themes** lists the themes of the project: GitHub Issues that have sub-issues. Each row shows how many issues are under the theme and how many are completed, as GitHub reports them. Select a theme to see its issues, and select an issue to open it in Issues. **Issues completed today** counts the closes gwt took in today. **Delete theme** asks for confirmation, then closes the theme's GitHub Issue as not planned. The issues under it are kept, and reopening the Issue on GitHub brings the theme back.
-- Open **Logs**, **Index**, and **Profile** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Use the Command Palette for all-stop; individual agent stop/restart remain available through the existing controls.
+- **Themes** lists the themes of the project: GitHub Issues that have sub-issues, and the themes the PM records from your conversation on Home. When you ask for something or decide something, the PM records it as a theme (a GitHub Issue labelled `gwt-theme`) or adds it to an existing one, with no extra step from you; tell the PM when something should not become a theme. A recorded theme shows **Source of this theme**, and **Show in conversation** opens the PM on that message. Each row shows how many issues are under the theme and how many are completed, as GitHub reports them. Select a theme to see its issues, and select an issue to open it in Issues. **Issues completed today** counts the closes gwt took in today. **Delete theme** asks for confirmation, then closes the theme's GitHub Issue as not planned. The issues under it are kept, and reopening the Issue on GitHub brings the theme back.
+- Open **Logs**, **Index**, and **Env vars** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Individual agent stop/restart remain available through the existing controls.
 - Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
 - **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
-- **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
+- **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal. Review windows appear in their own list: select a review task to open its terminal, or select its name in Works to return to that review row.
 - In **Agents**, enter a display name and click **Register**. A member has no tool, model or reasoning of its own in the ledger: the tool a session starts with comes from the project's **Available execution environments**, and reasoning and speed come from the member's **Traits**. An idle member can take new work through the project’s configured launch settings. Change a selected member’s **Display name** inline to save it automatically; the same member and current work are retained. Invalid drafts stay in the field, and **Retry name** retries a failed or conflicting save. Assignment and Board history retain their original names. **Current work** shows the exact Session’s recorded launch facts separately. **Assignment history** shows each Session’s recorded name, tool and launch model; missing values appear as **—**, and provider-internal model changes are not measured here. Empty names and duplicate names (after trimming spaces and ignoring case) are rejected. **Agents Settings** selects registered people by name; a candidate's tool, model, reasoning and runtime settings are edited there. In the ledger, **Saved implementation settings** edits a registered member’s runtime and permission preferences, including members outside the candidate pool. Inherit uses the project’s existing setting. Saved-profile candidate launches use these settings on the next NEW launch. Launch Agent uses its current form and prompt-free permission policy; Auto uses tier settings. Current work and exact resumed conversations keep their recorded settings. **PM eligible** is available during registration and in member details; registration defaults to unchecked and does not select a PM. It allows an available member to be selected with **Select as Project Manager**. The configured PM retains the same member, name and history in Team. Its shared editor changes the saved project PM tool, model and reasoning; The project-labeled Project Manager section in **Agents** provides auto start, loop interval, pause and restart; explicit restart applies saved PM changes to a new conversation. **Retry profile** retries a refused save after review. A PM owned by another project links to that project before editing. If the selected tool is unavailable, the queue explains the wait and does not switch tools automatically. Existing saved candidates retain their project execution settings and current assignments during migration.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
@@ -2644,7 +2672,7 @@ counters). The default type scale is tuned for developer readability, so
 terminal text, IDs, paths, counters, and dense work surfaces stay legible during
 long sessions while display typography remains reserved for headings and chrome
 labels. Every chrome surface — Project Bar, Command Rail, Status Strip,
-Command Palette, Hotkey Overlay, Drawer modals, surface panels — shares a
+Hotkey Overlay, Drawer modals, surface panels — shares a
 single token system that ships in two flagship themes:
 
 - **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
@@ -2671,21 +2699,20 @@ falls back to system colors so accessibility is preserved.
 
 | Combo | Action |
 | --- | --- |
-| `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
 | `⌘B` | Focus the Board surface |
 | `⌘G` | Focus the Issues surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
-| `Esc` | Close any open palette / overlay / drawer / dropdown |
+| `Esc` | Close any open overlay / drawer / dropdown |
 
 The rail keeps **PM** separate from the labeled **Issues**, **Works**, **Agents**,
-**Board**, **Settings**, **Logs**, **Index**, and **Profile** entries. The selected surface fills a fixed pane;
+**Board**, **Settings**, **Logs**, **Index**, and **Env vars** entries. The selected surface fills a fixed pane;
 **Split view** adds an optional second pane. The status strip remains below the
-content area. Reach other actions through the Command Palette or their hotkeys.
+content area. Reach other actions through the rail or their hotkeys.
 
 ### Accessibility
 
-Every modal dialog (Command Palette, Hotkey Overlay, branch cleanup,
+Every modal dialog (Hotkey Overlay, branch cleanup,
 worktree migration, launch wizard) follows the WAI-ARIA
 dialog convention: `role="dialog"` with an accessible name, `aria-modal`,
 focus moves into the dialog on open and returns to the trigger on close,

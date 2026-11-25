@@ -136,14 +136,16 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   const pill = bar.querySelector(".knowledge-monitor-pill");
 
   assert.equal(pill.textContent, "Stopped");
-  assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
+  // Issue #7728 AC-2: no Start/Stop here; monitoring follows the project stop/start.
+  assert.equal(bar.querySelector('[data-action="monitor-toggle"]'), null);
+  assert.equal(bar.querySelector('[data-role="monitor-state"]').textContent, "Not assigning");
 
   surface.applyIssueMonitorStatus(STATUS);
   assert.equal(pill.textContent, "Running");
   assert.equal(pill.dataset.tone, "active");
   assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active —", "no runtime census has been received");
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
-  assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
+  assert.equal(bar.querySelector('[data-role="monitor-state"]').textContent, "Assigning");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));
   for (const selector of [".knowledge-monitor-max-active", '[data-action="monitor-auto-apply"]', ".knowledge-monitor-labels", ".knowledge-monitor-pool"]) {
     assert.equal(body.querySelector(selector), null, `${selector} belongs to Settings`);
@@ -710,7 +712,7 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   assert.equal(sent.length, before, "reading explanations sends no control messages");
   for (const selector of [
     '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
-    '[data-action="monitor-settings"]', '[data-action="monitor-toggle"]',
+    '[data-action="monitor-settings"]', '[data-role="monitor-state"]',
     '[data-action="close-issue-preview"]', '.issue-detail-provenance',
   ]) {
     assert.ok(root.querySelector(selector)?.getAttribute("aria-description"), `${selector} has an accessible explanation`);
@@ -794,7 +796,7 @@ test("T-7a: two Issue windows keep independent explanation identities and cleanu
   t.after(() => { surface.clearKnowledgeBridgeState("win-1"); surface.clearKnowledgeBridgeState("win-2"); });
   const focus = target => target.dispatchEvent(new window.Event("focusin", { bubbles: true }));
   const firstControl = body.querySelector('[data-action="monitor-autonomous"]');
-  const secondControl = second.querySelector('[data-action="monitor-toggle"]');
+  const secondControl = second.querySelector('[data-role="monitor-state"]');
   focus(firstControl);
   focus(secondControl);
   const firstId = firstControl.getAttribute("aria-describedby");
@@ -932,8 +934,8 @@ test("Issues list bursts render once while controls and notifications stay synch
   assert.ok(resolved.includes(monitorDiagnostic({ message: "Transient error" }).key), "error recovery stays synchronous");
   assert.equal(body.querySelector('[data-metric="queue"]').textContent, "Queue 49", "independent controls stay current");
   assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active —", "inbox updates cannot prove local child liveness");
-  body.querySelector('[data-action="monitor-toggle"]').click();
-  assert.ok(sent.some(message => message.kind === "set_issue_monitor_enabled" && message.enabled === true));
+  body.querySelector('[data-action="monitor-autonomous"]').click();
+  assert.ok(sent.some(message => message.kind === "set_issue_monitor_autonomous_mode"));
   assert.equal(renders, 0, "Issues receipts wait for the shared frame before rendering the list");
   assert.equal(body.querySelector(".knowledge-row"), row);
   assert.equal(frames.size, 1);

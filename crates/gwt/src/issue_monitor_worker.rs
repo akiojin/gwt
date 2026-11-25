@@ -547,6 +547,9 @@ pub struct LoadedIssueMonitorCandidates {
     /// this pass, each with the reason. Every other Issue in `issues` carries a
     /// freshly evaluated readiness.
     pub readiness_failures: Vec<IssueReadinessFailure>,
+    /// Issue #7845: GitHub's sub-issue parents from the live list. Empty for a
+    /// cache fallback, which keeps the previous live observation.
+    pub issue_parents: BTreeMap<u64, u64>,
 }
 
 impl LoadedIssueMonitorCandidates {
@@ -2387,6 +2390,11 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
             // Publish the listed facts before committing their Live observation.
             cache_live_plain_issue_sources(&cache_root, &listing.issues)
                 .map_err(|error| format!("Live Issue source cache: {error}"))?;
+            let issue_parents = listing
+                .issues
+                .iter()
+                .filter_map(|issue| issue.parent_number.map(|parent| (issue.number, parent)))
+                .collect::<BTreeMap<_, _>>();
             let (mut issues, readiness_failures) =
                 issue_monitor_candidates_with_readiness_and_refresh_limit(
                     Some(repo_path),
@@ -2474,6 +2482,7 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
                 live_error: None,
                 readiness_failures,
                 urgent_assignments,
+                issue_parents,
             });
         }
         Err(error) => error.to_string(),
@@ -2677,6 +2686,7 @@ where
                 live_error: None,
                 readiness_failures: Vec::new(),
                 urgent_assignments: BTreeMap::new(),
+                issue_parents: Default::default(),
             })
         }
         Err(live_error) => {
@@ -2691,6 +2701,7 @@ where
                         live_error: Some(live_error),
                         readiness_failures: Vec::new(),
                         urgent_assignments: BTreeMap::new(),
+                        issue_parents: Default::default(),
                     });
                 }
             }
@@ -2754,6 +2765,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
         {
             monitor.reconcile_provider_account("claude", &account_id, now);
         }
+    }
+    if loaded.source != IssueMonitorCandidateSource::Cache {
+        monitor.observe_issue_parents(&loaded.issue_parents);
     }
     let summary =
         crate::issue_monitor::scan_issue_monitor_candidates_for_project_tab_with_provenance(
@@ -3953,6 +3967,7 @@ fn advance_one_autonomous_issue(
                             reviewed_sha: sha,
                             required_criteria: criteria,
                             diff,
+                            merged_evidence: None,
                             linked_issue_kind,
                         },
                         now,
@@ -5772,6 +5787,7 @@ pub(crate) mod tests {
             )]),
             open_pr_observed_at: Some("2026-10-21T00:00:00Z".into()),
             linked_prs: BTreeMap::new(),
+            issue_parents: Default::default(),
         };
         let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
@@ -5834,6 +5850,7 @@ pub(crate) mod tests {
                     created_at: "2026-10-02T00:00:00Z".into(),
                 },
             )]),
+            issue_parents: Default::default(),
         };
         let mut monitor = test_monitor(Default::default());
         scan_loaded_issue_monitor_candidates(&mut monitor, &loaded, &repo, "2026-10-03T00:00:00Z");
@@ -5871,6 +5888,7 @@ pub(crate) mod tests {
             body: None,
             url: format!("https://github.com/example/repo/issues/{number}"),
             updated_at: updated_at.map(str::to_string),
+            parent_number: None,
         }
     }
 
@@ -6134,6 +6152,12 @@ pub(crate) mod tests {
             // Issue #4146 AC-2: every checkbox is `[x]`, but the plain rows
             // below them are untracked work, so the Issue is not complete.
             (49, "- [x] T-001\n- T-002 never tracked"),
+            (
+                50,
+                "- [x] T-L101 replacement delivered\n\
+                 - [ ] T364 excluded from the backlog <!-- gwt-task: historical -->\n\
+                 - [ ] T-600 superseded by T-L101 <!-- gwt-task: historical -->",
+            ),
         ] {
             cache
                 .write_snapshot(&structured_spec(number, "t1", "Plan", tasks))
@@ -6150,6 +6174,7 @@ pub(crate) mod tests {
                 live_issue(47, &["gwt-spec"], Some("t1")),
                 live_issue(48, &["gwt-spec"], Some("t1")),
                 live_issue(49, &["gwt-spec"], Some("t1")),
+                live_issue(50, &["gwt-spec"], Some("t1")),
             ],
             dir.path(),
             |_| panic!("matching cache must not refresh"),
@@ -6171,6 +6196,7 @@ pub(crate) mod tests {
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
                 IssueMonitorReadiness::ReadyWithOpenTasks,
+                IssueMonitorReadiness::ReadyWithCompletedTasks,
             ]
         );
     }
@@ -7341,6 +7367,7 @@ pub(crate) mod tests {
             live_error: None,
             readiness_failures: Vec::new(),
             urgent_assignments: BTreeMap::new(),
+            issue_parents: Default::default(),
         };
         let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
@@ -8343,6 +8370,7 @@ pub(crate) mod tests {
                 live_error: None,
                 readiness_failures: Vec::new(),
                 urgent_assignments: BTreeMap::new(),
+                issue_parents: Default::default(),
             };
             let mut committed = candidate.clone();
             committed.rebase_daemon_driver_prefs(&base.prefs());
@@ -8453,6 +8481,7 @@ pub(crate) mod tests {
                 live_error: None,
                 readiness_failures: Vec::new(),
                 urgent_assignments: BTreeMap::new(),
+                issue_parents: Default::default(),
             };
             let mut scanned = reused.clone();
             reconcile_issue_monitor_windows(&mut scanned, worktree.path(), now);
@@ -9584,6 +9613,7 @@ pub(crate) mod tests {
             live_error: Some("issue #43 targeted refresh failed".to_string()),
             readiness_failures: Vec::new(),
             urgent_assignments: BTreeMap::new(),
+            issue_parents: Default::default(),
         };
         assert!(
             live_with_failed_spec_enrichment.authorizes_remote_effects(),
@@ -9641,6 +9671,7 @@ pub(crate) mod tests {
             live_error: Some("operation deadline exceeded at issue-list stage".to_string()),
             readiness_failures: Vec::new(),
             urgent_assignments: BTreeMap::new(),
+            issue_parents: Default::default(),
         };
 
         let summary = scan_loaded_issue_monitor_candidates(

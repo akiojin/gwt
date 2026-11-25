@@ -1,6 +1,8 @@
+import { uploadAttachmentFile } from "./attachment-upload.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 import { decisionItemFromQueue, decisionMessageLines } from "./pm-chat.js";
+import { agentAvatar } from "./agent-avatar.js";
 
 // Home is the conversation with the Project Manager (Issue #7639, SPEC #7007
 // T-021). Rendered by the React surface `HomeConversation`
@@ -48,12 +50,15 @@ const COPY = {
 };
 
 const SEND_TIMEOUT_MS = 15_000;
+// A provider can fail without leaving a native message or a session status.
+const REPLY_WAIT_MS = 120_000;
 const REFRESH_MS = 5_000;
 
 const topicId = (projectKey, decisionId) => `${projectKey}:${decisionId}`;
 const isoTime = ms => new Date(ms).toISOString();
 
 const EMPTY_STATE = Object.freeze({
+  pm: null,
   catalogLoaded: false, hasProjects: false, loaded: false, appliedRequest: 0, projects: [],
   settled: [], hidden: [], sent: [], sentCount: 0,
   pending: null, failure: null, replyTo: null,
@@ -63,12 +68,39 @@ const EMPTY_STATE = Object.freeze({
 // view below reads them.
 function withDecisions(state, event) {
   if (!Number.isSafeInteger(event.request_id) || event.request_id <= state.appliedRequest) return state;
+  const priorProjects = new Map(state.projects.map(project => [project.key, project]));
   const projects = (event.projects || []).map(project => ({
     key: project.project_key, title: project.title || project.project_key,
-    pmAvailable: Boolean(project.pm_available), error: project.error || null,
+    pmAvailable: Boolean(project.pm_available), pmInterrupted: Boolean(project.pm_interrupted), error: project.error || null,
     decisions: project.decisions || [], waitingCount: project.waiting_count ?? 0,
+    conversation: project.conversation,
+    ...conversationHistory(priorProjects.get(project.project_key), project.conversation),
   }));
-  return withProjects({ ...state, loaded: true, appliedRequest: event.request_id }, projects);
+  // A rejected worker reply has queues with errors but no fresh PM view.
+  const pm = event.pm === undefined ? state.pm : event.pm;
+  return withProjects({
+    ...state, pm, loaded: true, appliedRequest: event.request_id,
+    sent: reconcileSent(state.sent, projects),
+  }, projects);
+}
+
+function conversationHistory(previous, conversation) {
+  const latest = conversation?.messages || [];
+  const sameSource = previous?.conversation?.conversation_id === conversation?.conversation_id;
+  const prior = sameSource ? previous?.history || [] : [];
+  const older = conversation?.older_messages || [];
+  const latestIds = new Set(latest.map(message => message.id));
+  const overlap = prior.findIndex(message => latestIds.has(message.id));
+  // Keep loaded pages as the latest page advances. Drop them if the source
+  // was replaced or the two latest snapshots no longer overlap.
+  const messages = new Map();
+  for (const message of [...older, ...prior.slice(0, Math.max(0, overlap)), ...latest]) {
+    messages.set(message.id, message);
+  }
+  return {
+    history: [...messages].map(([, message]) => message),
+    hasOlder: Boolean(conversation?.has_older) && (older.length > 0 || overlap < 0 || previous?.hasOlder),
+  };
 }
 
 function withProjects(state, projects) {
@@ -100,6 +132,35 @@ function withDecisionResult(state, event) {
   };
 }
 
+function reconcileSent(sent, projects) {
+  const claimed = sent.filter(receipt => receipt.nativeId)
+    .map(receipt => topicId(receipt.projectKey, receipt.nativeId));
+  return sent.map(receipt => {
+    const project = projects.find(candidate => candidate.key === receipt.projectKey);
+    const messages = project?.conversation?.messages || [];
+    const native = receipt.nativeId ? null : messages.find(item =>
+      item.role === "user" && matchesSentText(item.text, receipt.text, receipt.attachments)
+      && !receipt.previousIds.includes(item.id) && !claimed.includes(topicId(receipt.projectKey, item.id)));
+    if (native) claimed.push(topicId(receipt.projectKey, native.id));
+    const nativeId = receipt.nativeId ?? native?.id;
+    const index = messages.findIndex(item => item.id === nativeId);
+    const next = index === -1 ? null : messages.slice(index + 1).find(item =>
+      item.role === "user" || (item.role === "assistant" && String(item.text ?? "").trim()));
+    const availability = project?.conversation?.availability;
+    const waitingForReply = receipt.waitingForReply && project?.pmAvailable && !project.pmInterrupted
+      && availability !== "unsupported" && availability !== "unavailable" && !next;
+    return { ...receipt, nativeId, waitingForReply };
+  });
+}
+
+function matchesSentText(nativeText, text, attachments) {
+  if (!attachments?.length) return nativeText === text;
+  if (!nativeText.startsWith(`${text}\n\n`)) return false;
+  const suffix = nativeText.slice(text.length + 2);
+  if (!/^Files?: (?:\[)?"/.test(suffix)) return false;
+  return attachments.every(({ uploadPathPrefix }) => suffix.includes(uploadPathPrefix));
+}
+
 // What the outcome of the message to a PM changes: a refusal says why.
 function withSendResult(state, requestId, ok, error) {
   const pending = state.pending;
@@ -107,9 +168,13 @@ function withSendResult(state, requestId, ok, error) {
   if (!ok) {
     return { ...state, pending: null, failure: { topicId: null, message: error || COPY.refused } };
   }
+  const receipt = {
+    id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project,
+    text: pending.answer, attachments: pending.attachments, at: Date.now(), previousIds: pending.previousIds, waitingForReply: true,
+  };
   return {
     ...state, pending: null, failure: null, sentCount: state.sentCount + 1,
-    sent: [...state.sent, { id: `sent-${requestId}`, projectKey: pending.projectKey, project: pending.project, text: pending.answer, at: Date.now() }],
+    sent: reconcileSent([...state.sent, receipt], state.projects),
   };
 }
 
@@ -128,7 +193,7 @@ function decisionsOf(state) {
 }
 
 // The model the React surface renders, derived from the conversation state.
-function homeConversationView(state) {
+function homeConversationView(state, route) {
   const settled = new Set(state.settled.map(entry => entry.id));
   const projects = state.projects.map(project => ({
     key: project.key, title: project.title, pmAvailable: project.pmAvailable,
@@ -147,13 +212,35 @@ function homeConversationView(state) {
         error: state.failure?.topicId === id ? state.failure.message : "",
       };
     });
-  const messages = state.sent.map(message => ({
+  const messages = state.sent.filter(message => !message.nativeId).map(message => ({
     id: message.id, kind: "message", projectKey: message.projectKey, project: message.project,
-    createdAt: isoTime(message.at), lines: [message.text], status: COPY.delivered(message.project),
+    createdAt: isoTime(message.at), lines: [message.text], attachments: message.attachments, status: COPY.delivered(message.project),
   }));
+  const replyWaiting = [
+    ...state.sent.filter(message => message.waitingForReply).map(message => `reply-${message.id}`),
+    ...(pending && !pending.decisionId ? [`reply-sent-${pending.requestId}`] : []),
+  ].map(id => ({ id, kind: "reply-waiting" }));
   // Oldest at the top, newest at the bottom (design item 230).
-  const topics = [...waiting, ...messages]
-    .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
+  const sentByNativeId = new Map(state.sent.filter(message => message.nativeId)
+    .map(message => [topicId(message.projectKey, message.nativeId), message]));
+  const history = [], recent = [...waiting, ...messages];
+  for (const project of state.projects) {
+    let sentAt;
+    for (const message of project.history) {
+      const id = topicId(project.key, message.id);
+      if (message.role === "user") sentAt = sentByNativeId.get(id)?.at;
+      const receipt = sentByNativeId.get(id);
+      const topic = { id, kind: message.role === "assistant" ? "pm-message" : "message",
+        project: project.title, lines: [receipt?.text ?? message.text], attachments: receipt?.attachments };
+      // Keep a submitted turn at its delivery position when native history
+      // replaces the optimistic user message and the reply starts.
+      if (message.timestamp) recent.push({ ...topic, sortAt: message.timestamp });
+      else if (sentAt !== undefined) recent.push({ ...topic, sortAt: isoTime(sentAt) });
+      else history.push(topic);
+    }
+  }
+  const topics = route.decisions ? waiting : [...history, ...recent
+    .sort((a, b) => (a.sortAt ?? a.createdAt ?? "").localeCompare(b.sortAt ?? b.createdAt ?? "")), ...replyWaiting];
   // Issue #7742 AC-4: the queues' own waiting counts, never a recount of the
   // topics drawn here.
   const count = state.loaded ? state.projects.reduce((sum, project) => sum + project.waitingCount, 0) : null;
@@ -163,7 +250,8 @@ function homeConversationView(state) {
         : count ? COPY.greeting.waiting(count) : COPY.greeting.clear;
   const replyTo = waiting.find(topic => topic.id === state.replyTo) ?? null;
   return {
-    pm: { name: COPY.pmName, role: COPY.pmRole },
+    pm: { name: state.pm?.name || COPY.pmName, role: COPY.pmRole,
+      avatar: agentAvatar(state.pm || { name: COPY.pmName }) },
     // The entries that add a project are offered while there is none.
     guide: state.catalogLoaded && !state.hasProjects,
     noneOpen: state.catalogLoaded && state.loaded && state.hasProjects && !projects.length,
@@ -178,6 +266,9 @@ function homeConversationView(state) {
     resolved: state.settled.filter(entry => !state.hidden.includes(entry.id))
       .map(entry => ({ ...entry, answeredAt: isoTime(entry.answeredAt) })),
     topics,
+    hasOlder: state.projects.some(project => project.hasOlder),
+    decisionsOnly: route.decisions,
+    initialMessage: route.project && route.message ? topicId(route.project, route.message) : null,
     busy: Boolean(pending),
     composer: {
       replyTo: replyTo && { id: replyTo.id, subject: replyTo.subject, projectKey: replyTo.projectKey, project: replyTo.project },
@@ -192,25 +283,30 @@ function homeConversationView(state) {
 }
 
 export function createHomeConversation({
-  document, window: win, send, onWaitingChange = () => {}, onOpenFolder = () => {}, onClone = () => {},
+  document, window: win, send, onPmChange = () => {}, onOpenFolder = () => {}, onClone = () => {},
   onOpenProjects = () => {}, scheduleFrame,
 }) {
   const state = createUiStateStore(EMPTY_STATE);
-  const model = createUiStateStore(homeConversationView(EMPTY_STATE), { scheduleFrame });
+  const query = new URL(win.location.href).searchParams;
+  const route = { decisions: query.get("view") === "decisions", project: query.get("project"), message: query.get("message") };
+  const model = createUiStateStore(homeConversationView(EMPTY_STATE, route), { scheduleFrame });
   let requestSequence = 0;
   let sendTimer = null;
   let refreshTimer = null;
+  let lastPm = null;
+  let historyRequest = null;
 
   // The one read of the decisions Home shows.
   function requestDecisions() {
-    send({ kind: "load_home_conversation", request_id: ++requestSequence });
+    if (!historyRequest) send({ kind: "load_home_conversation", request_id: ++requestSequence });
   }
 
   // The one send of a message to the PM of a project. The pane input path
   // pastes the body and submits it on its own carriage return.
   function sendToPm(pending) {
     return issue(pending, requestId => ({ kind: "home_pm_send", project_key: pending.projectKey,
-      text: `${pending.answer}\r`, request_id: requestId }));
+      text: `${pending.answer}\r`, request_id: requestId,
+      ...(pending.uploads?.length ? { attachments: pending.uploads } : {}) }));
   }
 
   // The one queue operation of a decision: an answer, or "decide later".
@@ -249,6 +345,19 @@ export function createHomeConversation({
   }
 
   const actions = {
+    loadOlder() {
+      if (historyRequest) return false;
+      const history = Object.fromEntries(state.read().projects
+        .filter(project => project.hasOlder && project.history.length)
+        .map(project => [project.key, project.history[0].id]));
+      if (!Object.keys(history).length) return false;
+      const requestId = ++requestSequence;
+      if (send({ kind: "load_home_conversation", request_id: requestId, history }) !== "sent") return false;
+      historyRequest = requestId;
+      win.setTimeout(() => { if (historyRequest === requestId) historyRequest = null; }, SEND_TIMEOUT_MS);
+      return true;
+    },
+
     answer(id, optionIndex) {
       const option = decision(id)?.item.options?.[optionIndex];
       if (option != null) answer(id, option, optionIndex, false);
@@ -267,14 +376,27 @@ export function createHomeConversation({
     },
     // From the composer: an answer to the reply target, or a new message to
     // the PM of the chosen project.
-    submit(text, projectKey) {
+    uploadAttachment: uploadAttachmentFile,
+    submit(text, projectKey, attachments = [], uploads = []) {
       const body = String(text ?? "").trim();
       const current = state.read();
       if (!body || current.pending) return false;
-      if (current.replyTo && decision(current.replyTo)) return answer(current.replyTo, body, null, true);
+      if (current.replyTo && decision(current.replyTo)) {
+        if (attachments.length) return false;
+        return answer(current.replyTo, body, null, true);
+      }
       const project = current.projects.find(candidate => candidate.key === projectKey);
       if (!project) return false;
-      return sendToPm({ topicId: null, projectKey: project.key, project: project.title, answer: body, fromComposer: true });
+      const sentAttachments = attachments.map(({ file, id, preview }, index) => ({
+        name: file.name, id, preview,
+        uploadPathPrefix: `".gwt/drop-files/${uploads[index].upload_id.replaceAll("-", "")}-`,
+      }));
+      const previousIds = (project.conversation?.messages || [])
+        .filter(message => message.role === "user" && matchesSentText(message.text, body, sentAttachments)).map(message => message.id);
+      return sendToPm({
+        topicId: null, projectKey: project.key, project: project.title,
+        answer: body, fromComposer: true, previousIds, attachments: sentAttachments, uploads,
+      });
     },
     deleteTopic(id) {
       state.update(current => ({ ...current, hidden: [...current.hidden.filter(other => other !== id), id] }));
@@ -288,6 +410,7 @@ export function createHomeConversation({
   // A receive only commits state; everything that follows from it is below.
   function receive(event) {
     if (event?.kind === "home_conversation") {
+      if (event.request_id === historyRequest) historyRequest = null;
       state.update(current => withDecisions(current, event));
       return true;
     }
@@ -302,8 +425,15 @@ export function createHomeConversation({
     return false;
   }
 
-  state.subscribe(current => current, current => model.update(() => homeConversationView(current)));
-  model.subscribe(view => view.waiting, waiting => onWaitingChange(waiting));
+  state.subscribe(current => current, current => {
+    const view = homeConversationView(current, route);
+    const waitingChanged = view.waiting !== model.read().waiting;
+    model.update(() => view);
+    if (waitingChanged || current.pm !== lastPm) {
+      lastPm = current.pm;
+      onPmChange({ name: current.pm?.name, avatar: current.pm?.avatar, decisions: view.waiting ?? 0 });
+    }
+  });
   // A message in flight is given a bounded time to be confirmed; once it is
   // settled either way, the decisions are read again.
   state.subscribe(current => current.pending?.requestId ?? null, requestId => {
@@ -328,14 +458,25 @@ export function createHomeConversation({
 
   // The catalog that follows a connection starts the first read.
   function connected() {
-    if (!refreshTimer) refreshTimer = win.setInterval(requestDecisions, REFRESH_MS);
+    if (!refreshTimer) refreshTimer = win.setInterval(() => {
+      state.update(current => {
+        const now = Date.now();
+        if (!current.sent.some(receipt => receipt.waitingForReply && now - receipt.at >= REPLY_WAIT_MS)) return current;
+        return { ...current, sent: current.sent.map(receipt => now - receipt.at >= REPLY_WAIT_MS
+          ? { ...receipt, waitingForReply: false } : receipt) };
+      });
+      requestDecisions();
+    }, REFRESH_MS);
   }
 
   function connectionLost() {
     if (refreshTimer) win.clearInterval(refreshTimer);
     refreshTimer = null;
-    const pending = state.read().pending;
-    if (pending) state.update(current => withUnconfirmed(current, pending.requestId));
+    state.update(current => {
+      const next = current.pending ? withUnconfirmed(current, current.pending.requestId) : current;
+      if (!next.sent.some(receipt => receipt.waitingForReply)) return next;
+      return { ...next, sent: next.sent.map(receipt => ({ ...receipt, waitingForReply: false })) };
+    });
   }
 
   const container = createDetachedIslandContainer(document);

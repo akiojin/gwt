@@ -3,9 +3,26 @@ import { renderMemberTuningControls } from "./settings-surface.js";
 import { createFocusTrap } from "./focus-trap.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { mountIsland } from "./react/islands.js";
+import { AVATAR_PRESETS, AVATAR_UPLOAD_TYPES, agentAvatar, prepareAvatarUpload } from "./agent-avatar.js";
 
 const configuredPm = member => !!member?.pm_project_key;
 const holdsPmRole = member => !!member && (member.is_pm || !!member.pm_project_key || member.assignment?.role === "pm");
+// Draw `member`'s avatar (Issues #7635 / #7636) into an existing node: an
+// uploaded image as an <img>, otherwise its glyph.
+function renderAgentAvatar(node, member) {
+  const view = agentAvatar(member);
+  const img = node.querySelector(":scope > img.agent-avatar-image");
+  if (view.imageUrl) {
+    if (!img) {
+      const created = node.ownerDocument.createElement("img"); created.className = "agent-avatar-image"; created.alt = "";
+      created.src = view.imageUrl; node.replaceChildren(created);
+    } else if (img.getAttribute("src") !== view.imageUrl) img.src = view.imageUrl;
+  } else if (img || node.textContent !== view.glyph) node.textContent = view.glyph;
+  node.dataset.avatarKind = view.kind;
+  if (view.presetId) node.dataset.avatarPreset = view.presetId;
+  else delete node.dataset.avatarPreset;
+  return node;
+}
 const rosterReady = roster => roster.revision !== null && roster.revision !== undefined;
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
@@ -18,6 +35,7 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
 const TRAIT_CHOICES = { reasoning_level: [["low", "Low"], ["standard", "Standard"], ["high", "High"], ["max", "Max"]],
   speed: [["normal", "Normal"], ["fast", "Fast"], ["fastest", "Fastest"]] };
 const PERSONALITY_MAX_CHARS = 4000;
+const ENVIRONMENT_ORDER_RESTORED = "Returned to the project's order";
 const savedTraits = member => ({ reasoning_level: member?.traits?.reasoning_level || "", speed: member?.traits?.speed || "", personality: member?.traits?.personality || "" });
 const traitLabel = (name, value) => TRAIT_CHOICES[name].find(([id]) => id === value)?.[1] || "";
 const traitsSummary = member => {
@@ -27,14 +45,14 @@ const traitsSummary = member => {
 };
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
+export function createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onMoveMember = () => {}, onRemoveMember = () => {}, onSetTraits = () => {}, onSetEnvironmentPriority = () => {}, onSetAvatar = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {}, onOpenPmTerminal = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views" data-project-only><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
-    <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
+    <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span><button type="button" class="wizard-button" data-action="pm-terminal">Open PM terminal</button></div>
     <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> registered members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Registered members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
-    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. The tool a session starts with comes from the project's available execution environments, not from the member. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
+    <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues. Sessions use the project's available execution environments in the agent's order, when set. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div><div class="react-island agent-history-plans-host" data-project-only></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" data-project-only hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
   if (executionModel) {
@@ -98,6 +116,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
   let renderedDetail = null;
   const memberRows = new Map();
   const nameFields = new Map();
+  const memberPriority = memberId => executionEnvironmentsModel?.read().view?.agent_priorities?.[memberId];
   let submittedSnapshot = null, scheduleNotice = "", pendingSource = null;
   const emptySwitch = { intents: [], pending: null, error: null, disconnected: false };
   const switchState = () => switchModel?.read() || emptySwitch;
@@ -112,19 +131,37 @@ export function createAgentsSurface({ document, storage, executionModel, project
   // Issue #7035 AC-1: review windows hold max_active slots without a roster
   // member, so they are listed from the same child census Busy reads.
   const liveReviews = () => (activityModel.read().agents || []).filter(assignment => !assignment.is_pm && assignment.review_dispatch);
+  const exactReview = target => !disposed && finite(activityModel.read().count) && liveReviews().find(review =>
+    review.window_id === target?.window_id && review.session_id === target?.session_id && review.runtime_incarnation === target?.runtime_incarnation);
+  function selectReview(target) {
+    if (!exactReview(target)) return false;
+    if (tab !== "team") { tab = "team"; sync(); }
+    const row = [...element.querySelectorAll(".roster-review")].find(row => row.dataset.reviewSessionId === target.session_id);
+    row?.querySelector("button")?.focus(); row?.scrollIntoView?.({ block: "nearest" });
+    return !!row;
+  }
   function renderReviews() {
     const host = element.querySelector(".roster-reviews"), reviews = liveReviews();
+    const focused = host.contains(document.activeElement) ? document.activeElement.closest(".roster-review")?.dataset : null;
+    let focusTarget = null;
     host.replaceChildren(...reviews.map(review => {
       const row = document.createElement("article"); row.className = "roster-row roster-review"; row.setAttribute("role", "listitem");
       row.dataset.reviewSessionId = review.session_id;
-      const who = document.createElement("div"), name = document.createElement("h3"), purpose = document.createElement("span"), state = document.createElement("span");
+      row.dataset.windowId = review.window_id; row.dataset.runtimeIncarnation = String(review.runtime_incarnation);
+      const who = document.createElement("div"), name = document.createElement("h3"), purpose = document.createElement("button"), state = document.createElement("span");
       who.className = "roster-who"; purpose.className = "roster-purpose"; state.className = "roster-state";
       name.textContent = review.agent_name || "Reviewer";
       purpose.textContent = review.issue_number ? `Review · Issue #${review.issue_number}` : "Review"; purpose.title = purpose.textContent;
+      purpose.type = "button"; purpose.setAttribute("aria-label", `Open ${name.textContent} review terminal`);
+      purpose.disabled = !finite(activityModel.read().count);
+      purpose.addEventListener("click", () => { const current = exactReview(review); if (current) onOpenWork(current); });
+      if (focused?.windowId === review.window_id && focused.reviewSessionId === review.session_id
+        && focused.runtimeIncarnation === String(review.runtime_incarnation) && exactReview(review)) focusTarget = purpose;
       state.textContent = `Reviewing${review.issue_number ? ` #${review.issue_number}` : ""}`;
       who.append(name, purpose); row.append(avatar({ name: name.textContent }), who, state);
       return row;
     }));
+    focusTarget?.focus({ preventScroll: true });
     host.hidden = reviews.length === 0;
     return reviews.length;
   }
@@ -153,7 +190,7 @@ export function createAgentsSurface({ document, storage, executionModel, project
     return result;
   }
   function avatar(member) {
-    const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); result.textContent = Array.from(member.name || "?")[0]; return result;
+    const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); return renderAgentAvatar(result, member);
   }
   function setSelectedMember(memberId) {
     if (memberId === selectedId) return;
@@ -362,6 +399,59 @@ export function createAgentsSurface({ document, storage, executionModel, project
     panel.insertBefore(history, actions || null);
     renderedDetail = { key, currentWork, actions };
   }
+  function syncEnvironmentPriority(panel, memberId) {
+    const { view, agentPriorityPending, agentPriorityError } = executionEnvironmentsModel.read();
+    const environments = view?.environments || [];
+    const priority = memberPriority(memberId);
+    const ids = priority?.environment_ids || [];
+    const list = panel.querySelector("ol"), picker = panel.querySelector("select");
+    const disabled = !view || !!agentPriorityPending;
+    const key = JSON.stringify([environments.map(({ id, name }) => [id, name]), ids]);
+    if (panel.dataset.environmentKey !== key) {
+      const previousPick = picker.value;
+      picker.replaceChildren(...environments.filter(environment => !ids.includes(environment.id)).map(environment => {
+        const option = document.createElement("option"); option.value = environment.id; option.textContent = environment.name;
+        option.selected = option.value === previousPick;
+        return option;
+      }));
+      list.replaceChildren(...ids.map((id, index) => {
+        const name = environments.find(environment => environment.id === id)?.name || id;
+        const row = document.createElement("li"); row.className = "project-environments__item"; row.dataset.environmentId = id;
+        const title = document.createElement("span"); title.className = "project-environments__name"; title.textContent = name;
+        const actions = document.createElement("div"); actions.className = "project-environments__actions";
+        for (const [label, offset] of [["Move up", -1], ["Move down", 1], ["Remove", 0]]) {
+          const button = document.createElement("button"); button.type = "button"; button.className = "wizard-button"; button.textContent = label;
+          button.setAttribute("aria-label", `${label} ${name}`);
+          const target = index + offset, edge = target < 0 || target >= ids.length;
+          button.dataset.edge = String(edge);
+          button.addEventListener("click", () => {
+            if (button.disabled || executionEnvironmentsModel.read().agentPriorityPending) return;
+            const next = [...(memberPriority(memberId)?.environment_ids || [])];
+            const from = next.indexOf(id), to = from + offset;
+            if (from < 0 || to < 0 || to >= next.length) return;
+            if (offset) [next[from], next[to]] = [next[to], next[from]];
+            else next.splice(from, 1);
+            onSetEnvironmentPriority(memberId, next);
+          });
+          actions.append(button);
+        }
+        row.append(title, actions);
+        return row;
+      }));
+      panel.dataset.environmentKey = key;
+    }
+    list.hidden = ids.length === 0;
+    const status = panel.querySelector("[role=status]");
+    status.textContent = !view ? "Loading execution environments…" : priority?.reverted_to_project
+      ? ENVIRONMENT_ORDER_RESTORED : ids.length ? "" : "Using the project's order";
+    const hasOptions = picker.options.length > 0;
+    panel.querySelector("form").hidden = !hasOptions;
+    picker.disabled = panel.querySelector("[type=submit]").disabled = disabled || !hasOptions;
+    for (const button of list.querySelectorAll("button")) button.disabled = disabled || button.dataset.edge === "true";
+    const error = panel.querySelector("[role=alert]");
+    error.textContent = agentPriorityError?.memberId === memberId ? agentPriorityError.message : "";
+    error.hidden = !error.textContent;
+  }
   function memberNameField(member) {
     let field = nameFields.get(member.member_id);
     if (!field) {
@@ -404,11 +494,66 @@ export function createAgentsSurface({ document, storage, executionModel, project
         const next = { ...field.traitsDraft, personality: field.traitsDraft.personality.trim() };
         onSetTraits(latest.member_id, Object.fromEntries(Object.entries(next).filter(([, value]) => value)));
       });
-      label.append(input); who.append(name, meta, label, status, retry, eligibleLabel, selectPm, traits, tuning); head.append(avatar(member), who);
+      if (executionEnvironmentsModel) {
+        const priority = document.createElement("fieldset");
+        priority.className = "settings-section project-environments"; priority.dataset.memberEnvironments = "";
+        priority.innerHTML = `<legend>Execution environment priority</legend>
+          <p class="settings-help">Only environments allowed by the project can be used. Clear the list to use the project's order.</p>
+          <ol class="project-environments__list" aria-label="Execution environments in priority order"></ol>
+          <p class="settings-help" role="status"></p>
+          <form class="project-environments__add"><label class="settings-field"><span>Add an execution environment</span><select class="settings-select"></select></label><button type="submit" class="wizard-button">Add to the end</button></form>
+          <p class="settings-status" data-kind="error" role="alert" hidden></p>`;
+        priority.querySelector("form").addEventListener("submit", event => {
+          event.preventDefault();
+          const selected = priority.querySelector("select").value;
+          const ids = memberPriority(member.member_id)?.environment_ids || [];
+          if (selected && !ids.includes(selected) && !executionEnvironmentsModel.read().agentPriorityPending) {
+            onSetEnvironmentPriority(member.member_id, [...ids, selected]);
+          }
+        });
+        field.environmentPriority = priority;
+      }
+      // Issue #7635: the avatar is the agent's own; choosing one changes every display of it.
+      const avatarPicker = document.createElement("section"); avatarPicker.className = "roster-avatar-picker"; avatarPicker.dataset.memberAvatar = "";
+      const avatarTitle = document.createElement("h4"); avatarTitle.id = `roster-avatar-title-${member.member_id}`; avatarTitle.textContent = "Avatar";
+      const avatarChoices = document.createElement("div"); avatarChoices.className = "roster-avatar-choices"; avatarChoices.setAttribute("role", "radiogroup"); avatarChoices.setAttribute("aria-labelledby", avatarTitle.id);
+      for (const choice of [{ id: "default", label: "Initial" }, ...AVATAR_PRESETS]) {
+        const button = document.createElement("button"); button.type = "button"; button.className = "roster-avatar roster-avatar-choice";
+        button.dataset.avatarChoice = choice.id; button.setAttribute("role", "radio"); button.setAttribute("aria-label", choice.label); button.title = choice.label;
+        button.addEventListener("click", () => {
+          const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+          if (disposed || !latest || !rosterReady(roster) || roster.pending_roster || button.getAttribute("aria-checked") === "true") return;
+          showAvatarError(""); onSetAvatar(latest.member_id, choice.id === "default" ? { kind: "default" } : { kind: "preset", preset_id: choice.id });
+        });
+        avatarChoices.append(button);
+      }
+      // Issue #7636 (T-018): an image picked from this machine. It is cropped
+      // and scaled here and saved only in the local ledger; a refused file
+      // shows why and leaves the saved avatar untouched.
+      const upload = document.createElement("button"); upload.type = "button"; upload.className = "roster-avatar roster-avatar-choice";
+      upload.dataset.avatarChoice = "upload"; upload.setAttribute("role", "radio"); upload.setAttribute("aria-label", "Upload image"); upload.title = "Upload image";
+      const file = document.createElement("input"); file.type = "file"; file.accept = AVATAR_UPLOAD_TYPES.join(","); file.hidden = true; file.tabIndex = -1; file.dataset.avatarFile = "";
+      const avatarError = document.createElement("p"); avatarError.className = "roster-avatar-error"; avatarError.setAttribute("role", "alert"); avatarError.hidden = true;
+      const showAvatarError = message => { avatarError.textContent = message || ""; avatarError.hidden = !message; };
+      upload.addEventListener("click", () => { if (!disposed && !upload.disabled) file.click(); });
+      file.addEventListener("change", async () => {
+        const picked = file.files?.[0]; file.value = "";
+        if (!picked || disposed) return;
+        const prepared = await prepareAvatarUpload(picked, { createCanvas: () => document.createElement("canvas") });
+        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+        if (disposed || !latest) return;
+        if (prepared.error) { showAvatarError(prepared.error); return; }
+        if (!rosterReady(roster) || roster.pending_roster) { showAvatarError("Another ledger change is in progress. Try again."); return; }
+        showAvatarError(""); onSetAvatar(latest.member_id, prepared.avatar);
+      });
+      avatarChoices.append(upload);
+      avatarPicker.append(avatarTitle, avatarChoices, file, avatarError); field.avatarPicker = avatarPicker; field.showAvatarError = showAvatarError;
+      label.append(input); who.append(name, meta, label, status, retry, avatarPicker, eligibleLabel, selectPm, traits, tuning);
+      if (field.environmentPriority) who.append(field.environmentPriority);
+      field.avatar = avatar(member); head.append(field.avatar, who);
     }
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
-    field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     field.head.querySelector("p").textContent = `Member since ${date(member.created_at)} UTC`;
     let memberId = field.head.querySelector(".roster-member-id");
     if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
@@ -443,6 +588,16 @@ export function createAgentsSurface({ document, storage, executionModel, project
       control.disabled = !rosterReady(rosterModel.read());
     }
     field.traits.querySelector('[data-action="save-traits"]').disabled = held || !field.traitsDraft;
+    if (field.environmentPriority) syncEnvironmentPriority(field.environmentPriority, member.member_id);
+    const shown = renderAgentAvatar(field.avatar, member).dataset;
+    for (const button of field.avatarPicker.querySelectorAll("[data-avatar-choice]")) {
+      const id = button.dataset.avatarChoice;
+      if (id === "default") renderAgentAvatar(button, { name: member.name });
+      else if (id === "upload") { if (shown.avatarKind === "upload") renderAgentAvatar(button, member); else if (button.textContent !== "＋") button.textContent = "＋"; }
+      else button.textContent = AVATAR_PRESETS.find(preset => preset.id === id).glyph;
+      button.setAttribute("aria-checked", String(id === (shown.avatarKind === "upload" ? "upload" : shown.avatarPreset || "default")));
+      button.disabled = held;
+    }
     // Issue #7647 (SPEC #7007 item 27): a member has no tool of its own, so
     // the ledger offers none, nor a model or reasoning for it. Only the
     // Project Manager keeps those here, until it has its own list of
@@ -566,14 +721,15 @@ export function createAgentsSurface({ document, storage, executionModel, project
       }
       // The controls sit at the row's trailing edge, so the body of the row stays the selection target.
       const traits = document.createElement("span"); traits.className = "roster-row-traits";
-      who.append(name, purpose, traits, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state, order);
+      const priorityNotice = document.createElement("span"); priorityNotice.className = "settings-help"; priorityNotice.dataset.environmentPriorityNotice = ""; priorityNotice.hidden = true;
+      who.append(name, purpose, traits, priorityNotice, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state, order);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
     }
     const { row } = cached, unavailable = member.assignment?.session_id && activityModel.read().count === null;
     row.setAttribute("aria-selected", String(member.member_id === selectedId));
-    row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
+    renderAgentAvatar(row.querySelector(".roster-avatar"), member);
     row.querySelector("h3").textContent = member.name;
     const order = row.querySelector(".roster-order"), held = !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     order.setAttribute("aria-label", `Order and deletion for ${member.name}`);
@@ -587,6 +743,9 @@ export function createAgentsSurface({ document, storage, executionModel, project
     purpose.textContent = holdsPmRole(member) ? `${configuredPm(member) ? "Project Manager" : "Project Manager assignment retained"}${member.pm_project_key && member.pm_project_key !== rosterModel.read().project_key ? ` · ${member.pm_project_key}` : ""}` : current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
     const traits = row.querySelector(".roster-row-traits");
     traits.textContent = traitsSummary(member); traits.title = traits.textContent; traits.hidden = !traits.textContent;
+    const priorityNotice = row.querySelector("[data-environment-priority-notice]");
+    priorityNotice.hidden = !memberPriority(member.member_id)?.reverted_to_project;
+    priorityNotice.textContent = priorityNotice.hidden ? "" : ENVIRONMENT_ORDER_RESTORED;
     const summaries = member.active_assignments || [], summariesKey = JSON.stringify(summaries);
     if (cached.summariesKey !== summariesKey) {
       const assignments = row.querySelector(".roster-assignments"); assignments.replaceChildren();
@@ -619,10 +778,13 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const roster = rosterModel.read(), activity = activityModel.read(), catalog = windowCatalogModel.read().catalog;
     const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
       || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-    const pm = windows.find(window => (activity.agents || []).some(assignment => assignment.is_pm
-      && assignment.window_id === window.id && assignment.session_id === window.session_id));
+    const pm = windows.find(window => window.is_pm && window.session_id && (
+      ["stopped", "error"].includes(window.status) || (activity.agents || []).some(assignment => assignment.is_pm
+        && assignment.window_id === window.id && assignment.session_id === window.session_id)
+    ));
     const identity = element.querySelector(".roster-pm-identity");
     identity.hidden = !pm;
+    identity.querySelector('[data-action="pm-terminal"]').onclick = pm ? () => onOpenPmTerminal(pm.id, pm.session_id) : null;
     identity.querySelector(".roster-pm-name").textContent = pm?.agent_name || (pm ? "Project Manager" : "");
     const schedule = scheduleState();
     if (submittedSnapshot && (schedule.error || schedule.snapshot !== submittedSnapshot)) submittedSnapshot = null;
@@ -695,7 +857,8 @@ export function createAgentsSurface({ document, storage, executionModel, project
     running.textContent = `Running ${number(count)}`;
   }));
   if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
+  if (executionEnvironmentsModel) unsubscribers.push(executionEnvironmentsModel.subscribeFrame(state => state, sync));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
-  return { element, sync, syncPreview, selectMember, openPmSettings, setPreviewHost, setView, get view() { return view; }, dispose() { if (disposed) return; historyPlans.unmount(); releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); closeRemoval(); document.removeEventListener("keydown", removalEscape); removal.remove(); disposed = true; } };
+  return { element, sync, syncPreview, selectMember, selectReview, openPmSettings, setPreviewHost, setView, get view() { return view; }, dispose() { if (disposed) return; historyPlans.unmount(); releaseExecution?.(); pmSettingsPanel?.unmount(element.querySelector('[data-role="pm-project-operations"]')); for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); closeRemoval(); document.removeEventListener("keydown", removalEscape); removal.remove(); disposed = true; } };
 }

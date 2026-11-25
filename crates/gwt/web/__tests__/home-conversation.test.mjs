@@ -237,6 +237,31 @@ test("a new message is sent to the chosen project and never to a silent pick", a
   assert.match(sent.textContent, /You.*to Beta.*Move the nightly update.*Delivered to the Project Manager of Beta\./);
 });
 
+test("native history replaces each confirmed local send once, including repeated text", async () => {
+  const { app, home, load, sends, socket } = fixture();
+  const text = "Check the nightly update";
+  const native = id => ({ id, role: "user", text });
+  const loadHistory = messages => load([alpha], [project(alpha, [], { conversation: { messages } })]);
+  const receipts = () => home().querySelectorAll("[data-home-sent]").length;
+  loadHistory([native("older")]);
+  for (const answer of [text, text]) {
+    assert.ok(app.home.actions.submit(answer, alpha.project_key));
+    socket.deliver({ kind: "pane_send_result", request_id: sends().at(-1).request_id, ok: true });
+  }
+  await settle();
+  assert.equal(receipts(), 2);
+  loadHistory([native("older"), native("first")]);
+  await settle();
+  assert.equal(receipts(), 1);
+  loadHistory([native("older"), native("first")]);
+  await settle();
+  assert.equal(receipts(), 1);
+  loadHistory([native("older"), native("first"), native("second")]);
+  await settle();
+  assert.equal(receipts(), 0);
+  assert.equal(home().querySelectorAll(".gwt-home__msg--me").length, 3);
+});
+
 test("a resolved topic is deleted only after a confirmation", async () => {
   const { document, home, load, answers, socket, topics } = fixture();
   load([alpha], [twoProjects[0]]);
@@ -313,4 +338,27 @@ test("a project whose decisions cannot be read is named, not hidden", () => {
   const { home, load } = fixture();
   load([alpha], [project(alpha, [], { pm_available: false, error: "store locked" })]);
   assert.equal(home().querySelector('.gwt-home__note[role="alert"]').textContent, "Decisions of Alpha could not be read: store locked");
+});
+
+test("Home attachment controls use Operator tokens and wrap at narrow widths", () => {
+  const css = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
+  const styles = css.split(".gwt-home__attachments {")[1].split(".gwt-home__draft {")[0];
+  assert.match(styles, /flex-wrap:\s*wrap/);
+  assert.match(styles, /var\(--color-border\)/);
+  assert.match(styles, /var\(--color-surface\)/);
+  assert.doesNotMatch(styles, /#[\da-f]{3,8}\b|rgba?\(/i);
+});
+
+test("Issue #7864 mounts only the most recent 50 articles in native order", async () => {
+  const f = fixture();
+  f.load([alpha], [project(alpha, [], { conversation: { availability: "ready",
+    messages: Array.from({ length: 2500 }, (_, index) => ({
+      id: String(index), role: "assistant", text: `Article ${index}`,
+    })),
+  } })]);
+  await settle();
+  const articles = [...f.home().querySelectorAll(".gwt-home__timeline > article:not([data-home-greeting])")];
+  assert.deepEqual(articles.map(node => node.lastElementChild.textContent),
+    Array.from({ length: 50 }, (_, index) => `Article ${2450 + index}`));
+  assert.equal(f.home().querySelector(".gwt-home__timeline > details"), null);
 });

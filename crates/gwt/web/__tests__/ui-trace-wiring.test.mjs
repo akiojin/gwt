@@ -49,10 +49,9 @@ function fakeProfiler() {
   };
 }
 
-test("UI trace wiring registers command palette actions and saves stopped traces", () => {
+test("UI trace wiring starts and saves stopped traces", () => {
   const profiler = fakeProfiler();
   const sent = [];
-  const registered = [];
   const logs = [];
   const wiring = createUiTraceWiring({
     profiler,
@@ -63,20 +62,9 @@ test("UI trace wiring registers command palette actions and saves stopped traces
     log: (message) => logs.push(message),
   });
 
-  assert.equal(
-    wiring.registerPalette({ register: (entry) => registered.push(entry) }),
-    true,
-  );
-  assert.deepEqual(
-    registered.map((entry) => [entry.id, entry.label, entry.group]),
-    [
-      ["diagnostics-ui-trace-start", "Start UI Trace", "Diagnostics"],
-      ["diagnostics-ui-trace-stop", "Stop UI Trace", "Diagnostics"],
-    ],
-  );
-
-  registered[0].handler();
-  registered[1].handler();
+  assert.equal("registerPalette" in wiring, false);
+  wiring.start();
+  wiring.stop();
 
   assert.deepEqual(sent, [
     {

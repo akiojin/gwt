@@ -40,6 +40,93 @@ pub struct AgentMember {
     /// Fixed traits of this agent (SPEC #7007 items 26, 43 and 48).
     #[serde(default, skip_serializing_if = "AgentTraits::is_unset")]
     pub traits: AgentTraits,
+    /// The agent's avatar (SPEC #7007 items 17, 18 and 20). It belongs to the
+    /// agent, so a tool change never touches it.
+    #[serde(default, skip_serializing_if = "AgentAvatar::is_unset")]
+    pub avatar: AgentAvatar,
+}
+
+/// Preset avatars an agent can choose (SPEC #7007 item 96). The GUI draws
+/// each id; an id outside this list is refused when saved.
+pub const AVATAR_PRESET_IDS: &[&str] = &["cat", "owl", "bear", "fox", "penguin", "robot"];
+
+/// Where an agent's avatar comes from. `Upload` is an image the user
+/// provides (T-018).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAvatarKind {
+    #[default]
+    Default,
+    Preset,
+    Upload,
+}
+
+/// An agent's avatar. The default draws the agent's initial.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAvatar {
+    #[serde(default)]
+    pub kind: AgentAvatarKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    /// The uploaded image (T-018) as a `data:image/png;base64,` URL. The GUI
+    /// crops and scales the picked file to a small square PNG, and it is kept
+    /// only in this machine's ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+/// Largest uploaded avatar PNG the ledger keeps, in decoded bytes.
+pub const AVATAR_IMAGE_MAX_BYTES: usize = 64 * 1024;
+const AVATAR_IMAGE_PREFIX: &str = "data:image/png;base64,";
+
+impl AgentAvatar {
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Refuse an avatar the GUI cannot draw.
+    fn validated(self) -> Result<Self, String> {
+        match self.kind {
+            AgentAvatarKind::Default => Ok(Self::default()),
+            AgentAvatarKind::Preset => match self.preset_id.as_deref() {
+                Some(id) if AVATAR_PRESET_IDS.contains(&id) => Ok(Self {
+                    image: None,
+                    ..self
+                }),
+                _ => Err("Choose one of the preset avatars".into()),
+            },
+            AgentAvatarKind::Upload => {
+                use base64::Engine as _;
+                let refused = || {
+                    format!(
+                        "The avatar image must be a PNG of at most {} KiB",
+                        AVATAR_IMAGE_MAX_BYTES / 1024
+                    )
+                };
+                let encoded = self
+                    .image
+                    .as_deref()
+                    .and_then(|image| image.strip_prefix(AVATAR_IMAGE_PREFIX))
+                    .ok_or_else(refused)?;
+                // Bound the work before decoding: 4 base64 chars carry 3 bytes.
+                if encoded.len() > AVATAR_IMAGE_MAX_BYTES.div_ceil(3) * 4 {
+                    return Err(refused());
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| refused())?;
+                if bytes.len() > AVATAR_IMAGE_MAX_BYTES || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                {
+                    return Err(refused());
+                }
+                Ok(Self {
+                    kind: AgentAvatarKind::Upload,
+                    preset_id: None,
+                    image: self.image,
+                })
+            }
+        }
+    }
 }
 
 /// Longest personality text an agent may carry. Item 180 fixes that a cap
@@ -208,6 +295,11 @@ pub enum AgentRosterAction {
         member_id: String,
         traits: AgentTraits,
     },
+    /// Replace the member's avatar. A tool change never writes it.
+    SetAvatar {
+        member_id: String,
+        avatar: AgentAvatar,
+    },
     SetTuning(MemberTuning),
 }
 
@@ -342,6 +434,7 @@ impl AgentRoster {
             last_owner_project_key: None,
             assignment: None,
             traits: Default::default(),
+            avatar: Default::default(),
         });
         Ok(())
     }
@@ -845,6 +938,7 @@ pub(crate) fn observed_project_member_seeds(
                     ),
                 }),
                 traits: Default::default(),
+                avatar: Default::default(),
             });
     }
     Ok(members)
@@ -900,6 +994,7 @@ pub fn mutate_project_roster_snapshot(
             | AgentRosterAction::Move { .. }
             | AgentRosterAction::Remove { .. }
             | AgentRosterAction::SetTraits { .. }
+            | AgentRosterAction::SetAvatar { .. }
     ) {
         return crate::agent_registry::mutate_pm_selection(
             &gwt_core::paths::project_scope_hash(root),
@@ -1040,6 +1135,15 @@ pub(crate) fn apply_roster_action(
                 .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
                 .traits = traits;
         }
+        AgentRosterAction::SetAvatar { member_id, avatar } => {
+            let avatar = avatar.validated().map_err(std::io::Error::other)?;
+            roster
+                .members
+                .iter_mut()
+                .find(|member| member.agent_member_id == member_id)
+                .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
+                .avatar = avatar;
+        }
         AgentRosterAction::SetPmEligibility { .. }
         | AgentRosterAction::SelectPm { .. }
         | AgentRosterAction::Remove { .. }
@@ -1167,13 +1271,33 @@ fn missing_session_is_absent(sessions: &Path, id: &str) -> std::io::Result<bool>
     };
     for namespace in namespaces {
         let namespace = namespace?;
+        let sidecar = namespace.path().join(format!("{id}.json"));
         if namespace.file_type()?.is_dir()
-            && !path_is_absent(&namespace.path().join(format!("{id}.json")))?
+            && !path_is_absent(&sidecar)?
+            && !runtime_sidecar_proves_exit(&sidecar)
         {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+// Issue #7351: a vanished window can leave its runtime sidecar behind. Only a
+// readable, published sidecar whose exact PTY child has exited stops fencing
+// the reservation; unreadable, legacy or still-live evidence keeps it busy.
+fn runtime_sidecar_proves_exit(path: &Path) -> bool {
+    let Ok(runtime) = gwt_agent::SessionRuntimeState::load(path) else {
+        return false;
+    };
+    runtime.runtime_incarnation.is_some_and(|value| value > 0)
+        && runtime
+            .child_pid
+            .filter(|pid| *pid > 0)
+            .zip(runtime.child_started_at.filter(|started| *started > 0))
+            .is_some_and(|(pid, started)| {
+                !crate::process::exact_pty_process_tree_is_alive(pid, started)
+                    && !crate::process::is_host_process_alive(pid)
+            })
 }
 
 fn dead_project_assignments(
@@ -1495,7 +1619,10 @@ fn reserve_project_member_inner(
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(root, prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
-        let listed = requested_tool.as_deref().is_some_and(|tool| prefs.environment_lists_tool(tool));
+        let listed = requested_tool.as_deref().is_some_and(|tool| {
+            prefs.environment_lists_tool(tool)
+                || selected_member_id.is_some_and(|id| prefs.member_environment_overrides_tool(id, tool))
+        });
         let matches_tool = |member: &AgentMember| matches_tool(member, listed);
         let runs = |profile: &crate::IssueMonitorLaunchProfile, tool: &String| listed || &profile.agent_id == tool;
         if !listed && selected_member_id.is_some_and(|id| {
@@ -1780,6 +1907,7 @@ pub fn adopt_project_member_session(
                 host_started_at: crate::process::host_process_start_time(observed.host_pid),
             }),
         traits: Default::default(),
+        avatar: Default::default(),
     };
     let mut seed = initial_project_members(root, &path, sessions_dir)?;
     if !seed
@@ -4529,5 +4657,54 @@ mod tests {
         let lock = std::fs::File::open(&history).unwrap();
         lock.lock_exclusive().unwrap();
         assert!(allocate(&history, "en", &HashSet::new(), &HashSet::new()).is_err());
+    }
+
+    // Issue #7636 AC-2 / AC-4: an uploaded avatar is a small PNG kept inline
+    // in the machine-local ledger; anything else is refused so the stored
+    // avatar stays as it was, and a preset or the default drops the image.
+    #[test]
+    fn uploaded_avatar_accepts_only_a_small_png_and_presets_drop_it() {
+        use base64::Engine as _;
+        let encode = |bytes: &[u8]| {
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0; 32]);
+        let upload = |image: Option<String>| AgentAvatar {
+            kind: AgentAvatarKind::Upload,
+            preset_id: None,
+            image,
+        };
+        let accepted = upload(Some(encode(&png))).validated().unwrap();
+        assert_eq!(accepted.image, Some(encode(&png)));
+
+        let mut oversized = png.clone();
+        oversized.resize(AVATAR_IMAGE_MAX_BYTES + 1, 0);
+        for refused in [
+            None,
+            Some(encode(b"GIF89a not a png")),
+            Some(encode(&oversized)),
+            Some(format!("data:image/jpeg;base64,{}", &encode(&png)[22..])),
+            Some("data:image/png;base64,!!!".to_string()),
+            Some("https://example.com/avatar.png".to_string()),
+        ] {
+            let error = upload(refused).validated().unwrap_err();
+            assert!(error.contains("avatar"), "{error}");
+        }
+
+        let preset = AgentAvatar {
+            kind: AgentAvatarKind::Preset,
+            preset_id: Some("fox".into()),
+            image: Some(encode(&png)),
+        };
+        assert_eq!(preset.validated().unwrap().image, None);
+        let default = AgentAvatar {
+            image: Some(encode(&png)),
+            ..AgentAvatar::default()
+        };
+        assert!(default.validated().unwrap().is_unset());
     }
 }

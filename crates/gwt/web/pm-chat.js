@@ -3,7 +3,6 @@ import { renderUiContent } from './ui-content.js';
 import { createTaskHome } from './task-home.js';
 import { createTaskDecisions } from './task-decisions.js';
 import { createTaskProgress } from './task-progress.js';
-import { createTaskLog } from './task-log.js';
 
 function reportDetailsMarkdown(structured) {
   return [structured.details, (structured.refs || []).map(ref => `- ${ref}`).join('\n')]
@@ -156,8 +155,10 @@ export function createPmWindowModel() {
         // removal or the new order shows without waiting for the next poll.
         const request = previous?.decisionRequest;
         if (request?.status !== 'pending' || event.request_id !== request.requestId) return state;
+        // A refusal carries the current queue too (a decision answered
+        // elsewhere first is no longer in it), so it applies either way.
         next = { ...next,
-          decisions: event.ok && validDecisions(event.decisions) ? event.decisions : previous.decisions,
+          decisions: validDecisions(event.decisions) ? event.decisions : previous.decisions,
           decisionRequest: { ...request, status: event.ok ? 'ok' : 'failed',
             error: event.ok ? null : event.error || 'The decision queue refused the request.' } };
       } else if (event.kind === 'pm_request_task') {
@@ -358,7 +359,7 @@ export function createPmWindowModel() {
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
 export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onTaskReopen = () => {}, onSend = () => {}, onAnswerDecision = () => {}, onDeferDecision = () => {}, onOpenTerminal = () => false,
-  onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
+  onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -396,12 +397,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const progressButton = element('button', '', 'Progress');
   const chatButton = element('button', '', 'Chat');
   const tasksButton = element('button', '', 'Tasks');
-  const taskLogButton = element('button', '', 'Log');
   const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
   homeButton.type = decideButton.type = progressButton.type = chatButton.type = tasksButton.type
-    = taskLogButton.type = reportsButton.type = logButton.type = 'button';
-  toolbar.append(homeButton, decideButton, progressButton, chatButton, tasksButton, taskLogButton, reportsButton, logButton);
+    = reportsButton.type = logButton.type = 'button';
+  toolbar.append(homeButton, decideButton, progressButton, chatButton, tasksButton, reportsButton, logButton);
   // SPEC #7007: the task-centered Home island is the entry view. Its actions
   // reuse the existing surfaces: creating a task goes through the PM chat
   // composer (the request-task intake path), reviewing decisions opens the
@@ -430,12 +430,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     onReviewDecision: () => showView('decide'),
     onViewTaskDetails: key => { onTaskDetail(key); showView('tasks'); },
     onViewAllTasks: () => showView('tasks'),
-  });
-  // SPEC #7007 T-013: the Log island lists the notification history groups
-  // the caller feeds through receiveLog; opening the original record stays
-  // with the caller, which owns the notification center.
-  const taskLog = createTaskLog({ document,
-    onViewNotification: entry => { if (!disposed) onViewNotification(entry); },
   });
   const chatBody = element('section', 'pm-chat__chat');
   chatBody.setAttribute('aria-label', 'PM conversation');
@@ -470,7 +464,12 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   cancelReply.type = 'button';
   replyChip.append(replyLabel, cancelReply);
   composer.append(replyChip, draft, sendButton, composerStatus);
-  chatBody.append(chatActions, chatNotice, chatLog, composer);
+  // Issue #7644: says when the message a theme came from is not shown here.
+  const targetNotice = element('p', 'pm-chat__notice');
+  targetNotice.setAttribute('role', 'status');
+  targetNotice.dataset.pmMessageTargetNotice = '';
+  targetNotice.hidden = true;
+  chatBody.append(chatActions, chatNotice, targetNotice, chatLog, composer);
   const tasksBody = element('section', 'pm-chat__tasks');
   tasksBody.setAttribute('aria-label', 'Request tasks');
   const tasksHeader = element('div', 'pm-chat__history-header');
@@ -557,7 +556,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   body.append(currentCard, historyHeader, notice, transcript);
   const taskWorkspace = element('div', 'pm-chat__workspace');
   taskWorkspace.append(chatBody, tasksBody);
-  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, taskProgress.element, taskLog.element, body, taskWorkspace);
+  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, taskProgress.element, body, taskWorkspace);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -585,7 +584,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     taskHome.element.hidden = value !== 'home';
     taskDecisions.element.hidden = value !== 'decide';
     taskProgress.element.hidden = value !== 'progress';
-    taskLog.element.hidden = value !== 'tasklog';
     root.classList.toggle('pm-chat--logs', logs);
     root.classList.toggle('pm-chat--chat', value === 'chat');
     homeButton.setAttribute('aria-pressed', String(value === 'home'));
@@ -593,7 +591,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     progressButton.setAttribute('aria-pressed', String(value === 'progress'));
     chatButton.setAttribute('aria-pressed', String(value === 'chat'));
     tasksButton.setAttribute('aria-pressed', String(value === 'tasks'));
-    taskLogButton.setAttribute('aria-pressed', String(value === 'tasklog'));
     reportsButton.setAttribute('aria-pressed', String(value === 'reports'));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
@@ -608,8 +605,28 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const showProgress = () => showView('progress');
   const showChat = () => showView('chat');
   const showTasks = () => showView('tasks');
-  const showTaskLog = () => showView('tasklog');
   const showReports = () => showView('reports');
+  // Issue #7644: open the human message a recorded theme came from. A
+  // conversation that has not arrived yet is answered once it does.
+  let messageTarget = null;
+  function revealMessageTarget() {
+    if (messageTarget == null || latestState?.conversation?.availability !== 'ready') return;
+    const id = messageTarget;
+    messageTarget = null;
+    const bubble = [...chatLog.querySelectorAll('.pm-chat__bubble--user')]
+      .find(node => node.dataset.messageId === id);
+    targetNotice.textContent = bubble ? ''
+      : 'The message this theme came from is no longer in the conversation shown here. The theme\'s GitHub Issue keeps what was recorded.';
+    targetNotice.hidden = !targetNotice.textContent;
+    bubble?.scrollIntoView({ block: 'center' });
+    bubble?.focus({ preventScroll: true });
+  }
+  const showMessage = messageId => {
+    if (disposed) return;
+    messageTarget = String(messageId);
+    showChat();
+    revealMessageTarget();
+  };
   const showLog = () => showView('log');
   const openTerminal = () => {
     terminalStatus.hidden = onOpenTerminal(session) !== false;
@@ -653,10 +670,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     humanAttention = Number.isFinite(count) ? count : null;
     renderCurrent(latestState?.current);
   }
-  function receiveLog(groups) {
-    if (disposed) return;
-    taskLog.receive(groups || []);
-  }
   // Decide lists the gwtd decision queue in the order the backend returns
   // it (newest first, deferred decisions at the tail). Typed options become
   // numbered choices; a decision without options keeps the free-form reply.
@@ -682,9 +695,20 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     settledDecisionRequest = request.requestId;
     const fromDraft = draftAnswer === request.decisionId;
     draftAnswer = null;
+    // SPEC #7007 T-014 / T-016: the queue's error is internal wording that
+    // can name the decision's identifier; the surfaces say what happened and
+    // the next step instead.
     if (request.status !== 'ok') {
-      decisionSendError = { id: request.decisionId, message: request.error
-        || (request.action === 'defer' ? 'The decision could not be deferred.' : 'The answer could not be sent.') };
+      if (!items.some(item => item.id === request.decisionId)) {
+        decisionSendError = null;
+        deferNotice = { id: null, message: request.action === 'defer'
+          ? 'This decision was already settled elsewhere. Nothing was deferred.'
+          : 'This decision was already settled elsewhere. Your answer was not recorded.' };
+        return null;
+      }
+      decisionSendError = { id: request.decisionId, message: request.action === 'defer'
+        ? 'The decision was not deferred. Reload this window, then try again.'
+        : 'The answer was not recorded. Reload this window, then try again.' };
       return null;
     }
     decisionSendError = null;
@@ -1123,6 +1147,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
         : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
     chatNotice.hidden = !chatNotice.textContent;
     if (following) chatLog.scrollTop = chatLog.scrollHeight;
+    revealMessageTarget();
   }
   function syncComposer() {
     // A free-form decision answer freezes the draft the same way a chat send does.
@@ -1356,12 +1381,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     taskHome.dispose();
     taskDecisions.dispose();
     taskProgress.dispose();
-    taskLog.dispose();
     homeButton.removeEventListener('click', showHome);
     decideButton.removeEventListener('click', showDecisions);
     progressButton.removeEventListener('click', showProgress);
     chatButton.removeEventListener('click', showChat);
-    taskLogButton.removeEventListener('click', showTaskLog);
     composer.removeEventListener('submit', submitDraft);
     draft.removeEventListener('keydown', draftKeydown);
     draft.removeEventListener('input', syncComposer);
@@ -1379,7 +1402,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   decideButton.addEventListener('click', showDecisions);
   progressButton.addEventListener('click', showProgress);
   chatButton.addEventListener('click', showChat);
-  taskLogButton.addEventListener('click', showTaskLog);
   composer.addEventListener('submit', submitDraft);
   draft.addEventListener('keydown', draftKeydown);
   draft.addEventListener('input', syncComposer);
@@ -1392,6 +1414,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, receiveHumanAttention, dispose,
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showMessage, showTasks, showReports, receiveHumanAttention, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }

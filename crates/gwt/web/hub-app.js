@@ -1,4 +1,5 @@
 import { createCloseProjectController } from "./close-project-confirm-modal.js";
+import { createProjectAutonomyControl } from "./project-autonomy.js";
 // The page served at `/` (Issue #4538 AC-3, Issue #7639). It has three views
 // and is never a workspace, dashboard, or tab strip:
 // - Home: the conversation with the Project Manager. It shows no project
@@ -171,7 +172,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
 
   const home = createHomeConversation({
     document: doc, window: win, send,
-    onWaitingChange: waiting => setPm({ decisions: waiting ?? 0 }),
+    onPmChange: setPm,
     onOpenFolder: () => openFolderDialog(),
     onClone: mode => openCloneDialog(mode),
     onOpenProjects: () => showView("projects"),
@@ -234,6 +235,18 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     },
   });
 
+  // Issue #7728: the Hub list and Settings mount the same stop/start surface.
+  function autonomyControl(project) {
+    const control = createProjectAutonomyControl({
+      document: doc, projectTitle: project.title || project.project_key,
+      send: running => send({ kind: "set_project_autonomy", project_key: project.project_key, running }),
+    });
+    control.element.dataset.projectAutonomy = project.project_key;
+    control.update(project.autonomy);
+    releaseExecutionViews.push(() => control.unmount());
+    return control.element;
+  }
+
   function render() {
     for (const release of releaseExecutionViews) release();
     releaseExecutionViews = [];
@@ -254,7 +267,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
         badge.setAttribute("role", "status");
         row.append(badge);
       }
-      row.append(close, executionView(project));
+      row.append(autonomyControl(project), close, executionView(project));
       return row;
     });
     renderList(orphanSection.list, catalog.orphan_daemons || [], "No projects awaiting shutdown", (project) => {

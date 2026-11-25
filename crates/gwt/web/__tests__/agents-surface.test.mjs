@@ -23,7 +23,7 @@ const members = [
   { member_id: "m2", name: "Two", provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, environmentView, onSetEnvironmentPriority, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -36,18 +36,39 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   rosterController.applyAgentRosterSnapshot({ project_key: "project", members: members.map(member => ({ ...member, agent_member_id: member.member_id })), revision: 3, revision_decimal: "3", capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] });
   const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
   const switchModel = switching ? createUiStateStore(switching, options) : undefined;
+  const executionEnvironmentsModel = environmentView ? createUiStateStore({ view: environmentView }, options) : undefined;
   const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], traitsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const opened = [], traitsSaved = [], avatarsSaved = [], moved = [], removed = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
   if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
-  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, storage, executionModel, executionEnvironmentsModel, onSetEnvironmentPriority, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (name, pm_eligible) => { added.push({ name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onMoveMember: (id, direction) => moved.push([id, direction]), onSetTraits: (id, traits) => traitsSaved.push([id, traits]), onSetAvatar: (id, avatar) => avatarsSaved.push([id, avatar]), onRemoveMember: id => removed.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { traitsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { traitsSaved, avatarsSaved, moved, removed, surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, added, reassigned, refreshed, switchModel, switched, saved, continued, executionEnvironmentsModel };
 }
+
+test("Agent environment priority removes the last override and shows a deletion fallback on its member row", async () => {
+  const writes = [];
+  const environmentView = {
+    environments: [{ id: "codex", name: "Codex pool" }],
+    agent_priorities: { m1: { environment_ids: ["codex"], reverted_to_project: false } },
+  };
+  const f = await fixture({ environmentView, onSetEnvironmentPriority: (memberId, ids) => writes.push([memberId, ids]) });
+  const panel = f.surface.element.querySelector(".roster-detail [data-member-environments]");
+  panel.querySelector('[aria-label="Remove Codex pool"]').click();
+  assert.deepEqual(writes, [["m1", []]]);
+  f.executionEnvironmentsModel.update(() => ({
+    view: { environments: [], agent_priorities: { m1: { environment_ids: [], reverted_to_project: true } } },
+  }));
+  f.flush();
+  assert.match(panel.textContent, /Returned to the project's order/);
+  assert.match(f.surface.element.querySelector('[data-member-id="m1"]').textContent, /Returned to the project's order/);
+  assert.doesNotMatch(f.surface.element.querySelector('[data-member-id="m2"]').textContent, /Returned to the project's order/);
+  f.surface.dispose();
+});
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
   const f = await fixture(), input = f.surface.element.querySelector('[aria-label="Display name"]');
@@ -152,12 +173,19 @@ test("Agents identifies the exact PM before the implementation pool without addi
   assert.equal(identity.querySelector(".window-role-badge").textContent, "PM");
   const children = [...f.surface.element.children];
   assert.ok(children.indexOf(identity) < children.indexOf(f.surface.element.querySelector(".roster-team")));
-  assert.equal(identity.querySelectorAll("button").length, 0, "PM is not a selectable or restable member");
+  assert.deepEqual([...identity.querySelectorAll("button")].map(button => button.textContent), ["Open PM terminal"]);
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
   assert.equal(f.surface.element.querySelectorAll(".roster-list .roster-row").length, 2);
   assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");
   withPm("Yuu updated"); f.flush();
   assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu updated");
+  pm.status = "error";
+  withPm("Yuu updated");
+  f.activityModel.update(() => ({ count: 1, agents: [current] }));
+  f.flush();
+  assert.equal(identity.hidden, false, "an errored PM keeps its terminal action");
+  pm.status = "running";
+  withPm("Yuu updated");
   f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
   f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: state.catalog.version + 1,
     appState: { ...state.catalog.appState, tabs: state.catalog.appState.tabs.map(tab => ({ ...tab, project_key: "another-project" })) } } }));
@@ -313,7 +341,26 @@ test("Issue #7035 Agents lists slot-occupying review windows with name, target a
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="r1"]'), null, "a reviewer is not a roster member");
   assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 2 \/ Team 2/,
     "Busy counts the implementation member and the review window that both hold slots");
+  const target = f.activityModel.read().agents[1], open = row.querySelector("button.roster-purpose");
+  assert.ok(open, "a review task is keyboard reachable like a member's current task");
+  open.click();
+  assert.deepEqual(f.opened, [target]);
+  assert.equal(f.surface.selectReview(target), true);
+  assert.equal(f.document.activeElement, open);
+  f.surface.sync();
+  assert.ok(f.document.activeElement === f.surface.element.querySelector(".roster-review button"), "readback preserves keyboard focus on the same review");
+  assert.equal(f.surface.selectReview({ ...target, runtime_incarnation: 2 }), false);
+  f.activityModel.update(state => ({ ...state, count: null }));
+  open.click();
+  assert.equal(f.opened.length, 1, "unknown activity cannot authorize the retained review button");
+  assert.equal(f.surface.selectReview(target), false);
+  f.activityModel.update(state => ({ ...state, count: 2 }));
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector(".roster-review button").disabled, true);
   f.activityModel.update(state => ({ ...state, count: 1, agents: state.agents.filter(agent => !agent.review_dispatch) }));
+  open.click();
+  assert.deepEqual(f.opened, [target], "a detached button cannot open a retired review");
+  assert.equal(f.surface.selectReview(target), false);
   f.flush();
   assert.equal(reviews.hidden, true, "the list hides once no review window runs");
   assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
@@ -1101,5 +1148,82 @@ test("the ledger shows and saves each member's traits and keeps the draft until 
   assert.equal(value("reasoning_level"), "", "each member has its own traits");
   assert.match(styles, /\.roster-traits textarea\s*\{[^}]*resize:\s*vertical/s);
   assert.match(source, /querySelectorAll\("button, select, input, textarea"\)/, "a split preview keeps the personality read-only");
+  f.surface.dispose();
+});
+
+// Issue #7635 AC-1 / AC-2 / AC-4: every ledger row and the detail draw the
+// member's avatar, and the detail chooses a preset or the default.
+test("the ledger draws each member's avatar and saves a chosen preset", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const rowAvatar = id => root.querySelector(`.roster-row[data-member-id="${id}"] .roster-avatar`);
+  const detailAvatar = () => root.querySelector(".roster-detail .roster-detail-heading .roster-avatar");
+  const picker = () => root.querySelector(".roster-detail [data-member-avatar]");
+  const choice = id => picker().querySelector(`[data-avatar-choice="${id}"]`);
+  assert.equal(rowAvatar("m1").textContent, "O", "an unset member shows its initial");
+  assert.equal(rowAvatar("m2").textContent, "T");
+  assert.deepEqual([...picker().querySelectorAll("[data-avatar-choice]")].map(button => button.dataset.avatarChoice),
+    ["default", "cat", "owl", "bear", "fox", "penguin", "robot", "upload"]);
+  assert.equal(choice("default").getAttribute("aria-checked"), "true");
+
+  choice("fox").click();
+  assert.deepEqual(f.avatarsSaved, [["m1", { kind: "preset", preset_id: "fox" }]]);
+  f.rosterModel.update(state => ({ ...state, revision: "4", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "preset", preset_id: "fox" } } : member) })); f.flush();
+  assert.equal(rowAvatar("m1").textContent, "🦊", "the row follows the saved preset");
+  assert.equal(detailAvatar().textContent, "🦊", "the detail follows the saved preset");
+  assert.equal(choice("fox").getAttribute("aria-checked"), "true");
+  assert.equal(choice("default").getAttribute("aria-checked"), "false");
+  choice("fox").click();
+  assert.equal(f.avatarsSaved.length, 1, "choosing the current avatar sends nothing");
+
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "r", action: { kind: "move" } } })); f.flush();
+  assert.equal(choice("cat").disabled, true, "another pending ledger change holds the choice");
+  f.rosterModel.update(state => ({ ...state, pending_roster: null })); f.flush();
+  choice("default").click();
+  assert.deepEqual(f.avatarsSaved[1], ["m1", { kind: "default" }]);
+  assert.equal(rowAvatar("m2").textContent, "T", "each member keeps its own avatar");
+  f.surface.dispose();
+});
+
+// Issue #7636 AC-1 / AC-2 / AC-3: an uploaded image is drawn in the row and
+// the detail, a refused file says why without saving, and a preset or the
+// initial can be chosen again at any time.
+test("the ledger draws an uploaded avatar, refuses a bad file and returns to a preset", async () => {
+  const f = await fixture(), root = f.surface.element;
+  const image = "data:image/png;base64,iVBORw0KGgo=";
+  const picker = () => root.querySelector(".roster-detail [data-member-avatar]");
+  const choice = id => picker().querySelector(`[data-avatar-choice="${id}"]`);
+  const error = () => picker().querySelector(".roster-avatar-error");
+  assert.equal(choice("upload").getAttribute("aria-label"), "Upload image");
+  assert.equal(error().hidden, true);
+
+  const file = picker().querySelector("input[type=file][data-avatar-file]");
+  assert.match(file.accept, /image\/png/);
+  let opened = 0; file.click = () => { opened++; };
+  choice("upload").click();
+  assert.equal(opened, 1, "the upload choice opens the file picker");
+  Object.defineProperty(file, "files", { configurable: true, value: [{ type: "image/svg+xml", size: 10 }] });
+  file.dispatchEvent(new f.window.Event("change"));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(error().hidden, false, "an unsupported file says why");
+  assert.match(error().textContent, /PNG, JPEG, WebP or GIF/);
+  assert.equal(f.avatarsSaved.length, 0, "a refused file saves nothing");
+
+  f.rosterModel.update(state => ({ ...state, revision: "4", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "upload", image } } : member) })); f.flush();
+  for (const node of [root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar'), root.querySelector(".roster-detail .roster-detail-heading .roster-avatar"), choice("upload")]) {
+    assert.equal(node.querySelector("img.agent-avatar-image")?.getAttribute("src"), image);
+  }
+  assert.equal(choice("upload").getAttribute("aria-checked"), "true");
+  assert.equal(choice("default").getAttribute("aria-checked"), "false");
+
+  choice("owl").click();
+  assert.equal(error().hidden, true, "a new choice clears the message");
+  assert.deepEqual(f.avatarsSaved, [["m1", { kind: "preset", preset_id: "owl" }]]);
+  f.rosterModel.update(state => ({ ...state, revision: "5", members: state.members.map(member => member.member_id === "m1"
+    ? { ...member, avatar: { kind: "preset", preset_id: "owl" } } : member) })); f.flush();
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar').textContent, "🦉");
+  assert.equal(root.querySelector('.roster-row[data-member-id="m1"] .roster-avatar img'), null);
+  assert.equal(choice("upload").textContent, "＋");
   f.surface.dispose();
 });

@@ -18,6 +18,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createFocusTrap } from "/focus-trap.js";
       import {
         HUB_PROJECTS_URL_PATH,
+        HUB_DECISIONS_URL_PATH,
+        HUB_URL_PATH,
         parseFrontendRoute,
         projectUrlPath,
         renderRouteNotFound,
@@ -86,6 +88,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // SPEC-3431 FR-026 / FR-132: one shared PM settings controller feeds
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
+      import { createProjectAutonomyControl } from "/project-autonomy.js";
       import { createToastStack } from "/toast-host.js";
       import { createProjectPageMetadata, projectAgentSummary } from "/project-page-metadata.js";
       import { createNotificationCenter } from "/notification-center.js";
@@ -162,8 +165,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createBrowserEnv } from "/theme-manager.js";
       import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
-      import { createPmChat, createPmWindowModel } from "/pm-chat.js";
-      import { logGroupsFromHistoryRows } from "/task-log.js";
+      import { createPmWindowModel } from "/pm-chat.js";
       import { windowCommandErrorPresentation } from "/window-command-error.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
@@ -188,7 +190,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       } from "/window-worktree-form.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
-      // module loads so the theme toggle, command palette, hotkey overlay,
+      // module loads so the theme toggle, hotkey overlay,
       // status strip clock, and Mission Briefing intro are wired before the
       // rest of app.js continues bootstrapping the legacy surfaces.
       let __op;
@@ -200,7 +202,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         __op = {
           themeManager: null,
           hotkey: null,
-          palette: null,
         };
       }
       const projectOwnerHealthModel = createUiStateStore(null);
@@ -212,7 +213,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
-        palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyIssueMonitorStatus: (status) => applyKnowledgeIssueMonitorStatus(status),
         applyRuntimeHealth: (snapshot) => runtimeHealthModel.update(() => snapshot || {}),
@@ -225,11 +225,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       }
       const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-control-explanation", placement: "right", passThrough: true });
 
-      // The rail owns PM navigation and launches a missing PM.
+      // The project rail leads to the agent ledger for PM operations.
       for (const id of ["op-pm-entry"]) {
         document.getElementById(id)?.addEventListener("click", (event) => {
           event.preventDefault();
-          openPmAgent();
+          openAgents("ledger");
         });
       }
 
@@ -254,7 +254,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const appChrome = createAppChrome({
         document,
         handlers: {
-          pm: () => openPmDecisions(),
+          pm: () => openHomeDecisions(),
           notifications: () => notificationCenter.toggle(),
           // Issue #7639: the project list is the Projects view of the page at `/`.
           projects: () => window.location.assign(HUB_PROJECTS_URL_PATH),
@@ -325,7 +325,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           const runtime = terminalMap.get(windowId);
           return runtime?.isReady === true
             && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true
-            && (pmChatViews.has(windowId) || worksSurface?.contains(windowId) || canRefreshTerminalViewport(windowId));
+            && (workspaceWindowById(windowId)?.is_pm || worksSurface?.contains(windowId) || canRefreshTerminalViewport(windowId));
         },
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
@@ -337,6 +337,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       });
       const windowMap = new Map();
       let splitSurfaces = null;
+      let loadIssueThemes = () => {};
+      let updateThemeConnection = () => {};
       let worksSurface = null;
       let agentsSurface = null;
       let rosterHost = null;
@@ -480,6 +482,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // route, never from in-page selection, so reconnects rebind the same
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      // Issue #7654: the last decision-count read sent, and the counts of the
+      // newest reply: every open project's total, and this project's own.
+      let decisionCountsRequested = 0;
+      const decisionCountsModel = createUiStateStore({ applied: 0, total: null, own: null });
+      // Decisions registered by other processes appear within this period, as on Home.
+      const DECISION_COUNTS_REFRESH_MS = 5_000;
       const projectExecutionPolicy = createProjectExecutionPolicyModel(routeProjectKey);
       const projectViewReadiness = createProjectViewReadiness({ document, projectKey: routeProjectKey, send });
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
@@ -500,6 +508,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const sessionUsageModel = createUiStateStore([]);
       // Issue #7741: the execution environment definitions and the last refusal.
       const executionEnvironmentsModel = createUiStateStore({ view: null, refusal: null });
+      const poolLoginEventModel = createUiStateStore(null);
       // Issue #7643: the last answer to a Themes screen request.
       const themeRepliesModel = createUiStateStore({ reply: null });
       let routeProjectMissing = false;
@@ -839,10 +848,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         makeEl,
         clearChildren,
         focusOrSpawnPreset,
-        openReports: () => {
-          openPmAgent();
-          pmChatViews.get(pmWindowId)?.controller.showReports();
-        },
+        openReports: () => focusOrSpawnPreset("board"),
         knowledgeKindForPreset,
         // SPEC-3064 Phase 3 (E6d): these two live in the knowledge-kanban
         // surface, whose factory runs after this one — close over the
@@ -976,9 +982,11 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme"].includes(message.kind) ||
+        if (["add_pool_account", "sign_in_pool_account", "save_copilot_account", "move_pool_account", "use_pool_account", "delete_pool_account",
+              "resume_next_pool_account", "pool_account_login_input", "close_pool_account_login"].includes(message.kind) ||
+            ["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" ||
+            (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" || message.kind === "set_agent_execution_environments" ||
             (message.kind === "get_hook_doctor" && message.repair === true) || message.kind === "update_user_hooks") {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
@@ -1029,109 +1037,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const traceUi = uiTraceWiring.traceUi;
       const traceMeasure = uiTraceWiring.traceMeasure;
 
-      // SPEC-2359 US-41 Phase 8b: surface Workspace projection prune through
-      // the Command Palette. The dry-run entry previews the plan; the apply
-      // entry confirms before mutating projection files on disk.
-      if (window.__operatorShell?.palette) {
-        uiTraceWiring.registerPalette(window.__operatorShell.palette);
-        window.__operatorShell.palette.register({
-          id: "workspace-projection-prune-dry-run",
-          label: "Work: Prune Stale Projections (dry-run)",
-          group: "Work",
-          handler: () => {
-            send({
-              kind: "workspace_projection_prune",
-              dry_run: true,
-              ids: [],
-            });
-          },
-        });
-        window.__operatorShell.palette.register({
-          id: "workspace-projection-prune-apply",
-          label: "Work: Prune Stale Projections (apply)",
-          group: "Work",
-          handler: () => {
-            if (
-              window.confirm(
-                "Apply Work projection prune now? Archived entries past their grace period will be physically removed.",
-              )
-            ) {
-              send({
-                kind: "workspace_projection_prune",
-                dry_run: false,
-                ids: [],
-              });
-            }
-          },
-        });
-        // #4777: all-agent stop remains in the palette after its rail entry retires.
-        window.__operatorShell.palette.register({
-          id: "stop-all-agents",
-          label: "Agents: Stop All Running Agents",
-          group: "Agents",
-          handler: () => {
-            requestStopAllWindows();
-          },
-        });
-        // SPEC-2356 Anshin Addendum (FR-043): send a line of input to the focused
-        // agent pane from the palette.
-        window.__operatorShell.palette.register({
-          id: "send-input-focused-agent",
-          label: "Agent: Send Input to Focused Agent",
-          group: "Agents",
-          handler: () => {
-            promptSendFocusedPaneInput();
-          },
-        });
-      }
-
-      // SPEC-2356 Anshin Addendum (FR-043): inject one line of input into the
-      // focused agent pane. Targets the window's session_id (not its window id)
-      // so the backend can scope the injection to the caller's own pane. Returns
-      // true when a line was actually dispatched.
-      function focusedAgentWindowData() {
-        if (!focusedId) return null;
-        const windowData = workspaceWindowById(focusedId);
-        if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) {
-          return null;
-        }
-        return windowData;
-      }
-
-      function sendPaneInput(sessionId, text) {
-        const session = String(sessionId || "").trim();
-        const line = String(text ?? "");
-        if (!session || line.length === 0) {
-          return false;
-        }
-        return send({ kind: "pane_send_input", session_id: session, text: line }) !== "unavailable";
-      }
-
-      function sendFocusedPaneInput(text) {
-        const windowData = focusedAgentWindowData();
-        const sessionId = windowData?.session_id;
-        return sendPaneInput(sessionId, text);
-      }
-
-      // SPEC-2356 Anshin Addendum (FR-043): the Command Palette entry prompts for
-      // a single line and routes it to the focused agent pane.
-      function promptSendFocusedPaneInput() {
-        const windowData = focusedAgentWindowData();
-        if (!windowData) {
-          window.alert("Focus an agent window first to send it input.");
-          return;
-        }
-        if (!String(windowData.session_id || "").trim()) {
-          window.alert("This agent has no active session to send input to.");
-          return;
-        }
-        const label = windowDisplayTitle(windowData);
-        const text = window.prompt(`Send a line of input to ${label}:`);
-        if (text === null) {
-          return;
-        }
-        sendFocusedPaneInput(text);
-      }
+      // #7879: the command palette is abolished (SPEC #7007 item 36). UI trace
+      // stays a developer diagnostic reachable from the devtools console.
+      window.__operatorShell.uiTrace = {
+        start: uiTraceWiring.start,
+        stop: uiTraceWiring.stop,
+      };
 
       const { handlePayload: applyReleaseNotesPayload, handleError: applyReleaseNotesError, ...releaseNotesWindow } = createReleaseNotesWindow({
         document,
@@ -1241,7 +1152,16 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function setConnectionState(connected, recoverSnapshots = false) {
         if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); tuningController.disconnectTuning(); }
         connectionOverlay.setConnected(connected);
+        updateThemeConnection(connected);
         handleLaunchWizardTransportChange(connected);
+        if (!connected) {
+          failAgentEnvironmentPriority("Connection lost before the priority change was confirmed.");
+          executionEnvironments.connectionLost();
+        } else if (rosterHost) {
+          send({ kind: "get_execution_environments" });
+        }
+        if (connected) executionEnvironments.refreshVisibleAccounts();
+        if (connected) requestDecisionCounts();
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
@@ -1255,7 +1175,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           "[data-role='connection-label']",
         );
         if (connectionStatusLabel) {
-          connectionStatusLabel.textContent = connected ? "ONLINE" : "OFFLINE";
+          connectionStatusLabel.textContent = connected ? "Connected" : "Disconnected";
         }
         if (strip) {
           strip.classList.toggle("op-status-strip--offline", !connected);
@@ -1686,6 +1606,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // modal glue (open/close/render + state) moved to /project-shell-surface.js.
 
       function presetLabel(preset) {
+        if (preset === "profile") return "Environment variables";
         return preset
           .split("_")
           .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -1700,7 +1621,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           agent: "Agent",
           branches: "Branches",
           settings: "Settings",
-          profile: "Profile",
+          profile: "Environment variables",
           logs: "Logs",
           agent_kanban: "Agent Kanban",
           // SPEC-3671 FR-014: these three presets share the Knowledge surface but
@@ -1809,6 +1730,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const PM_ROLE_BADGE = "PM";
 
       function windowDisplayTitle(windowData) {
+        if (windowData?.preset === "profile") return presetRoleLabel("profile");
         const candidates = [
           windowData?.dynamic_title,
           windowData?.purpose_title,
@@ -1984,7 +1906,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           initialSurfaceSelected = true;
           // A rail choice supersedes navigation still awaiting a window.
           pendingFrameWindowId = null;
-          pendingPmFrame = false;
         }
       }
 
@@ -2031,11 +1952,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             frameWindow(windowId, { animate: false });
           }
         }
-        // A freshly launched PM must fulfill the rail navigation request.
-        if (pendingPmFrame && pmWindowId && windowMap.has(pmWindowId)) {
-          pendingPmFrame = false;
-          frameWindow(pmWindowId, { animate: false });
-        }
+
       }
 
       const startupMetrics = createStartupMetrics({ send });
@@ -2577,6 +2494,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       let pmWindowId = null;
       const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
+      // Issue #7728: unknown until the first pm_status, so Settings never
+      // offers a stop/start action from a guessed PM state.
+      const projectAutonomyPmModel = createUiStateStore({ paused: null });
 
       function updatePmLauncher(workspace) {
         pmLauncherModel.update(state => ({ ...state, workspace }));
@@ -2585,7 +2505,15 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       pmLauncherModel.subscribe(state => state, ({ workspace, paused }) => {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
+        const previousPmId = pmWindowId;
         pmWindowId = pmWindow?.id ?? null;
+        if (previousPmId !== pmWindowId) {
+          if (previousPmId) applyPmReviewAttention(previousPmId, null);
+          if (pmWindowId) {
+            const current = readPmWindowState().windows[pmWindowId];
+            applyPmReviewAttention(pmWindowId, current?.current?.facts?.review_attention);
+          }
+        }
 
         const railEntry = document.getElementById("op-pm-entry");
         if (railEntry) {
@@ -2598,40 +2526,19 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               : "running";
           railEntry.dataset.pmState = state;
           railEntry.dataset.pmPaused = String(paused);
-          // Issue #4777: the hover text says what the PM is, not only its name.
-          const role = "your point of contact, not one of the agents";
-          railEntry.title =
-            state === "running"
-              ? `Project Manager: ${role}`
-              : state === "stopped"
-                ? `Project Manager (stopped): ${role}. Click to resume`
-                : `Project Manager: ${role}. Click to start`;
+          const status = state === "running" ? "" : ` (${state === "stopped" ? "stopped" : "not running"})`;
+          railEntry.title = `Project Manager${status} · Open Agents`;
           if (paused) railEntry.title += ". Autonomous loop paused";
         }
       });
 
-      // One click selects an existing PM or waits for its new window.
-      let pendingPmFrame = false;
-
-      function openPmAgent() {
-        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
-        if (worksHost) setWorksHost(null);
-        if (pmWindowId && windowMap.has(pmWindowId)) {
-          requestWindowFrame(pmWindowId);
-          return;
-        }
-        pendingPmFrame = true;
-        send({ kind: "open_pm_agent" });
+      function openHomeDecisions() {
+        window.location.assign(HUB_DECISIONS_URL_PATH);
       }
 
-      // Issue #7740: the header's PM entry opens the PM on its waiting
-      // decisions. A PM that is not mounted yet shows them once it is.
-      let pendingPmDecisions = false;
-      function openPmDecisions() {
-        const view = pmWindowId ? pmChatViews.get(pmWindowId) : null;
-        pendingPmDecisions = !view;
-        openPmAgent();
-        view?.controller.showDecisions();
+      function openPmMessage(messageId) {
+        const query = new URLSearchParams({ project: activeProjectKey(), message: messageId });
+        window.location.assign(`${HUB_URL_PATH}?${query}`);
       }
 
       // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
@@ -3687,15 +3594,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                 ["Transport", "Local server"],
               ],
             };
-          case "profile":
-            return {
-              heading: "Active Profile",
-              rows: [
-                ["Profile", "default"],
-                ["Model", "Mixed"],
-                ["Shell", "Interactive"],
-              ],
-            };
           case "logs":
             return {
               heading: "Recent Events",
@@ -3875,6 +3773,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
+        parentThemeForIssue: number => projectThemes.parentTheme(number),
+        loadIssueThemes: () => loadIssueThemes(),
         currentProjectRoot: () => activeProjectTab()?.project_root,
         sendKnowledgeSemanticSearchNow,
         createNode,
@@ -4456,15 +4356,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         return parts.join("");
       }
 
-      const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, requestPmDecisionAnswer, requestPmDecisionDefer, markPmDecisionUnavailable, expirePmDecision, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
         if (request) send(request);
       });
       const renderedTerminalPackets = new Map();
-      const refreshedTaskMutations = new Map();
       subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
         if (!state) return;
         const packet = state.terminal;
@@ -4473,168 +4371,22 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
           renderedTerminalPackets.set(state.windowId, packet);
         }
-        const view = pmChatViews.get(state.windowId);
-        if (view) view.logHost.dataset.stateVersion = String(state.revision);
-        const mutation = state.taskMutation;
-        if (mutation?.status === "recorded" && refreshedTaskMutations.get(state.windowId) !== mutation.requestId) {
-          refreshedTaskMutations.set(state.windowId, mutation.requestId);
-          if (state.taskDetail?.key === mutation.key) loadPmTaskDetail(state.windowId, mutation.key);
-          requestVisiblePmReports(true, state.windowId);
-        }
       });
-
-      function loadPmTaskDetail(windowId, key) {
-        const request = requestPmTaskDetail(windowId, key);
-        if (!request) return;
-        if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowId, request.request_id);
-        window.setTimeout(() => markPmTaskDetailUnavailable(windowId, request.request_id), 30000);
-      }
-
-      function disposePmChat(windowId) {
-        refreshedTaskMutations.delete(windowId);
-        const view = pmChatViews.get(windowId);
-        if (!view) return;
-        view.unsubscribe();
-        view.unsubscribeLog?.();
-        view.unsubscribeHumanAttention?.();
-        view.controller.dispose();
-        applyPmDecisions(windowId, null);
-        applyPmReviewAttention(windowId, null);
-        view.body.classList.remove("pm-conversation-body");
-        // Return the terminal nodes to their original body when PM ownership ends.
-        view.body.append(...view.logHost.childNodes);
-        view.logHost.remove();
-        view.root.remove();
-        pmChatViews.delete(windowId);
-      }
-
-      function syncPmChat(windowData, element) {
-        const eligible = windowData.is_pm && presetSurface(windowData.preset) === "terminal";
-        let view = pmChatViews.get(windowData.id);
-        if (!eligible) {
-          disposePmChat(windowData.id);
-          return;
-        }
-        if (view) {
-          if (view.sessionId !== windowData.session_id) {
-            view.sessionId = windowData.session_id;
-            bindPmWindowState(windowData.id, windowData.session_id);
-            requestVisiblePmReports();
-          }
-          return;
-        }
-        const body = element.querySelector(".window-body");
-        const terminalRoot = body.querySelector(".terminal-root");
-        if (!terminalRoot) return;
-        const root = document.createElement("div");
-        const logHost = document.createElement("div");
-        logHost.className = "pm-conversation-log";
-        logHost.append(terminalRoot);
-        const overlay = body.querySelector(".terminal-overlay");
-        if (overlay) logHost.append(overlay);
-        body.classList.add("pm-conversation-body");
-        body.append(root, logHost);
-        view = { root, body, logHost, sessionId: windowData.session_id };
-        view.controller = createPmChat({
-          document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          onChatVisible: () => requestVisiblePmReports(false, windowData.id),
-          onTaskDetail: key => loadPmTaskDetail(windowData.id, key),
-          onTaskCancel: reason => {
-            const request = requestPmTaskCancel(windowData.id, reason);
-            if (!request) return;
-            if (send(request) === "unavailable") return markPmTaskMutationUnavailable(windowData.id, request.request_id);
-            window.setTimeout(() => markPmTaskMutationUnavailable(windowData.id, request.request_id), 30000);
-          },
-          onTaskReopen: reason => {
-            const request = requestPmTaskReopen(windowData.id, reason);
-            if (!request) return;
-            if (send(request) === "unavailable") return markPmTaskMutationUnavailable(windowData.id, request.request_id);
-            window.setTimeout(() => markPmTaskMutationUnavailable(windowData.id, request.request_id), 30000);
-          },
-          onOpenTerminal: sessionId => {
-            if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
-            openSurface("works");
-            return true;
-          },
-          onSend: text => {
-            const request = requestPmChatSend(windowData.id, text);
-            if (!request) return;
-            if (send(request) === "unavailable") return markPmChatSendUnavailable(windowData.id);
-            const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
-            window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
-          },
-          // Issue #7742: answers and deferrals are gwtd decision-queue
-          // operations; gwtd delivers an answer to the waiting session itself.
-          onAnswerDecision: (decisionId, answer) => sendPmDecisionRequest(windowData.id,
-            requestPmDecisionAnswer(windowData.id, decisionId, answer)),
-          onDeferDecision: decisionId => sendPmDecisionRequest(windowData.id,
-            requestPmDecisionDefer(windowData.id, decisionId)),
-          onLogVisibility: (visible) => {
-            logHost.hidden = !visible;
-            if (!visible) requestVisiblePmReports(true);
-            if (visible) requestAnimationFrame(() => {
-              scheduleTerminalFit(windowData.id, false);
-              activateTerminalOnReveal(windowData.id);
-            });
-          },
-          // SPEC #7007 T-013: a Log group opens the notification drawer at
-          // its original record (keyed rows focus their history row).
-          onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
-          // SPEC #5016 HSK: unanswered decisions join the shared attention count.
-          onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
-          // SPEC #5016 HSV: unresolved reviews join the same shared count.
-          onReviewAttention: items => applyPmReviewAttention(windowData.id, items),
-        });
-        pmChatViews.set(windowData.id, view);
-        if (pendingPmDecisions) {
-          pendingPmDecisions = false;
-          view.controller.showDecisions();
-        }
-        // SPEC #7007 T-013: the Log view mirrors this page's notification
-        // history (#5016 groups). The subscription fires immediately with
-        // the current rows, then on every history change.
-        view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
-          view.controller.receiveLog(logGroupsFromHistoryRows(rows));
-        });
-        // SPEC #5016 HSF: Live facts shows the strip's needs_human value.
-        view.unsubscribeHumanAttention = issueMonitorModel.subscribe(model => model.humanAttention.count,
-          count => view.controller.receiveHumanAttention(count));
-        bindPmWindowState(windowData.id, windowData.session_id);
-        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
-          view.controller.update(state);
-          if (state) view.logHost.dataset.stateVersion = String(state.revision);
-        });
-        requestVisiblePmReports();
-      }
-
-      // Issue #7742: `false` tells the PM view the request was not issued.
-      function sendPmDecisionRequest(windowId, request) {
-        if (!request) return false;
-        if (send(request) === "unavailable") {
-          markPmDecisionUnavailable(windowId);
-          return true;
-        }
-        window.setTimeout(() => expirePmDecision(windowId, request.request_id), 30000);
-        return true;
-      }
+      subscribePmWindowState(state => state.windows[pmWindowId]?.current?.facts?.review_attention, items => {
+        if (pmWindowId) applyPmReviewAttention(pmWindowId, items);
+      });
 
       function requestVisiblePmReports(resync = false, onlyWindowId = null) {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
-          if (onlyWindowId !== null && windowData.id !== onlyWindowId) continue;
-          const view = pmChatViews.get(windowData.id);
-          if (windowData.is_pm && view && view.logHost.hidden) {
-            const request = requestPmReports(windowData.id, resync);
-            if (request) send(request);
-            const conversation = view.controller?.isChatVisible() ? requestPmConversation(windowData.id) : null;
-            if (conversation) send(conversation);
-          }
+          if (!windowData.is_pm || (onlyWindowId !== null && windowData.id !== onlyWindowId)) continue;
+          const request = requestPmReports(windowData.id, resync);
+          if (request) send(request);
         }
       }
       window.setInterval(requestVisiblePmReports, 5000);
 
       function mountWindowBody(windowData, element) {
-        disposePmChat(windowData.id);
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
         const surface = presetSurface(windowData.preset);
@@ -4796,6 +4548,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // case arms, the frontendUnits registry entries, and the delegated
       // document-level <select> guard listeners, wired through this
       // factory.
+      const projectEnvironmentSetsModel = createUiStateStore({});
       const {
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
@@ -4842,6 +4595,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
         renderProjectEnvironments: renderProjectExecutionEnvironments,
         renderPmEnvironments: renderPmExecutionEnvironments,
+        projectEnvironmentSetsModel,
+        projectAutonomyPmModel,
+        createProjectAutonomyControl: options => createProjectAutonomyControl({ ...options, document }),
       });
 
       function ensureWindow(windowData) {
@@ -4862,6 +4618,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                 </span>
               </div>
               <div class="window-actions">
+                <button class="icon-button" data-action="pm-home" aria-label="Back to Home" title="Back to Home" hidden>⌂</button>
+                <button class="icon-button" data-action="pm-agents" aria-label="Back to Agents" title="Back to Agents" hidden>←</button>
                 <button class="icon-button" data-action="restart" aria-label="Restart agent" title="Restart agent" hidden>↻</button>
                 <button class="icon-button" data-action="open-issue" aria-label="Open Issue" title="Open Issue" hidden>⧉</button>
               </div>
@@ -4873,6 +4631,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
           const titlebar = element.querySelector(".titlebar");
 
+          element.querySelector("[data-action='pm-home']").addEventListener("click", () => window.location.assign(HUB_URL_PATH));
+          element.querySelector("[data-action='pm-agents']").addEventListener("click", () => openAgents("ledger"));
           const restartButton = element.querySelector("[data-action='restart']");
           const openIssueButton = element.querySelector("[data-action='open-issue']");
 
@@ -4920,7 +4680,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             renderedAgentKanbanBodyKeys.set(windowData.id, nextAgentKanbanBodyKey);
           }
         }
-        syncPmChat(windowData, element);
+        if (windowData.is_pm && surface === "terminal") {
+          bindPmWindowState(windowData.id, windowData.session_id);
+          requestVisiblePmReports(false, windowData.id);
+        }
         // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
         // into Agents without changing its preset, so `mountWindowBody` does not
         // run again. Reclaim the live terminal into this window's own body.
@@ -4954,6 +4717,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           }
         }
 
+        element.querySelector("[data-action='pm-home']").hidden = !windowData.is_pm;
+        element.querySelector("[data-action='pm-agents']").hidden = !windowData.is_pm;
         const nextWindowElementKey = windowElementRenderKey(windowData);
         if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey) {
           return;
@@ -5041,7 +4806,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
                   isolate("remove_window", visibility.removed, (windowId) => {
                     const element = windowMap.get(windowId);
                     if (!element) return;
-                    disposePmChat(windowId);
                     const runtime = terminalMap.get(windowId);
                     const retainNative = runtime && worksSurface?.retainsNativeRoot(windowId, runtime.terminalContainer, appState);
                     if (runtime && !retainNative) disposeTerminalRuntime(windowId, runtime, runtime.terminalContainer);
@@ -5557,6 +5321,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             applyPmWindowReceiveEvent(event);
             break;
           }
+          case "decision_counts":
+            decisionCountsModel.update(current => decisionCountsFrom(current, event));
+            break;
           case "pm_launch_profile_result":
             tuningController.applyPmTuningResult(event);
             break;
@@ -5565,6 +5332,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             applyPmSettingsReceiveEvent(event);
             pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
+            projectAutonomyPmModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
@@ -5580,7 +5348,15 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             break;
           case "execution_environments":
             applyExecutionEnvironments(event.view);
-            executionEnvironmentsModel.update(state => ({ ...state, view: event.view }));
+            executionEnvironmentsModel.update(state => ({ ...state, view: event.view, agentPriorityPending: null, agentPriorityError: null }));
+            break;
+          case "pool_account_login_started":
+          case "pool_account_login_output":
+          case "pool_account_login_finished":
+            poolLoginEventModel.update(() => event);
+            break;
+          case "project_environment_set":
+            projectEnvironmentSetsModel.update(state => ({ ...state, [event.project_root]: event }));
             break;
           case "themes":
           case "theme_error":
@@ -5588,6 +5364,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             break;
           case "execution_environment_error":
             applyExecutionEnvironmentError(event);
+            failAgentEnvironmentPriority(event.message);
             executionEnvironmentsModel.update(state => ({ ...state, refusal: { message: event.message } }));
             break;
           case "issue_monitor_profiles_write_failed":
@@ -6067,6 +5844,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           openAgents("project");
           agentsSurface.selectMember(memberId);
         },
+        onSelectReview: (target) => {
+          openAgents("project");
+          agentsSurface.selectReview(target);
+        },
         getTelemetry: () => worksTelemetryModel.read(),
         onFocus: focusWindowLocally,
         onPreviewFocus: (id) => {
@@ -6114,8 +5895,37 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function syncAppChromePm() {
         const pmWindow = (pmLauncherModel.read().workspace?.windows || []).find(windowData => windowData?.is_pm);
         const name = String(pmWindow?.agent_name || rosterModel.read().members.find(member => member.is_pm)?.name || "").trim();
-        appChrome.setPm({ name, decisions: issueMonitorModel.read().pmDecisionAttention.count });
+        // Issue #7635: names are unique in the ledger, so the PM's avatar is its member's.
+        const avatar = name ? rosterModel.read().members.find(member => member.name === name)?.avatar : null;
+        appChrome.setPm({ name, avatar, decisions: decisionCountsModel.read().total });
       }
+
+      // A reply older than the newest one applied changes nothing.
+      function decisionCountsFrom(current, event) {
+        if (!Number.isSafeInteger(event.request_id) || event.request_id <= current.applied) return current;
+        const known = (event.projects || []).filter(project => Number.isSafeInteger(project.waiting_count));
+        const own = known.find(project => project.project_key === routeProjectKey);
+        return {
+          applied: event.request_id,
+          total: known.length ? known.reduce((sum, project) => sum + project.waiting_count, 0) : null,
+          own: own ? own.waiting_count : null,
+        };
+      }
+
+      // Issue #7654: the header and the status bar count the decisions of the
+      // project queues themselves, as Home does, whether or not a PM window is
+      // open. The header's PM is the device's, so it counts every open
+      // project; the status bar counts this project's queue.
+      function requestDecisionCounts() {
+        if (document.visibilityState === "hidden") return;
+        send({ kind: "load_decision_counts", request_id: ++decisionCountsRequested });
+      }
+      decisionCountsModel.subscribe(state => state.total, syncAppChromePm);
+      decisionCountsModel.subscribe(state => state.own, own => {
+        applyPmDecisions("decision-queue", own == null ? null : { waiting: own });
+      });
+      // A hidden page skips the read; the next tick after it shows again catches up.
+      window.setInterval(requestDecisionCounts, DECISION_COUNTS_REFRESH_MS);
       pmLauncherModel.subscribe(state => state.workspace, syncAppChromePm);
       rosterModel.subscribe(state => state.revision, syncAppChromePm);
       issueMonitorModel.subscribe(model => model.pmDecisionAttention.count, syncAppChromePm);
@@ -6139,6 +5949,18 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (send(request) !== "sent" && action.kind !== "read") applyAgentRosterError({ project_key: routeProjectKey,
           request_id: request.request_id, message: "Member change could not be sent. Reload members and retry when connected." });
       }
+      function failAgentEnvironmentPriority(message) {
+        executionEnvironmentsModel.update(state => state.agentPriorityPending
+          ? { ...state, agentPriorityPending: null, agentPriorityError: { memberId: state.agentPriorityPending, message } }
+          : state);
+      }
+      function setAgentEnvironmentPriority(memberId, environmentIds) {
+        if (executionEnvironmentsModel.read().agentPriorityPending) return;
+        executionEnvironmentsModel.update(state => ({ ...state, agentPriorityPending: memberId, agentPriorityError: null }));
+        if (send({ kind: "set_agent_execution_environments", member_id: memberId, environment_ids: environmentIds }) !== "sent") {
+          failAgentEnvironmentPriority("Reconnect before changing the execution environment priority.");
+        }
+      }
       function requestAgentSchedule(action = { kind: "read" }) {
         if (action.kind !== "read" && action.expected_roster_revision !== rosterModel.read().revision) {
           applyAgentScheduleError({ project_key: routeProjectKey, message: "Members changed. Refresh plans before reassigning." });
@@ -6157,7 +5979,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
         if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch();
-          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); }
+          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); send({ kind: "get_execution_environments" }); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -6166,7 +5988,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, executionEnvironmentsModel, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onReloadProfile: () => requestAgentRoster(),
         onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
         onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
@@ -6180,6 +6002,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
         onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
         onSetTraits: (memberId, traits) => requestAgentRoster({ kind: "set_traits", member_id: memberId, traits }),
+        onSetEnvironmentPriority: setAgentEnvironmentPriority,
+        onSetAvatar: (memberId, avatar) => requestAgentRoster({ kind: "set_avatar", member_id: memberId, avatar }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
         onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),
@@ -6187,6 +6011,10 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onReassign: requestAgentSchedule,
         onRefreshSchedule: () => { requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); },
         onOpenWork: openAssignedWork,
+        onOpenPmTerminal: (windowId, sessionId) => {
+          const pm = workspaceWindowById(windowId);
+          if (pm?.is_pm && pm.session_id === sessionId) requestWindowFrame(windowId);
+        },
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
@@ -6197,6 +6025,20 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const executionEnvironments = createExecutionEnvironments({
         document, usageModel, supportedAgentsModel, renderAccountUsage, send,
         definitionsModel: executionEnvironmentsModel,
+        loginEventModel: poolLoginEventModel,
+        openLoginTerminal: (element, onData) => {
+          const terminal = new Terminal({
+            cols: 80, rows: 24, theme: XTERM_THEME_DARK,
+            fontFamily: resolveTerminalFontFamily(), fontSize: 13, scrollback: 0,
+          });
+          terminal.open(element);
+          terminal.focus();
+          const input = terminal.onData(onData);
+          return {
+            appendOutput: data => terminal.write(decodeBase64(data)),
+            dispose: () => { input.dispose(); terminal.dispose(); },
+          };
+        },
         onOpenToolManagement: () => document.dispatchEvent(
           new CustomEvent("settings:open", { detail: { target: "supported-agents" } })),
         onSetUsageCollection: (provider, enabled) => {
@@ -6208,6 +6050,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function setEnvironmentsHost(host) {
         const changed = executionEnvironments.element.hidden === Boolean(host);
         executionEnvironments.element.hidden = !host;
+        if (!host && changed) executionEnvironments.closeLogin(false);
         const targetHost = host || document.querySelector(".surface-area");
         if (executionEnvironments.element.parentElement !== targetHost) targetHost.appendChild(executionEnvironments.element);
         if (host && changed) {
@@ -6219,13 +6062,21 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         executionEnvironments.open(view);
         openSurface("environments");
       }
+      windowCatalogModel.subscribe(state => JSON.stringify(
+        catalogActiveWindows(state.catalog).map(window => [window.id, window.session_id])
+      ), () => executionEnvironments.refreshVisibleAccounts());
       document.addEventListener("environments:open", event => openExecutionEnvironments(event.detail?.view));
       // Issue #7643: Themes groups the project's Issues; opened from the rail.
       const projectThemes = createProjectThemes({
         document, send, repliesModel: themeRepliesModel, // An issue under a theme opens in the Issues screen, like an Issue link
         // in a window header.
         onOpenIssue: number => runIssueWindowHeaderAction("open-issue", { linked_issue_number: number }),
+        onOpenConversation: ({ messageId }) => openPmMessage(messageId),
+        getProjectKey: activeProjectKey,
+        onHierarchyChange: renderAllKnowledgeBridgeWindows,
       });
+      loadIssueThemes = projectThemes.loadHierarchy;
+      updateThemeConnection = projectThemes.updateConnection;
       const themesElement = projectThemes.element;
       themesElement.hidden = true;
       document.querySelector(".surface-area").appendChild(themesElement);
@@ -6326,8 +6177,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         }
       });
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
-      // Without this, Esc only worked for the Hotkey overlay and Command
-      // Palette; users were trapped in branch-cleanup / migration / wizard
+      // Without this, Esc only worked for the Hotkey overlay; users were trapped in branch-cleanup / migration / wizard
       // with pointer escape only. The window list dropdown also gets Esc
       // close so the operator chrome offers consistent keyboard escape.
       document.addEventListener("keydown", (event) => {
@@ -6412,7 +6262,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         refreshVisibleKnowledgeWindows();
       });
       window.addEventListener("pageshow", () => requestVisiblePmReports(true));
-      // SPEC-2356 — bridge Command Palette + hotkey commands into existing
+      // SPEC-2356 — bridge rail + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the existing socket transport.
 
@@ -6633,6 +6483,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         });
       }
 
+      // Issue #7880 (design item 137): Works has no rail entry; a person opens
+      // the terminal host from the Issue detail or the Agents screen. Specs of
+      // the host itself, including native and managed browsers that cannot
+      // install the test bridge before load, open it through the same
+      // openSurface the split view selector reaches.
+      window.__gwtSurfaceTestApi = Object.freeze({ open: surface => openSurface(surface) });
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       installPlaywrightTestBridge();
       frontendUnits.socketTransport.connect();

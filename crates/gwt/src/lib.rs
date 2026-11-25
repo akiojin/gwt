@@ -28,6 +28,8 @@ pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
 pub use cli::issue::validate_monitor_profiles_set;
+pub mod account_homes;
+mod account_switch;
 pub mod custom_agents_dispatch;
 pub mod custom_agents_service;
 pub mod daemon_publisher;
@@ -78,6 +80,7 @@ pub mod pm_current;
 pub mod pm_planning;
 pub mod pm_policy;
 pub mod pm_registry;
+pub mod pm_report_board;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
@@ -298,17 +301,18 @@ pub use protocol::{
     ActiveWorkProjectionView, ActiveWorkspaceWorkView, AgentAssignmentHistoryView,
     AgentPastContributorView, AgentRosterMemberView, AgentRosterView, AgentWorkFactsView,
     AppStateView, AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
-    ContinueWorkOutcomeKind, CustomAgentErrorCode, FileAttachment, FocusCycleDirection,
-    FrontendEvent, GitHubRepositorySearchResultView, HomeProjectConversationView, HubProjectView,
-    HubStateView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
-    LocalAgentActivityAgentView, LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
+    ContinueWorkOutcomeKind, CustomAgentErrorCode, DecisionCountView, FileAttachment,
+    FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
+    HomeProjectConversationView, HubProjectView, HubStateView, IndexSearchMatchMode,
+    IndexSearchResult, IndexSearchScope, IndexSearchTarget, LocalAgentActivityAgentView,
+    LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
     ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
-    PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus,
-    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
-    WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView,
-    WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceStateNoticeKind,
-    WorkspaceStateNoticeView, WorkspaceView,
+    PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectAutonomyView,
+    ProjectTabView, RecentProjectView, RecoveryCenterItemState, RecoveryCenterItemView,
+    RecoveryCenterLoadStatus, RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView,
+    WorkEventView, WorkItemView, WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource,
+    WorkspaceStateNoticeKind, WorkspaceStateNoticeView, WorkspaceView,
 };
 pub use window_registry::WindowRegistry;

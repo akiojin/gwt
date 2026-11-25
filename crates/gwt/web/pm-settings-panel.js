@@ -11,6 +11,9 @@ import { createUiStateStore } from "./ui-state-store.js";
 const DEFAULT_LOOP_INTERVAL_SECS = 60;
 const MIN_LOOP_INTERVAL_SECS = 10;
 const MAX_U64 = 18446744073709551615n;
+// Issue #7728: the patrol has no switch of its own; it follows the project stop/start.
+const PATROL_HELP =
+  "The Project Manager patrol follows the project stop/start in Settings > Issues and the project list. The conversation stays available while the project is stopped.";
 const AUTO_START_HELP =
   "Start the Project Manager automatically when this project opens.";
 const LOOP_INTERVAL_HELP =
@@ -158,11 +161,9 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
         : "Not running";
     view.autonomyStatus.textContent = !state.available
       ? "Autonomous loop unavailable"
-      : state.paused ? "Autonomous loop paused" : "Autonomous loop active";
-    view.pauseToggle.textContent = state.paused ? "Resume" : "Pause";
-    view.pauseToggle.setAttribute("aria-pressed", String(state.paused));
+      : state.paused ? "Autonomous loop stopped with the project" : "Autonomous loop active";
     setControlExplanation(view.autonomyStatus,
-      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.`, "pm-autonomy-status");
+      `${view.autonomyStatus.textContent}. ${PATROL_HELP}`, "pm-autonomy-status");
 
     view.pendingChip.hidden = !(
       state.isRunning
@@ -191,7 +192,6 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
     for (const control of [
       view.intervalInput,
       view.autoStartInput,
-      view.pauseToggle,
       view.restart,
     ]) {
       control.disabled = !canEdit();
@@ -268,12 +268,7 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
     autonomyStatus.setAttribute("role", "status");
     autonomyStatus.setAttribute("aria-live", "polite");
     section.appendChild(autonomyStatus);
-    const pauseToggle = el("button", "wizard-button");
-    pauseToggle.type = "button";
-    pauseToggle.dataset.role = "pm-pause-toggle";
-    section.appendChild(pauseToggle);
-    section.appendChild(el("p", "settings-help",
-      "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged."));
+    section.appendChild(el("p", "settings-help", PATROL_HELP));
 
     const pendingChip = el(
       "p",
@@ -336,7 +331,6 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
 
     for (const [control, text, key] of [
       [runningLine, "The agent, model and effort of the current Project Manager session. Saved profile changes apply after restart.", "pm-running-as"],
-      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.", "pm-pause-toggle"],
       [pendingChip, PROFILE_HELP, "pm-pending-chip"],
       [intervalInput, LOOP_INTERVAL_HELP, "pm-loop-interval"],
       [autoStartInput, AUTO_START_HELP, "pm-auto-start"],
@@ -353,7 +347,6 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
       intervalError,
       intervalInput,
       pendingChip,
-      pauseToggle,
       restart,
       runningLine,
       startBlockLine,
@@ -366,11 +359,6 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
         kind: "set_pm_auto_start",
         enabled: Boolean(autoStartInput.checked),
       });
-    });
-    pauseToggle.addEventListener("click", () => {
-      const state = model.read();
-      if (!canEdit()) return;
-      dispatch({ kind: "set_pm_paused", paused: !state.paused });
     });
     restart.addEventListener("click", () => {
       const state = model.read();

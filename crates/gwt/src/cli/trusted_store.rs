@@ -481,6 +481,26 @@ pub(crate) fn init_git_repo_with_origin(dir: &Path) {
     }
 }
 
+/// [`init_git_repo_with_origin`] for a Cargo workspace: the initial commit
+/// also tracks a root `Cargo.toml`, which `verify.plan` derivation requires
+/// before it proposes the Rust matrix (#7304).
+#[cfg(test)]
+pub(crate) fn init_cargo_repo_with_origin(dir: &Path) {
+    init_git_repo_with_origin(dir);
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+    for args in [
+        vec!["add", "Cargo.toml"],
+        vec!["commit", "-qm", "chore: cargo workspace"],
+    ] {
+        let status = gwt_core::process::hidden_command("git")
+            .args(&args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

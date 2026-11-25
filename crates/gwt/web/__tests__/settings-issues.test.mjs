@@ -123,6 +123,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
       terminal_queue_auto_refill_limit: 3, allowed_labels: ["auto-merge"] },
     catalog: { loaded: true, labels: [{ name: "auto-merge", color: "008800" }, { name: "bug", color: "ff0000" }] },
     send: message => sent.push(message),
+    autonomyControl: { element: Object.assign(document.createElement("span"), { textContent: "Running" }) },
   });
   assert.match(panel.textContent, /Project settings.*Project A/);
   assert.deepEqual([...panel.querySelectorAll("legend")].map(el => el.textContent), ["Launch control", "Refill", "Target"]);
@@ -133,7 +134,10 @@ test("Issues Settings keeps labels and values together and sends existing projec
   assert.equal(panel.querySelector(".settings-issues-capacity"), null);
   assert.equal(panel.querySelector('[aria-label="Auto-refill"]').closest("fieldset").querySelector("legend").textContent, "Refill");
   assert.equal(panel.querySelector('[aria-label="Allowed labels"]').closest("fieldset").querySelector("legend").textContent, "Target");
-  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Monitoring"]);
+  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Project", "Autonomous"]);
+  // Issue #7728 AC-2: monitoring has no switch of its own; the project stop/start replaces it.
+  assert.equal(panel.querySelector('[aria-label="Monitoring"]'), null);
+  assert.match(panel.querySelector('[data-settings-launch-action="project-autonomy"] > span:last-child').getAttribute("aria-description") || "", /Stopping halts new Issue assignments and the Project Manager patrol together/);
   const change = (name, value) => {
     const control = panel.querySelector(`[aria-label="${name}"]`);
     assert.ok(control, name);
@@ -151,10 +155,8 @@ test("Issues Settings keeps labels and values together and sends existing projec
   ]);
   change("Autonomous", true);
   assert.equal(panel.querySelector('[aria-label="Autonomous"]').checked, false, "wait for the confirmed server status");
-  change("Monitoring", false);
-  assert.deepEqual(sent.slice(-2), [
+  assert.deepEqual(sent.slice(-1), [
     { kind: "set_issue_monitor_autonomous_mode", enabled: true },
-    { kind: "set_issue_monitor_enabled", enabled: false },
   ], "Settings owns independent controls connected to the same project model");
 });
 
@@ -166,10 +168,10 @@ test("Settings launch controls retain their nodes and save once across status re
   render(panel, options);
   const launchControls = [...panel.querySelectorAll('[data-action]')];
   render(panel, { ...options, launchControls });
-  assert.equal(panel.querySelector('[aria-label="Monitoring"]'), launchControls[1]);
-  launchControls[1].checked = false;
-  launchControls[1].dispatchEvent(new Event("change"));
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_enabled", enabled: false }]);
+  assert.equal(panel.querySelector('[aria-label="Autonomous"]'), launchControls[0]);
+  launchControls[0].checked = true;
+  launchControls[0].dispatchEvent(new Event("change"));
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_autonomous_mode", enabled: true }]);
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
@@ -200,7 +202,8 @@ test("Project settings never writes capacity when opened, remounted or updated",
       launchControls: [...panel.querySelectorAll("[data-action]")] });
     assert.equal(panel.querySelectorAll('[aria-label^="Max active"], [aria-label="Apply Max active"], .settings-issues-capacity').length, 0);
     assert.doesNotMatch(panel.textContent, /This project allocation|Measuring capacity|All projects on this machine/);
-    assert.equal(panel.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]').length, 2);
+    assert.equal(panel.querySelectorAll('[data-action="monitor-autonomous"]').length, 1);
+    assert.equal(panel.querySelectorAll('[data-action="monitor-toggle"]').length, 0);
   }
   assert.deepEqual(sent, []);
 });
@@ -213,7 +216,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
-    ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
+    ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i],
     ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*default limit of 3/i],
     ["Allowed labels", /matching issues/i],
   ]) {
@@ -481,7 +484,7 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A");
   assert.equal(document.querySelector('[aria-label="bug"]').checked, false, "server status replaces an unconfirmed selection");
   assert.equal(document.querySelector('[aria-label="Autonomous"]').checked, false);
-  assert.equal(document.querySelector('[aria-label="Monitoring"]').checked, false);
+  assert.equal(document.querySelector('[aria-label="Monitoring"]'), null);
   const rosterReads = () => sent.filter(message => message.kind === "agent_roster");
   const beforeProfileAck = rosterReads().length;
   const ack = { project_root: "/A", request_id: 701, profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices };

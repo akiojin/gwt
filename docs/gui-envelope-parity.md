@@ -79,6 +79,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `TerminalInput` | 一部対応 | `pane.send` | 自分のペインに一行を送信できる。GUI の対話的な端末入力はキー入力や改行をそのまま扱う。 |
 | `LoadPmConversation` | 読み取り | — | 正規 PM ペインに結び付く会話の履歴を表示用に読む。 |
 | `LoadHomeConversation` | 読み取り | — | ホームの会話に出す、開いている各プロジェクトの判断キューを読む。 |
+| `LoadDecisionCounts` | 読み取り | — | プロジェクト画面のヘッダーとステータスバーに出す、開いている各プロジェクトの判断キューの待ち件数を読む。 |
 | `HomePmSend` | 対象外 | — | ホームからプロジェクトを指定して、そのプロジェクトの登録済み PM ペインへ文を送る。宛先のセッションはホストが解決する。 |
 | `GetFirstRunSetup` | 読み取り | — | 初回セットアップに出す、登録済みのツール、台帳のエージェント、PM の指名、セットアップの要否を読む。`refresh` は導入済みツールを検出し直す。 |
 | `SaveFirstRunSetup` | 対象外 | — | この端末の PM の指名（台帳のエージェント、または新しいエージェントの名前）を保存する。初回セットアップの画面からの操作に限る（Issue #7731）。 |
@@ -112,6 +113,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `SearchProjectIndex` | 対応 | `search` | プロジェクトインデックスを指定スコープで検索する。 |
 | `RequestWorkAdvisory` | 読み取り | — | Start Work で重複作業を調べるための候補を取得する。 |
 | `SelectKnowledgeBridgeEntry` | GUI 内部 | — | Knowledge ウィンドウ内の選択とプレビューを更新する。 |
+| `EditIssueSubtask` | 一部対応 | `issue.edit` | 課題本文の子課題を追加・削除し、選択中の課題詳細を更新する。エンベロープでは本文を編集できる。 |
 | `UpdateKnowledgeBridgePhase` | 一部対応 | `issue.label` | ラベルを操作できる。GUI は一覧の変更を既存フェーズラベルの置換として扱う。 |
 | `SetIssueAutonomousTarget` | 対応 | `issue.label` | 課題を自律駆動の対象に含める／外す。対象の印である `auto-merge` ラベルを付け外しする。 |
 | `RunBranchCleanup` | 一部対応 | `branch.prune_merged` | マージ済みブランチの削除に対応する。GUI は候補選択、作業ツリーの削除オプションと進捗も扱う。 |
@@ -139,6 +141,7 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `OpenActiveWorkLaunchWizard` | GUI 内部 | — | 現在の Work を再利用するウィザードの起動入力を初期化する。 |
 | `LaunchWizardAction` | 対象外 | — | 画面遷移、下書き編集、セットアップ、起動の確定は状態を持つ GUI ウィザードに紐づく。 |
 | `SetIssueMonitorEnabled` | 対応 | `issue.monitor.config.set` | Issues モニターの有効状態を切り替える。GUI は起動設定が不足している場合にウィザードを開く。 |
+| `SetProjectAutonomy` | 一部対応 | `issue.monitor.config.set`, `pm.pause`, `pm.resume` | プロジェクトの停止・開始（Issue #7728）。GUI は Issues の割り当てと PM 巡回を 1 操作で切り替える。CLI は `issue.monitor.config.set` の `enabled` と `pm.pause` / `pm.resume` を組み合わせる。 |
 | `SetIssueMonitorAutonomousMode` | 対応 | `issue.monitor.config.set` | プロジェクトの自動実行モードを切り替える。 |
 | `GetUpdateSettings` | 対応 | `update.settings.status` | 更新の適用設定と現在の状態を取得する。 |
 | `GetHookDoctor` | 対応 | `hook.doctor` | プロジェクトの hook を診断し、明示された場合に修復する。 |
@@ -149,11 +152,23 @@ Rust CI の `gui_envelope_parity_ledger_tracks_frontend_events_and_catalog` が�
 | `LoadThemes` | 読み取り | — | テーマ画面に出す、プロジェクトのテーマ（sub-issue を持つ Issue）と今日の完了数を読む（Issue #7643）。 |
 | `DeleteTheme` | 対象外 | — | テーマを削除する（テーマの GitHub Issue を not planned で閉じる）。テーマ画面の確認ダイアログを経る操作に限る（Issue #7643）。 |
 | `GetExecutionEnvironments` | 読み取り | — | 実行環境の定義、アカウント、開いているプロジェクトの優先度リストを取得する。 |
+| `AddPoolAccount` | 対象外 | — | 追加アカウントを登録してブラウザ専用のサインインターミナルを開く（Issue #7842）。 |
+| `SignInPoolAccount` | 対象外 | — | 既存アカウントのサインインターミナルを開く（Issue #7842）。 |
+| `SaveCopilotAccount` | 対象外 | — | 認証主体を確認して Copilot の PAT を macOS Keychain に保存する。入力値は操作ログから除外する（Issue #7842）。 |
+| `MovePoolAccount` | 対象外 | — | 同じプロバイダー内でアカウントの優先順を変更する（Issue #7842）。 |
+| `UsePoolAccount` | 対象外 | — | サインイン済みのアカウントをプールの先頭に移す（Issue #7842）。 |
+| `DeletePoolAccount` | 対象外 | — | 確認画面を経て追加アカウントをプールから削除する（Issue #7842）。 |
+| `ResumeNextPoolAccount` | 対象外 | — | 対象のセッションのターン終了後に別のアカウントで再開する（Issue #7842）。 |
+| `PoolAccountLoginInput` | 対象外 | — | 操作元のブラウザ専用サインインターミナルへ入力する（Issue #7842）。 |
+| `ClosePoolAccountLogin` | 対象外 | — | 操作元のブラウザ専用サインインターミナルを閉じる（Issue #7842）。 |
+| `GetProjectEnvironmentSet` | 読み取り | — | プロジェクト設定に表示する環境変数セットの候補名と割り当てを取得する。 |
+| `SetProjectEnvironmentSet` | 対象外 | — | プロジェクト設定から、次のエージェント起動に使う環境変数セットの割り当てを保存する（Issue #7651）。 |
 | `AddExecutionEnvironment` | 対象外 | — | アカウントと経由ツールの組をホストに登録する。実行環境の画面からの操作に限る（Issue #7741）。 |
 | `UpdateExecutionEnvironment` | 対象外 | — | 実行環境の名前と実行時指定を変更する。実行環境の画面からの操作に限る（Issue #7741）。 |
 | `DeleteExecutionEnvironment` | 対象外 | — | 実行環境を削除し、各プロジェクトのリストから外す。確認画面を経る操作に限る（Issue #7741）。 |
 | `SetProjectExecutionEnvironments` | 対象外 | — | プロジェクトの利用可能な実行環境リストを優先度順で保存する。プロジェクト設定からの操作に限る（Issue #7741）。 |
 | `SetPmExecutionEnvironments` | 対象外 | — | この端末の PM 専用の実行環境リストを優先度順で保存する。空のリストは保存側で拒否する。アプリ設定からの操作に限る（Issue #7732）。 |
+| `SetAgentExecutionEnvironments` | 対象外 | — | エージェント設定から実行環境の優先度を保存する。空のリストはプロジェクト順を使う（Issue #7846）。 |
 | `SetIssueMonitorMaxActiveAgents` | 対応 | `issue.monitor.config.set` | Issues の同時稼働エージェント上限を変更する。 |
 | `SetIssueMonitorAllowedLabels` | 対応 | `issue.monitor.config.set` | Issues の対象ラベルを変更する。 |
 | `GetRepositoryLabels` | 読み取り | — | Issues の設定候補としてリポジトリのラベルを取得する。 |

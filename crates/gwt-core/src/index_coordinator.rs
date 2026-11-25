@@ -2035,32 +2035,40 @@ fn acquire_heavy_at(
                 }
             }
             if started.elapsed() >= timeout {
-                // A deferred retry resumes its existing place in the queue.
-                match enroll_in_heavy_queue_for_attempt(
-                    &pending_dir,
-                    &target,
-                    priority,
-                    mode,
-                    attempt,
-                ) {
+                let refreshed = if key.is_verification() {
+                    // The live waiter still owns its arrival even if its
+                    // durable entry expired while it was polling.
+                    let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
+                    check_heavy_attempt_locked(&pending_dir, &target, attempt)?;
+                    let now = now_ms();
+                    let mut entry = registration;
+                    entry.registered_at_ms = now;
+                    entry.disk_budgets = None;
+                    entry.position_until_ms =
+                        Some(now.saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
+                    entry.reserved_until_ms =
+                        Some(now.saturating_add(VERIFICATION_RESERVATION_TTL.as_millis() as u64));
+                    let path = heavy_queue_entry_path(&pending_dir, &target);
+                    // A contended reservation may still belong to a live
+                    // claimant. Refresh it only after a successful read.
+                    read_registration(&path).and_then(|existing| {
+                        entry.reason = existing.and_then(|existing| existing.reason);
+                        write_json_atomic(&path, &entry).map_err(CoordinatorError::Io)
+                    })
+                } else {
+                    enroll_in_heavy_queue_for_attempt(
+                        &pending_dir,
+                        &target,
+                        priority,
+                        mode,
+                        attempt,
+                    )
+                    .map(|_| ())
+                };
+                match refreshed {
                     Err(CoordinatorError::Io(err)) if is_contended(&err) => {}
                     Err(err) if attempt.is_some() => return Err(err),
                     _ => {}
-                }
-                if key.is_verification() {
-                    // Preserve #4169's reservation before ending this poll so a
-                    // later claimant cannot overtake the deferred verification.
-                    let path = heavy_queue_entry_path(&pending_dir, &target);
-                    let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
-                    check_heavy_attempt_locked(&pending_dir, &target, attempt)?;
-                    if let Ok(mut entry) = heavy_queue_entry(&pending_dir, &target, priority) {
-                        entry.attempt_id = attempt.map(|attempt| attempt.id.to_string());
-                        entry.reserved_until_ms = Some(
-                            now_ms()
-                                .saturating_add(VERIFICATION_RESERVATION_TTL.as_millis() as u64),
-                        );
-                        let _ = write_json_atomic(&path, &entry);
-                    }
                 }
                 return Err(CoordinatorError::Timeout {
                     waited_ms: started.elapsed().as_millis() as u64,
@@ -5932,6 +5940,61 @@ mod tests {
             .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
             .expect("clearing the reservation lets the next claimant proceed");
         lease.release().unwrap();
+    }
+
+    #[test]
+    fn verification_waiter_keeps_fifo_when_its_reservation_expires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let holder = own(
+            &coordinator,
+            &TargetKey::verification("holder-repo", "holder"),
+            JobPriority::ManualRebuild,
+        );
+        let lease = holder.acquire_heavy(Duration::ZERO).unwrap();
+        let early = TargetKey::verification("early-repo", "early");
+        let later = TargetKey::verification("later-repo", "later");
+        let waiter = own(&coordinator, &early, JobPriority::ManualRebuild);
+        let path = coordinator.heavy_reservation_path(&early);
+        enroll_in_heavy_queue(
+            &coordinator.heavy_pending_dir(),
+            &early.file_stem(),
+            JobPriority::ManualRebuild,
+        )
+        .unwrap();
+        let mut entry = read_registration(&path).unwrap().unwrap();
+        entry.queued_at_ms = Some(1);
+        write_json_atomic(&path, &entry).unwrap();
+        let arrival = (entry.queued_at(), entry.queue_seq);
+        coordinator
+            .reserve_heavy(&later, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+
+        // Simulate the durable position expiring after the live waiter joins.
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                let mut entry = read_registration(&path).unwrap().unwrap();
+                entry.position_until_ms = Some(0);
+                write_json_atomic(&path, &entry).unwrap();
+            }));
+        });
+        assert!(matches!(
+            waiter.acquire_heavy_with_disk_budgets(Duration::ZERO, HANG_GUARD, &[]),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        let queue = coordinator.heavy_pool_status().unwrap().queue;
+        assert_eq!(queue[0].target.as_deref(), Some(early.file_stem().as_str()));
+        let reservation = read_registration(&coordinator.heavy_reservation_path(&early))
+            .unwrap()
+            .unwrap();
+        assert_eq!((reservation.queued_at(), reservation.queue_seq), arrival);
+        assert_eq!(queue[1].target.as_deref(), Some(later.file_stem().as_str()));
+        lease.release().unwrap();
+        waiter
+            .acquire_heavy_with_disk_budgets(Duration::ZERO, HANG_GUARD, &[])
+            .unwrap()
+            .release()
+            .unwrap();
     }
 
     #[test]

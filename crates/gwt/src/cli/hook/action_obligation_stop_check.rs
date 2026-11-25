@@ -16,7 +16,22 @@
 use std::path::Path;
 
 use super::{envelope::stop_hook_active_from, HookOutput};
-use crate::cli::{action_obligation, execution_state};
+use crate::cli::{
+    action_obligation::{self, ObligationKind},
+    execution_state,
+};
+
+/// A Completed execution cannot run a new verification matrix. Only an
+/// integrity-valid record for this session establishes that boundary.
+fn session_execution_completed(worktree: &Path, session: &str) -> bool {
+    matches!(
+        execution_state::load(worktree),
+        Ok(Some(record))
+            if record.primary_session_id == session
+                && record.status == execution_state::ExecutionControlStatus::Completed
+                && execution_state::integrity_ok(&record)
+    )
+}
 
 /// Name the Session holding this worktree's execution control record when the
 /// caller is not that Session — an orphan window (Issue #4454).
@@ -85,13 +100,13 @@ pub(crate) fn handle_user_prompt_submit_with_context(
     else {
         return;
     };
+    let kind = action_obligation::classify_prompt(&prompt);
     // Issue #5790 / SPEC-3431 FR-064: the PM can update Issues but cannot
     // produce implementation, verification or PR artifacts. Reuse the exact
     // automatic-prompt classifier so notifications never arm even IssueUpdate.
     if super::is_resident_pm_worktree(worktree)
         && (crate::pm_conversation::internal_prompt(&prompt)
-            || action_obligation::classify_prompt(&prompt)
-                != Some(action_obligation::ObligationKind::IssueUpdate))
+            || kind != Some(ObligationKind::IssueUpdate))
     {
         return;
     }
@@ -99,6 +114,11 @@ pub(crate) fn handle_user_prompt_submit_with_context(
     // nothing. Not arming is the primary fix; the Stop-side release below
     // covers obligations already on record.
     if foreign_record_holder(&resolved, &session_id).is_some() {
+        return;
+    }
+    if kind == Some(ObligationKind::Verification)
+        && session_execution_completed(&resolved, &session_id)
+    {
         return;
     }
     if let Err(error) = action_obligation::mark_from_prompt(&resolved, &session_id, &prompt) {
@@ -152,7 +172,14 @@ pub(crate) fn handle_with_input_with_context(
     // Old PM sessions may already carry execution obligations. Leave their
     // history intact while enforcing only the kinds the PM can settle.
     if super::is_resident_pm_worktree(worktree) {
-        open.retain(|kind| *kind == action_obligation::ObligationKind::IssueUpdate);
+        open.retain(|kind| *kind == ObligationKind::IssueUpdate);
+    }
+    // Issue #7315: older hooks could persist a verification obligation after
+    // completion. Preserve the ledger and gate only the remaining kinds.
+    if open.contains(&ObligationKind::Verification)
+        && session_execution_completed(&resolved, session.trim())
+    {
+        open.retain(|kind| *kind != ObligationKind::Verification);
     }
     if open.is_empty() {
         return HookOutput::Silent;
@@ -462,6 +489,59 @@ mod tests {
             ),
             "non-PM sessions must keep the prompt-to-action gate"
         );
+    }
+
+    #[test]
+    fn completed_session_can_stop_after_pm_verification_follow_up() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let session = "completed-follow-up";
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session);
+        let dir = mk_worktree();
+        let worktree = dir.path();
+        execution_state::materialize_at_launch(
+            worktree,
+            execution_state::ExecutionOwnerKind::Issue,
+            7315,
+            session,
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            execution_state::settle(
+                worktree,
+                session,
+                execution_state::ExecutionSettlement::Completed,
+            )
+            .unwrap(),
+            execution_state::SettleResult::Settled(_)
+        ));
+
+        let prompt = crate::pm_registry::protected_pm_delivery_prompt(
+            "00000000-0000-4000-8000-000000000001",
+            "残りの受け入れ条件を検証して",
+        )
+        .unwrap();
+        handle_user_prompt_submit_with_context(
+            worktree,
+            &serde_json::json!({ "prompt": &prompt }).to_string(),
+            false,
+        );
+        assert!(action_obligation::open_kinds(worktree, session).is_empty());
+
+        // Simulate a verification obligation persisted by an older hook.
+        assert!(action_obligation::mark_from_prompt(worktree, session, &prompt).unwrap());
+        let previous = action_obligation::load(worktree).unwrap();
+        assert_eq!(
+            handle_with_input_with_context(worktree, "{}", Some(session), false),
+            HookOutput::Silent
+        );
+        assert_eq!(action_obligation::load(worktree).unwrap(), previous);
     }
 
     /// Issue #4454 AC-1 / AC-3: an orphan window — one whose worktree's

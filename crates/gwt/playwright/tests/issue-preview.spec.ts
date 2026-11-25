@@ -508,7 +508,7 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator("#op-strip-running")).toHaveText("3");
     const inline = page.locator("#op-strip-running-inline");
     await expect(inline).toBeVisible();
-    await expect(inline).toHaveText("3 inline");
+    await expect(inline).toHaveText("3 in Issues");
     await expect(page.locator(".op-status-strip__cell--running")).toHaveAttribute(
       "title",
       "3 of 3 running agents are inline terminals in the Issue window",
@@ -523,7 +523,7 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".works-terminal[data-window-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect(page.locator("#canvas, #fleet-minimap")).toHaveCount(0);
     await expect(page.locator("#op-strip-running")).toHaveText("3");
-    await expect(inline).toHaveText("2 inline");
+    await expect(inline).toHaveText("2 in Issues");
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
 
     // SPEC #3885 T-005 / FR-012: the row keeps the Issue ↔ agent link as a

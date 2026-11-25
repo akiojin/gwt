@@ -36,7 +36,7 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows), prev
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); input.className = "xterm"; runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
     onRevokeTerminal(id, root) { revocations.push({ id, root }); },
     mountPreview(id, root, options) { if (!previewAvailable()) return () => {}; const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
-    onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
+    onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), onSelectReview: target => selected.push(target), getTelemetry: () => telemetry,
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
@@ -174,6 +174,40 @@ test("Works joins exact local-live sessions, places PM first and keeps unknown t
   assert.equal(surface.element.querySelector(".works-empty").textContent, "Local agent activity is unavailable.");
   assert.equal(surface.element.querySelector('[data-count="running"]').textContent, "5", "an unavailable census does not hide the server summary");
   surface.dispose();
+});
+
+test("Works review names return the exact live review to Agents without inventing a member", async () => {
+  const review = { ...live[0], review_dispatch: true };
+  const reviewWindow = { ...windows[0], runtime_started_at_ms: 1 };
+  const f = await fixture(null, catalog([reviewWindow]), undefined, false, { agents: [review], count: 1 });
+  f.rosterModel.update(() => ({ members: [] })); f.flush();
+  f.surface.openWork(review);
+  const name = f.surface.element.querySelector(".works-full button.work-name");
+  assert.ok(name, "unregistered review windows have an Agents navigation button");
+  assert.equal(name.getAttribute("aria-label"), "View One in Agents");
+  name.click();
+  assert.deepEqual(f.selected, [{ ...review, projectKey: undefined, hostId: undefined }]);
+  f.activityModel.update(() => ({ agents: [review], count: null }));
+  name.click();
+  assert.equal(f.selected.length, 1, "unknown activity cannot navigate with retained identity");
+  f.activityModel.update(() => ({ agents: [{ ...review, session_id: "replacement" }], count: 1 }));
+  name.click();
+  assert.equal(f.selected.length, 1, "a reused window ID cannot navigate the old review");
+  f.windowCatalogModel.update(() => ({ catalog: catalog([{ ...reviewWindow, session_id: "replacement" }], 2) })); f.flush();
+  f.surface.openWork({ ...review, session_id: "replacement" });
+  const replacement = f.surface.element.querySelector(".works-full button.work-name");
+  replacement.click();
+  assert.equal(f.selected.length, 2, "the replacement review has its own usable navigation");
+  assert.equal(f.selected[1].session_id, "replacement");
+  name.click();
+  assert.equal(f.selected.length, 2, "the detached old control stays inert");
+  f.windowCatalogModel.update(() => ({ catalog: catalog([{ ...reviewWindow, session_id: "replacement", status: "stopped", persist: false }], 3) }));
+  f.activityModel.update(() => ({ agents: [], count: 0 }));
+  replacement.click();
+  assert.equal(f.selected.length, 2, "retained STOP output is not a live review navigation target");
+  f.flush();
+  assert.ok(!f.surface.element.querySelector(".works-full button.work-name"));
+  f.surface.dispose();
 });
 
 test("Works keeps stable member order after PM when census arrival order changes", async () => {

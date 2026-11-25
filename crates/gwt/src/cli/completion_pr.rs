@@ -153,6 +153,28 @@ pub(super) fn admit<E: CliEnv>(
                     )
                 })
                 .collect();
+            // A reused owner branch keeps every earlier merged slice. Settle
+            // on the newest delivery: the head no other inheriting head
+            // descends from (#7321). Equal or sibling heads stay ambiguous.
+            if matching.len() > 1 {
+                let newest: Vec<_> = matching
+                    .iter()
+                    .copied()
+                    .filter(|pr| {
+                        !matching.iter().any(|other| {
+                            other.head_sha != pr.head_sha
+                                && verification::git_is_ancestor(
+                                    &worktree,
+                                    &pr.head_sha,
+                                    &other.head_sha,
+                                ) == Ok(true)
+                        })
+                    })
+                    .collect();
+                if newest.len() == 1 {
+                    matching = newest;
+                }
+            }
         }
         if matching.len() != 1 {
             let numbers = candidates
@@ -527,6 +549,69 @@ mod tests {
         assert_eq!(
             execution::load(repo.path()).unwrap().unwrap().status,
             execution::ExecutionControlStatus::Active
+        );
+    }
+
+    /// #7321 (#6117): a relaunch fast-forwards a reused owner branch whose
+    /// earlier slices were all merged. Every merged PR then inherits the
+    /// delivered receipt, and automatic selection must settle on the newest
+    /// delivery instead of refusing the candidates as ambiguous.
+    #[test]
+    fn autonomous_completion_selects_newest_inherited_merged_pr_after_relaunch() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let session_id = "completion-pr-relaunch-history";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let repo = tempfile::tempdir().unwrap();
+        prepare(repo.path(), session_id);
+        let mut env = TestEnv::new(repo.path().into());
+        // PR #9001 delivered the first slice at the prepared HEAD.
+        seed_pr(&mut env, false, PrState::Merged);
+        // PR #9002 delivered a later slice from the same owner branch.
+        std::fs::write(repo.path().join("owner_slice.rs"), "second owner slice\n").unwrap();
+        commit_fixture_change(repo.path(), "owner_slice.rs");
+        let head = |repo: &Path| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let mut newer = env.completion_prs[&9001].clone();
+        newer.head_sha = head(repo.path());
+        newer.inventory.number = 9002;
+        newer.inventory.url = "https://github.com/o/r/pull/9002".into();
+        env.completion_prs.insert(9002, newer);
+        land_head_on_origin_develop(repo.path());
+        // Relaunch fast-forwards onto develop holding another owner's product.
+        std::fs::write(repo.path().join("other_owner.rs"), "other owner product\n").unwrap();
+        commit_fixture_change(repo.path(), "other_owner.rs");
+        land_head_on_origin_develop(repo.path());
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            "work-completion-relaunch",
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
+        commit_and_reverify(repo.path(), session_id, ".gwt/work/events");
+
+        let mut out = String::new();
+        assert!(
+            super::admit(&mut env, session_id, Some(5034), None, &mut out)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .is_some()
+        );
+        assert_eq!(env.completion_pr_call_log.last(), Some(&9002));
+        // The explicit build.complete selector also accepts the merged head.
+        assert!(
+            super::admit(&mut env, session_id, Some(5034), Some(9002), &mut out)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .is_some()
         );
     }
 

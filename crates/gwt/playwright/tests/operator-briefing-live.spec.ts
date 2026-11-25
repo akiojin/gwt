@@ -48,7 +48,7 @@ test("Issues strip coalesces receiver bursts and updates without animation frame
       cell.setAttribute = originalSet;
     }
   });
-  expect(batch).toEqual({ before: { renders: 0, unchanged: true }, renders: 1, text: "Run Q49 A1/2" });
+  expect(batch).toEqual({ before: { renders: 0, unchanged: true }, renders: 1, text: "Running · 49 queued · 1 of 2 active" });
   await page.evaluate(() => {
     (window as any).__monitorStripRaf = window.requestAnimationFrame;
     window.requestAnimationFrame = () => 0;
@@ -58,12 +58,12 @@ test("Issues strip coalesces receiver bursts and updates without animation frame
     } }));
   });
   try {
-    await expect(value).toHaveText("Error Q0 A0/2", { timeout: 1000 });
+    await expect(value).toHaveText("Error · 0 queued · 0 of 2 active", { timeout: 1000 });
     await expect(page.locator("#op-strip-issue-monitor")).toHaveClass(/op-status-strip__cell--alert/);
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
       kind: "issue_monitor_status", status: { enabled: true, state: "idle", last_error: "" },
     } })));
-    await expect(value).toHaveText("Idle Q0 A0/2", { timeout: 1000 });
+    await expect(value).toHaveText("Idle · 0 queued · 0 of 2 active", { timeout: 1000 });
     await expect(page.locator("#op-strip-issue-monitor")).not.toHaveClass(/op-status-strip__cell--alert/);
   } finally {
     await page.evaluate(() => {

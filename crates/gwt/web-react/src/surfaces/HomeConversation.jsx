@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useStoreSelector } from "../store/useStoreSelector.js";
 import { focusElement } from "../hosts/focus.js";
-import { scrollIntoCenter, scrollToEnd } from "../hosts/scroll.js";
+import { restoreScrollAnchor, scrollIntoCenter, scrollToEnd } from "../hosts/scroll.js";
 import { localTimeLabel, relativeTimeLabel } from "./time-labels.js";
 
 // Home: the conversation with the Project Manager (Issue #7639, SPEC #7007
@@ -20,6 +20,7 @@ const selectView = state => state;
 const COPY = {
   conversation: "Conversation with the Project Manager",
   you: "You",
+  replyWaiting: "Project Manager is replying",
   to: project => `to ${project}`,
   decisionWaiting: "Decision waiting",
   waitingFor: label => `waiting since ${label}`,
@@ -61,17 +62,45 @@ function Time({ iso }) {
   return <time dateTime={iso} title={localTimeLabel(iso) ?? undefined}>{label}</time>;
 }
 
-function PmFace() {
-  return <span className="gwt-home__face" aria-hidden="true">P</span>;
+function PmFace({ avatar }) {
+  return (
+    <span className="gwt-home__face" aria-hidden="true">
+      {avatar.imageUrl ? <img className="agent-avatar-image" src={avatar.imageUrl} alt="" /> : avatar.glyph}
+    </span>
+  );
 }
 
 function Lines({ lines }) {
   return lines.map((line, index) => <p key={index}>{line}</p>);
 }
 
+const clipboardImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+const maxAttachments = 16;
+
+function Attachments({ attachments, onRemove, disabled }) {
+  if (!attachments?.length) return null;
+  return <ul className="gwt-home__attachments" aria-label={onRemove ? "Draft attachments" : "Attachments"}>
+    {attachments.map(({ name, preview, id }) => (
+      <li key={id}>
+        {preview ? <img src={preview} alt={name} /> : <span>{name}</span>}
+        {onRemove ? <button type="button" className="wizard-button" disabled={disabled}
+          aria-label={`Remove ${name}`} onClick={() => onRemove(id)}>×</button> : null}
+      </li>
+    ))}
+  </ul>;
+}
+
 export function HomeConversation({ store, actions }) {
   const view = useStoreSelector(store, selectView);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const uploadsInFlight = useRef(false);
+  const attachmentSendCount = useRef(null);
+  const nextAttachmentId = useRef(0);
+  const fileInputRef = useRef(null);
+  const [fileSelection, setFileSelection] = useState(0);
   const [chosenProject, setChosenProject] = useState("");
   const [query, setQuery] = useState("");
   const [removing, setRemoving] = useState(null);
@@ -82,16 +111,79 @@ export function HomeConversation({ store, actions }) {
   const removeTriggerRef = useRef(null);
   const messageRefs = useRef(new Map());
   const { composer } = view;
+  const initialMessage = useRef(null);
 
-  // The newest message is at the bottom: start there, and follow new messages.
-  const timelineKey = view.topics.map(topic => topic.id).join("\n");
-  useEffect(() => {
-    scrollToEnd(logRef.current);
-  }, [timelineKey]);
+  const [windowEnd, setWindowEnd] = useState(null);
+  const [wideHistory, setWideHistory] = useState(false);
+  const scrollAnchor = useRef(null);
+  const following = useRef(true);
+  const requestedMessage = initialMessage.current !== view.initialMessage ? view.initialMessage : null;
+  const targetIndex = requestedMessage ? view.topics.findIndex(topic => topic.id === requestedMessage) : -1;
+  const rememberedEnd = windowEnd ? view.topics.findIndex(topic => topic.id === windowEnd) + 1 : 0;
+  const end = targetIndex >= 0 ? Math.min(view.topics.length, targetIndex + 25)
+    : rememberedEnd || view.topics.length;
+  const start = view.decisionsOnly ? 0 : Math.max(0, end - (wideHistory ? 100 : 50));
+  const topics = view.topics.slice(start, end);
+  const timelineKey = topics.map(topic => topic.id).join("\n");
+
+  useLayoutEffect(() => {
+    const target = messageRefs.current.get(requestedMessage);
+    const anchor = scrollAnchor.current;
+    const anchorNode = anchor && messageRefs.current.get(anchor.id);
+    if (target) {
+      initialMessage.current = requestedMessage;
+      scrollIntoCenter(target);
+      focusElement(target);
+      setHighlight(requestedMessage);
+      const last = topics.at(-1);
+      if (end < view.topics.length) setWindowEnd(last.id);
+    } else if (anchorNode) {
+      if (anchor.before === undefined || anchor.before !== view.topics[0]?.id) scrollAnchor.current = null;
+      restoreScrollAnchor(logRef.current, anchorNode, anchor.top);
+    } else if (following.current) {
+      scrollToEnd(logRef.current);
+    }
+  }, [timelineKey, view.initialMessage]);
+
+  function rememberScrollAnchor(log, loadingOlder = false) {
+    const top = log.getBoundingClientRect().top;
+    for (const { id } of topics) {
+      const bounds = messageRefs.current.get(id)?.getBoundingClientRect();
+      if (bounds && bounds.bottom > top) {
+        scrollAnchor.current = { id, top: bounds.top, before: loadingOlder ? view.topics[0]?.id : undefined };
+        break;
+      }
+    }
+  }
+
+  function scrollTimeline(event) {
+    if (view.decisionsOnly) return;
+    const log = event.currentTarget;
+    const nearEnd = log.scrollHeight - log.clientHeight - log.scrollTop <= 16;
+    following.current = !windowEnd && nearEnd;
+    if (log.scrollTop <= 16 && log.scrollHeight > log.clientHeight) {
+      if (!start && !view.hasOlder) return;
+      if (!start && !actions.loadOlder()) return;
+      rememberScrollAnchor(log, !start);
+      setWideHistory(true);
+      const earlierEnd = Math.max(end - 50, start + 25);
+      setWindowEnd(view.topics[(start ? earlierEnd : Math.min(end, 50)) - 1]?.id ?? null);
+    } else if (nearEnd && windowEnd) {
+      rememberScrollAnchor(log);
+      const next = end + 50;
+      setWindowEnd(next >= view.topics.length ? null : view.topics[next - 1]?.id ?? null);
+    }
+  }
 
   // A confirmed send clears exactly the draft that was sent.
   useEffect(() => {
-    if (composer.sentCount) setDraft("");
+    if (composer.sentCount) {
+      setDraft("");
+      if (composer.sentCount === attachmentSendCount.current) {
+        setAttachments([]);
+        attachmentSendCount.current = null;
+      }
+    }
   }, [composer.sentCount]);
 
   useEffect(() => {
@@ -112,9 +204,13 @@ export function HomeConversation({ store, actions }) {
     focusElement(node);
     setHighlight(id);
   };
+  useEffect(() => {
+    if (composer.replyTo?.id) focusElement(draftRef.current);
+  }, [composer.replyTo?.id]);
+
   const reply = id => {
     actions.reply(id);
-    focusElement(draftRef.current);
+    if (!view.decisionsOnly) focusElement(draftRef.current);
   };
   const closeRemove = () => {
     setRemoving(null);
@@ -130,10 +226,57 @@ export function HomeConversation({ store, actions }) {
     : mentioned ?? projects.find(project => project.key === chosenProject) ?? (projects.length === 1 ? projects[0] : null);
   const needsProject = !composer.replyTo && !target && projects.length > 1 && draft.trim() !== "";
   const noPm = target && !target.pmAvailable ? COPY.noPm(target.title) : "";
-  const canSend = Boolean(draft.trim()) && Boolean(target) && !view.busy && !noPm;
-  const submit = event => {
+  const canSend = Boolean(draft.trim()) && Boolean(target) && !view.busy && !noPm && !uploading;
+  const canAttach = !composer.replyTo && !view.busy && !uploading;
+  const addAttachments = files => {
+    if (!canAttach || !files.length) return;
+    if (attachments.length + files.length > maxAttachments) {
+      setAttachmentError(`Choose up to ${maxAttachments} attachments.`);
+      return;
+    }
+    setAttachmentError("");
+    const added = files.map(file => ({
+      file,
+      name: file.name,
+      id: ++nextAttachmentId.current,
+      preview: clipboardImageTypes.has(file.type) ? URL.createObjectURL(file) : null,
+    }));
+    setAttachments(current => [...current, ...added]);
+  };
+  const removeAttachment = id => {
+    const removed = attachments.find(attachment => attachment.id === id);
+    if (removed?.preview) URL.revokeObjectURL(removed.preview);
+    setAttachments(current => current.filter(attachment => attachment.id !== id));
+    setAttachmentError("");
+  };
+  const submit = async event => {
     event?.preventDefault();
-    if (canSend) actions.submit(draft, target.key);
+    if (!canSend || uploadsInFlight.current) return;
+    attachmentSendCount.current = null;
+    if (composer.replyTo || !attachments.length) {
+      actions.submit(draft, target.key);
+      return;
+    }
+    uploadsInFlight.current = true;
+    setUploading(true);
+    setAttachmentError("");
+    try {
+      const uploads = [];
+      for (const { file } of attachments) {
+        const uploaded = await actions.uploadAttachment(file);
+        uploads.push({ ...uploaded, source: "uploaded" });
+      }
+      if (actions.submit(draft, target.key, attachments, uploads)) {
+        attachmentSendCount.current = composer.sentCount + 1;
+      } else {
+        setAttachmentError("The message could not be sent. Your attachments are kept.");
+      }
+    } catch (error) {
+      setAttachmentError(`Attachment upload failed: ${error.message}`);
+    } finally {
+      uploadsInFlight.current = false;
+      setUploading(false);
+    }
   };
   const onDraftKeyDown = event => {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent?.isComposing || event.keyCode === 229) return;
@@ -147,9 +290,9 @@ export function HomeConversation({ store, actions }) {
   return (
     <section className="gwt-home" data-home aria-label={COPY.conversation}>
       <header className="gwt-home__head">
-        <PmFace />
+        <PmFace avatar={view.pm.avatar} />
         <div className="gwt-home__who">
-          <h1 className="gwt-home__name">{view.pm.name}</h1>
+          <h1 className="gwt-home__name">{view.decisionsOnly ? "Decisions" : view.pm.name}</h1>
           <p className="gwt-home__sub">
             {view.pm.role}
             {" · "}
@@ -164,10 +307,11 @@ export function HomeConversation({ store, actions }) {
             </button>
           </p>
         </div>
+        {view.decisionsOnly ? <a className="text-button" href="/">Back to Home</a> : null}
       </header>
 
-      <div className="gwt-home__timeline" role="log" aria-label={COPY.conversation} ref={logRef} tabIndex={0}>
-        {view.resolved.length ? (
+      <div className="gwt-home__timeline" role="log" aria-label={COPY.conversation} ref={logRef} tabIndex={0} onScroll={scrollTimeline}>
+        {!view.decisionsOnly && view.resolved.length ? (
           <div className="gwt-home__resolved" data-home-resolved>
             <input
               type="search"
@@ -186,7 +330,7 @@ export function HomeConversation({ store, actions }) {
                 </summary>
                 <div className="gwt-home__settled-body">
                   <article className="gwt-home__msg gwt-home__msg--pm">
-                    <p className="gwt-home__meta"><PmFace /><span className="gwt-home__meta-name">{view.pm.name}</span><span>{entry.project}</span></p>
+                    <p className="gwt-home__meta"><PmFace avatar={view.pm.avatar} /><span className="gwt-home__meta-name">{view.pm.name}</span><span>{entry.project}</span></p>
                     <Lines lines={entry.lines} />
                   </article>
                   <article className="gwt-home__msg gwt-home__msg--me" aria-label={COPY.yourAnswer}>
@@ -207,8 +351,8 @@ export function HomeConversation({ store, actions }) {
           </div>
         ) : null}
 
-        <article className="gwt-home__msg gwt-home__msg--pm" data-home-greeting>
-          <p className="gwt-home__meta"><PmFace /><span className="gwt-home__meta-name">{view.pm.name}</span></p>
+        {!view.decisionsOnly ? <article className="gwt-home__msg gwt-home__msg--pm" data-home-greeting>
+          <p className="gwt-home__meta"><PmFace avatar={view.pm.avatar} /><span className="gwt-home__meta-name">{view.pm.name}</span></p>
           <p>{view.greeting}</p>
           {view.guide ? (
             <div className="gwt-home__guide">
@@ -225,11 +369,15 @@ export function HomeConversation({ store, actions }) {
               <button type="button" className="wizard-button" data-home-entry="projects" onClick={actions.openProjects}>{COPY.projects}</button>
             </div>
           ) : null}
-        </article>
+        </article> : null}
 
         {view.notices.map(notice => <p className="gwt-home__note gwt-home__note--error" role="alert" key={notice}>{notice}</p>)}
 
-        {view.topics.map(topic => topic.kind === "decision" ? (
+        {topics.map(topic => topic.kind === "reply-waiting" ? (
+          <article className="gwt-home__msg gwt-home__msg--pm" key={topic.id} role="status" aria-label={COPY.replyWaiting}>
+            …
+          </article>
+        ) : topic.kind === "decision" ? (
           <article
             className={`gwt-home__msg gwt-home__msg--pm${highlight === topic.id ? " is-highlighted" : ""}`}
             key={topic.id}
@@ -238,7 +386,7 @@ export function HomeConversation({ store, actions }) {
             ref={node => { if (node) messageRefs.current.set(topic.id, node); else messageRefs.current.delete(topic.id); }}
           >
             <p className="gwt-home__meta">
-              <PmFace />
+              <PmFace avatar={view.pm.avatar} />
               <span className="gwt-home__meta-name">{view.pm.name}</span>
               <span>{topic.project}</span>
               <span className="gwt-home__chip gwt-home__chip--waiting">{COPY.decisionWaiting}</span>
@@ -265,23 +413,31 @@ export function HomeConversation({ store, actions }) {
               ))}
               <button type="button" className="text-button" data-home-defer disabled={view.busy} onClick={() => actions.defer(topic.id)}>{COPY.later}</button>
             </div>
+            <Attachments attachments={topic.attachments} />
             {topic.status ? <p className="gwt-home__status" role="status">{topic.status}</p> : null}
             {topic.error ? <p className="gwt-home__status gwt-home__status--error" role="alert">{topic.error}</p> : null}
           </article>
         ) : (
-          <article className="gwt-home__msg gwt-home__msg--me" key={topic.id} data-home-sent={topic.id}>
+          <article
+            className={`gwt-home__msg gwt-home__msg--${topic.kind === "pm-message" ? "pm" : "me"}${highlight === topic.id ? " is-highlighted" : ""}`}
+            key={topic.id}
+            data-home-sent={topic.status ? topic.id : undefined}
+            tabIndex={-1}
+            ref={node => { if (node) messageRefs.current.set(topic.id, node); else messageRefs.current.delete(topic.id); }}
+          >
             <p className="gwt-home__meta">
-              <span className="gwt-home__meta-name">{COPY.you}</span>
-              <span>{COPY.to(topic.project)}</span>
+              <span className="gwt-home__meta-name">{topic.kind === "pm-message" ? view.pm.name : COPY.you}</span>
+              <span>{topic.kind === "pm-message" ? topic.project : COPY.to(topic.project)}</span>
               <Time iso={topic.createdAt} />
             </p>
             <Lines lines={topic.lines} />
-            <p className="gwt-home__status" role="status">{topic.status}</p>
+            <Attachments attachments={topic.attachments} />
+            {topic.status ? <p className="gwt-home__status" role="status">{topic.status}</p> : null}
           </article>
         ))}
       </div>
 
-      <form className="gwt-home__composer" aria-label={COPY.draft} onSubmit={submit}>
+      <form className="gwt-home__composer" hidden={view.decisionsOnly && !composer.replyTo} aria-label={COPY.draft} onSubmit={submit}>
         {composer.replyTo ? (
           <div className="gwt-home__replychip" data-home-replychip>
             <button type="button" className="gwt-home__replychip-target" onClick={() => jumpTo(composer.replyTo.id)}>
@@ -291,7 +447,16 @@ export function HomeConversation({ store, actions }) {
             <button type="button" className="gwt-home__replychip-clear" aria-label={COPY.clearReply} title={COPY.clearReply} onClick={actions.clearReply}>×</button>
           </div>
         ) : null}
+        {!composer.replyTo ? <Attachments attachments={attachments} onRemove={removeAttachment} disabled={!canAttach} /> : null}
         <div className="gwt-home__compose-row">
+          {!composer.replyTo ? <>
+            <input key={fileSelection} type="file" ref={fileInputRef} multiple hidden onChange={event => {
+              addAttachments(Array.from(event.target.files));
+              setFileSelection(selection => selection + 1);
+            }} />
+            <button type="button" className="wizard-button" disabled={!canAttach}
+              onClick={() => fileInputRef.current.click()}>Attach files</button>
+          </> : null}
           <textarea
             className="gwt-home__draft"
             ref={draftRef}
@@ -299,7 +464,23 @@ export function HomeConversation({ store, actions }) {
             aria-label={COPY.draft}
             placeholder={composer.replyTo ? COPY.draftReply : COPY.draftNew}
             value={draft}
-            readOnly={view.busy && Boolean(composer.status)}
+            readOnly={uploading || (view.busy && Boolean(composer.status))}
+            onDragOver={event => {
+              if (canAttach && event.dataTransfer.types.includes("Files")) event.preventDefault();
+            }}
+            onDrop={event => {
+              const files = Array.from(event.dataTransfer.files);
+              if (!files.length) return;
+              event.preventDefault();
+              addAttachments(files);
+            }}
+            onPaste={event => {
+              if (!canAttach) return;
+              const images = Array.from(event.clipboardData.files).filter(file => clipboardImageTypes.has(file.type));
+              if (!images.length) return;
+              event.preventDefault();
+              addAttachments(images);
+            }}
             onChange={event => setDraft(event.target.value)}
             onKeyDown={onDraftKeyDown}
           />
@@ -321,7 +502,7 @@ export function HomeConversation({ store, actions }) {
           </button>
         </div>
         <p className="gwt-home__composer-status" aria-live="polite">
-          {composer.status || (composer.error ? `Not sent: ${composer.error} Your message is kept.` : needsProject ? COPY.needProject : noPm)}
+          {(uploading ? "Uploading attachments…" : attachmentError) || composer.status || (composer.error ? `Not sent: ${composer.error} Your message is kept.` : needsProject ? COPY.needProject : noPm)}
         </p>
       </form>
 

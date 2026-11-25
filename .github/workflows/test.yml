@@ -348,6 +348,19 @@ jobs:
             --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
           node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
         timeout-minutes: 10
+      # Issue #7662: the trace and the fixture's attached backend logs
+      # (owner gwt.log, daemon stderr) are the only evidence of where a
+      # Linux-only launch stalled.
+      - name: Retain Issues operator hold evidence
+        if: ${{ failure() && matrix.shard == 1 }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-operator-hold
+          path: |
+            crates/gwt/playwright/test-results/
+            ${{ runner.temp }}/linux-operator-hold-headed.json*
+          if-no-files-found: warn
+          retention-days: 7
       - name: Voice accuracy regression (optional local dataset)
         if: matrix.shard == 1
         run: |
@@ -1394,7 +1407,7 @@ jobs:
         run: |
           bash scripts/check-frontend-build.sh
           node --test crates/gwt/web-react/__tests__/use-store-selector.test.mjs scripts/check-frontend-build.test.mjs
-          node --experimental-loader ./crates/gwt/web-react/__tests__/jsx-loader.mjs --test crates/gwt/web-react/__tests__/task-home.test.mjs crates/gwt/web-react/__tests__/execution-environments.test.mjs crates/gwt/web-react/__tests__/project-execution-environments.test.mjs crates/gwt/web-react/__tests__/agent-history-plans.test.mjs crates/gwt/web-react/__tests__/project-themes.test.mjs
+          node --experimental-loader ./crates/gwt/web-react/__tests__/jsx-loader.mjs --test crates/gwt/web-react/__tests__/task-home.test.mjs crates/gwt/web-react/__tests__/execution-environments.test.mjs crates/gwt/web-react/__tests__/project-execution-environments.test.mjs crates/gwt/web-react/__tests__/agent-history-plans.test.mjs crates/gwt/web-react/__tests__/project-themes.test.mjs crates/gwt/web-react/__tests__/project-autonomy.test.mjs
         timeout-minutes: 5
       - name: Run frontend unit tests
         env:

@@ -777,6 +777,46 @@ impl AppRuntime {
         all
     }
 
+    pub(crate) fn resume_with_next_account_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        self.switch_window_account(id, None)
+    }
+
+    pub(super) fn resume_after_account_deletion(&mut self, account_id: &str) -> Vec<OutboundEvent> {
+        let affected: Vec<_> = self
+            .active_agent_sessions
+            .iter()
+            .filter(|(_, active)| {
+                gwt_agent::session_ledger::load_session_candidate(
+                    &self.sessions_dir,
+                    &active.session_id,
+                )
+                .and_then(|session| session.execution_account)
+                .is_some_and(|account| account.account_id == account_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        affected
+            .into_iter()
+            .flat_map(|id| self.switch_window_account(&id, Some(account_id)))
+            .collect()
+    }
+
+    fn switch_window_account(&mut self, id: &str, deleted: Option<&str>) -> Vec<OutboundEvent> {
+        let Some(runtime) = self.runtimes.get(id) else {
+            return Vec::new();
+        };
+        let command = gwt::project_runtime::events::OwnerCommand::SwitchExecutionAccount {
+            id: runtime.owner_pane_id.clone(),
+            incarnation: runtime.incarnation,
+            deleted_account_id: deleted.map(str::to_owned),
+        };
+        self.queue_remote_runtime_command(
+            id,
+            command,
+            super::RemoteRuntimeCommandKind::SwitchExecutionAccount,
+        )
+    }
+
     pub(crate) fn list_windows_event_for_project(
         &self,
         context: &super::ProjectContext,

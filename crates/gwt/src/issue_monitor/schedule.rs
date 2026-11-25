@@ -249,6 +249,7 @@ fn reconcile_with_health(
         && pool
             .first()
             .is_some_and(|profile| profile.agent_member_id.is_some());
+    let store = crate::execution_environments::load().ok();
     let mut ineligible = BTreeMap::new();
     let mut members = Vec::new();
     for member in roster.members.iter().filter(|member| {
@@ -261,9 +262,12 @@ fn reconcile_with_health(
             .get(&member.agent_member_id)
             .cloned()
             .or_else(|| {
-                bound
-                    .then(|| automatic_member_ineligibility(&pool, member))
-                    .flatten()
+                (bound
+                    && store.as_ref().is_none_or(|store| {
+                        store.agent_priority_ids(&member.agent_member_id).is_none()
+                    }))
+                .then(|| automatic_member_ineligibility(&pool, member))
+                .flatten()
             }) {
             Some(reason) if member.assignment.is_none() => {
                 ineligible.insert(member.agent_member_id.clone(), reason);
@@ -511,8 +515,9 @@ fn check_member_runner(root: &Path, profile: &IssueMonitorLaunchProfile) -> Resu
         .working_dir(root)
         .runtime_target(profile.runtime_target)
         .build();
-    gwt_agent::LaunchEnvironment::from_active_profile(
+    gwt_agent::LaunchEnvironment::for_project(
         &gwt_core::paths::gwt_config_path(),
+        root,
         config.runtime_target,
     )?
     .with_project_root(root)
@@ -530,7 +535,9 @@ fn member_runner_health(
         return failures;
     };
     let pool = prefs.launch_profile_pool();
-    let environment = prefs.environment_tool_for_agents();
+    let Ok(store) = crate::execution_environments::load() else {
+        return failures;
+    };
     for member in &roster.members {
         // An existing assignment (including one on another host) retains its
         // delivery authority; only future local automatic work is inspected.
@@ -538,19 +545,28 @@ fn member_runner_health(
             continue;
         }
         let id = &member.agent_member_id;
-        let profile = if let Some(tool) = environment.as_deref() {
-            Some(prefs.member_candidate_on_environment(&pool, id, tool))
-        } else {
-            prefs.legacy_member_candidate(&pool, member)
-        };
-        let Some(profile) = profile else {
-            continue;
-        };
         // Members of the same tool/runtime share this installed runner. Retry
         // a failed probe next snapshot, rather than once per member this pass.
-        // Issue #7647: the runner inspected is the one the member starts with.
-        let key = format!("{}:{:?}", profile.agent_id, profile.runtime_target);
-        if let Err(error) = probes.entry(key).or_insert_with(|| probe(&profile)) {
+        let mut check = |profile: &IssueMonitorLaunchProfile| {
+            let key = format!("{}:{:?}", profile.agent_id, profile.runtime_target);
+            probes.entry(key).or_insert_with(|| probe(profile)).clone()
+        };
+        let mut rejected = None;
+        let profile = prefs.member_candidate_with_store(&store, &pool, member, |tool| {
+            let candidate = prefs.member_candidate_on_environment(&pool, id, tool);
+            match check(&candidate) {
+                Ok(()) => true,
+                Err(error) => {
+                    rejected = Some(error);
+                    false
+                }
+            }
+        });
+        let error = match profile {
+            Some(profile) => check(&profile).err(),
+            None => rejected,
+        };
+        if let Some(error) = error {
             failures.insert(id.clone(), format!("runner_health_check_failed: {error}"));
         }
     }
@@ -589,7 +605,8 @@ fn mutate_project_agent_schedule_with_probe(
             if !target.implementation_eligible() || target.assignment.as_ref().is_some_and(|assignment| !assignment.host_id.is_empty() && assignment.host_id != host) {
                 return Err(io::Error::other("Target Agent must be eligible for implementation and belong to this host; read issue.monitor.schedule.read and choose a local member"));
             }
-            let tool_exclusion = if source_member_id != target_member_id && prefs.environment_tools().is_none() {
+            let override_set = crate::execution_environments::load().is_ok_and(|store| store.agent_priority_ids(target_member_id).is_some());
+            let tool_exclusion = if source_member_id != target_member_id && prefs.environment_tools().is_none() && !override_set {
                 selected_member_tool_exclusion(&prefs.launch_profile_pool(), Some(target), target_member_id)
             } else {
                 None
@@ -786,7 +803,9 @@ impl IssueMonitorState {
         });
         let uses_environment =
             !normalize_project_execution_environments(self.execution_environments.clone())
-                .is_empty();
+                .is_empty()
+                || crate::execution_environments::load()
+                    .is_ok_and(|store| store.agent_priority_ids(id).is_some());
         let tool_matches = (!uses_environment
             && self
                 .launch_profiles
@@ -1473,6 +1492,95 @@ mod tests {
             move_action(&snapshot, 41, member, &roster.members[1].agent_member_id),
         )
         .expect("schedule.reassign must provide a canonical recovery path after cleanup");
+    }
+
+    /// Issue #7351 (#6526): a vanished window leaves a readable runtime sidecar
+    /// whose PTY child has exited. The queued Issue must not stay
+    /// `agent_plan_missing` forever, while a live child still fences reuse.
+    #[test]
+    fn issue_7351_vanished_session_with_exited_runtime_sidecar_recovers_the_plan() {
+        const TEST: &str = "issue_monitor::schedule::tests::issue_7351_vanished_session_with_exited_runtime_sidecar_recovers_the_plan";
+        if std::env::var_os("GWT_SCHEDULE_CHILD_WAIT").is_some() {
+            use std::io::Read;
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+            return;
+        }
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let (_temp, _home, root, sessions, roster) = fixture();
+        let member = &roster.members[0].agent_member_id;
+        crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "vanished-window",
+            Some(41),
+            None,
+            None,
+            Some(member),
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(&root, "work/issue-41", gwt_agent::AgentId::Codex);
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            member,
+            "vanished-window",
+            &session.id,
+        )
+        .unwrap();
+        let mut child = OwnedChild(
+            gwt_core::process::resolved_command(gwt_core::process::ProcessPlanRequest::new(
+                std::env::current_exe().unwrap(),
+            ))
+            .unwrap()
+            .args(["--exact", TEST])
+            .env("GWT_SCHEDULE_CHILD_WAIT", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        );
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        runtime.host_started_at = crate::process::host_process_start_time(std::process::id());
+        runtime.child_pid = Some(child.0.id());
+        runtime.child_started_at = crate::process::host_process_start_time(child.0.id());
+        runtime.runtime_incarnation = Some(3);
+        assert!(runtime.child_started_at.is_some());
+        let sidecar = gwt_agent::runtime_state_path(&sessions, &session.id);
+        runtime.save(&sidecar).unwrap();
+        // The window vanishes: its Session file is gone, the sidecar remains.
+        fs::remove_file(sessions.join(format!("{}.toml", session.id))).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
+        assert!(
+            monitor
+                .agent_schedule_launch_exclusion(41)
+                .is_some_and(|reason| reason.starts_with("agent_plan_missing")),
+            "a live PTY child still fences the reservation"
+        );
+        drop(child.0.stdin.take());
+        assert!(child.0.wait().unwrap().success());
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
+        assert!(
+            monitor.agent_schedule_launch_exclusion(41).is_none(),
+            "an exited child's sidecar must not strand the queued Issue"
+        );
     }
 
     #[test]

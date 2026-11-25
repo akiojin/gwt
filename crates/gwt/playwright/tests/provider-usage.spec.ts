@@ -25,9 +25,9 @@ test.describe("Execution environments", () => {
       info.project.name.includes("light") ? "light" : "dark");
   });
 
-  async function open(page: any, withSettings = false) {
+  async function open(page: any, withSettings = false, withPools = false) {
     if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page, withSettings);
+    await installProviderUsageBackend(page, withSettings, false, withPools);
     if (liveUrl) await gotoLiveGwt(page, liveUrl);
     else await page.goto(APP_URL);
   }
@@ -47,7 +47,7 @@ test.describe("Execution environments", () => {
     await expect(cards).toHaveCount(2);
     const codex = surface(page).locator('[data-environment="codex"]');
     await expect(codex).toContainText("Available");
-    await expect(codex).toContainText("Account Codex 1 · Via Codex");
+    await expect(codex).toContainText("Using Codex 1 · 1 account in pool · Via Codex");
     await expect(codex).toContainText("96% used · resets");
     await expect(codex.locator(".exec-env__usage")).toHaveAttribute("data-severity", "danger");
     await expect(codex.locator("time")).toHaveAttribute("datetime", "2030-01-02T03:04:05Z");
@@ -82,11 +82,11 @@ test.describe("Execution environments", () => {
     const rows = surface(page).locator("[data-account]");
     await expect(rows).toHaveCount(2);
     for (const row of await rows.all()) await expect(row.getByRole("button", { name: /^Details for the / })).toBeVisible();
-    await expect(surface(page).locator('[data-account="codex"]')).toContainText("pro · Up to date");
+    await expect(surface(page).locator('[data-account="codex"]')).toContainText("Codex · pro · Signed in · Up to date");
     await page.screenshot({ path: info.outputPath("accounts.png"), fullPage: true });
 
-    await surface(page).getByRole("button", { name: "Details for the Codex account" }).click();
-    await expect(surface(page).getByRole("heading", { level: 1, name: "Codex account" })).toBeFocused();
+    await surface(page).getByRole("button", { name: "Details for the Codex 1 account" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Codex 1 account" })).toBeFocused();
     const card = surface(page).locator('.op-usage-card[data-provider="codex"]');
     await expect(card).toHaveCount(1);
     const windows = card.locator(".op-usage-win");
@@ -111,9 +111,59 @@ test.describe("Execution environments", () => {
     await page.screenshot({ path: info.outputPath("account-detail.png"), fullPage: true });
 
     await surface(page).getByRole("button", { name: "← Accounts" }).click();
-    await expect(surface(page).locator('[data-account="codex"] .exec-env__chip')).toHaveText("Limit reached");
+    await expect(surface(page).locator('[data-account="codex"] .exec-env__chip--limit')).toHaveText("Limit reached");
     await surface(page).getByRole("button", { name: "← Execution environments" }).click();
     await expect(surface(page).getByRole("heading", { level: 1, name: "Execution environments" })).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  // Issue #7841 AC-1/AC-2/AC-3: one row per account, grouped by pool, each
+  // with its own usage, sign-in and limit state; a tool without an official
+  // usage source says so and keeps the last limit gwt saw.
+  test("accounts are listed per pool with their own usage, sign-in and limits (Issue #7841)", async ({ page }, info) => {
+    const errors = captureUsageErrors(page);
+    await open(page, false, true);
+    await page.locator('.app-head [data-destination="environments"]').click();
+    const claudeEnvironment = surface(page).locator('[data-environment="claude"]');
+    await expect(claudeEnvironment).toContainText("Using Claude Code 1 · 2 accounts in pool · Via Claude Code");
+    await emitProviderUsage(page, [
+      { provider: "codex", pool_account_id: "codex", plan: "pro",
+        windows: [{ kind: "weekly", used_percent: 29, resets_at: "2030-01-06T03:04:05Z" }], state: { kind: "ok" } },
+      { provider: "claude_code", pool_account_id: "claude", plan: "max",
+        windows: [{ kind: "weekly", used_percent: 80, resets_at: "2030-01-07T03:04:05Z" }], state: { kind: "ok" } },
+      { provider: "claude_code", pool_account_id: "claude-2", account_label: "second@example.test", plan: "pro", limit_reached: true,
+        windows: [{ kind: "five_hour", used_percent: 100, resets_at: "2030-01-02T05:00:00Z" }], state: { kind: "ok" } },
+      { provider: "grok_build", pool_account_id: "grok", windows: [], limit_reached: false,
+        state: { kind: "unknown", reason: "no official usage source" },
+        last_limit: { detected_at: "2026-11-24T02:00:00Z", resets_at: "2099-11-24T06:00:00Z" } },
+    ]);
+    await surface(page).getByRole("button", { name: "Accounts", exact: true }).click();
+    const pools = surface(page).locator("[data-pool]");
+    await expect(pools).toHaveCount(3);
+    const claudePool = surface(page).locator('[data-pool="claude"]');
+    await expect(claudePool).toContainText("2 accounts in pool, in priority order");
+    const second = claudePool.locator('[data-account="claude-2"]');
+    await expect(second).toContainText("Claude Code · second@example.test · pro · Not signed in");
+    await expect(second).toContainText("100% used · resets");
+    await expect(second.locator(".exec-env__chip--limit")).toHaveText("Limit reached");
+    await expect(claudePool.locator('[data-account="claude"]')).toContainText("In use");
+    const grok = surface(page).locator('[data-account="grok"]');
+    await expect(grok).toContainText("Usage unknown (no official usage source)");
+    await expect(grok.locator("[data-last-limit] time").first()).toHaveAttribute("datetime", "2026-11-24T02:00:00Z");
+    await expect(grok.locator(".exec-env__chip--limit")).toHaveText("Limit reached");
+    const overflow = await page.evaluate(() =>
+      document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+    expect(overflow, "no horizontal page overflow").toBe(false);
+    await page.screenshot({ path: info.outputPath("account-pools.png"), fullPage: true });
+
+    await surface(page).getByRole("button", { name: "Details for the Claude Code 2 account" }).click();
+    await expect(surface(page).getByRole("heading", { level: 1, name: "Claude Code 2 account" })).toBeFocused();
+    await expect(surface(page).locator('.op-usage-card[data-provider="claude_code"] .op-usage-win')).toContainText(/5-hour\s*100%/);
+    await surface(page).getByRole("button", { name: "← Accounts" }).click();
+    await surface(page).getByRole("button", { name: "Details for the Grok Build 1 account" }).click();
+    await expect(surface(page).locator(".op-usage-card")).toHaveCount(0);
+    await expect(surface(page)).toContainText("Usage unknown (no official usage source)");
+    await expect(surface(page)).toContainText("Last limit hit");
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
@@ -171,9 +221,9 @@ test.describe("Execution environment definitions", () => {
   const surface = (page: any) => page.locator(".exec-env");
   const sent = (page: any, kind: string) =>
     page.evaluate((kind: string) => (window as any).__sentMessages.filter((message: any) => message.kind === kind), kind);
-  async function open(page: any, withSettings = false) {
+  async function open(page: any, withSettings = false, withPools = false) {
     if (!liveUrl) await installEmbeddedRoutes(page);
-    await installProviderUsageBackend(page, withSettings);
+    await installProviderUsageBackend(page, withSettings, false, withPools);
     if (liveUrl) await gotoLiveGwt(page, liveUrl);
     else await page.goto(APP_URL);
   }
@@ -366,8 +416,8 @@ async function emitProviderUsage(page: any, accounts: unknown[], sessions: unkno
   }, { accounts, sessions });
 }
 
-async function installProviderUsageBackend(page: any, withSettings = false, withAgents = false): Promise<void> {
-  await page.addInitScript(({ withSettings, withAgents }) => {
+async function installProviderUsageBackend(page: any, withSettings = false, withAgents = false, withPools = false): Promise<void> {
+  await page.addInitScript(({ withSettings, withAgents, withPools }) => {
     try {
       window.sessionStorage.setItem("gwt:ui:briefing", "1");
     } catch {
@@ -478,8 +528,14 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
     };
     const environmentState = {
       accounts: [
-        { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1" },
-        { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1" },
+        { id: "claude", tool: "claude", tool_name: "Claude Code", name: "Claude Code 1", sign_in: "signed_in" },
+        { id: "codex", tool: "codex", tool_name: "Codex", name: "Codex 1", sign_in: "signed_in" },
+        // Issue #7841: a second account in the Claude pool and a tool without
+        // an official usage source.
+        ...(withPools ? [
+          { id: "claude-2", tool: "claude", tool_name: "Claude Code", name: "Claude Code 2", sign_in: "signed_out" },
+          { id: "grok", tool: "grok", tool_name: "Grok Build", name: "Grok Build 1", sign_in: "signed_in" },
+        ] : []),
       ],
       environments: [
         { id: "claude", name: "Claude Code 1", account_id: "claude", via_tool: "claude", runtime: {} as any },
@@ -661,5 +717,5 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, { withSettings, withAgents });
+  }, { withSettings, withAgents, withPools });
 }

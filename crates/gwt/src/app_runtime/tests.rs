@@ -2119,6 +2119,7 @@ fn sample_runtime_with_events(
         proxy,
         blocking_tasks,
         hook_doctor_in_flight: Default::default(),
+        coalesced_reads: Default::default(),
         agent_maintenance: Default::default(),
         sessions_dir,
         launch_wizard_cache,
@@ -2128,6 +2129,7 @@ fn sample_runtime_with_events(
         initial_launch_workers: HashMap::new(),
         project_open_started: None,
         pending_startup_pm_tabs: Vec::new(),
+        pending_pm_launch_retry_tabs: Vec::new(),
         pending_frontend_ready_snapshots: Vec::new(),
         gui_slice_continue_queued: false,
         deferred_issue_monitor_launches: None,
@@ -2140,6 +2142,8 @@ fn sample_runtime_with_events(
         issue_monitor_launch_failure_causes: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
         issue_monitor_launch_attempts: HashMap::new(),
+        issue_monitor_stale_retry_at: HashMap::new(),
+        issue_monitor_cleanup_retries: HashMap::new(),
         issue_monitor_launch_queue: Vec::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         // Issue #3878: own the fallback commit budget instead of inheriting
@@ -2171,6 +2175,7 @@ fn sample_runtime_with_events(
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+        pool_account_logins: HashMap::new(),
         decision_answers_sent: HashSet::new(),
         decision_answers_in_flight: HashMap::new(),
         decision_answer_sequence: 0,
@@ -2835,6 +2840,7 @@ fn issue_monitor_autonomous_record(
         last_failure_message: None,
         delivering_since: None,
         review_attempts: None,
+        merged_evidence_reviews: Vec::new(),
         gate_hold: None,
         cancelled_claim_phase: None,
     }
@@ -8342,6 +8348,7 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             last_owner_project_key: None,
             assignment: None,
             traits: Default::default(),
+            avatar: Default::default(),
         })
         .collect(),
     });
@@ -10850,7 +10857,7 @@ fn workspace_test_work(
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         session_agent_total: agents.len() as u32,
         agents,
         works,
@@ -12641,6 +12648,8 @@ fn codex_usage_account(
 ) -> gwt_core::usage::ProviderUsage {
     gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::Codex,
+        pool_account_id: None,
+        last_limit: None,
         account_id: None,
         account_label: None,
         plan: None,
@@ -13138,6 +13147,8 @@ mod frontend_launch_tests;
 mod gui_slice_tests;
 #[cfg(test)]
 mod home_conversation_tests;
+#[cfg(test)]
+mod hydration_lock_tests;
 #[cfg(test)]
 mod issue_monitor_claim_tests;
 #[cfg(test)]

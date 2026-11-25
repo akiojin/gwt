@@ -77,6 +77,14 @@ pub enum PmCommand {
         project_root: Option<String>,
         submission: Box<pm_report::Submission>,
     },
+    /// Issue #7644: record what the current human PM turn asked or decided as
+    /// a theme, or that it is not one. Bound to the native human message.
+    ThemeRecord {
+        original: String,
+        decision: crate::themes::ThemeDecision,
+    },
+    /// Issue #7644: the project's themes, so a decision can update one.
+    ThemeList,
     /// Read the project's reports in posting order.
     ReportList {
         project_root: Option<String>,
@@ -92,6 +100,8 @@ pub enum PmCommand {
     Status {
         project_root: Option<String>,
     },
+    /// Fetch origin and record the result for the registered PM's current turn.
+    BranchFreshnessRefresh,
     /// Persist whether the resident PM should start on the next project open.
     SetAutoStart {
         project_root: Option<String>,
@@ -344,6 +354,12 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         r#"{}"#,
         CapabilityGapReason::Permission,
         "Use a recorded scoped instruction_id or pm.approval.request; only develop/main required check contexts change",
+    ),
+    (
+        "repository.branch_protection.update",
+        r#"{}"#,
+        CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request; only typed develop/main protection toggles change (allow_force_pushes, required_conversation_resolution, enforce_admins, strict)",
     ),
     (
         "update.settings.set", r#"{}"#, CapabilityGapReason::Permission,
@@ -640,6 +656,7 @@ pub(super) fn run<E: CliEnv>(
                 if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
                     tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
                 }
+                crate::pm_report_board::publish_best_effort(&repo_path);
             }
             out.push_str(
                 &serde_json::json!({"schema_version":2,"ok":true,"receipt":receipt}).to_string(),
@@ -769,12 +786,68 @@ pub(super) fn run<E: CliEnv>(
             if let Err(error) = crate::index_worker::queue_reports_index_refresh(&repo_path) {
                 tracing::warn!(%error, "saved PM report refresh could not be queued; source polling will retry");
             }
+            crate::pm_report_board::publish_best_effort(&repo_path);
             let mut response =
                 serde_json::json!({"schema_version": 1, "ok": true, "report": report});
             if let Some(saved) = saved_instruction {
                 response["instruction"] = serde_json::json!(saved);
             }
             out.push_str(&response.to_string());
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::ThemeRecord { original, decision } => {
+            let repo_path = env.repo_path().to_path_buf();
+            if !caller_is_registered_pm(&repo_path) {
+                return Err(refusal("pm.theme.record requires the registered PM".into()));
+            }
+            let turn = super::hook::pm_reporting::capture_qa_turn(&repo_path)
+                .map_err(super::io_as_api_error)?
+                .ok_or_else(|| {
+                    refusal("pm.theme.record needs the current human PM turn; automatic prompts are not recorded as themes".into())
+                })?;
+            let (session_id, message_id) = super::hook::pm_reporting::instruction_prompt_identity(
+                &repo_path, &turn, &original,
+            )
+            .map_err(|_| {
+                refusal("pm.theme.record: original must exactly match the latest human message of this PM turn".into())
+            })?;
+            let source = crate::themes::ThemeSource {
+                session_id,
+                message_id,
+                recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+            };
+            let number = crate::themes::record_theme(env.client(), &decision, &source)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.0)))?;
+            let record = super::hook::pm_reporting::record_theme_decision(
+                &repo_path, &turn, &decision, number, &source,
+            )
+            .map_err(super::io_as_api_error)?;
+            out.push_str(
+                &serde_json::json!({"schema_version":1,"ok":true,"theme":record}).to_string(),
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::ThemeList => {
+            let listing =
+                gwt_github::IssueClient::list_themes(env.client()).map_err(SpecOpsError::from)?;
+            let themes: Vec<_> = listing
+                .themes
+                .iter()
+                .map(|theme| {
+                    serde_json::json!({
+                        "number": theme.number.0,
+                        "title": theme.title,
+                        "summary": crate::themes::theme_summary(&theme.body),
+                        "url": theme.url,
+                        "issues_total": theme.sub_issues_total,
+                    })
+                })
+                .collect();
+            out.push_str(
+                &serde_json::json!({"schema_version":1,"ok":true,"themes":themes,"truncated":listing.truncated}).to_string(),
+            );
             out.push('\n');
             Ok(0)
         }
@@ -791,6 +864,19 @@ pub(super) fn run<E: CliEnv>(
                     .to_string(),
             );
             out.push('\n');
+            Ok(0)
+        }
+        PmCommand::BranchFreshnessRefresh => {
+            let session = ambient_session_id()
+                .ok_or_else(|| refusal("requires this project's registered PM session".into()))?;
+            super::hook::branch_freshness::refresh(env.repo_path(), &session).map_err(|error| {
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    refusal(error.to_string())
+                } else {
+                    ApiError::Unexpected(error.to_string()).into()
+                }
+            })?;
+            out.push_str("git fetch origin succeeded and was recorded for this PM turn\n");
             Ok(0)
         }
         PmCommand::StatusSet {

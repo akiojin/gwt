@@ -1,6 +1,7 @@
 //! Read-only, text-only projection of a PM's native conversation.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -30,6 +31,8 @@ pub struct PmConversationMessage {
     pub role: PmConversationRole,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_key: Option<String>,
 }
 
@@ -39,6 +42,15 @@ pub struct PmConversationSnapshot {
     pub availability: PmConversationAvailability,
     pub messages: Vec<PmConversationMessage>,
     pub detail: Option<String>,
+}
+
+/// A bounded Home page and the preceding page, when a cursor was requested.
+#[derive(Debug, Clone, Serialize)]
+pub struct HomeConversationPage {
+    #[serde(flatten)]
+    pub latest: PmConversationSnapshot,
+    pub older_messages: Vec<PmConversationMessage>,
+    pub has_older: bool,
 }
 
 mod claude;
@@ -63,7 +75,7 @@ impl PmConversationSnapshot {
     }
 }
 
-/// Reuses one PM's last native source, retaining only bounded visible text.
+/// Reuses one PM's last native source and exposes bounded conversation pages.
 #[derive(Default)]
 pub struct PmConversationReader {
     cached: Option<CachedConversation>,
@@ -257,17 +269,60 @@ struct CachedConversation {
     stamp: SourceStamp,
     offset: u64,
     snapshot: PmConversationSnapshot,
+    message_indices: HashMap<String, usize>,
     identity_seen: bool,
 }
 
 impl CachedConversation {
-    fn snapshot(&self) -> PmConversationSnapshot {
-        if self.identity_seen {
-            self.snapshot.clone()
-        } else {
-            self.key
-                .unavailable("Conversation identity has not been verified.")
+    fn page(&self, limit: usize, before: Option<&str>) -> HomeConversationPage {
+        if !self.identity_seen {
+            return unavailable_page(
+                self.key
+                    .unavailable("Conversation identity has not been verified."),
+            );
         }
+        let messages = &self.snapshot.messages;
+        let latest = page_start(messages, limit);
+        let end = before.and_then(|id| self.message_indices.get(id).copied());
+        let start = end.map_or(latest, |end| page_start(&messages[..end], limit));
+        let mut snapshot = PmConversationSnapshot {
+            conversation_id: self.snapshot.conversation_id.clone(),
+            availability: PmConversationAvailability::Ready,
+            messages: messages[latest..].to_vec(),
+            detail: None,
+        };
+        if latest > 0 {
+            snapshot.detail = Some("Showing the most recent conversation messages.".to_owned());
+        }
+        HomeConversationPage {
+            latest: snapshot,
+            older_messages: end.map_or_else(Vec::new, |end| messages[start..end].to_vec()),
+            has_older: start > 0,
+        }
+    }
+}
+
+fn page_start(messages: &[PmConversationMessage], limit: usize) -> usize {
+    let mut bytes = 0;
+    let selected = messages
+        .iter()
+        .rev()
+        .take(limit)
+        .enumerate()
+        .take_while(|(index, message)| {
+            let include = *index == 0 || bytes + message.text.len() <= MAX_TEXT_BYTES;
+            bytes += message.text.len();
+            include
+        })
+        .count();
+    messages.len() - selected
+}
+
+fn unavailable_page(latest: PmConversationSnapshot) -> HomeConversationPage {
+    HomeConversationPage {
+        latest,
+        older_messages: Vec::new(),
+        has_older: false,
     }
 }
 
@@ -275,11 +330,28 @@ impl PmConversationReader {
     /// Call from a worker. Unchanged stores need only metadata; ordinary
     /// append reads begin at the last complete JSONL record, not at byte zero.
     pub fn read_for_session(&mut self, session: &Session) -> PmConversationSnapshot {
+        self.read_page(session, MAX_MESSAGES, None).latest
+    }
+
+    pub fn read_home_page(
+        &mut self,
+        session: &Session,
+        before: Option<&str>,
+    ) -> HomeConversationPage {
+        self.read_page(session, 50, before)
+    }
+
+    fn read_page(
+        &mut self,
+        session: &Session,
+        limit: usize,
+        before: Option<&str>,
+    ) -> HomeConversationPage {
         let key = match ConversationKey::from_session(session) {
             Ok(key) => key,
             Err(snapshot) => {
                 self.cached = None;
-                return snapshot;
+                return unavailable_page(snapshot);
             }
         };
         if self.cached.as_ref().is_some_and(|cached| cached.key != key) {
@@ -291,7 +363,7 @@ impl PmConversationReader {
             .map(|cached| cached.path.clone())
             .or_else(|| key.locate())
         else {
-            return key.waiting();
+            return unavailable_page(key.waiting());
         };
         let mut opened = std::fs::File::open(&path);
         // Native stores may move the exact conversation to a new path. A
@@ -303,19 +375,19 @@ impl PmConversationReader {
         {
             self.cached = None;
             let Some(relocated) = key.locate() else {
-                return key.waiting();
+                return unavailable_page(key.waiting());
             };
             path = relocated;
             opened = std::fs::File::open(&path);
         }
         match opened {
-            Ok(file) => self.read_file(key, path, file),
+            Ok(file) => self.read_file(key, path, file, limit, before),
             Err(error) => {
                 self.cached = None;
                 if error.kind() == std::io::ErrorKind::NotFound {
-                    key.waiting()
+                    unavailable_page(key.waiting())
                 } else {
-                    key.unavailable("The conversation store is not readable.")
+                    unavailable_page(key.unavailable("The conversation store is not readable."))
                 }
             }
         }
@@ -326,18 +398,22 @@ impl PmConversationReader {
         key: ConversationKey,
         path: PathBuf,
         mut file: std::fs::File,
-    ) -> PmConversationSnapshot {
+        limit: usize,
+        before: Option<&str>,
+    ) -> HomeConversationPage {
         use std::io::{Read, Seek, SeekFrom};
         let stamp = match file.metadata() {
             Ok(metadata) => SourceStamp::from_file(&file, &metadata),
             Err(_) => {
                 self.cached = None;
-                return key.unavailable("The conversation store is not readable.");
+                return unavailable_page(
+                    key.unavailable("The conversation store is not readable."),
+                );
             }
         };
         if let Some(cached) = &self.cached {
             if cached.key == key && cached.path == path && cached.stamp == stamp {
-                return cached.snapshot();
+                return cached.page(limit, before);
             }
             // A shorter file, replacement, or same-length rewrite is a new
             // source generation. Only growth of the same file is an append.
@@ -359,6 +435,7 @@ impl PmConversationReader {
             path,
             stamp: stamp.clone(),
             offset: 0,
+            message_indices: HashMap::new(),
             identity_seen: false,
         });
         let parsed = file
@@ -370,6 +447,7 @@ impl PmConversationReader {
                     &cached.key,
                     &mut cached.snapshot,
                     &mut cached.identity_seen,
+                    &mut cached.message_indices,
                 )
             });
         match parsed {
@@ -380,11 +458,11 @@ impl PmConversationReader {
                 {
                     self.processed_bytes += bytes;
                 }
-                cached.snapshot()
+                cached.page(limit, before)
             }
             Err(detail) => {
                 self.cached = None;
-                key.unavailable(detail)
+                unavailable_page(key.unavailable(detail))
             }
         }
     }
@@ -466,8 +544,18 @@ fn parse_reader(
     let mut snapshot =
         PmConversationSnapshot::empty(Some(id), PmConversationAvailability::Ready, None);
     let mut identity_seen = false;
-    match scan_records(reader, &key, &mut snapshot, &mut identity_seen) {
-        Ok(_) if identity_seen => snapshot,
+    match scan_records(
+        reader,
+        &key,
+        &mut snapshot,
+        &mut identity_seen,
+        &mut HashMap::new(),
+    ) {
+        Ok(_) if identity_seen => {
+            let start = page_start(&snapshot.messages, MAX_MESSAGES);
+            snapshot.messages.drain(..start);
+            snapshot
+        }
         Ok(_) => key.unavailable("Conversation identity has not been verified."),
         Err(detail) => key.unavailable(detail),
     }
@@ -478,6 +566,7 @@ fn scan_records(
     key: &ConversationKey,
     snapshot: &mut PmConversationSnapshot,
     identity_seen: &mut bool,
+    message_indices: &mut HashMap<String, usize>,
 ) -> Result<u64, &'static str> {
     use std::io::{BufRead, Read};
     let mut complete_bytes = 0;
@@ -536,26 +625,11 @@ fn scan_records(
             let source_id = native_request_source_id(key.agent.command(), &key.id, &message.id);
             message.source_key = Some(gwt_core::pm_authorization::digest(source_id.as_bytes()));
         }
-        if let Some(existing) = snapshot
-            .messages
-            .iter_mut()
-            .find(|existing| existing.id == message.id)
-        {
-            *existing = message;
+        if let Some(&index) = message_indices.get(&message.id) {
+            snapshot.messages[index] = message;
         } else {
+            message_indices.insert(message.id.clone(), snapshot.messages.len());
             snapshot.messages.push(message);
-        }
-        while snapshot.messages.len() > MAX_MESSAGES
-            || (snapshot.messages.len() > 1
-                && snapshot
-                    .messages
-                    .iter()
-                    .map(|message| message.text.len())
-                    .sum::<usize>()
-                    > MAX_TEXT_BYTES)
-        {
-            snapshot.messages.remove(0);
-            snapshot.detail = Some("Showing the most recent conversation messages.".to_owned());
         }
     }
     Ok(complete_bytes)

@@ -130,39 +130,43 @@ test.describe("Operator chrome smoke", () => {
   test("rail items are reachable without any reveal interaction", async ({ page }) => {
     for (const id of [
       '[data-surface="issues"]',
-      '[data-surface="works"]',
       '[data-cmd="open-logs"]',
       '[data-cmd="open-index"]',
       '[data-cmd="open-profile"]',
-      "#op-palette-button",
     ]) {
       await expect(page.locator(id)).toBeVisible();
     }
   });
 
   test("hovering and focusing a rail item exposes its explanation outside the scroll area", async ({ page }) => {
-    const control = page.locator("#op-palette-button");
+    const control = page.locator('.op-rail__item[data-cmd="open-logs"]');
     const explanation = page.locator("#rail-control-explanation");
     await control.hover();
     await expect(explanation).toBeVisible();
-    await expect(explanation).toContainText("Command palette");
+    await expect(explanation).toContainText("Logs");
     await control.focus();
     await expect(explanation).toBeVisible();
   });
 
-  test("⌘K opens the command palette", async ({ page }) => {
+  test("the retired command palette has no rail entry, DOM, or ⌘K / ⌘P shortcut (#7879)", async ({ page }) => {
+    await expect(page.locator("#op-palette-button")).toHaveCount(0);
+    await expect(page.locator(".op-palette-backdrop, .op-palette")).toHaveCount(0);
+    await expect(page.locator(".op-rail")).not.toContainText("⌘K");
+    const dialogs = page.locator('[role="dialog"][aria-modal="true"]:visible');
+    const before = await dialogs.count();
     // Headed Chromium reserves the physical Meta+K chord for browser chrome
     // before the page sees it. Dispatch the same trusted-shape DOM event so
     // this browser E2E exercises gwt's global hotkey registry deterministically.
-    await page.locator("body").dispatchEvent("keydown", {
-      key: "k",
-      code: "KeyK",
-      metaKey: true,
-      bubbles: true,
-    });
-    await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
-    await page.keyboard.press("Escape");
-    await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute("data-open", "true");
+    for (const key of ["k", "p"]) {
+      await page.locator("body").dispatchEvent("keydown", {
+        key,
+        code: `Key${key.toUpperCase()}`,
+        metaKey: true,
+        bubbles: true,
+      });
+    }
+    await expect(dialogs).toHaveCount(before);
+    await expect(page.locator(".op-palette-backdrop, .op-palette")).toHaveCount(0);
   });
 });
 
@@ -172,6 +176,8 @@ test.describe("Operator chrome reduced-motion", () => {
 
   test("the rail renders identically under prefers-reduced-motion", async ({ page }) => {
     await expect(page.locator(".op-rail")).toBeVisible();
-    await expect(page.locator('[data-surface="works"]')).toBeVisible();
+    await expect(page.locator('[data-surface="issues"]')).toBeVisible();
+    // Issue #7880 (design item 137): Works has no rail entry.
+    await expect(page.locator('[data-surface="works"]')).toHaveCount(0);
   });
 });

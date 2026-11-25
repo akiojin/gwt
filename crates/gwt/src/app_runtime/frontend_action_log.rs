@@ -404,6 +404,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .window(id)
             .mode(format!("{knowledge_kind:?}"))
             .target(number.to_string()),
+        FrontendEvent::EditIssueSubtask { id, number, .. } => {
+            FrontendUserActionLog::new("edit_issue_subtask", "knowledge")
+                .window(id)
+                .target(number.to_string())
+        }
         FrontendEvent::UpdateKnowledgeBridgePhase {
             id,
             issue_number,
@@ -611,6 +616,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::SetPmExecutionEnvironments { .. } => {
             FrontendUserActionLog::new("set_pm_execution_environments", "execution_environments")
         }
+        FrontendEvent::SetAgentExecutionEnvironments { member_id, .. } => {
+            FrontendUserActionLog::new("set_agent_execution_environments", "execution_environments")
+                .target(member_id.clone())
+        }
         FrontendEvent::AddAgentBackend { agent, profile } => {
             FrontendUserActionLog::new("add_agent_backend", "agent_backends")
                 .agent(agent.as_str())
@@ -763,6 +772,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
+        FrontendEvent::SetProjectAutonomy { running, .. } => {
+            FrontendUserActionLog::new("set_project_autonomy", "project").mode(if *running {
+                "start"
+            } else {
+                "stop"
+            })
+        }
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
@@ -883,11 +899,23 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadHomeConversation { .. }
+        | FrontendEvent::LoadDecisionCounts { .. }
         | FrontendEvent::LoadThemes { .. }
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::GetExecutionEnvironments
+        | FrontendEvent::AddPoolAccount { .. }
+        | FrontendEvent::SignInPoolAccount { .. }
+        | FrontendEvent::SaveCopilotAccount { .. }
+        | FrontendEvent::MovePoolAccount { .. }
+        | FrontendEvent::UsePoolAccount { .. }
+        | FrontendEvent::DeletePoolAccount { .. }
+        | FrontendEvent::ResumeNextPoolAccount { .. }
+        | FrontendEvent::PoolAccountLoginInput { .. }
+        | FrontendEvent::ClosePoolAccountLogin { .. }
+        | FrontendEvent::GetProjectEnvironmentSet
+        | FrontendEvent::SetProjectEnvironmentSet { .. }
         | FrontendEvent::GetFirstRunSetup { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }

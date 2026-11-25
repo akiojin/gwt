@@ -1603,12 +1603,13 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         .expect("ordinary intake owner repair");
         let diagnosis =
             gwt::cli::execution_state::diagnose_owner(&fixture.worktree, fixture.execution_owner);
-        let revival = serde_json::to_value(diagnosis.obligation_revival.unwrap()).unwrap();
-        assert_eq!(revival["outcome"], "status_unreadable");
-        assert_eq!(revival["validation"]["check"], "identity");
-        assert_eq!(
-            revival["validation"]["expected_content_hash"],
-            revival["validation"]["actual_content_hash"]
+        assert!(diagnosis.obligation_revival.is_none(), "{diagnosis:?}");
+        assert!(
+            diagnosis
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("obligation revival")),
+            "{diagnosis:?}"
         );
     }
     let mut env = gwt::cli::TestEnv::new(fixture.worktree.clone());

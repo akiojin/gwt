@@ -4111,6 +4111,39 @@ fn pinned_pr_command_args(repository: Option<&str>, args: &[&str]) -> Vec<String
     args
 }
 
+/// GitHub can return concurrent workflow attempts together for the same head.
+fn remove_superseded_cancellations(rollup: &mut serde_json::Value) {
+    fn check_run(node: &serde_json::Value) -> Option<((&str, &str), UtcTimestamp)> {
+        if node.get("__typename")?.as_str()? != "CheckRun" {
+            return None;
+        }
+        let workflow = node.get("workflowName")?.as_str()?;
+        let name = node.get("name")?.as_str()?;
+        let started_at = parse_github_timestamp(node.get("startedAt")?.as_str())?;
+        (!workflow.is_empty() && !name.is_empty()).then_some(((workflow, name), started_at))
+    }
+
+    let Some(checks) = rollup.as_array_mut() else {
+        return;
+    };
+    let mut latest = BTreeMap::<_, UtcTimestamp>::new();
+    for (key, started_at) in checks.iter().filter_map(check_run) {
+        latest
+            .entry(key)
+            .and_modify(|previous| *previous = (*previous).max(started_at))
+            .or_insert(started_at);
+    }
+    let mut keep = checks
+        .iter()
+        .map(|node| {
+            node.get("conclusion").and_then(serde_json::Value::as_str) != Some("CANCELLED")
+                || check_run(node).is_none_or(|(key, started_at)| latest[&key] == started_at)
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+    checks.retain(|_| keep.next().unwrap_or(true));
+}
+
 fn fetch_pr_completion_snapshot_with<F>(
     repository: Option<&str>,
     repo_path: &Path,
@@ -4163,6 +4196,9 @@ where
     let state = parse_pr_status_json(&output.stdout)?.state;
     let now = UtcTimestamp::now();
     if state == PrState::Open {
+        if let Some(rollup) = value.get_mut("statusCheckRollup") {
+            remove_superseded_cancellations(rollup);
+        }
         let url = value
             .get("url")
             .and_then(serde_json::Value::as_str)
@@ -4258,6 +4294,18 @@ pub fn try_fetch_pr_diff(
     max_bytes: usize,
 ) -> Result<Option<String>> {
     try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
+}
+
+pub fn try_fetch_pr_diff_in_repository(
+    repo_path: &Path,
+    repository: &str,
+    number: u64,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, |path, args| {
+        let args = pinned_pr_command_args(Some(repository), args);
+        run_gh_command(path, &args.iter().map(String::as_str).collect::<Vec<_>>())
+    })
 }
 
 fn try_fetch_pr_diff_with<F>(
@@ -6944,6 +6992,62 @@ mod tests {
         assert!(calls.borrow()[0].ends_with("--repo github.com/o/r"));
         assert!(calls.borrow()[1].ends_with("--hostname github.com"));
         assert!(calls.borrow()[2].ends_with("--hostname github.com"));
+    }
+
+    #[test]
+    fn completion_snapshot_ignores_only_superseded_cancelled_checks() {
+        let check = |workflow, started_at, conclusion| {
+            serde_json::json!({
+                "__typename": "CheckRun", "name": "verify", "workflowName": workflow,
+                "startedAt": started_at, "status": "COMPLETED", "conclusion": conclusion
+            })
+        };
+        let old = check("CI", "2026-10-09T00:01:00Z", "CANCELLED");
+        let new = check("CI", "2026-10-09T00:02:00Z", "SUCCESS");
+        let blocker = |checks: Vec<serde_json::Value>| {
+            let payload = serde_json::json!({
+                "number": 42, "state": "OPEN", "isDraft": false, "headRefName": "work/issue-7310",
+                "headRefOid": "same-head", "url": "https://github.com/o/r/pull/42",
+                "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": checks,
+                "body": "Agent Visual Check: n/a (no UI surface)"
+            });
+            fetch_pr_completion_snapshot_with(None, Path::new("/repo"), 42, |_, args| {
+                let stdout = if args[0] == "pr" {
+                    payload.to_string()
+                } else {
+                    serde_json::json!({"data":{"repository":{"pullRequest":{
+                        "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}
+                    }}}})
+                    .to_string()
+                };
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout,
+                    stderr: String::new(),
+                })
+            })
+            .unwrap()
+            .inventory
+            .completion_blocker()
+        };
+        assert_eq!(blocker(vec![new.clone(), old.clone()]), None);
+        let red = Some("checks_not_green");
+        assert_eq!(blocker(vec![old.clone()]), red);
+        assert_eq!(
+            blocker(vec![
+                old.clone(),
+                check("Other CI", "2026-10-09T00:02:00Z", "SUCCESS")
+            ]),
+            red
+        );
+        assert_eq!(
+            blocker(vec![old, check("CI", "2026-10-09T00:02:00Z", "FAILURE")]),
+            red
+        );
+        assert_eq!(
+            blocker(vec![new, check("CI", "2026-10-09T00:03:00Z", "CANCELLED")]),
+            red
+        );
     }
 
     #[test]

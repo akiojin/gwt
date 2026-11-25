@@ -473,6 +473,8 @@ mod tests {
         let fetched_at = parse_rfc3339_utc(FIRST_FAILURE_AT).expect("fixture instant");
         let exhausted = gwt_core::usage::ProviderUsage {
             provider: gwt_core::usage::UsageProvider::Codex,
+            pool_account_id: None,
+            last_limit: None,
             account_id: Some("acct".to_string()),
             account_label: None,
             plan: None,

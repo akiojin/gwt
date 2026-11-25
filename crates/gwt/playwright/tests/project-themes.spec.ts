@@ -6,6 +6,9 @@
  * AC-3: a project with no themes says what a theme is.
  * A-23: deleting a theme asks first and says what happens: its GitHub Issue
  *       is closed, the issues under it stay, and it can be reopened.
+ * Issue #7644: a theme the PM recorded from the conversation on Home is listed
+ *       before any issue sits under it, says where it came from, and opens
+ *       Home on that message.
  *
  * Runs against the embedded frontend with a stub backend, in both themes,
  * with zero console / page errors.
@@ -83,7 +86,24 @@ async function installThemesBackend(page: Page, themes: unknown[], options: { re
         const message = JSON.parse(raw);
         sent.push(message);
         const view = () => ({ themes: current, completed_today: 5, truncated: false });
-        if (message.kind === "frontend_ready") this.emit(workspaceState);
+        if (message.kind === "frontend_ready") {
+          if (location.pathname === "/") {
+            const projectKey = new URLSearchParams(location.search).get("project");
+            this.emit({ kind: "hub_state", hub: { app_version: "playwright", recent_projects: [], projects: [{
+              id: "tab-1", title: "Themes Fixture", project_key: projectKey, kind: "git",
+            }] } });
+          } else this.emit(workspaceState);
+        }
+        if (message.kind === "load_home_conversation") {
+          const projectKey = new URLSearchParams(location.search).get("project");
+          const messages = current.filter(theme => theme.recorded_from).map(theme => ({
+            id: theme.recorded_from.message_id, role: "user", text: theme.summary,
+          }));
+          this.emit({ kind: "home_conversation", request_id: message.request_id, projects: [{
+            project_key: projectKey, title: "Themes Fixture", decisions: [], waiting_count: 0,
+            conversation: { messages },
+          }] });
+        }
         if (message.kind === "load_themes") this.emit({ kind: "themes", request_id: message.request_id, view: view() });
         if (message.kind === "delete_theme") {
           if (refuseDelete) {
@@ -172,7 +192,7 @@ test.describe("Themes", () => {
 
     const empty = screen.locator("[data-themes-empty]");
     await expect(empty.getByRole("heading", { name: "No themes yet" })).toBeVisible();
-    await expect(empty).toContainText("A theme is a GitHub Issue that has sub-issues.");
+    await expect(empty).toContainText("The PM records a theme when you ask for something or decide something in the conversation on Home.");
     await expect(screen.locator("[data-themes-list]")).toHaveCount(0);
     await expect(screen.locator('[data-themes-stat="completed_today"]')).toHaveText("5");
     await page.screenshot({ path: info.outputPath("themes-empty.png"), fullPage: true });
@@ -211,6 +231,36 @@ test.describe("Themes", () => {
     await expect(screen.locator("[data-themes-list] [data-theme-number]")).toHaveCount(1);
     const deletes = await sentOf(page, "delete_theme");
     expect(deletes.map(message => message.number)).toEqual([7007]);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("a theme recorded from the conversation leads back to it (Issue #7644)", async ({ page }, info) => {
+    const errors = captureErrors(page);
+    const recorded = {
+      number: 7800, title: "Search in the log screen", summary: "Add search to the log screen.",
+      url: "https://github.com/example/repo/issues/7800", issues_total: 0, issues_completed: 0, issues: [],
+      recorded_from: { session_id: "pm-session", message_id: "native-turn", recorded_at: "2026-11-23T10:00:00Z" },
+    };
+    const screen = await open(page, [recorded, ...THEMES]);
+    // A theme made on GitHub has no conversation to open.
+    await screen.locator('[data-theme-number="7007"]').click();
+    await expect(screen.locator("[data-theme-origin]")).toHaveCount(0);
+    await screen.locator("[data-themes-back]").click();
+
+    const row = screen.locator('[data-theme-number="7800"]');
+    await expect(row).toContainText("0 issues under it · 0 completed");
+    await row.click();
+    const origin = screen.locator("[data-theme-origin]");
+    await expect(origin.getByRole("heading", { name: "Source of this theme" })).toBeVisible();
+    await expect(origin).toContainText("Recorded automatically from the conversation on Home");
+    await expect(screen.locator("[data-theme-no-issues]")).toContainText("No issues sit under this theme yet.");
+    await page.screenshot({ path: info.outputPath("theme-recorded.png"), fullPage: true });
+
+    const projectKey = new URL(page.url()).pathname.split("/").at(-1)!;
+    await origin.getByRole("button", { name: "Show in conversation" }).click();
+    await expect(page).toHaveURL(new URL(`/?project=${projectKey}&message=native-turn`, APP_URL).href);
+    await expect(page.locator(".gwt-home__msg.is-highlighted")).toContainText(recorded.summary);
+    await expect(page.locator(".gwt-home__msg.is-highlighted")).toBeFocused();
     expect(errors, "zero console/page errors").toEqual([]);
   });
 

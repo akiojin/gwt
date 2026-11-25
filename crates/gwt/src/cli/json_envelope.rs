@@ -848,6 +848,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 branches: optional_string_vec(params, "branches")?,
             })
         }
+        "worktree.remove_merged" | "worktree.remove-merged" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "branches"],
+                "worktree.remove_merged",
+            )?;
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::RemoveMerged {
+                // Removing a worktree drops its directory and local branch, so
+                // an unqualified call only reports candidates (Issue #7324).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                branches: optional_string_vec(params, "branches")?,
+            })
+        }
         "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
             reject_unknown_params(
                 params,
@@ -970,6 +984,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 issue_number: required_u64(params, "issue_number")?,
                 reviewed_sha: required_string(params, "reviewed_sha")?,
                 verdict_raw: required_string(params, "verdict_raw")?,
+                evidence_review_token: optional_string(params, "evidence_review_token")?,
+            })
+        }
+        "issue.monitor.review_merged_evidence" => {
+            CliCommand::Issue(IssueCommand::MonitorReviewMergedEvidence {
+                issue_number: required_u64(params, "issue_number")?,
+                pr_number: required_u64(params, "pr_number")?,
+                reviewed_sha: required_string(params, "reviewed_sha")?,
+                evidence_revision: required_string(params, "evidence_revision")?,
             })
         }
         "update.settings.status" => CliCommand::Update(super::UpdateCommand::SettingsStatus {
@@ -1006,6 +1029,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let key = format!("{number}:{recovery_id}");
             CliCommand::Board(BoardCommand::RecoveryPost {
                 intent_id: format!("manual-recovery:{key}"),
+                manual_recovery: true,
                 command: Box::new(BoardPostCommand {
                     kind: "decision".into(),
                     body: Some(body),
@@ -1279,6 +1303,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "board.config.set"
         | "repository.required_checks.update"
         | "repository.settings.set"
+        | "repository.branch_protection.update"
         | "release.metadata.set"
         | "pr.reopen"
         | "pr.review.submit"
@@ -2346,12 +2371,56 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 })
             }
         }
+        "pm.theme.record" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "original", "decision", "title", "summary", "number", "note", "reason",
+                ],
+                "pm.theme.record",
+            )?;
+            let text = |key: &'static str| required_nonempty_workspace_reopen_string(params, key);
+            let decision = match text("decision")?.as_str() {
+                "create" => crate::themes::ThemeDecision::Create {
+                    title: text("title")?,
+                    summary: text("summary")?,
+                },
+                "update" => crate::themes::ThemeDecision::Update {
+                    number: required_u64(params, "number")?,
+                    note: text("note")?,
+                },
+                "none" => crate::themes::ThemeDecision::None {
+                    reason: text("reason")?,
+                },
+                "declined" => crate::themes::ThemeDecision::Declined {
+                    reason: text("reason")?,
+                },
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "decision",
+                        reason: "expected one of: create, update, none, declined",
+                    })
+                }
+            };
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeRecord {
+                original: required_string(params, "original")?,
+                decision,
+            })
+        }
+        "pm.theme.list" => {
+            reject_unknown_params(params, &[], "pm.theme.list")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeList)
+        }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
             project_root: optional_string(params, "project_root")?,
         }),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
+        "pm.branch_freshness.refresh" => {
+            reject_unknown_params(params, &[], "pm.branch_freshness.refresh")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::BranchFreshnessRefresh)
+        }
         "pm.status.set" => {
             reject_unknown_params(
                 params,
@@ -2631,7 +2700,11 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
         broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
     });
     Ok(CliCommand::Board(match intent_id {
-        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        Some(intent_id) => BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery: false,
+        },
         None => BoardCommand::Post(command),
     }))
 }
@@ -5521,6 +5594,25 @@ mod tests {
         }
     }
 
+    /// Issue #7324: an unqualified `worktree.remove_merged` is a dry run.
+    #[test]
+    fn worktree_remove_merged_defaults_to_a_dry_run() {
+        match ok("worktree.remove_merged", json!({})) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::RemoveMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(branches.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let error = err("worktree.remove_merged", json!({ "force": true }));
+        assert!(format!("{error}").contains("force"), "{error}");
+    }
+
     #[test]
     fn worktree_gc_build_artifacts_rejects_an_unknown_param() {
         let error = err("worktree.gc_build_artifacts", json!({ "force": true }));
@@ -6017,6 +6109,7 @@ mod tests {
                 issue_number,
                 reviewed_sha,
                 verdict_raw,
+                evidence_review_token: _,
             }) => {
                 assert_eq!(issue_number, 42);
                 assert_eq!(reviewed_sha, "abc123");
@@ -7405,7 +7498,7 @@ mod tests {
             }),
         );
         assert!(matches!(command,
-            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command })
+            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command, manual_recovery: true })
             if intent_id == "manual-recovery:5876:incident-a"
                 && command.kind == "decision"
                 && command.owners == ["5876"]
@@ -8366,6 +8459,14 @@ mod tests {
         assert_eq!(saved["report"]["kind"], "qa");
         assert_eq!(saved["report"]["question"], "Can we ship?");
         assert_eq!(saved["report"]["body"], "Checks passed.");
+        // Issue #7642: the saved report is recorded on the Board as it is saved.
+        let board_id = format!("pm-report-{}", saved["report"]["id"].as_str().unwrap());
+        assert!(gwt_core::coordination::load_snapshot(&repo)
+            .unwrap()
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == board_id));
         let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
         let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
         let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();

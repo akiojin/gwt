@@ -6,7 +6,8 @@ import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 // sub-issues: the backend reads them (`load_themes` → `themes`) together with
 // the number of Issues completed today, and this host only derives rows and
 // keeps what the screen is doing: which theme is open, the delete
-// confirmation, and the request it is waiting on.
+// confirmation, and the request it is waiting on. A theme the PM recorded
+// from the conversation on Home names the message it came from (Issue 7644).
 
 const NOT_CONNECTED = "Not connected to gwt. Try again once the connection is back.";
 
@@ -25,6 +26,11 @@ function themeRows(view) {
       completed,
       percent: total ? Math.round((completed / total) * 100) : 0,
       status: total > 0 && completed === total ? "almost_done" : "in_progress",
+      recordedFrom: theme.recorded_from?.session_id && theme.recorded_from?.message_id ? {
+        sessionId: theme.recorded_from.session_id,
+        messageId: theme.recorded_from.message_id,
+        recordedAt: theme.recorded_from.recorded_at || "",
+      } : null,
       issues: (theme.issues || []).map(issue => ({
         number: issue.number,
         title: issue.title,
@@ -41,11 +47,17 @@ const INITIAL = Object.freeze({
   selected: null, dialog: null, deleting: false, deleteError: null, notice: null,
 });
 
-export function createProjectThemes({ document, send, repliesModel, onOpenIssue, scheduleFrame }) {
+export function createProjectThemes({
+  document, send, repliesModel, onOpenIssue, onOpenConversation, scheduleFrame,
+  getProjectKey = () => null, onHierarchyChange = () => {},
+}) {
   const model = createUiStateStore(INITIAL, { scheduleFrame });
   let nextRequestId = 1;
   // The request this screen is waiting on; any other reply is stale.
   let pending = null;
+  let hierarchyProject = null;
+  let parents = new Map();
+  let interruptedProject = null;
 
   function request(message, waiting) {
     const requestId = nextRequestId++;
@@ -57,14 +69,14 @@ export function createProjectThemes({ document, send, repliesModel, onOpenIssue,
       }));
       return;
     }
-    pending = { requestId, kind: message.kind, number: message.number ?? null };
+    pending = { requestId, kind: message.kind, number: message.number ?? null, project: getProjectKey() };
     model.update(state => ({ ...state, ...waiting }));
   }
   function reload() {
     request({ kind: "load_themes" }, { loading: true, error: null, notice: null });
   }
   function applyReply(reply) {
-    if (!reply || !pending || reply.request_id !== pending.requestId) return;
+    if (!reply || !pending || reply.request_id !== pending.requestId || pending.project !== getProjectKey()) return;
     const answered = pending;
     pending = null;
     if (reply.kind === "theme_error") {
@@ -75,6 +87,13 @@ export function createProjectThemes({ document, send, repliesModel, onOpenIssue,
       return;
     }
     const themes = themeRows(reply.view);
+    hierarchyProject = answered.project;
+    const nextParents = new Map();
+    for (const theme of themes) {
+      for (const issue of theme.issues) {
+        if (issue.inRepository) nextParents.set(issue.number, theme);
+      }
+    }
     const deleted = answered.kind === "delete_theme";
     model.update(state => ({
       ...state, loaded: true, loading: false, deleting: false, error: null, deleteError: null,
@@ -85,6 +104,10 @@ export function createProjectThemes({ document, send, repliesModel, onOpenIssue,
       notice: deleted ? { deleted: answered.number } : null,
       selected: themes.some(theme => theme.number === state.selected) ? state.selected : null,
     }));
+    if (parents.size || nextParents.size) {
+      parents = nextParents;
+      onHierarchyChange();
+    }
   }
   const release = repliesModel.subscribe(state => state.reply, applyReply);
 
@@ -93,6 +116,7 @@ export function createProjectThemes({ document, send, repliesModel, onOpenIssue,
     openTheme: number => model.update(state => ({ ...state, selected: number, notice: null })),
     closeTheme: () => model.update(state => ({ ...state, selected: null, dialog: null, deleteError: null })),
     openIssue: number => onOpenIssue(number),
+    openConversation: ({ sessionId, messageId }) => onOpenConversation?.({ sessionId, messageId }),
     askDelete: number => model.update(state => ({ ...state, dialog: { number }, deleteError: null })),
     cancelDelete: () => model.update(state => (state.deleting ? state : { ...state, dialog: null, deleteError: null })),
     confirmDelete: () => {
@@ -107,5 +131,21 @@ export function createProjectThemes({ document, send, repliesModel, onOpenIssue,
     release();
     island.unmount();
   }
-  return { element: container, reload, dispose };
+  function loadHierarchy() {
+    const project = getProjectKey();
+    if (project && hierarchyProject !== project && pending?.project !== project) reload();
+  }
+  function parentTheme(number) {
+    return hierarchyProject === getProjectKey() ? parents.get(number) : undefined;
+  }
+  function updateConnection(connected) {
+    if (!connected && pending?.kind === "load_themes") {
+      interruptedProject = pending.project;
+      pending = null;
+    } else if (connected && interruptedProject === getProjectKey() && interruptedProject !== null) {
+      interruptedProject = null;
+      if (!pending) reload();
+    }
+  }
+  return { element: container, reload, loadHierarchy, parentTheme, updateConnection, dispose };
 }

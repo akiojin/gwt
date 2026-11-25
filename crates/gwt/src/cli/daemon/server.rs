@@ -2240,6 +2240,22 @@ fn spawn_issue_monitor_worker(
                                 continue;
                             };
                             if let Some(control) = decode_issue_monitor_control_in_repo(payload, Some(&scope.project_root)) {
+                                if let IssueMonitorControl::MergedEvidenceReview {
+                                    dispatch, authorization_comment_id, evidence_revision, resident_pm_session, ..
+                                } = &control {
+                                    let scope = scope.clone();
+                                    let dispatch = dispatch.clone();
+                                    let comment_id = *authorization_comment_id;
+                                    let revision = evidence_revision.clone();
+                                    let pm = resident_pm_session.clone();
+                                    let verified = tokio::task::spawn_blocking(move || {
+                                        verify_merged_evidence_grant(&scope, &dispatch, comment_id, &revision, &pm)
+                                    }).await;
+                                    if !matches!(verified, Ok(true)) {
+                                        completion.reject(IssueMonitorControlQueueError::Rejected);
+                                        continue;
+                                    }
+                                }
                                 let strict_scan = matches!(&control, IssueMonitorControl::ScanNowIfIdle);
                                 if strict_scan && (scan_requested || periodic_scan_requested || in_flight_scan.is_some()) {
                                     completion.reject(IssueMonitorControlQueueError::ScanAlreadyInFlight);
@@ -3524,6 +3540,14 @@ enum IssueMonitorControl {
         issue_number: u64,
         reviewed_sha: String,
         verdict_raw: String,
+        evidence_review_token: Option<String>,
+    },
+    MergedEvidenceReview {
+        dispatch: crate::AutonomousReviewDispatch,
+        authorization_comment_id: u64,
+        evidence_revision: String,
+        verdict_token: String,
+        resident_pm_session: String,
     },
     /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness;
     /// refresh the stuck-detection window for the issue.
@@ -4483,6 +4507,30 @@ fn try_apply_issue_monitor_control(
             crate::AutonomousWaitOutcome::Declared { .. }
         )
         .then_some(false),
+        IssueMonitorControl::MergedEvidenceReview {
+            dispatch,
+            authorization_comment_id,
+            evidence_revision,
+            verdict_token,
+            resident_pm_session: _,
+        } => monitor
+            .dispatch_merged_evidence_review(
+                dispatch,
+                authorization_comment_id,
+                &evidence_revision,
+                verdict_token,
+                now,
+            )
+            .ok()
+            .map(|()| true),
+        IssueMonitorControl::ReviewVerdict {
+            issue_number,
+            reviewed_sha,
+            verdict_raw,
+            evidence_review_token: Some(token),
+        } => monitor
+            .apply_merged_evidence_review_verdict(issue_number, &reviewed_sha, &token, &verdict_raw)
+            .map(|_| true),
         control @ (IssueMonitorControl::LaunchFailed {
             failure: Some(_), ..
         }
@@ -4729,11 +4777,13 @@ fn apply_routine_issue_monitor_control(
             issue_number,
             reviewed_sha,
             verdict_raw,
+            evidence_review_token: _,
         } => {
             // The daemon (trusted) judges the raw verdict; agents cannot self-pass.
             monitor.apply_review_verdict(issue_number, &reviewed_sha, &verdict_raw);
             true
         }
+        IssueMonitorControl::MergedEvidenceReview { .. } => false,
         IssueMonitorControl::Heartbeat {
             issue_number,
             at,
@@ -6434,10 +6484,15 @@ async fn wait_control_receipt_reports_refusals_and_accepts_a_live_wait() {
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
             .expect("claim control receiver");
+        let receipt_id = uuid::Uuid::new_v4().to_string();
         let receipt = hub
-            .enqueue_issue_monitor_control(DaemonFrame::Ack)
+            .enqueue_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: serde_json::json!({ "ack_receipt_id": receipt_id }),
+            })
             .await
             .expect("admit control");
+        assert!(!hub.has_issue_monitor_control_receipt(&receipt_id));
         let (_, completion) = receiver.recv().await.expect("receive control").into_parts();
         let mut pending = None;
         assert!(!apply_or_queue_issue_monitor_control(
@@ -6462,6 +6517,10 @@ async fn wait_control_receipt_reports_refusals_and_accepts_a_live_wait() {
         assert!(pending.is_none(), "a settled wait is not a retry barrier");
         let completion = receipt.await.expect("completion is settled");
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert_eq!(
+            hub.has_issue_monitor_control_receipt(&receipt_id),
+            launched && !expired
+        );
         if expired {
             let message = completion
                 .expect_err("expired cap must reject renewal")
@@ -7090,6 +7149,29 @@ fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
     assert!(waiting.in_force);
 }
 
+fn monitor_control_is_from_resident_pm(
+    session: Option<&serde_json::Value>,
+    repo_path: Option<&std::path::Path>,
+) -> bool {
+    let Some(session) = session
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|session| !session.is_empty())
+    else {
+        return false;
+    };
+    repo_path.is_some_and(|repo| {
+        crate::pm_registry::session_is_registered_pm(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
+            session,
+        ) || crate::pm_registry::pm_repository_key(repo).is_some_and(|key| {
+            crate::pm_registry::pm_registrations_for_repository(&key)
+                .iter()
+                .any(|record| record.registration.session_id == session)
+        })
+    })
+}
+
 fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
@@ -7204,23 +7286,10 @@ fn decode_issue_monitor_control_in_repo(
                         .ok()?,
                     ),
                 };
-                let resident_pm = config
-                    .get("resident_pm_session")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|session| !session.is_empty())
-                    .is_some_and(|session| {
-                        repo_path.is_some_and(|repo| {
-                            crate::pm_registry::session_is_registered_pm(
-                                &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
-                                session,
-                            ) || crate::pm_registry::pm_repository_key(repo).is_some_and(|key| {
-                                crate::pm_registry::pm_registrations_for_repository(&key)
-                                    .iter()
-                                    .any(|record| record.registration.session_id == session)
-                            })
-                        })
-                    });
+                let resident_pm = monitor_control_is_from_resident_pm(
+                    config.get("resident_pm_session"),
+                    repo_path,
+                );
                 if (!resident_pm && (enabled == Some(true) || autonomous_mode == Some(true)))
                     || max_active_agents == Some(0)
                     || max_active_agents.is_some_and(|size| {
@@ -7444,6 +7513,26 @@ fn decode_issue_monitor_control_in_repo(
                 }
                 return Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch));
             }
+            if let Some(review) = payload.get("merged_evidence_review") {
+                if !monitor_control_is_from_resident_pm(
+                    review.get("resident_pm_session"),
+                    repo_path,
+                ) {
+                    return None;
+                }
+                let dispatch = serde_json::from_value(review.get("dispatch")?.clone()).ok()?;
+                return Some(IssueMonitorControl::MergedEvidenceReview {
+                    dispatch,
+                    authorization_comment_id: review.get("authorization_comment_id")?.as_u64()?,
+                    evidence_revision: review.get("evidence_revision")?.as_str()?.to_string(),
+                    verdict_token: uuid::Uuid::new_v4().to_string(),
+                    resident_pm_session: review
+                        .get("resident_pm_session")?
+                        .as_str()?
+                        .trim()
+                        .to_string(),
+                });
+            }
             if let Some(review_verdict) = payload.get("review_verdict") {
                 let issue_number = review_verdict.get("issue_number")?.as_u64()?;
                 let reviewed_sha = review_verdict
@@ -7459,6 +7548,10 @@ fn decode_issue_monitor_control_in_repo(
                     issue_number,
                     reviewed_sha,
                     verdict_raw,
+                    evidence_review_token: review_verdict
+                        .get("evidence_review_token")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
                 });
             }
             if let Some(value) = payload.get("max_active_agents") {
@@ -9027,7 +9120,7 @@ fn execute_merged_issue_settlement<
                     .auto_close_merged_issues
                     .unwrap_or(prefs.autonomous_mode)
                 && !prefs.autonomous_records.iter().any(|record| {
-                    record.issue_number == *issue_number && record.review_passed == Some(false)
+                    record.issue_number == *issue_number && record.failed_review_veto()
                 })
             {
                 Ok(())
@@ -9053,6 +9146,53 @@ fn claim_ttl_secs(heartbeat_at: &str, expires_at: &str) -> u64 {
 
 fn issue_monitor_http_client(scope: &RuntimeScope) -> Result<HttpIssueClient, String> {
     issue_monitor_http_client_with_repository(scope).map(|(client, _)| client)
+}
+
+fn verify_merged_evidence_grant(
+    scope: &RuntimeScope,
+    dispatch: &crate::AutonomousReviewDispatch,
+    comment_id: u64,
+    revision: &str,
+    resident_pm_session: &str,
+) -> bool {
+    use gwt_git::pr_status::{
+        fetch_pr_auto_merge_remote_state_in_repository, PrAutoMergeRemoteState,
+    };
+    use gwt_github::client::{FetchResult, IssueClient};
+    if comment_id == 0 || !crate::issue_monitor::valid_merged_evidence_revision(revision) {
+        return false;
+    }
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + Duration::from_secs(15),
+    );
+    let Ok((client, repository)) = issue_monitor_http_client_with_repository(scope) else {
+        return false;
+    };
+    let Ok(FetchResult::Updated(issue)) =
+        client.fetch(gwt_github::IssueNumber(dispatch.issue_number), None)
+    else {
+        return false;
+    };
+    let expected = crate::issue_monitor::merged_evidence_authorization_text(
+        dispatch.pr_number,
+        &dispatch.reviewed_sha,
+        revision,
+    );
+    issue.state == gwt_github::IssueState::Open
+        && issue.comments.iter().any(|comment| {
+            comment.id.0 == comment_id
+                && comment.body.lines().next() == Some(expected.as_str())
+                && crate::session_launch::github_body_is_stamped_by_pm(
+                    &comment.body,
+                    resident_pm_session,
+                )
+        })
+        && matches!(
+            fetch_pr_auto_merge_remote_state_in_repository(
+                &scope.project_root, &format!("github.com/{repository}"), dispatch.pr_number,
+            ),
+            Some(PrAutoMergeRemoteState::Merged { head_sha }) if head_sha == dispatch.reviewed_sha
+        )
 }
 
 /// The monitor's HTTP client plus the explicit repository identity that
@@ -10139,6 +10279,9 @@ fn commit_issue_monitor_control_completion(
     monitor: &crate::IssueMonitorState,
     completion: IssueMonitorControlCompletion,
 ) {
+    // Publish proof as soon as the writer confirms the durable commit.
+    // The normal ACK still follows the agent status projection update.
+    completion.record_durable_commit();
     refresh_issue_monitor_agent_status(hub, monitor);
     completion.commit();
 }
@@ -10427,6 +10570,18 @@ async fn handle_connection(
                     issue_monitor: hub.wait_for_issue_monitor_status().await,
                 };
                 if out_tx.send(DaemonFrame::Status(snapshot)).is_err() {
+                    break;
+                }
+            }
+            Ok(ClientFrame::IssueMonitorControlReceipt { id }) => {
+                let response = if hub.has_issue_monitor_control_receipt(&id) {
+                    DaemonFrame::Ack
+                } else {
+                    DaemonFrame::Error {
+                        message: "Issues control commit receipt unavailable".into(),
+                    }
+                };
+                if out_tx.send(response).is_err() {
                     break;
                 }
             }
@@ -14206,6 +14361,7 @@ exit 0
             reviewed_sha: "reviewed-sha".to_string(),
             required_criteria: vec!["AS-PM-SUBSCRIBE-OBSERVER-001".to_string()],
             diff: "review diff".to_string(),
+            merged_evidence: None,
             linked_issue_kind: crate::LinkedIssueKind::Issue,
         });
         monitor.set_autonomous_mode(true);
@@ -14619,6 +14775,7 @@ exit 0
         monitor: &mut crate::IssueMonitorState,
         payload: serde_json::Value,
     ) -> bool {
+        let receipt_id = payload["ack_receipt_id"].as_str().map(str::to_owned);
         let hub = BroadcastHub::new();
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
@@ -14664,6 +14821,10 @@ exit 0
             Ok(()),
             "successful receipt is the daemon ACK boundary after durable commit"
         );
+        if let Some(id) = receipt_id {
+            assert!(hub.has_issue_monitor_control_receipt(&id));
+            assert!(!hub.has_issue_monitor_control_receipt(&uuid::Uuid::new_v4().to_string()));
+        }
         should_scan
     }
 
@@ -16574,6 +16735,7 @@ exit 0
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -16691,6 +16853,7 @@ exit 0
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -16701,7 +16864,7 @@ exit 0
         let mut monitor =
             test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         let verdict = r#"{"schema":"gwt-autonomous-review/v1","overall":"pass","criteria":[]}"#;
-        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        let mut payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
                 "review_verdict": {
@@ -16712,6 +16875,7 @@ exit 0
             }),
             std::process::id() + 1,
         );
+        payload["ack_receipt_id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
 
         assert!(
             commit_issue_monitor_control_with_ack_for_test(&prefs_path, &mut monitor, payload)
@@ -22667,6 +22831,7 @@ exit 0
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    merged_evidence_reviews: Vec::new(),
                     gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
@@ -23200,6 +23365,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    merged_evidence_reviews: Vec::new(),
                     gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
@@ -27746,6 +27912,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -27818,6 +27985,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -27942,6 +28110,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    merged_evidence_reviews: Vec::new(),
                     gate_hold: None,
                     cancelled_claim_phase: None,
                 },
@@ -27967,6 +28136,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    merged_evidence_reviews: Vec::new(),
                     gate_hold: None,
                     cancelled_claim_phase: None,
                 },
@@ -28042,6 +28212,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -28940,6 +29111,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -29095,6 +29267,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -29238,6 +29411,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
                 gate_hold: None,
                 cancelled_claim_phase: None,
             }],
@@ -29665,6 +29839,7 @@ exit 1
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
             gate_hold: None,
             cancelled_claim_phase: None,
         };
@@ -29912,6 +30087,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    merged_evidence_reviews: Vec::new(),
                     gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
@@ -30981,6 +31157,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    merged_evidence_reviews: Vec::new(),
                     gate_hold: None,
                     cancelled_claim_phase: None,
                 }],
@@ -31284,6 +31461,7 @@ exit 1
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            merged_evidence_reviews: Vec::new(),
             gate_hold: None,
             cancelled_claim_phase: None,
         };

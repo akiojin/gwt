@@ -102,7 +102,7 @@ impl WindowPreset {
             Self::Branches => "Branches",
             Self::Settings => "Settings",
             Self::Memo => "Memo",
-            Self::Profile => "Profile",
+            Self::Profile => "Environment variables",
             Self::Logs => "Logs",
             // SPEC-3671 FR-014: the three Knowledge-surface faces must be
             // tellable apart from an open window's title.
@@ -129,7 +129,7 @@ impl WindowPreset {
             Self::Branches => "Browse repository branches and launch agents",
             Self::Settings => "Manage custom agents and launch presets",
             Self::Memo => "Removed legacy memo surface",
-            Self::Profile => "Manage env profiles, overrides, and merged preview",
+            Self::Profile => "Manage device environment variable sets",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Browse cached issues and launch agents",
             Self::IssueMonitor => "Browse cached issues and manage agent execution",
@@ -542,7 +542,7 @@ mod tests {
         assert!(!WindowPreset::Issue.requires_process());
         assert_eq!(
             WindowPreset::Profile.subtitle(),
-            "Manage env profiles, overrides, and merged preview"
+            "Manage device environment variable sets"
         );
     }
 

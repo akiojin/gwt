@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
 import { operationOutput, readOperationOutput } from "./_helpers/operation-envelope.mjs";
+import { openWorks } from "./_helpers/works-entry";
 
 let rosterReadSequence = 0;
 async function readCanonicalRoster(page: Page): Promise<any> {
@@ -34,6 +35,47 @@ test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
+
+  test("Issue #7817 launch_now leaves a delivered PM check queued without starting its Agent", async ({ page }, info) => {
+    const issueNumber = 43;
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      page,
+      issueNumber,
+      additionalIssueNumbers: [44],
+      initialBodies: {
+        43: "## Acceptance Criteria\n- [x] AC-1: Deliver the implementation.\n- [ ] AC-2: [main-verification] PM verifies main.",
+      },
+      monitorPreferences: {
+        merged_issue_settlements: [{
+          issue_number: issueNumber,
+          pr_number: 7,
+          merge_sha: "1234567890123456789012345678901234567890",
+          action: { kind: "await_close", unmet: ["AC-2"] },
+          settled_at: new Date().toISOString(),
+        }],
+      },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const launchNow = await fixture.operationAsync("issue.monitor.launch_now", { number: issueNumber });
+      expect(JSON.parse(launchNow.output).priority_updated).toBe(true);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [44] });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([44]);
+      const status = fixture.fixtureOperation("issue.monitor.status");
+      const row = JSON.parse(status.output).inbox.find((item: any) => item.issue_number === issueNumber);
+      expect(row.exclusion_reason).toContain("delivered Issue is awaiting PM or main verification");
+      expect(row.launched_window_id).toBeUndefined();
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors).toEqual([]);
+  });
 
   test("Issue #6996 five submissions immediately after GUI restart do not report finalizer waits as errors", async ({ page }, info) => {
     test.setTimeout(360_000);
@@ -130,9 +172,15 @@ test.describe("Issue queue real backend launch", () => {
       expect(beforeStart.enabled).toBe(false);
       expect(Object.values(beforeStart.terminal_queues ?? {}).flatMap((queue: any) => queue.entries)).toEqual([]);
       await expect(page.locator('[data-role="monitor-refill-guidance"]')).toBeVisible();
-      await expect(page.locator('[data-queue-column="queued"] .knowledge-empty')).toContainText("Start the Issues to begin Auto-refill.");
+      await expect(page.locator('[data-queue-column="queued"] .knowledge-empty')).toContainText("Start the project to begin Auto-refill.");
+      // Issue #7728: Issues has no own Start; the project stop/start in Settings starts it.
+      await expect(controls.getByRole("button", { name:"Start", exact:true })).toHaveCount(0);
+      await controls.getByRole("button", { name:"Issues settings", exact:true }).click();
+      const projectStart = settings.locator('[data-settings-launch-action="project-autonomy"] [data-project-autonomy-action="start"]');
+      await expect(projectStart).toBeVisible();
       const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
-      await controls.getByRole("button", { name:"Start", exact:true }).click();
+      await projectStart.click();
+      await page.locator('[data-surface="issues"]').click();
       const firstScan = await page.waitForFunction(({ cursor, previousScan }) => {
         return ((window as any).__gwtPlaywrightMessages ?? []).find(({ sequence, payload }: any) =>
           sequence > cursor && payload.kind === "issue_monitor_status" && payload.status.enabled
@@ -2204,7 +2252,7 @@ request.catch(() => {});
         const main = current.getByRole("region", { name: "Main pane", exact: true });
         await expect(main.locator(".roster-capacity-note")).toContainText("Busy 1 / Team");
         await expect(main.locator(`.roster-row[data-member-id="${memberId}"] .roster-current`)).toContainText("In Works");
-        await current.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(current);
         await expect(main).toHaveAttribute("data-surface", "works");
         if (await main.locator(".works-full:not([hidden])").isVisible())
           await main.locator('.works-full [data-action="back"]').click();
@@ -2383,7 +2431,7 @@ request.catch(() => {});
       expect(agent.runtime_incarnation).toBeGreaterThan(0);
       expect(() => process.kill(launch.pid, 0)).not.toThrow();
       await info.attach(`local-live-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       const main = page.getByRole("region", { name: "Main pane", exact: true });
@@ -3388,7 +3436,7 @@ request.catch(() => {});
       expect(typeof retained.id === "string" && retained.id.length > 0).toBe(true);
       // The stopped diagnostic remains in the catalog; Works only shows live census members.
       await expect(restored.locator(`.workspace-window[data-id="${retained.id}"]`)).toHaveCount(1);
-      await restored.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(restored);
       if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       await expect(restored.locator(`.work-row[data-window-id="${retained.id}"]`)).toHaveCount(0);
@@ -3564,7 +3612,7 @@ request.catch(() => {});
       await expect.poll(async () => ["running", "idle"].includes((await agentWindow(restored, fresh.gwt_session_id!))?.status),
         { timeout: 60_000 }).toBe(true);
       const freshWindow = await agentWindow(restored, fresh.gwt_session_id!);
-      await restored.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(restored);
       if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
         await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       const tile = restored.locator(`.work-row[data-window-id="${freshWindow.id}"]`);

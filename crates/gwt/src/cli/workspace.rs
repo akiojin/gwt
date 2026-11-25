@@ -1048,7 +1048,7 @@ pub(super) fn run<E: CliEnv>(
             let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| {
                 string_error("workspace.receipt requires ambient GWT_SESSION_ID".to_string())
             })?;
-            let status = crate::workspace_update_receipt::inspect(
+            let status = crate::workspace_update_receipt::settle(
                 env.repo_path(),
                 &session_id,
                 &operation_id,
@@ -1186,13 +1186,20 @@ pub(super) fn run<E: CliEnv>(
                             .map_err(string_error)?
                         }
                         Err(error) if error.reason() == crate::daemon_runtime::AgentBridgeFailureReason::TransportFailure => {
-                            let recovered = bridge_authority.as_ref().filter(|authority| authority.local_continuation_eligible)
-                                .and_then(|authority| crate::workspace_update_receipt::inspect(
+                            // #7330 / #7816: never resend. Settle the lost response instead: wait
+                            // for a reserved update to publish, or claim an unreserved one as
+                            // not_applied so the Host refuses it and the outcome is final.
+                            let settled = bridge_authority.as_ref()
+                                .filter(|authority| authority.local_continuation_eligible && !error.request_never_delivered())
+                                .and_then(|authority| crate::workspace_update_receipt::settle(
                                     &legacy_repo_path, &session_id, &operation_id, Some((&request, &authority.identity)),
-                                ).ok()).and_then(|status| status.receipt);
-                            match recovered {
-                                Some(receipt) => receipt,
-                                None => return Err(SpecOpsError::from(ApiError::Network(format!(
+                                ).ok());
+                            match settled {
+                                Some(status) if status.receipt.is_some() => status.receipt.expect("applied receipt"),
+                                Some(status) if status.is_not_applied() => return Err(SpecOpsError::from(ApiError::Network(format!(
+                                    "{error}; operation_id={operation_id}, outcome=not_applied; the Host refuses this operation_id, so the update was not applied and may be sent again"
+                                )))),
+                                _ => return Err(SpecOpsError::from(ApiError::Network(format!(
                                     "{error}; operation_id={operation_id}, outcome=unconfirmed; inspect JSON operation workspace.receipt with this operation_id; do not resend the update"
                                 )))),
                             }

@@ -2943,6 +2943,129 @@ fn pm_bounded_settings_refuse_foreign_snapshots_and_unconfirmed_mutations() {
     assert!(client.transport().recorded().is_empty());
 }
 
+/// Issue #7311 (feedback #5975): the PM had no canonical operation to clear a
+/// branch protection deficiency that Issues flagged. The typed
+/// `repository.branch_protection.update` rewrites only the requested fields
+/// and carries every other protection field through the full-replacement PUT.
+#[test]
+fn pm_branch_protection_update_preserves_unrequested_fields_and_confirms_effect() {
+    use gwt_github::client::http::validate_pm_settings;
+    use serde_json::json;
+    let params = json!({
+        "branch":"develop",
+        "allow_force_pushes":false,
+        "required_conversation_resolution":true,
+        "strict":true
+    });
+    validate_pm_settings("repository.branch_protection.update", &params).unwrap();
+    let current = json!({
+        "url":"https://api.github.com/repos/octo/gwt/branches/develop/protection",
+        "required_status_checks":{"strict":false,"contexts":["Rust","Build"],
+            "checks":[{"context":"Rust","app_id":15368},{"context":"Build","app_id":null}]},
+        "enforce_admins":{"enabled":false},
+        "required_pull_request_reviews":{"dismiss_stale_reviews":true,
+            "require_code_owner_reviews":false,"required_approving_review_count":1,
+            "require_last_push_approval":false},
+        "required_linear_history":{"enabled":true},
+        "allow_force_pushes":{"enabled":true},
+        "allow_deletions":{"enabled":false},
+        "block_creations":{"enabled":false},
+        "required_conversation_resolution":{"enabled":false},
+        "lock_branch":{"enabled":false},
+        "allow_fork_syncing":{"enabled":false},
+        "required_signatures":{"enabled":false}
+    });
+    let mut updated = current.clone();
+    updated["allow_force_pushes"]["enabled"] = false.into();
+    updated["required_conversation_resolution"]["enabled"] = true.into();
+    updated["required_status_checks"]["strict"] = true.into();
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(&current.to_string()));
+    transport.enqueue(ok_body(&updated.to_string()));
+    let client = client_with(transport);
+    let before = client
+        .pm_settings_snapshot("repository.branch_protection.update", &params)
+        .unwrap();
+    assert_eq!(before["repository"], "octo/gwt");
+    assert_eq!(before["branch"], "develop");
+    assert_eq!(before["allow_force_pushes"], true);
+    let after = client
+        .pm_settings_mutate("repository.branch_protection.update", &params, &before)
+        .unwrap();
+    assert_eq!(after["allow_force_pushes"], false);
+    assert_eq!(after["required_conversation_resolution"], true);
+    let requests = client.transport().recorded();
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/branches/develop/protection"
+    );
+    assert_eq!(requests[1].method.as_str(), "PUT");
+    assert_eq!(requests[1].url, requests[0].url);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[1].body.as_ref().unwrap()).unwrap(),
+        json!({
+            "required_status_checks":{"strict":true,
+                "checks":[{"context":"Build","app_id":-1},{"context":"Rust","app_id":15368}]},
+            "enforce_admins":false,
+            "required_pull_request_reviews":{"dismiss_stale_reviews":true,
+                "require_code_owner_reviews":false,"required_approving_review_count":1,
+                "require_last_push_approval":false},
+            "restrictions":null,
+            "required_linear_history":true,
+            "allow_force_pushes":false,
+            "allow_deletions":false,
+            "block_creations":false,
+            "required_conversation_resolution":true,
+            "lock_branch":false,
+            "allow_fork_syncing":false
+        })
+    );
+
+    // A response that silently dropped an unrequested field is not confirmed.
+    let mut drifted = updated.clone();
+    drifted["required_linear_history"]["enabled"] = false.into();
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(&current.to_string()));
+    transport.enqueue(ok_body(&drifted.to_string()));
+    let client = client_with(transport);
+    let before = client
+        .pm_settings_snapshot("repository.branch_protection.update", &params)
+        .unwrap();
+    assert!(client
+        .pm_settings_mutate("repository.branch_protection.update", &params, &before)
+        .is_err());
+
+    // `strict` needs existing required status checks; refuse before the PUT.
+    let mut no_checks = current.clone();
+    no_checks
+        .as_object_mut()
+        .unwrap()
+        .remove("required_status_checks");
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(&no_checks.to_string()));
+    let client = client_with(transport);
+    let before = client
+        .pm_settings_snapshot("repository.branch_protection.update", &params)
+        .unwrap();
+    assert!(client
+        .pm_settings_mutate("repository.branch_protection.update", &params, &before)
+        .is_err());
+    assert_eq!(client.transport().recorded().len(), 1);
+
+    for params in [
+        json!({"branch":"feature","allow_force_pushes":false}),
+        json!({"branch":"develop"}),
+        json!({"branch":"develop","allow_deletions":true}),
+        json!({"branch":"develop","enforce_admins":"yes"}),
+        json!({"allow_force_pushes":false}),
+    ] {
+        assert!(
+            validate_pm_settings("repository.branch_protection.update", &params).is_err(),
+            "{params}"
+        );
+    }
+}
+
 #[test]
 fn pm_bounded_topics_and_security_use_only_their_typed_fields() {
     use serde_json::json;
@@ -3140,4 +3263,34 @@ fn list_themes_stops_at_the_page_limit_and_says_so() {
 
     assert!(listing.truncated);
     assert_eq!(client.transport().recorded().len(), 10);
+}
+
+// Issue #7644: a theme the PM recorded from the conversation carries the
+// `gwt-theme` label and is a theme before any issue sits under it.
+#[test]
+fn list_themes_includes_recorded_themes_without_sub_issues() {
+    let transport = FakeTransport::new();
+    transport.enqueue(theme_page(
+        serde_json::json!([
+            { "number": 5, "title": "Plain", "body": "", "url": "https://github.com/o/r/issues/5",
+              "labels": { "nodes": [ { "name": "bug" } ] },
+              "subIssuesSummary": { "total": 0, "completed": 0 }, "subIssues": { "nodes": [] } },
+            { "number": 6, "title": "Recorded", "body": "From the conversation.",
+              "url": "https://github.com/o/r/issues/6",
+              "labels": { "nodes": [ { "name": "gwt-theme" } ] },
+              "subIssuesSummary": { "total": 0, "completed": 0 }, "subIssues": { "nodes": [] } }
+        ]),
+        None,
+    ));
+    let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+
+    let listing = client.list_themes().expect("themes");
+
+    let numbers: Vec<u64> = listing.themes.iter().map(|theme| theme.number.0).collect();
+    assert_eq!(numbers, vec![6]);
+    assert_eq!(listing.themes[0].sub_issues_total, 0);
+    let request: serde_json::Value =
+        serde_json::from_str(client.transport().recorded()[0].body.as_deref().unwrap()).unwrap();
+    assert!(request["query"].as_str().unwrap().contains("labels("));
+    assert_eq!(gwt_github::client::THEME_LABEL, "gwt-theme");
 }

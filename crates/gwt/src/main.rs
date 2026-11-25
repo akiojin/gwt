@@ -2421,6 +2421,11 @@ enum UserEvent {
         window_id: String,
         data: Vec<u8>,
     },
+    HomeAttachmentsReady {
+        operation: Box<app_runtime::AttachmentOperation>,
+        request_id: u64,
+        prompt: String,
+    },
     AttachmentPromptReady {
         operation: Box<app_runtime::AttachmentOperation>,
         prompt: String,
@@ -2481,6 +2486,16 @@ enum UserEvent {
     ),
     BrowserDisconnected {
         client_id: String,
+    },
+    PoolAccountLoginPrepared {
+        client_id: String,
+        login_id: String,
+        project_root: Option<PathBuf>,
+        result: Result<gwt::execution_environments::Account, String>,
+    },
+    PoolAccountLoginEnded {
+        client_id: String,
+        login_id: String,
     },
     ProjectExecutionChoiceCompleted(
         Box<app_runtime::project_execution_policy::ProjectExecutionChoiceCompleted>,
@@ -3102,12 +3117,16 @@ mod tests {
         ));
         // Issue #7639: Home reads decisions and sends to a PM by project.
         assert!(hub_frontend_event_allowed(
-            &FrontendEvent::LoadHomeConversation { request_id: 1 }
+            &FrontendEvent::LoadHomeConversation {
+                request_id: 1,
+                history: Default::default()
+            }
         ));
         assert!(hub_frontend_event_allowed(&FrontendEvent::HomePmSend {
             project_key: "0123456789abcdef".to_string(),
             text: "Approve it".to_string(),
             request_id: 2,
+            attachments: Vec::new(),
         }));
         // Issue #7731: the first-run setup is read and saved from the Hub.
         assert!(hub_frontend_event_allowed(
@@ -3732,6 +3751,7 @@ mod tests {
             reviewed_sha: "abc123".to_string(),
             required_criteria: vec!["tests pass".to_string()],
             diff: "diff --git a/a b/a".to_string(),
+            merged_evidence: None,
             linked_issue_kind: gwt::LinkedIssueKind::Issue,
         };
         let review_payload = gwt::runtime_daemon_events::issue_monitor_payload(
@@ -5140,6 +5160,7 @@ mod tests {
             proxy,
             blocking_tasks,
             hook_doctor_in_flight: Default::default(),
+            coalesced_reads: Default::default(),
             agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
@@ -5151,6 +5172,8 @@ mod tests {
             issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_launch_attempts: std::collections::HashMap::new(),
+            issue_monitor_stale_retry_at: HashMap::new(),
+            issue_monitor_cleanup_retries: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_fallback_commit_timeout:
@@ -5170,6 +5193,7 @@ mod tests {
             initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
+            pending_pm_launch_retry_tabs: Vec::new(),
             pending_frontend_ready_snapshots: Vec::new(),
             gui_slice_continue_queued: false,
             deferred_issue_monitor_launches: None,
@@ -5187,6 +5211,7 @@ mod tests {
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             active_agent_sessions: HashMap::new(),
+            pool_account_logins: HashMap::new(),
             decision_answers_sent: Default::default(),
             decision_answers_in_flight: Default::default(),
             decision_answer_sequence: 0,
@@ -11594,9 +11619,9 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 projection,
             }) => {
-                let mut events = app.handle_workspace_state_loaded(&project_root);
+                let events = app.handle_workspace_state_loaded(&project_root);
                 if let Some(projection) = projection {
-                    events.extend(app.handle_workspace_projection_changed_events(&project_root, &projection));
+                    app.queue_workspace_projection_patch(&project_root, projection);
                 }
                 clients.dispatch(events);
             }
@@ -11883,6 +11908,9 @@ fn main() -> std::io::Result<()> {
                     )]);
                 }
             }
+            Event::UserEvent(UserEvent::HomeAttachmentsReady { operation, request_id, prompt }) => {
+                clients.dispatch(app.deliver_home_message(*operation, &prompt, request_id));
+            }
             Event::UserEvent(UserEvent::AttachmentPromptReady { operation, prompt }) => {
                 let events = app.inject_attachment_prompt_events(*operation, prompt);
                 clients.dispatch(events);
@@ -12011,8 +12039,14 @@ fn main() -> std::io::Result<()> {
                 app.project_observation_invalidation_completed(*completed);
             }
             Event::UserEvent(UserEvent::BrowserDisconnected { client_id }) => {
-                let _ = client_id;
+                app.close_pool_account_login(&client_id);
                 clients.dispatch(app.reconcile_project_view_connections(&clients));
+            }
+            Event::UserEvent(UserEvent::PoolAccountLoginPrepared { client_id, login_id, project_root, result }) => {
+                clients.dispatch(app.pool_account_login_prepared(client_id, login_id, project_root, result));
+            }
+            Event::UserEvent(UserEvent::PoolAccountLoginEnded { client_id, login_id }) => {
+                clients.dispatch(app.pool_account_login_ended(client_id, login_id));
             }
             Event::UserEvent(UserEvent::ProjectExecutionChoiceCompleted(completed)) => {
                 clients.dispatch(app.project_execution_choice_completed(*completed));

@@ -45,6 +45,17 @@ Agent workspace を materialize するために worktree を使いますが、�
   使える最初の実行環境で始まり、制限で保留中のものや未サインインのものは飛ばします。
   リストを保存したプロジェクトでは、登録済みのエージェントも、登録時のツールに
   かかわらずこの順で決まった実行環境のツールで始まります。
+  Accounts はサインイン済みの既定アカウントを取り込みます。**Add account** を選ぶと、
+  Claude Code、Codex、Grok Build の追加アカウント用にログインターミナルが開きます。
+  macOS で GitHub Copilot を追加する場合は、GitHub ログイン名と Copilot Requests 権限付きの
+  fine-grained personal access token を入力します。gwt は認証主体を照合し、トークンを macOS Keychain に保存します。
+  サインインが確認できるまではセッションの選択対象から外れます。再サインイン、
+  優先順の変更、プールからの削除もここで行えます。**Use this account** を選ぶと、
+  次の開始・再開からそのアカウントを最初に試します。稼働中のセッションや PM では、
+  **Resume with the next account** を選ぶとターン終了後に同じ会話を再開します。
+  レート制限時は次のサインイン済みアカウントで再開し、拒否されたターンの入力を送り直します。
+  使用中のアカウントを削除して別ツールしか残らない場合、セッションは再開待ちになり、
+  設定済みの候補が表示されます。候補のツールで作業する場合は、新規会話として開始します。
 
 ## インストール
 
@@ -235,9 +246,11 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
   停止します。背景で継続中の作業も対象です。他の GUI が接続中の daemon や、独立起動した
   daemon は動作を維持します。
 
-プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
-表示します。BLOCK は待機・停止・エラーを含み、シェルは集計しません。
-ステータスバーと Works 見出しは、タブタイトルと同じ RUNNING / BLOCK / IDLE / ERROR 件数を表示します。
+プロジェクトのブラウザタブには、エージェントの件数を言葉で表したタイトル（例：
+`gwt — 3 running · 1 blocked — gwt`）と状態別 favicon を表示します。Blocked は
+待機・停止・エラーを含み、シェルは集計しません。ステータスバー（Running / Idle /
+Blocked / Errors）と Works 見出しは、タブタイトルと同じ件数を表示します。
+ステータスバーの Auto-run 欄は `Running · 9 queued · 3 of 6 active` のように表示します。
 未読マーカーは、そのタブが可視かつフォーカスされたときに消えます。
 Hub のタイトルと favicon は固定です。
 
@@ -829,7 +842,7 @@ signal で停止できます。
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
-- `Profile` — environment/profile 管理
+- `Environment variables`（レールでは **Env vars**） — 上書きする値と継承を無効にする変数を、名前付きのセットとして管理します。**Settings → Issues → Environment variables** でセットを割り当てると、そのプロジェクトで次に起動するエージェントに適用されます。アップグレード時は登録済みプロジェクトと端末の既定に旧セットを引き継ぎます。新規登録したプロジェクトは **None** から始まります。
 - `Branches` — branch 確認、filter、cleanup、Git detail
 - `Settings` — application と agent の設定。`System` タブで Workspace summary
   と Board 投稿本文の出力言語を `Auto / English / 日本語` から選択できます
@@ -1182,6 +1195,13 @@ Issueのcloseやcancelだけでは数えません。エージェントによる�
 負うことになるため既定で除外され、`include_protected_workspaces: true` を明示した
 場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
 実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
+
+worktree 自体を削除するには `worktree.remove_merged` を使います。HEAD が
+`origin/<base>` にマージ済みで、未コミット・未追跡の変更が無く、稼働中プロセスも
+live な gwt launch も無い `work/*` worktree を、そのローカルブランチごと削除します。
+引数無しの呼び出しは dry run で、候補と除外した worktree とその理由を報告します。
+削除するには `dry_run: false` を、対象を絞るには `branches: [...]` を渡します。
+共有の base ブランチ workspace と上記の保護対象 worktree は決して削除しません。
 
 低容量時の自動 GC は、マージ済みの idle キャッシュを先に回収します。それでも
 `[build_artifact_gc]` の設定閾値を下回る場合は、空き容量を1件ごとに確認しながら
@@ -1698,7 +1718,10 @@ PM に Board Discussion 共有の有効化や単独 Discussion の作成、`deve
 今回だけ許可するか、同じリポジトリ・操作種別の許可を記憶できます。保存した許可の確認・
 取り消しは PM に `pm.approval.status` / `pm.approval.revoke` で依頼できます。
 必須チェックの変更には `repository.required_checks.update` を使い、ブランチの strict
-設定と、残すチェックの app との関連付けを維持します。
+設定と、残すチェックの app との関連付けを維持します。`develop` / `main` の branch
+protection の切り替え（`allow_force_pushes`、`required_conversation_resolution`、
+`enforce_admins`、`strict`）には `repository.branch_protection.update` を使い、
+それ以外の保護設定は変更しません。
 
 同じ範囲付き許可で、`pr.reopen` による指定 PR の再開、`pr.review.submit` による
 GitHub review、`release.metadata.set` による既存 release の名前・説明・prerelease の変更、
@@ -2337,11 +2360,11 @@ project 固有の規約を明示的に渡すには、
 ## サーフェス操作
 
 - レールから **Themes**、**Issues**、**Works**、**Agents**、**Board**、**Settings** を選びます。
-- **Themes** は、プロジェクトのテーマ（sub-issue を持つ GitHub Issue）を一覧します。各行には、テーマ配下の課題数と完了数を GitHub の集計どおりに表示します。テーマを選ぶと配下の課題が並び、課題を選ぶと Issues で開きます。**Issues completed today** は、gwt が今日取り込んだ Close の件数です。**Delete theme** は確認のあとで、テーマの GitHub Issue を not planned で閉じます。配下の課題は残り、GitHub で Issue を開き直すとテーマが戻ります。
-- **Logs**・**Index**・**Profile** はサイドバーの各項目から直接開けます。高さが足りないときはサイドバーを縦にスクロールします。全停止は Command Palette から実行でき、個別エージェントの停止・再起動も既存の操作から実行できます。
+- **Themes** は、プロジェクトのテーマ（sub-issue を持つ GitHub Issue と、ホームの会話から PM が記録したテーマ）を一覧します。依頼や決定をすると、PM が追加の操作なしにテーマ（`gwt-theme` ラベル付きの GitHub Issue）として記録するか、既存のテーマに追記します。テーマにしたくないものは PM にそう伝えてください。記録されたテーマには **Source of this theme** が表示され、**Show in conversation** で元のメッセージを PM の会話で開けます。各行には、テーマ配下の課題数と完了数を GitHub の集計どおりに表示します。テーマを選ぶと配下の課題が並び、課題を選ぶと Issues で開きます。**Issues completed today** は、gwt が今日取り込んだ Close の件数です。**Delete theme** は確認のあとで、テーマの GitHub Issue を not planned で閉じます。配下の課題は残り、GitHub で Issue を開き直すとテーマが戻ります。
+- **Logs**・**Index**・**Env vars** はサイドバーの各項目から直接開けます。高さが足りないときはサイドバーを縦にスクロールします。個別エージェントの停止・再起動は既存の操作から実行できます。
 - **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。割り当てられた名前と PM バッジは Agents の先頭にも表示します。
 - **Works** は端末上で稼働する Agent を1人1行で表示し、直近の出力を載せます。**Settings → System → Works output lines** で3〜10行（既定3行）を選べ、読み取り専用の一覧にも即時反映し、再読み込み・アプリ再起動後も保持します。出力は選択・スクロールでき、端末を開きません。出力欄以外の行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
-- **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。
+- **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。レビュー窓は専用の一覧に表示され、レビューのタスクから端末を開き、Works の名前から元のレビュー行へ戻れます。
 - **Agents** で表示名を入力し、**Register** で登録します。台帳ではメンバーにツール・モデル・推論を指定しません。セッションを始めるツールはプロジェクトの **Available execution environments** で決まり、推論と速度はメンバーの **Traits** で決まります。空いているメンバーは、プロジェクトの起動設定に従って新しい作業を担当できます。選択した人物の **Display name** はその場で編集すると自動保存され、同じ人物 ID と進行中の作業を保持します。無効な入力は欄に残り、保存失敗や競合は **Retry name** で再試行できます。担当履歴と Board は当時の名前を保持します。 **Current work** には現在の exact Session の起動時記録を別に表示します。 **Assignment history** には各 Session に記録された名前・ツール・起動モデルを表示します。未取得の値は **—** とし、ツール内でのモデル変更の実測値とは区別します。空名と、前後の空白・大文字小文字の違いを除いた重複名は登録できません。**Agents Settings** では登録済みの人物を名前で選び、候補ごとのツール・モデル・推論・実行環境を編集します。台帳の **Saved implementation settings** では、候補プール外も含めた登録メンバーの Runtime・Permissions を編集します。Inherit はプロジェクトの既存設定を使います。保存済みプロファイル候補は次の NEW から適用します。Launch Agent は現在のフォームと権限プロンプトを省略する既存方針、Auto は tier 設定を使います。現在の作業と同じ会話の再開は記録済み設定を保持します。**PM eligible** は登録時と人物詳細で指定でき、登録時の既定はオフです。登録だけでは PM に選定しません。PM eligible で利用可能なメンバーを **Select as Project Manager** で PM に選べます。PM も同じ人物・名前・履歴を Team に保持します。共有編集欄ではプロジェクト PM の保存済みツール・モデル・推論を変更でき、**Agents** の対象プロジェクトを明示した Project Manager 欄で自動開始・ループ間隔・一時停止・再起動を操作し、明示的な再起動で新しい会話に適用します。拒否された保存は内容確認後に **Retry profile** で再試行できます。他プロジェクトの PM は表示されたリンクから対象プロジェクトへ移動して編集します。選択したツールが利用できないときは待機理由を表示し、別ツールへ自動切替しません。既存の候補はプロジェクトごとの実行設定と現在の割当を保って移行します。
 - **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
 - **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
@@ -2407,7 +2430,7 @@ Operator Design System 採用後、gwt は editorial-industrial 系タイポグ�
 既定の type scale は開発時の可読性を優先し、terminal text、ID、path、
 counter、密度の高い作業サーフェスを長時間でも読み取りやすくします。
 一方で display typography は見出しと chrome label に限定して Operator らしさを
-保ちます。Project Bar / Command Rail / Status Strip / Command Palette /
+保ちます。Project Bar / Command Rail / Status Strip /
 Hotkey Overlay / Drawer モーダル / サーフェスパネル の全クロームが
 共通トークンを参照し、 2 つの旗艦テーマで提供されます:
 
@@ -2433,21 +2456,20 @@ Contrast) では system colors にフォールバックします。
 
 | 組合せ | 動作 |
 | --- | --- |
-| `⌘K` / `⌘P` | Command Palette を開く (全サーフェス アクションの fuzzy 検索) |
 | `⌘B` | Board サーフェスを focus |
 | `⌘G` | Issues サーフェスを focus |
 | `⌘L` | Logs サーフェスを focus |
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
-| `Esc` | 開いている Palette / Overlay / Drawer / Dropdown を閉じる |
+| `Esc` | 開いている Overlay / Drawer / Dropdown を閉じる |
 
 レールには **PM** の独立した入口と、ラベル付きの **Issues**、**Works**、**Agents**、
-**Board**、**Settings**、**Logs**、**Index**、**Profile** が並びます。選択したサーフェスは固定ペインに表示し、
+**Board**、**Settings**、**Logs**、**Index**、**Env vars** が並びます。選択したサーフェスは固定ペインに表示し、
 **Split view** で必要に応じて2つ目のペインを追加できます。Status Strip は
-コンテンツ領域の下に表示します。その他の操作は Command Palette またはホットキーから使えます。
+コンテンツ領域の下に表示します。その他の操作はレールまたはホットキーから使えます。
 
 ### アクセシビリティ
 
-すべてのモーダルダイアログ (Command Palette / Hotkey Overlay / Branch
+すべてのモーダルダイアログ (Hotkey Overlay / Branch
 Cleanup / Worktree Migration / Launch Wizard) は WAI-ARIA
 dialog convention に従います。`role="dialog"` + accessible name、
 `aria-modal`、open 時にフォーカスがダイアログ内へ移動し close 時に

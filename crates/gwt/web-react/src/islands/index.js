@@ -8,7 +8,6 @@ import { WorkspaceStateNotice } from "../surfaces/WorkspaceStateNotice.jsx";
 import { TaskHome } from "../surfaces/TaskHome.jsx";
 import { TaskDecisions } from "../surfaces/TaskDecisions.jsx";
 import { TaskProgress } from "../surfaces/TaskProgress.jsx";
-import { TaskLog } from "../surfaces/TaskLog.jsx";
 import { ExecutionEnvironments } from "../surfaces/ExecutionEnvironments.jsx";
 import { AppFooter, AppFooterPm, AppHeader, AppHeaderNav } from "../surfaces/AppChrome.jsx";
 import { PmExecutionEnvironments, ProjectExecutionEnvironments } from "../surfaces/ProjectExecutionEnvironments.jsx";
@@ -16,13 +15,13 @@ import { HomeConversation } from "../surfaces/HomeConversation.jsx";
 import { ProjectThemes } from "../surfaces/ProjectThemes.jsx";
 import { AgentHistoryPlans } from "../surfaces/AgentHistoryPlans.jsx";
 import { FirstRunSetup } from "../surfaces/FirstRunSetup.jsx";
+import { ProjectAutonomy } from "../surfaces/ProjectAutonomy.jsx";
 
 const islands = Object.freeze({
   "workspace-state-notice": WorkspaceStateNotice,
   "task-home": TaskHome,
   "task-decisions": TaskDecisions,
   "task-progress": TaskProgress,
-  "task-log": TaskLog,
   "execution-environments": ExecutionEnvironments,
   "app-header": AppHeader,
   "app-header-nav": AppHeaderNav,
@@ -34,6 +33,7 @@ const islands = Object.freeze({
   "project-themes": ProjectThemes,
   "agent-history-plans": AgentHistoryPlans,
   "first-run-setup": FirstRunSetup,
+  "project-autonomy": ProjectAutonomy,
 });
 
 export function mountIsland(name, container, props) {

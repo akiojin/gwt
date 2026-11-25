@@ -61,6 +61,12 @@ heavy verification command. The order is build → `verify.plan` → `verify.run
 build the checkout binary without holding or waiting for any lease, and only
 then run canonical verification through it.
 
+Identity comes first: `pane.name` → `workspace.ensure` → `cargo build -p gwt --bin gwtd`.
+The Workspace identity gate refuses every other command, the bootstrap build
+included, until `workspace.ensure` succeeds, so run that first `pane.name` and
+`workspace.ensure` through the resolved installed gwtd. The checkout-binary
+rule below applies from the build onward.
+
 Decide first whether the checkout binary is needed. Only operations that
 execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
 `verify.*`, and any operation added in the checkout. Read-only `issue.*`,

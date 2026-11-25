@@ -963,6 +963,7 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
 
 test('Reports rejects file-drop input while Execution log keeps the attachment bridge', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1001,8 +1002,10 @@ test('Reports rejects file-drop input while Execution log keeps the attachment b
 });
 
 // Exercise the real token/XHR path: the uploader override bypasses both.
+let clipboardFixtureId = 0;
 async function clipboardFixture(windowId, run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL(`../attachment-upload.js?fixture=${++clipboardFixtureId}`, import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1078,6 +1081,7 @@ test('clipboard failure shows and reports the concrete upload cause', async () =
 
 test('Works full terminals own browser and native file drops and their progress', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1123,6 +1127,7 @@ test('Works full terminals own browser and native file drops and their progress'
 
 async function attachmentLifecycleFixture(run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  source = source.replace('"./attachment-upload.js"', JSON.stringify(new URL('../attachment-upload.js', import.meta.url).href));
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
@@ -1698,6 +1703,27 @@ const untypedItem = (id = 'untyped') => queueItem(id, { question: 'Approve the r
 const chatDecision = (root, id = 'decision-1') =>
   root.querySelector(`.pm-chat__conversation .pm-chat__decision[data-decision-id="${id}"]`);
 
+// SPEC #7007 T-016 (Issue #7634): a decision answered elsewhere first is
+// refused by the queue. The result carries the current queue, so the stale
+// decision leaves both surfaces at once, and the notice says it was already
+// settled instead of showing the queue's internal error and identifier.
+test('a decision answered elsewhere first leaves both surfaces with a plain notice', () => {
+  const { root, view, queue, settle, sent } = fixture();
+  queue([queueItem('decision-1'), queueItem('decision-2', { question: 'Which colour marks a waiting decision?' })]);
+  view.showDecisions();
+  root.querySelector('.task-decisions__card[data-decision-id="decision-1"] .task-decisions__option').click();
+  assert.equal(sent.at(-1).decision_id, 'decision-1');
+  settle(false, [queueItem('decision-2', { question: 'Which colour marks a waiting decision?' })],
+    'Config error: decision decision-1 is no longer open (answered)');
+  assert.equal(root.querySelectorAll('[data-decision-id="decision-1"]').length, 0,
+    'the settled decision leaves Decide and the conversation');
+  assert.equal(root.querySelectorAll('.task-decisions__card').length, 1);
+  assert.equal(root.querySelector('.task-decisions__notice').textContent,
+    'This decision was already settled elsewhere. Your answer was not recorded.');
+  assert.equal(root.querySelector('.task-decisions__send-error'), null);
+  assert.doesNotMatch(root.textContent, /Config error|no longer open|decision-1/);
+});
+
 // SPEC #7007 T-023 AC-1 / AC-2, Issue #7742: a waiting decision is drawn by
 // Decide and by the PM conversation only, both read the gwtd queue, and an
 // answer is a queue request that both settle on together.
@@ -1740,12 +1766,16 @@ test('Decide and the PM conversation share answer pending, failure, retry and co
   assert.match(chatControls().querySelector('[role="status"]').textContent, /Sending/);
   root.querySelector('.task-decisions__option').click();
   assert.equal(sent.length, 1, 'switching surfaces cannot duplicate an in-flight answer');
-  settle(false, null, 'Decision decision-1 is no longer open.');
-  assert.match(chatControls().querySelector('[role="alert"]').textContent, /no longer open/);
+  // SPEC #7007 T-014 / T-016: the queue's own wording and identifiers stay
+  // off the surfaces; the refusal says what happened and the next step.
+  settle(false, null, 'Config error: decision decision-1 is unavailable');
+  const refusal = 'The answer was not recorded. Reload this window, then try again.';
+  assert.equal(chatControls().querySelector('[role="alert"]').textContent, refusal);
   assert.equal(chatControls().querySelector('.pm-chat__decision-option').disabled, false);
   assert.ok(chatControls().querySelectorAll('.pm-chat__decision-option')[1] === option,
     'a failed answer leaves the original option available for keyboard retry');
-  assert.match(root.querySelector('.task-decisions__card').textContent, /no longer open/);
+  assert.equal(root.querySelector('.task-decisions__send-error').textContent, refusal);
+  assert.doesNotMatch(root.textContent, /Config error|decision-1 is/);
   chatControls().querySelector('.pm-chat__decision-option').click();
   assert.equal(sent.length, 2, 'an explicit choice retries the failed answer');
   assert.equal(sent[1].answer, '1. Use <short> wording');
@@ -1924,7 +1954,7 @@ test('Decide keeps a decision actionable and shows the error when the answer is 
   assert.equal(sent.length, 1);
   settle(false, null, 'The decision queue is unreadable.');
   const card = root.querySelector('.task-decisions__card');
-  assert.match(card.textContent, /The decision queue is unreadable\./);
+  assert.match(card.textContent, /The answer was not recorded\. Reload this window, then try again\./);
   const options = card.querySelectorAll('.task-decisions__option');
   assert.equal(options.length, 2, 'the decision stays actionable after a refused answer');
   assert.equal(options[0].disabled, false);
@@ -2052,29 +2082,53 @@ test('Progress View task details switches to the Tasks view and requests the det
   view.dispose();
 });
 
-test('Log view renders fed notification groups and routes the drawer action', async () => {
+// Issue #7650 (SPEC #7007 T-032): the structured Logs window is the only log
+// surface. The PM view no longer re-renders the notification history as a
+// Log tab; PM execution output stays on the terminal (Execution log).
+test('PM view carries no Log tab that re-renders notification history', () => {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const viewed = [];
-  const view = createPmChat({ document, root, sessionId: 'session',
-    onLogVisibility: () => {}, onViewNotification: entry => viewed.push(entry) });
-  view.receiveLog([{ id: 7, key: 'window-command:agent-1:input', category: 'action',
-    title: 'Input failed', message: 'Your input was not delivered to the window.',
-    details: 'owner identity mismatch', count: 2, latestAt: new Date().toISOString(),
-    resolved: false, activatable: false }]);
-  view.showTaskLog();
-  const card = await waitForPm(() => root.querySelector('.task-log__card'), 'a Log group card');
-  assert.match(card.textContent, /Input failed/);
-  assert.match(card.textContent, /Action required/);
-  assert.match(card.textContent, /Repeated 2 times/);
-  const logButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
-    .find(button => button.textContent === 'Log');
-  assert.ok(logButton, 'the toolbar carries a Log view button distinct from Execution log');
-  assert.equal(logButton.getAttribute('aria-pressed'), 'true');
-  const viewButton = [...card.querySelectorAll('button')]
-    .find(node => node.textContent === 'View in Notifications');
-  viewButton.click();
-  assert.equal(viewed.length, 1);
-  assert.equal(viewed[0].key, 'window-command:agent-1:input');
+  const view = createPmChat({ document, root, sessionId: 'session', onLogVisibility: () => {} });
+  const labels = [...root.querySelectorAll('.pm-chat__toolbar button')].map(button => button.textContent);
+  assert.equal(labels.includes('Log'), false, 'no Log tab beside Execution log');
+  assert.ok(labels.includes('Execution log'), 'PM execution output stays on the terminal view');
+  assert.equal(root.querySelector('.task-log'), null);
+  assert.equal(typeof view.showTaskLog, 'undefined');
+  assert.equal(typeof view.receiveLog, 'undefined');
+  view.dispose();
+});
+
+// Issue #7644: a theme recorded from the conversation opens the message it
+// came from, also when the conversation arrives after the request.
+test('Chat opens the message a theme came from, or says it is gone', () => {
+  const { root, model, view } = fixture();
+  view.showMessage('original');
+  assert.equal(view.isChatVisible(), true);
+  const navigation = [];
+  const bubble = () => root.querySelector('[data-message-id="original"]');
+  // linkedom has no scrollIntoView; a browser element does.
+  const proto = Object.getPrototypeOf(Object.getPrototypeOf(root));
+  const hadScroll = Object.hasOwn(proto, 'scrollIntoView');
+  proto.scrollIntoView = function () { navigation.push(`arrived:${this.dataset.messageId}`); };
+  try {
+    model.applyPmWindowReceiveEvent(conversation([
+      { id: 'original', role: 'user', text: 'Add search to the log screen', source_key: 'source' },
+    ]));
+  } finally {
+    if (!hadScroll) delete proto.scrollIntoView;
+  }
+  assert.ok(bubble(), 'the conversation rendered the target');
+  assert.deepEqual(navigation.splice(0), ['arrived:original']);
+  view.showReports();
+  bubble().scrollIntoView = () => navigation.push('scroll');
+  bubble().focus = () => navigation.push('focus');
+  view.showMessage('original');
+  assert.deepEqual(navigation, ['scroll', 'focus']);
+  const notice = root.querySelector('[data-pm-message-target-notice]');
+  assert.equal(notice.hidden, true);
+
+  view.showMessage('gone');
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /no longer in the conversation/);
   view.dispose();
 });

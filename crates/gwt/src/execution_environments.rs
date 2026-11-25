@@ -6,10 +6,11 @@
 //!
 //! Which environments a project may use, and in what priority order, is
 //! saved with that project's Issues settings
-//! ([`crate::issue_monitor::ProjectExecutionEnvironment`]). This module owns
-//! only the definitions.
+//! ([`crate::issue_monitor::ProjectExecutionEnvironment`]). Agent priorities
+//! are machine-wide and are saved with the definitions they reference.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -17,6 +18,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 const SCHEMA_VERSION: u32 = 1;
+const ADOPTABLE_TOOLS: [&str; 5] = ["claude", "codex", "grok", "gh", "agy"];
 
 /// Runtime options a session starts with (item 252: model, skip permissions
 /// and Fast mode; how a session is started is decided at launch).
@@ -34,13 +36,29 @@ pub struct RuntimeOptions {
     pub fast_mode: bool,
 }
 
-/// One account per tool that carries its own sign-in (item 73).
+/// An account in its tool's pool. Store order defines launch priority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
     /// Command id of the tool this account signs in to (`claude`, `codex`).
     pub tool: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<gwt_core::timestamp::UtcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<AccountOrigin>,
+    /// The login reported by Copilot itself. This is public account metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in_identity: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountOrigin {
+    Adopted,
+    Added,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +83,12 @@ pub enum EnvironmentKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEnvironmentPriority {
+    pub environment_ids: Vec<String>,
+    pub reverted_to_project: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default = "schema_version")]
     pub schema_version: u32,
@@ -76,6 +100,10 @@ pub struct Store {
     /// environment ids, in priority order. Empty while it was never saved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pm_environment_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_priorities: BTreeMap<String, AgentEnvironmentPriority>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    deleted_environment_ids: BTreeSet<String>,
 }
 
 fn schema_version() -> u32 {
@@ -89,6 +117,8 @@ impl Default for Store {
             accounts: Vec::new(),
             environments: Vec::new(),
             pm_environment_ids: Vec::new(),
+            agent_priorities: BTreeMap::new(),
+            deleted_environment_ids: BTreeSet::new(),
         }
     }
 }
@@ -159,6 +189,15 @@ impl Store {
             .find(|environment| environment.id == id)
     }
 
+    pub(crate) fn environment_was_deleted(&self, id: &str) -> bool {
+        self.deleted_environment_ids.contains(id) && self.environment(id).is_none()
+    }
+
+    pub(crate) fn agent_priority_ids(&self, member_id: &str) -> Option<&[String]> {
+        let ids = &self.agent_priorities.get(member_id)?.environment_ids;
+        (!ids.is_empty()).then_some(ids)
+    }
+
     pub fn kind(&self, environment: &ExecutionEnvironment) -> EnvironmentKind {
         match self.account(&environment.account_id) {
             Some(account) if account.tool == environment.via_tool => EnvironmentKind::Set,
@@ -180,31 +219,220 @@ impl Store {
     pub fn register_account(&mut self, tool: &str) -> Option<&Account> {
         let tool = tool_command(tool).filter(|tool| carries_own_account(tool))?;
         if !self.accounts.iter().any(|account| account.tool == tool) {
-            let name = format!("{} 1", tool_name(&tool));
-            self.accounts.push(Account {
-                id: tool.clone(),
-                tool: tool.clone(),
-                name: name.clone(),
-            });
-            self.environments.push(ExecutionEnvironment {
-                id: tool.clone(),
-                name,
-                account_id: tool.clone(),
-                via_tool: tool.clone(),
-                runtime: RuntimeOptions::default(),
-            });
+            self.insert_default_account(&tool);
         }
         self.accounts.iter().find(|account| account.tool == tool)
     }
 
-    /// Delete an account and every environment that uses it. Returns the ids
-    /// of the deleted environments so the caller can take them off each
-    /// project's list.
+    pub fn pool_add_refusal(tool: &str) -> Option<Refusal> {
+        crate::account_homes::pool_login_tool_refusal(tool).map(|reason| Refusal(reason.into()))
+    }
+
+    /// Enroll an isolated account without changing the current pool priority.
+    /// The caller holds the store lock so concurrent enrollments get distinct IDs.
+    pub fn add_pool_account(&mut self, tool: &str) -> io::Result<Account> {
+        if let Some(refusal) = Self::pool_add_refusal(tool) {
+            return Err(refusal.into());
+        }
+        let tool = tool_command(tool).expect("supported pool tool");
+        let mut number = 2u64;
+        let id = loop {
+            let id = format!("{tool}-{number}");
+            if self.account(&id).is_none()
+                && !crate::account_homes::managed_home_exists(&tool, &id)?
+            {
+                break id;
+            }
+            number = number
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("Account IDs exhausted"))?;
+        };
+        let home = crate::account_homes::prepare(&tool, &id)?;
+        let home = home.into_os_string().into_string().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Account path is not valid Unicode",
+            )
+        })?;
+        let account = Account {
+            id,
+            name: format!("{} {number}", tool_name(&tool)),
+            tool,
+            credential_home: Some(home),
+            added_at: Some(gwt_core::timestamp::UtcTimestamp::now()),
+            origin: Some(AccountOrigin::Added),
+            sign_in_identity: None,
+        };
+        if self.environment_for_tool(&account.tool).is_none() {
+            self.environments.push(ExecutionEnvironment {
+                id: account.tool.clone(),
+                name: tool_name(&account.tool),
+                account_id: account.id.clone(),
+                via_tool: account.tool.clone(),
+                runtime: RuntimeOptions::default(),
+            });
+        }
+        self.accounts.push(account.clone());
+        Ok(account)
+    }
+
+    fn pool_account_index(&self, account_id: &str) -> Result<usize, Refusal> {
+        let index = self
+            .accounts
+            .iter()
+            .position(|account| account.id == account_id)
+            .ok_or_else(|| Refusal("This account is no longer registered.".into()))?;
+        if crate::account_homes::home_env_key(&self.accounts[index].tool).is_none() {
+            return Err(Refusal("This provider allows only one account.".into()));
+        }
+        Ok(index)
+    }
+
+    pub fn move_pool_account(
+        &mut self,
+        account_id: &str,
+        toward_front: bool,
+    ) -> Result<(), Refusal> {
+        let index = self.pool_account_index(account_id)?;
+        let tool = &self.accounts[index].tool;
+        let neighbor = if toward_front {
+            self.accounts[..index]
+                .iter()
+                .rposition(|account| &account.tool == tool)
+        } else {
+            self.accounts[index + 1..]
+                .iter()
+                .position(|account| &account.tool == tool)
+                .map(|offset| index + 1 + offset)
+        };
+        if let Some(neighbor) = neighbor {
+            self.accounts.swap(index, neighbor);
+        }
+        Ok(())
+    }
+
+    pub fn use_pool_account(&mut self, account_id: &str) -> Result<(), Refusal> {
+        let mut index = self.pool_account_index(account_id)?;
+        if crate::account_homes::pool_sign_in(&self.accounts[index]).is_none() {
+            return Err(Refusal("Sign in to this account before using it.".into()));
+        }
+        while let Some(previous) = self.accounts[..index]
+            .iter()
+            .rposition(|account| account.tool == self.accounts[index].tool)
+        {
+            self.accounts.swap(index, previous);
+            index = previous;
+        }
+        Ok(())
+    }
+
+    pub fn pool_delete_refusal(&self, account_id: &str) -> Option<Refusal> {
+        match self.account(account_id) {
+            None => Some(Refusal("This account is no longer registered.".into())),
+            Some(account) if account.credential_home.is_none() => Some(Refusal(
+                "Sign out in the provider's CLI to disconnect the native account.".into(),
+            )),
+            Some(_) => None,
+        }
+    }
+
+    fn insert_default_account(&mut self, tool: &str) -> &mut Account {
+        let name = format!("{} 1", tool_name(tool));
+        self.accounts.push(Account {
+            id: tool.to_owned(),
+            tool: tool.to_owned(),
+            name: name.clone(),
+            credential_home: None,
+            added_at: None,
+            origin: None,
+            sign_in_identity: None,
+        });
+        if self.environment_for_tool(tool).is_none() {
+            self.environments.push(ExecutionEnvironment {
+                id: tool.to_owned(),
+                name,
+                account_id: tool.to_owned(),
+                via_tool: tool.to_owned(),
+                runtime: RuntimeOptions::default(),
+            });
+        }
+        self.accounts.last_mut().expect("just inserted account")
+    }
+
+    fn adopt_defaults(&mut self, mut probe: impl FnMut(&str) -> Option<Option<String>>) {
+        for tool in ADOPTABLE_TOOLS {
+            let Some(identity) = probe(tool) else {
+                continue;
+            };
+            let existing = self
+                .accounts
+                .iter()
+                .position(|account| account.tool == tool && account.credential_home.is_none());
+            let account = match existing {
+                Some(index) => &mut self.accounts[index],
+                None => self.insert_default_account(tool),
+            };
+            if account.origin.is_none() {
+                account.origin = Some(AccountOrigin::Adopted);
+                account.added_at = Some(gwt_core::timestamp::UtcTimestamp::now());
+                account.sign_in_identity = identity;
+            }
+        }
+    }
+
+    /// Try the pool in priority order, starting with the recorded account on
+    /// resume. If it is gone, the current pool order supplies the fallback.
+    pub fn select_pool_account<T>(
+        &self,
+        tool: &str,
+        preferred: Option<&str>,
+        mut usable: impl FnMut(&Account) -> Option<T>,
+    ) -> Option<(&Account, T)> {
+        let pool: Vec<_> = self
+            .accounts
+            .iter()
+            .filter(|account| account.tool == tool)
+            .collect();
+        let start = preferred
+            .and_then(|id| pool.iter().position(|account| account.id == id))
+            .unwrap_or(0);
+        pool[start..]
+            .iter()
+            .chain(&pool[..start])
+            .find_map(|&account| usable(account).map(|launch| (account, launch)))
+    }
+
+    /// A managed account can provide credentials even when the CLI's default
+    /// account is signed out.
+    pub fn has_signed_in_managed_account(&self, tool: &str) -> bool {
+        self.select_pool_account(tool, None, |account| {
+            account.credential_home.as_ref()?;
+            crate::account_homes::pool_sign_in(account)
+        })
+        .is_some()
+    }
+
+    /// Keep a pool's own environment while it still has an account. Returns
+    /// the ids of the deleted environments for removal from project lists.
     pub fn delete_account(&mut self, account_id: &str) -> Vec<String> {
-        let before = self.accounts.len();
-        self.accounts.retain(|account| account.id != account_id);
-        if self.accounts.len() == before {
+        let Some(index) = self
+            .accounts
+            .iter()
+            .position(|account| account.id == account_id)
+        else {
             return Vec::new();
+        };
+        let removed = self.accounts.remove(index);
+        if let Some(next) = self
+            .accounts
+            .iter()
+            .find(|account| account.tool == removed.tool)
+        {
+            for environment in &mut self.environments {
+                if environment.account_id == account_id && environment.via_tool == removed.tool {
+                    environment.account_id.clone_from(&next.id);
+                }
+            }
         }
         let (deleted, kept) = std::mem::take(&mut self.environments)
             .into_iter()
@@ -215,6 +443,7 @@ impl Store {
             .map(|environment: ExecutionEnvironment| environment.id)
             .collect();
         self.pm_environment_ids.retain(|id| !deleted.contains(id));
+        self.record_environment_deletions(&deleted);
         deleted
     }
 
@@ -301,7 +530,39 @@ impl Store {
             ));
         }
         self.pm_environment_ids.retain(|id| id != environment_id);
+        self.record_environment_deletions(&[environment_id.to_owned()]);
         Ok(())
+    }
+
+    pub fn set_agent_list(
+        &mut self,
+        member_id: &str,
+        environment_ids: &[String],
+    ) -> Result<(), Refusal> {
+        self.validate_priority_ids(environment_ids)?;
+        if environment_ids.is_empty() {
+            self.agent_priorities.remove(member_id);
+        } else {
+            self.agent_priorities.insert(
+                member_id.to_owned(),
+                AgentEnvironmentPriority {
+                    environment_ids: environment_ids.to_vec(),
+                    reverted_to_project: false,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn record_environment_deletions(&mut self, deleted: &[String]) {
+        self.deleted_environment_ids.extend(deleted.iter().cloned());
+        for priority in self.agent_priorities.values_mut() {
+            let before = priority.environment_ids.len();
+            priority.environment_ids.retain(|id| !deleted.contains(id));
+            if before > 0 && priority.environment_ids.is_empty() {
+                priority.reverted_to_project = true;
+            }
+        }
     }
 
     /// The Project Manager's execution environments in priority order, and
@@ -334,6 +595,12 @@ impl Store {
                     .into(),
             ));
         }
+        self.validate_priority_ids(environment_ids)?;
+        self.pm_environment_ids = environment_ids.to_vec();
+        Ok(())
+    }
+
+    fn validate_priority_ids(&self, environment_ids: &[String]) -> Result<(), Refusal> {
         for (index, id) in environment_ids.iter().enumerate() {
             if self.environment(id).is_none() {
                 return Err(Refusal(
@@ -348,7 +615,6 @@ impl Store {
                 ));
             }
         }
-        self.pm_environment_ids = environment_ids.to_vec();
         Ok(())
     }
 
@@ -469,6 +735,133 @@ pub fn ensure_accounts(tools: &[String]) -> io::Result<Store> {
     .map(|(store, ())| store)
 }
 
+/// Import accounts whose native sign-in is present under the default home.
+/// Probe outside the store lock so slower providers cannot block writers.
+pub fn adopt_signed_in_accounts() -> io::Result<Store> {
+    adopt_default_accounts(&ADOPTABLE_TOOLS)
+}
+
+/// Discover a native sign-in before registering the isolated account so its
+/// priority does not depend on whether the Accounts view finished loading.
+pub fn enroll_pool_account(tool: &str) -> io::Result<Account> {
+    if let Some(refusal) = Store::pool_add_refusal(tool) {
+        return Err(refusal.into());
+    }
+    let tool = tool_command(tool).expect("supported pool tool");
+    if tool == "gh" {
+        return Err(io::Error::other(
+            "Enter a fine-grained token in Accounts to add a Copilot account.",
+        ));
+    }
+    adopt_default_accounts(&[&tool])?;
+    mutate(|store| store.add_pool_account(&tool)).map(|(_, account)| account)
+}
+
+pub fn save_copilot_account(account_id: Option<&str>, login: &str, token: &str) -> io::Result<()> {
+    if let Some(refusal) = Store::pool_add_refusal("gh") {
+        return Err(refusal.into());
+    }
+    let identity = crate::account_homes::verify_copilot_enrollment(login, token)?;
+    if account_id.is_none() {
+        adopt_default_accounts(&["gh"])?;
+    }
+    save_verified_copilot_account(
+        account_id,
+        &identity,
+        token,
+        crate::account_homes::save_copilot_token,
+        crate::account_homes::remove_copilot_token,
+    )
+}
+
+fn save_verified_copilot_account(
+    account_id: Option<&str>,
+    identity: &str,
+    token: &str,
+    save_token: impl FnOnce(&str, &str, bool) -> io::Result<()>,
+    remove_token: impl FnOnce(&str),
+) -> io::Result<()> {
+    let mut created = None;
+    let result = mutate(|store| {
+        if let Some(id) = account_id {
+            let account = store
+                .account(id)
+                .filter(|account| account.tool == "gh" && account.credential_home.is_some())
+                .ok_or_else(|| io::Error::other("The managed Copilot account was not found."))?;
+            if account
+                .sign_in_identity
+                .as_deref()
+                .is_none_or(|expected| !expected.eq_ignore_ascii_case(identity))
+            {
+                return Err(io::Error::other(
+                    "Copilot authentication belongs to a different account.",
+                ));
+            }
+            return save_token(id, token, true);
+        }
+        if store.accounts.iter().any(|account| {
+            account.tool == "gh"
+                && account
+                    .sign_in_identity
+                    .as_deref()
+                    .is_some_and(|existing| existing.eq_ignore_ascii_case(identity))
+        }) {
+            return Err(io::Error::other(
+                "This Copilot account is already registered.",
+            ));
+        }
+        let account = store.add_pool_account("gh")?;
+        created = Some((account.id.clone(), false));
+        save_token(&account.id, token, false)?;
+        created = Some((account.id.clone(), true));
+        store
+            .accounts
+            .last_mut()
+            .expect("just added account")
+            .sign_in_identity = Some(identity.to_owned());
+        Ok(())
+    });
+    if result.is_err() {
+        if let Some((id, saved)) = created {
+            if saved {
+                remove_token(&id);
+            }
+            let _ = crate::account_homes::remove("gh", &id);
+        }
+    }
+    result.map(|_| ())
+}
+
+pub(crate) fn adopt_default_accounts(tools: &[&str]) -> io::Result<Store> {
+    let current = load()?;
+    let signed_in: Vec<_> = tools
+        .iter()
+        .filter(|&&tool| {
+            !current.accounts.iter().any(|account| {
+                account.tool == tool
+                    && account.credential_home.is_none()
+                    && account.origin.is_some()
+            })
+        })
+        .filter_map(|&tool| {
+            crate::account_homes::sign_in_state(tool, None).map(|state| (tool, state.identity))
+        })
+        .collect();
+    if signed_in.is_empty() {
+        return Ok(current);
+    }
+    mutate(|store| {
+        store.adopt_defaults(|tool| {
+            signed_in
+                .iter()
+                .find(|(candidate, _)| *candidate == tool)
+                .map(|(_, identity)| identity.clone())
+        });
+        Ok(())
+    })
+    .map(|(store, ())| store)
+}
+
 /// Apply an environment's runtime options to the candidate about to start a
 /// session (item 78 (3): a change takes effect from the next session).
 ///
@@ -544,7 +937,13 @@ pub fn project_list(
         prefs.execution_environments.clone(),
     );
     if !saved.is_empty() {
-        return (true, saved);
+        return (
+            true,
+            saved
+                .into_iter()
+                .filter(|entry| !store.environment_was_deleted(&entry.environment_id))
+                .collect(),
+        );
     }
     let derived = prefs
         .current_launch_tools()
@@ -555,6 +954,7 @@ pub fn project_list(
                 .map_or_else(|| tool.clone(), |environment| environment.id.clone()),
             tool,
         })
+        .filter(|entry| !store.environment_was_deleted(&entry.environment_id))
         .collect();
     (false, derived)
 }
@@ -682,6 +1082,101 @@ mod tests {
         assert_eq!(environment.runtime, RuntimeOptions::default());
     }
 
+    #[test]
+    fn adding_and_reordering_accounts_preserves_the_pool_environment() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut store = store_with(&["grok", "codex"]);
+        let environment = store.environment("grok").unwrap().clone();
+        let second = store.add_pool_account("Grok Build").unwrap();
+        let third = store.add_pool_account("grok").unwrap();
+        assert_eq!(second.id, "grok-2");
+        assert_eq!(third.id, "grok-3");
+        assert_eq!(store.environment("grok"), Some(&environment));
+        assert!(store.use_pool_account(&third.id).is_err());
+
+        let credential_home = Path::new(third.credential_home.as_deref().unwrap());
+        fs::write(
+            credential_home.join("auth.json"),
+            r#"{"profile":{"key":"fixture"}}"#,
+        )
+        .unwrap();
+        store.use_pool_account(&third.id).unwrap();
+        assert_eq!(store.accounts[0].id, third.id);
+        store.move_pool_account(&third.id, false).unwrap();
+        assert_eq!(
+            store
+                .accounts
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["grok", "codex", "grok-3", "grok-2"]
+        );
+        assert!(store.delete_account(&third.id).is_empty());
+        assert_eq!(store.add_pool_account("grok").unwrap().id, "grok-4");
+    }
+
+    #[test]
+    fn refused_pool_tools_leave_the_store_unchanged() {
+        let mut store = store_with(&["agy"]);
+        let before = store.clone();
+        for tool in ["agy", "qwen", "hermes"] {
+            assert!(Store::pool_add_refusal(tool).is_some());
+            assert!(store.add_pool_account(tool).is_err());
+        }
+        assert_eq!(store, before);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copilot_enrollment_stores_only_the_verified_identity_in_definitions() {
+        const TOKEN: &str = "github_pat_FIXTURE_ONLY";
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        save_verified_copilot_account(
+            None,
+            "github.com/fixture-user",
+            TOKEN,
+            |id, token, replace| {
+                assert_eq!((id, token, replace), ("gh-2", TOKEN, false));
+                Ok(())
+            },
+            |_| panic!("successful enrollment must keep the Keychain item"),
+        )
+        .unwrap();
+        let store = load().unwrap();
+        assert_eq!(
+            store.accounts[0].sign_in_identity.as_deref(),
+            Some("github.com/fixture-user")
+        );
+        assert!(!fs::read_to_string(path()).unwrap().contains(TOKEN));
+        assert!(save_verified_copilot_account(
+            Some("gh-2"),
+            "github.com/different-user",
+            TOKEN,
+            |_, _, _| panic!("a different login must not replace the Keychain item"),
+            |_| panic!("a different login must not remove the Keychain item"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn enrolling_before_refresh_keeps_an_existing_native_account_first() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let native = home.path().join(".grok");
+        fs::create_dir(&native).unwrap();
+        fs::write(native.join("auth.json"), r#"{"profile":{"key":"fixture"}}"#).unwrap();
+
+        let added = enroll_pool_account("grok").unwrap();
+        let store = load().unwrap();
+        assert_eq!(store.accounts[0].id, "grok");
+        assert_eq!(store.accounts[0].origin, Some(AccountOrigin::Adopted));
+        assert_eq!(store.accounts[1], added);
+        assert!(store.pool_delete_refusal("grok").is_some());
+        assert!(store.pool_delete_refusal(&added.id).is_none());
+    }
+
     fn ids(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|id| id.to_string()).collect()
     }
@@ -744,6 +1239,31 @@ mod tests {
         store.delete_account("codex");
         assert!(store.pm_environment_ids.is_empty());
         assert_eq!(pm_ids(&store), (false, vec!["claude"]));
+    }
+
+    #[test]
+    fn deleting_an_environment_updates_every_agent_and_marks_only_newly_empty_lists() {
+        let mut store = store_with(&["claude", "codex"]);
+        let via = store
+            .register_via("claude", "hermes", None)
+            .unwrap()
+            .id
+            .clone();
+        store.set_agent_list("one", &ids(&[&via])).unwrap();
+        store.set_agent_list("two", &ids(&["codex", &via])).unwrap();
+        store.delete_environment(&via).unwrap();
+        assert!(store.agent_priorities["one"].environment_ids.is_empty());
+        assert!(store.agent_priorities["one"].reverted_to_project);
+        assert_eq!(store.agent_priorities["two"].environment_ids, ["codex"]);
+        assert!(!store.agent_priorities["two"].reverted_to_project);
+        assert!(store.set_agent_list("one", &ids(&[&via])).is_err());
+
+        store.delete_account("codex");
+        assert!(store.agent_priorities["two"].environment_ids.is_empty());
+        assert!(store.agent_priorities["two"].reverted_to_project);
+        assert!(store.agent_priorities["one"].reverted_to_project);
+        store.set_agent_list("one", &[]).unwrap();
+        assert!(!store.agent_priorities.contains_key("one"));
     }
 
     #[test]
@@ -858,6 +1378,74 @@ mod tests {
             .update_environment("codex", None, Some(runtime))
             .unwrap();
         assert_eq!(saved.runtime.model, None);
+    }
+
+    #[test]
+    fn old_account_definitions_and_pool_metadata_round_trip() {
+        let mut account: Account =
+            serde_json::from_str(r#"{"id":"codex","tool":"codex","name":"Codex 1"}"#).unwrap();
+        assert_eq!(account.credential_home, None);
+        assert_eq!(account.origin, None);
+        assert_eq!(account.added_at, None);
+        account.credential_home = Some("/accounts/codex/second".into());
+        account.origin = Some(AccountOrigin::Added);
+        account.added_at = Some(gwt_core::timestamp::UtcTimestamp::now());
+        assert_eq!(
+            serde_json::from_str::<Account>(&serde_json::to_string(&account).unwrap()).unwrap(),
+            account
+        );
+    }
+
+    #[test]
+    fn adoption_uses_sign_in_evidence_and_keeps_one_environment_per_tool() {
+        let mut store = Store::default();
+        let probe = |tool: &str| match tool {
+            "claude" | "codex" | "grok" => Some(None),
+            "gh" => Some(Some("existing-user".to_string())),
+            _ => None,
+        };
+        store.adopt_defaults(probe);
+        store.adopt_defaults(probe);
+        assert_eq!(store.accounts.len(), 4);
+        assert_eq!(store.environments.len(), 4);
+        assert_eq!(
+            store.account("grok").unwrap().origin,
+            Some(AccountOrigin::Adopted)
+        );
+        assert_eq!(
+            store.account("gh").unwrap().sign_in_identity.as_deref(),
+            Some("existing-user")
+        );
+        assert!(store.environment_for_tool("agy").is_none());
+    }
+
+    #[test]
+    fn a_pool_keeps_its_environment_and_prefers_the_recorded_usable_account() {
+        let mut store = store_with(&["codex"]);
+        store.pm_environment_ids.push("codex".into());
+        for id in ["second", "third"] {
+            let mut account = store.account("codex").unwrap().clone();
+            account.id = id.into();
+            account.credential_home = Some(format!("/accounts/codex/{id}"));
+            store.accounts.push(account);
+        }
+        let select = |store: &Store, previous, unavailable| {
+            store
+                .select_pool_account("codex", previous, |account| {
+                    (account.id != unavailable).then(|| account.id.clone())
+                })
+                .map(|(_, id)| id)
+        };
+        assert_eq!(select(&store, None, "codex").as_deref(), Some("second"));
+        assert_eq!(select(&store, Some("third"), "").as_deref(), Some("third"));
+        assert_eq!(
+            select(&store, Some("second"), "second").as_deref(),
+            Some("third")
+        );
+        assert!(store.delete_account("codex").is_empty());
+        assert_eq!(store.environment("codex").unwrap().account_id, "second");
+        assert_eq!(store.pm_list().1.len(), 1);
+        assert_eq!(select(&store, Some("codex"), "").as_deref(), Some("second"));
     }
 
     #[test]
