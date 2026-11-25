@@ -273,6 +273,7 @@ export function createExecutionEnvironments({
     const accounts = accountRows(snapshot);
     return {
       loaded: definitions != null,
+      definitions,
       accounts,
       pools: accountPools(definitions, accounts),
       poolProviders: definitions?.pool_providers,
@@ -383,6 +384,7 @@ export function createExecutionEnvironments({
     onAdd: input => request({ kind: "add_execution_environment", ...input }, { name: "environments", key: null }),
     onUpdate: (id, change) => request({ kind: "update_execution_environment", environment_id: id, ...change }),
     onDelete: id => request({ kind: "delete_execution_environment", environment_id: id }, { name: "environments", key: null }),
+    onSetProjectEnvironments: ids => request({ kind: "set_project_execution_environments", environment_ids: ids }),
     onAddPoolAccount: tool => request({ kind: "add_pool_account", tool }),
     onSignInPoolAccount: account_id => request({ kind: "sign_in_pool_account", account_id }),
     onSaveCopilotAccount: (account_id, login, token) => request({ kind: "save_copilot_account", account_id, login, token }),
