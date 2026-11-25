@@ -26,9 +26,11 @@
 //! that expired or was already claimed) without reporting the claim. A closed
 //! connection's unapproved pairing is dropped before its close is reported.
 //! Connections may also arrive
-//! that reconnect an approved device (naming the unverified device ID),
-//! the opaque signals each relays and its close; each
-//! becomes a [`ConnectionEvent`] for the caller.
+//! that reconnect an approved device (naming the unverified device ID): the
+//! client binds each to that device on the ledger, so only it may be
+//! challenged there, and reports it, or closes a connection naming a device
+//! this Host does not hold approved and unexpired. With the opaque signals
+//! each connection relays and its close, these become [`ConnectionEvent`]s.
 //! A caller that stopped receiving is ignored, but a full event channel ends
 //! the registration (`EventBacklog`) rather than lose a connection's state.
 //! Signals may use only half the channel: a signal beyond that is dropped and
@@ -108,8 +110,9 @@ pub enum ConnectionEvent {
         connection_id: Uuid,
         invite: [u8; 32],
     },
-    /// An approved device's reconnect, by the device ID its browser named.
-    /// Not proof of the device: the caller must verify its key possession.
+    /// An approved device's reconnect, by the device ID its browser named and
+    /// the ledger bound to the connection. Not proof of the device: the caller
+    /// must verify its key possession (`challenge_peer_bound`).
     Reconnect {
         connection_id: Uuid,
         device_id: Uuid,
@@ -506,7 +509,30 @@ async fn register_and_renew(
                 CoordinatorMessage::ConnectionReconnect { generation: scoped, connection_id, device_id }
                     if scoped == generation =>
                 {
-                    report(&events, ConnectionEvent::Reconnect { connection_id, device_id })?;
+                    // Only a device this Host approved binds to the connection.
+                    // A reconnect may arrive before the first renewal enables
+                    // the Host (`Disabled`): it closes only that connection.
+                    let bound = write(authority)?.claim_reconnect(
+                        &device_id.to_string(),
+                        connection_id,
+                        wall()?,
+                    );
+                    match bound {
+                        Ok(()) => report(
+                            &events,
+                            ConnectionEvent::Reconnect { connection_id, device_id },
+                        )?,
+                        Err(AuthorizationError::Disabled
+                            | AuthorizationError::UnknownDevice
+                            | AuthorizationError::Revoked
+                            | AuthorizationError::Expired
+                            | AuthorizationError::WrongPeer
+                            | AuthorizationError::Capacity) => {
+                            budget.spend(Instant::now());
+                            send_close(&mut socket, generation, connection_id).await?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 CoordinatorMessage::ConnectionSignal { generation: scoped, connection_id, payload }
                     if scoped == generation =>
