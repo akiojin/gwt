@@ -1328,7 +1328,18 @@ fn prepare_pane_name_for_window(
             .into_iter()
             .find(|member| member.agent_member_id == member_id)
             .ok_or("Registered Agent is missing")?;
-        if member.agent_id.as_deref() != session.as_ref().map(|session| session.agent_id.command())
+        let tool = session.as_ref().map(|session| session.agent_id.command());
+        // Issue #7647: an agent may run any of the project's environments.
+        if member.agent_id.as_deref() != tool
+            && !tool.is_some_and(|tool| {
+                crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                    &pane.project_root,
+                ))
+                .is_ok_and(|prefs| {
+                    prefs.environment_lists_tool(tool)
+                        || prefs.member_environment_overrides_tool(member_id, tool)
+                })
+            })
         {
             return Err("Registered Agent has a different fixed tool".into());
         }
@@ -2737,6 +2748,13 @@ pub(crate) fn write_current_attachment_input(
     use super::events::OwnerAttachmentInputOutcome;
     let mut attempted = false;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Issue #7701: a human attachment outranks an unconfirmed wake.
+        super::pm_delivery::release_retained_wake(
+            entry,
+            None,
+            super::pm_delivery::RetainedWakeRelease::HumanInput,
+            Instant::now(),
+        )?;
         let reservation = with_current_writer(writers, id, entry, |handle| {
             Arc::clone(handle)
                 .reserve_input_transaction()

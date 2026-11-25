@@ -15,6 +15,7 @@ mod commands;
 mod completion_pr;
 mod concern;
 pub mod daemon;
+pub(crate) mod decision;
 pub mod delivered_owner;
 pub(crate) mod delivery_paths;
 mod diagnostics;
@@ -142,6 +143,8 @@ pub enum CliCommand {
     Intake(intake_outcome::IntakeCommand),
     Diagnostics(DiagnosticsCommand),
     Memory(MemoryCommand),
+    /// Issue #7742: the gwtd decision queue (`decision.*`).
+    Decision(decision::DecisionCommand),
     Concern(Box<concern::ConcernCommand>),
     Discuss(DiscussCommand),
     Discussion(DiscussionCommand),
@@ -603,6 +606,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
+        CliCommand::Decision(inner) => decision::run(env, inner, &mut out)?,
         CliCommand::Concern(inner) => concern::run(env, *inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,

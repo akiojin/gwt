@@ -707,7 +707,7 @@ fn active_work_projection_from_live_sessions(
         pr_number: None,
         pr_url: None,
         pr_state: None,
-        board_refs: Vec::new(),
+        board_refs: Default::default(),
         agents: agents.clone(),
         works: Vec::new(),
         lifecycle_state: work_active_lifecycle_state_wire(
@@ -1617,7 +1617,8 @@ fn active_work_items_from_projection(
                     history
                         .map(|item| item.board_refs.clone())
                         .unwrap_or_default()
-                },
+                }
+                .into(),
                 agents,
                 // SPEC-2359 Phase W-12 (FR-349): active_work_items groups live
                 // assigned agents, so the owning agent session is Running and
@@ -1769,7 +1770,7 @@ fn append_paused_work_items(
             pr_number: container.and_then(|value| value.pr_number),
             pr_url: container.and_then(|value| value.pr_url.clone()),
             pr_state: container.and_then(|value| value.pr_state.clone()),
-            board_refs: work.board_refs.clone(),
+            board_refs: work.board_refs.clone().into(),
             // Carry the persisted Work's agents (each with its Session history)
             // so a Paused Workspace still renders Work → Session in the detail.
             agents: work
@@ -3639,6 +3640,7 @@ fn bounded_active_work_item_snapshot(cached: &gwt::ActiveWorkItemView) -> gwt::A
 
 fn bounded_active_work_projection_snapshot(
     cached: &gwt::ActiveWorkProjectionView,
+    board_refs: Vec<String>,
 ) -> gwt::ActiveWorkProjectionView {
     gwt::ActiveWorkProjectionView {
         id: cached.id.clone(),
@@ -3657,7 +3659,7 @@ fn bounded_active_work_projection_snapshot(
         pr_url: cached.pr_url.clone(),
         pr_state: cached.pr_state.clone(),
         pr_created_at: cached.pr_created_at.clone(),
-        board_refs: cached.board_refs.clone(),
+        board_refs,
         journal_entries: Vec::new(),
         works: Vec::new(),
         cleanup_candidate: cached.cleanup_candidate.clone(),
@@ -4238,8 +4240,22 @@ fn agent_roster_view_from_snapshot(
             .filter(|entry| entry.origin_session_id.as_deref() == Some(session_id))
             .collect::<Vec<_>>()
     };
+    // Issue #7649: history names the execution environment a row's tool runs
+    // on. Unreadable definitions leave it unknown without failing the roster.
+    let environments = gwt::execution_environments::load().ok();
+    let project_environments = environments
+        .as_ref()
+        .map(|store| gwt::execution_environments::project_list(store, prefs).1)
+        .unwrap_or_default();
     let history_for = |session: &gwt_agent::Session| {
         let posts = posts_for(&session.id);
+        let environment = environments.as_ref().and_then(|store| {
+            gwt::execution_environments::environment_for_candidate(
+                store,
+                &project_environments,
+                session.agent_id.command(),
+            )
+        });
         let title = posts
             .iter()
             .filter(|entry| entry.title_summary.is_some())
@@ -4260,6 +4276,10 @@ fn agent_roster_view_from_snapshot(
             }
             .map(str::to_string),
             model: session.model.clone(),
+            reasoning: session.reasoning_level.clone(),
+            environment: environment.map(|environment| environment.name.clone()),
+            environment_model: environment
+                .and_then(|environment| environment.runtime.model.clone()),
             issue_number: session.linked_issue_number,
             title,
             result: Some(format!("{:?}", session.status)),
@@ -5810,6 +5830,7 @@ impl AppRuntime {
     /// health stores. The watcher has already paid to load `current.json`, so
     /// its per-agent state is fresh; the cache retains the expensive history
     /// and enrichment assembled by the background projection builder.
+    #[cfg(test)]
     pub(crate) fn merge_workspace_projection_into_cached_active_work(
         &self,
         project_root: &Path,
@@ -6066,35 +6087,9 @@ impl AppRuntime {
                 .active_work_projection_cache
                 .borrow()
                 .get(tab_id)
-                .map(bounded_active_work_projection_snapshot)
-        });
-        let mut projection = cached_projection
-            .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
-        projection.local_agent_activity = self
-            .retain_current_local_agent_activity(tab_id, projection.local_agent_activity.take());
-        Some(OutboundEvent::project(
-            self.project_key_for_tab(tab_id)?.clone(),
-            BackendEvent::ActiveWorkProjectionPatch {
-                projection: Box::new(projection),
-            },
-        ))
-    }
-
-    /// A Workspace watcher notification carries the same bounded membership
-    /// patch as a lifecycle acknowledgement. The browser preserves its
-    /// existing history for the exact projection id, so Tao neither clones nor
-    /// serializes unbounded Work/Session vectors here.
-    pub(crate) fn cached_active_work_projection_broadcast_for_workspace_watcher(
-        &self,
-        tab_id: &str,
-    ) -> Option<OutboundEvent> {
-        let tab = self.tab(tab_id)?;
-        let cached_projection = self.project_state_for_tab(tab_id).and_then(|state| {
-            state
-                .active_work_projection_cache
-                .borrow()
-                .get(tab_id)
-                .map(bounded_active_work_projection_snapshot)
+                .map(|cached| {
+                    bounded_active_work_projection_snapshot(cached, cached.board_refs.clone())
+                })
         });
         let mut projection = cached_projection
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
@@ -6195,13 +6190,23 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_workspace_projection_changed_events(
         &mut self,
         project_root: &Path,
         projection: &gwt_core::workspace_projection::WorkspaceProjection,
     ) -> Vec<OutboundEvent> {
+        self.queue_workspace_projection_patch(project_root, Box::new(projection.clone()));
+        Vec::new()
+    }
+
+    pub(crate) fn queue_workspace_projection_patch(
+        &self,
+        project_root: &Path,
+        projection: Box<gwt_core::workspace_projection::WorkspaceProjection>,
+    ) {
         let Some(context) = self.project_context_for_root(project_root) else {
-            return Vec::new();
+            return;
         };
         self.invalidate_workspace_projection_patch(&context.tab_id);
         let state = self.project_state(&context).expect("current project");
@@ -6212,7 +6217,8 @@ impl AppRuntime {
             .active_work_projection_cache
             .borrow()
             .get(&context.tab_id)
-            .map(bounded_active_work_projection_snapshot);
+            // The incoming projection replaces the root Board refs.
+            .map(|cached| bounded_active_work_projection_snapshot(cached, Vec::new()));
         if let Some(cached) = cached.as_mut() {
             cached.local_agent_activity = self.retain_current_local_agent_activity(
                 &context.tab_id,
@@ -6224,7 +6230,7 @@ impl AppRuntime {
             revision: state.workspace_projection_revision.get(),
             context: context.clone(),
             cached,
-            fresh: Box::new(projection.clone()),
+            fresh: projection,
             sessions: self.active_agent_sessions.values().cloned().collect(),
             windows,
             agent_names: self
@@ -6246,7 +6252,6 @@ impl AppRuntime {
                 Err(error) => tracing::warn!(%error, "workspace watcher patch preparation failed"),
             }
         });
-        Vec::new()
     }
 
     pub(crate) fn invalidate_workspace_projection_patch(&self, tab_id: &str) {
@@ -6303,8 +6308,12 @@ impl AppRuntime {
         if let Some(cached) = cache.get_mut(&tab_id) {
             prepared.restore_histories(cached);
         }
-        cache.insert(tab_id.clone(), prepared.projection);
+        let replaced = cache.insert(tab_id.clone(), prepared.projection);
         drop(cache);
+        // The outgoing snapshot can own a large Board ref history.
+        if let Some(replaced) = replaced {
+            self.blocking_tasks.spawn(move || drop(replaced));
+        }
         state
             .active_work_projection_payload_cache
             .borrow_mut()
@@ -6878,6 +6887,82 @@ mod bounded_cache_merge_tests {
         assert!(error.to_string().contains("not initialized"));
     }
 
+    // Issue #7649 AC-1: a history row names the reasoning the session was
+    // launched with and the execution environment its tool runs on.
+    #[test]
+    fn roster_history_records_reasoning_and_execution_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let context = ProjectContext {
+            tab_id: "project-tab".into(),
+            project_key: gwt_core::repo_hash::compute_path_hash(&root),
+            generation: 1,
+            project_root: root.clone(),
+        };
+        gwt::execution_environments::mutate(|store| {
+            store.register_account("codex");
+            store
+                .update_environment(
+                    "codex",
+                    Some("Codex pool"),
+                    Some(gwt::execution_environments::RuntimeOptions {
+                        model: Some("environment-model".into()),
+                        ..Default::default()
+                    }),
+                )
+                .map_err(std::io::Error::from)?;
+            Ok(())
+        })
+        .unwrap();
+        let roster: gwt::agent_names::AgentRoster = serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"member-1","agent_id":"codex","name":"One","enabled":true,"created_at":"2026-10-25T00:00:00Z"
+        }]})).unwrap();
+        let prefs = gwt::IssueMonitorPrefs {
+            agent_roster: Some(roster),
+            ..Default::default()
+        };
+        let mut codex = gwt_agent::Session::new(&root, "own", gwt_agent::AgentId::Codex);
+        codex.agent_member_id = Some("member-1".into());
+        codex.reasoning_level = Some("high".into());
+        let mut unregistered = codex.clone();
+        unregistered.id = "unregistered-tool".into();
+        unregistered.agent_id = gwt_agent::AgentId::ClaudeCode;
+        unregistered.reasoning_level = None;
+        let history = |session: gwt_agent::Session| {
+            serde_json::to_value(
+                agent_roster_view(
+                    &context,
+                    &prefs,
+                    &[Arc::new(session)],
+                    &[],
+                    true,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                )
+                .unwrap()
+                .members
+                .remove(0)
+                .history
+                .remove(0),
+            )
+            .unwrap()
+        };
+        let recorded = history(codex);
+        assert_eq!(recorded["reasoning"], "high");
+        assert_eq!(recorded["environment"], "Codex pool");
+        assert_eq!(recorded["environment_model"], "environment-model");
+        assert!(
+            recorded["model"].is_null(),
+            "the environment's model never rewrites the session's recorded model"
+        );
+        // A tool with no registered environment stays unknown.
+        let unknown = history(unregistered);
+        assert!(unknown["reasoning"].is_null());
+        assert!(unknown["environment"].is_null());
+        assert!(unknown["environment_model"].is_null());
+    }
+
     #[test]
     fn roster_history_uses_project_and_member_identity_and_retains_legacy_contributors_without_posts(
     ) {
@@ -7378,10 +7463,17 @@ mod bounded_cache_merge_tests {
             wire["projection"]["local_agent_activity"]["observed_at"],
             observed_at
         );
-        assert!(
-            tasks.lock().unwrap().is_empty(),
-            "the current watcher patch is accepted"
-        );
+        let dispose_previous_snapshot = {
+            let mut tasks = tasks.lock().unwrap();
+            assert_eq!(
+                tasks.len(),
+                1,
+                "an accepted patch only queues disposal of the previous snapshot"
+            );
+            tasks.pop().unwrap()
+        };
+        dispose_previous_snapshot();
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -7883,7 +7975,7 @@ mod bounded_cache_merge_tests {
         });
 
         cached.active_works[0].linked_issue_numbers = vec![3885, 4556];
-        let outbound = bounded_active_work_projection_snapshot(&cached);
+        let outbound = bounded_active_work_projection_snapshot(&cached, Vec::new());
         assert_eq!(
             outbound.active_works[0].linked_issue_numbers,
             vec![3885, 4556]
@@ -7953,7 +8045,7 @@ mod bounded_cache_merge_tests {
         });
 
         cached.active_works[0].linked_issue_numbers = vec![3885, 4556];
-        let outbound = bounded_active_work_projection_snapshot(&cached);
+        let outbound = bounded_active_work_projection_snapshot(&cached, Vec::new());
         assert_eq!(
             outbound.active_works[0].linked_issue_numbers,
             vec![3885, 4556]

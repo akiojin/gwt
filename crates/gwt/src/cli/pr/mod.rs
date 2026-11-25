@@ -434,7 +434,13 @@ pub(super) fn ready_verification(
                 plan.as_ref(),
                 &record,
             );
-            if status == verification::EvidenceStatus::Fresh {
+            if status == verification::EvidenceStatus::Fresh
+                || status == verification::EvidenceStatus::FreshWithQuarantine
+                    && verification::pr_create_quarantine_refusal(
+                        worktree, session_id, &record, body,
+                    )
+                    .is_none()
+            {
                 Ok(())
             } else {
                 Err(status)
@@ -640,31 +646,45 @@ pub(super) fn run_with_data<E: CliEnv>(
                 match crate::cli::verification_record::load(&worktree) {
                     Ok(Some(verification)) if !verification.quarantined_failures.is_empty() => {
                         if target_pr.is_none() {
-                            out.push_str("PR handoff refused: creating a Ready PR requires normal passing verification. Repair the failing commands and rerun verify.plan / verify.run; Draft PR creation is prohibited. Existing Draft PRs may use pr.ready with their validated quarantine references.\n");
-                            return Ok(2);
-                        }
-                        let evidence = crate::cli::verification_record::evaluate_evidence(
-                            &worktree,
-                            session_id.as_deref().unwrap_or_default(),
-                            None,
-                        );
-                        if evidence
-                            != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
-                        {
-                            out.push_str(&format!("PR handoff refused: {}\n", evidence.describe()));
-                            return Ok(2);
-                        }
-                        if let Err(refusal) =
-                            crate::cli::verification_record::validate_current_quarantine_references(
+                            // #7326: a first-PR quarantine is validated against
+                            // the submitted create body.
+                            if let Some(refusal) =
+                                crate::cli::verification_record::pr_create_quarantine_refusal(
+                                    &worktree,
+                                    session_id.as_deref().unwrap_or_default(),
+                                    &verification,
+                                    body,
+                                )
+                            {
+                                out.push_str(&refusal);
+                                out.push('\n');
+                                return Ok(2);
+                            }
+                        } else {
+                            let evidence = crate::cli::verification_record::evaluate_evidence(
+                                &worktree,
+                                session_id.as_deref().unwrap_or_default(),
+                                None,
+                            );
+                            if evidence
+                                != crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+                            {
+                                out.push_str(&format!(
+                                    "PR handoff refused: {}\n",
+                                    evidence.describe()
+                                ));
+                                return Ok(2);
+                            }
+                            if let Err(refusal) = crate::cli::verification_record::validate_current_quarantine_references(
                                 env,
                                 &verification,
                                 target_pr,
-                            )
-                        {
-                            out.push_str(&format!(
-                            "PR handoff refused: typed quarantine evidence is not current: {refusal}\n"
-                        ));
-                            return Ok(2);
+                            ) {
+                                out.push_str(&format!(
+                                    "PR handoff refused: typed quarantine evidence is not current: {refusal}\n"
+                                ));
+                                return Ok(2);
+                            }
                         }
                         verification_guard.get_or_insert_with(|| VerificationMutationGuard {
                             session_id: session_id.unwrap_or_default().to_string(),
@@ -937,30 +957,29 @@ pub(super) fn run_with_data<E: CliEnv>(
                 .fetch_pr_quarantine_context(number)
                 .ok()
                 .and_then(|context| head_check::from_body(&context.body));
-            let verified = retained
-                .as_ref()
-                .map(|check| check.verified_head.clone())
-                .or_else(|| {
-                    if current_branch_name(env.repo_path()).as_deref()
-                        != Some(pr.head_ref_name.as_str())
-                    {
-                        return None;
-                    }
-                    crate::cli::verification_record::load(env.repo_path())
-                        .ok()
-                        .flatten()
-                        .filter(|record| {
-                            record.all_passed
-                                && crate::cli::verification_record::integrity_ok(record)
-                        })
-                        .filter(|_| {
-                            env.fetch_current_pr()
-                                .ok()
-                                .flatten()
-                                .is_some_and(|current| current.number == number)
-                        })
-                        .and_then(|record| record.verified_head.clone())
-                });
+            // A passing canonical run on this PR's branch is newer than the
+            // marker retained in the PR body at creation, so it wins
+            // (Issue #7356); the body marker covers other checkouts.
+            let local = (current_branch_name(env.repo_path()).as_deref()
+                == Some(pr.head_ref_name.as_str()))
+            .then(|| {
+                crate::cli::verification_record::load(env.repo_path())
+                    .ok()
+                    .flatten()
+            })
+            .flatten()
+            .filter(|record| {
+                record.all_passed && crate::cli::verification_record::integrity_ok(record)
+            })
+            .filter(|_| {
+                env.fetch_current_pr()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|current| current.number == number)
+            })
+            .and_then(|record| record.verified_head.clone());
+            let verified =
+                local.or_else(|| retained.as_ref().map(|check| check.verified_head.clone()));
             if let Some(verified) = verified {
                 match env.fetch_pr_head_sha(number) {
                     Ok(Some(remote)) => {
@@ -1217,6 +1236,11 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         gwt_core::operation_deadline::now() + pr_metadata_record_deadline(),
     );
+    let retry_operation = if pr.state == gwt_git::pr_status::PrState::Merged {
+        "pr.edit"
+    } else {
+        "pr.ready"
+    };
     let result = (|| {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         // A reused branch can resolve to a historical merged PR. Identity
@@ -1233,9 +1257,8 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
             );
             return Ok(());
         }
-        // Every successful mutation certifies the exact event returned by its
-        // writer, including legacy/unbound edits. Read-only synchronization
-        // and agent-authored events do not acquire this producer provenance.
+        // Certify the exact shared event returned by either authorized writer.
+        // A machine-local merge refresh has no shard to certify.
         let event = if let Some(binding) = binding {
             let branch = current_branch_name(env.repo_path())
                 .ok_or_else(|| std::io::Error::other("current branch is unavailable"))?;
@@ -1293,7 +1316,7 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
             crate::cli::operation_warnings::push(
                 WORK_PR_METADATA_RECORDING_SKIPPED,
                 format!(
-                    "PR #{} ({}) was updated on GitHub, but local Work PR metadata recording was skipped: it did not obtain the workspace lock within {}s ({error}). Retry pr.ready for this existing PR once the lock holder finishes; do not create another PR.",
+                    "PR #{} ({}) was updated on GitHub, but local Work PR metadata recording was skipped: it did not obtain the workspace lock within {}s ({error}). Retry {retry_operation} for this existing PR once the lock holder finishes; do not create another PR.",
                     pr.number,
                     pr.url,
                     pr_metadata_record_deadline().as_secs(),
@@ -1302,7 +1325,7 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
             Ok(())
         }
         Err(error) => Err(std::io::Error::other(format!(
-            "PR #{} ({}) was updated on GitHub, but Work PR metadata was not recorded: {error}. Repair the Work binding and retry pr.ready for this existing PR; do not create another PR.",
+            "PR #{} ({}) was updated on GitHub, but Work PR metadata was not recorded: {error}. Repair the Work binding and retry {retry_operation} for this existing PR; do not create another PR.",
             pr.number, pr.url
         ))),
     }
@@ -1472,7 +1495,11 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
                 event.execution_container = Some(container);
                 vec![event]
             };
-            Ok((Some((id, events.first().cloned())), events))
+            let shared_event = events
+                .first()
+                .filter(|event| !work_items.is_completed_pr_merge_refresh(event))
+                .cloned();
+            Ok((Some((id, shared_event)), events))
         },
     )
     .ok()
@@ -2540,6 +2567,9 @@ mod tests {
         );
         assert_eq!(env.pr_create_call_log.len(), 1);
         assert!(!env.pr_create_call_log[0].draft);
+        // Issue #7697 AC-5: this operation leaves auto-merge to the merge
+        // automation, which arms a reviewed PR only after its PASS verdict.
+        assert!(env.pr_auto_merge_call_log.is_empty());
         assert_eq!(
             env.pr_create_call_log[0].head.as_deref(),
             Some(request.head.as_str())
@@ -4674,6 +4704,9 @@ mod tests {
             .expect("run adjudicated pr ready");
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_ready_call_log, vec![7]);
+        // Issue #7697 AC-5: this operation leaves auto-merge to the merge
+        // automation, which arms a reviewed PR only after its PASS verdict.
+        assert!(env.pr_auto_merge_call_log.is_empty());
         assert_eq!(env.pr_comments.len(), 1);
         assert_eq!(env.pr_comments[0].0, 7);
         assert!(env.pr_comments[0].1.contains(&decision_id));
@@ -5631,6 +5664,9 @@ fn main() -> ExitCode {
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_update_branch_call_log, vec![7]);
         assert!(out.contains("updated pull request #7 branch"), "{out}");
+        // Issue #7697 AC-5: this operation leaves auto-merge to the merge
+        // automation, which arms a reviewed PR only after its PASS verdict.
+        assert!(env.pr_auto_merge_call_log.is_empty());
     }
 
     /// SPEC #3835 AC-15 / FR-007: a conflicting update is refused, not
@@ -5906,7 +5942,7 @@ fn main() -> ExitCode {
     /// `origin/develop` with work continuing on a feature branch — carrying
     /// exactly `changed` as its diff.
     fn ready_gate_worktree(worktree: &std::path::Path, changed: &[(&str, &str)]) {
-        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        crate::cli::trusted_store::init_cargo_repo_with_origin(worktree);
         for args in [
             vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
             vec!["checkout", "-q", "-b", "work/issue-4510"],
@@ -7653,6 +7689,106 @@ fn main() -> ExitCode {
             assert_eq!(
                 work.status_category,
                 gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+            );
+        });
+    }
+
+    #[test]
+    fn issue_7345_editing_merged_pr_refreshes_done_work_without_tracked_events() {
+        use gwt_core::workspace_projection::{
+            emit_workspace_done_event_if_absent, load_workspace_work_items,
+            read_machine_local_workspace_work_events_from_path_read_only, WorkEventKind,
+            WorkspaceStatusCategory,
+        };
+
+        with_merged_pr_work(|env, repo, pr| {
+            let session_id = "merged-edit-session";
+            let identity = initialize_pr_generation_authority(repo, session_id);
+            persist_pr_generation_session(repo, session_id, identity);
+            seed_pr_generation_work(repo, session_id);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .unwrap();
+            let mut open_pr = pr.clone();
+            open_pr.state = gwt_git::pr_status::PrState::Open;
+            record_mutated_workspace_pr_metadata(
+                env,
+                &open_pr,
+                session.execution_binding.as_ref(),
+                None,
+                false,
+            )
+            .unwrap();
+            let work_id = "generation-delivery-work";
+            assert!(emit_workspace_done_event_if_absent(
+                repo,
+                work_id,
+                gwt_core::timestamp::UtcTimestamp::now(),
+            )
+            .unwrap());
+            let tracked_status = || {
+                let output = gwt_core::process::hidden_command("git")
+                    .args([
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=all",
+                        "--",
+                        ".gwt/work/events",
+                    ])
+                    .current_dir(repo)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                String::from_utf8(output.stdout).unwrap()
+            };
+            let before = tracked_status();
+            env.seed_pr(pr.number, pr);
+            seed_readable_pr_body(env);
+            let mut out = String::new();
+            assert_eq!(
+                run(
+                    env,
+                    PrCommand::EditBody {
+                        number: 7,
+                        base: None,
+                        title: None,
+                        body: Some(s("Updated rollback instructions")),
+                        add_labels: vec![],
+                    },
+                    &mut out,
+                )
+                .unwrap(),
+                0,
+                "{out}"
+            );
+            assert_eq!(env.pr_edit_call_log.len(), 1);
+            assert_eq!(
+                tracked_status(),
+                before,
+                "the edit must not add a Work shard"
+            );
+            let works = load_workspace_work_items(repo).unwrap().unwrap();
+            let work = works
+                .work_items
+                .iter()
+                .find(|work| work.id == work_id)
+                .unwrap();
+            assert_eq!(work.status_category, WorkspaceStatusCategory::Done);
+            assert_eq!(
+                work.execution_containers[0].pr_state.as_deref(),
+                Some("MERGED")
+            );
+            let local_events = read_machine_local_workspace_work_events_from_path_read_only(
+                &gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo),
+            )
+            .unwrap();
+            assert!(
+                local_events.iter().any(|event| {
+                    event.work_item_id == work_id && event.kind == WorkEventKind::Pr
+                }),
+                "the merge refresh must survive a projection rebuild"
             );
         });
     }

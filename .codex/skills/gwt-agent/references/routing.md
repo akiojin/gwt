@@ -6,18 +6,19 @@ Use the Board for agent-to-agent communication:
 
 ```bash
 "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"board.post","params":{"kind":"request","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
+{"schema_version":1,"operation":"board.post","params":{"kind":"request","mentions":["session:<id>"],"body":"<message>"}}
 JSON
 
 "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"board.post","params":{"kind":"handoff","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
+{"schema_version":1,"operation":"board.post","params":{"kind":"handoff","mentions":["agent:<id>"],"body":"<message>"}}
 JSON
 ```
 
 Use `params.kind:"request"`, `"next"`, `"blocked"`, `"handoff"`, or
-`"decision"` for coordination. `params.targets` highlights the entry as
-`[for-you]` in the recipient's Board reminder injection. Omit `params.targets`
-only for repo-wide Board updates.
+`"decision"` for coordination. Address recipients with `params.mentions`
+using `session:<id>`, `agent:<id>`, or `branch:<name>`. Use
+`params.broadcast:true` for repo-wide Board updates. A post with neither
+mentions nor an explicit broadcast stays in the current Work.
 
 Direct pane input is not part of the normal communication path. Prefer Board
 posts so requests, decisions, blockers, and handoffs remain visible to every

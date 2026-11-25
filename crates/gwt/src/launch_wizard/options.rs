@@ -337,6 +337,57 @@ pub(crate) fn default_launch_tuning(
     )
 }
 
+/// The steps the common reasoning levels are placed on, lowest first. A
+/// tool's own extra steps (`auto`, `ultracode`, ...) are never chosen for an
+/// agent's level.
+const TRAIT_REASONING_STEPS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Give the candidate the agent's fixed traits on the tool it is about to
+/// run (SPEC #7007 items 48 and 181).
+///
+/// The common level becomes the tool's own step of the same strength; a tool
+/// without that step takes the nearest one below it, and a tool with no
+/// reasoning steps is passed none. An unset level or speed keeps the
+/// candidate's value.
+pub(crate) fn apply_agent_traits(
+    profile: &mut crate::issue_monitor::IssueMonitorLaunchProfile,
+    traits: &crate::agent_names::AgentTraits,
+) {
+    use crate::agent_names::{TraitReasoningLevel, TraitSpeed};
+    let tool = gwt_agent::resolve_agent_id(&profile.agent_id);
+    let tool = tool
+        .as_ref()
+        .map_or(profile.agent_id.as_str(), gwt_agent::AgentId::command);
+    if let Some(level) = traits.reasoning_level {
+        let wanted = match level {
+            TraitReasoningLevel::Low => 0,
+            TraitReasoningLevel::Standard => 1,
+            TraitReasoningLevel::High => 2,
+            TraitReasoningLevel::Max => 4,
+        };
+        let models = current_model_options(tool);
+        let model = profile
+            .model
+            .as_deref()
+            .or(models.first().map(String::as_str))
+            .unwrap_or("");
+        let offered = reasoning_options_for_agent_model(tool, model, false);
+        profile.reasoning = TRAIT_REASONING_STEPS[..=wanted]
+            .iter()
+            .rev()
+            .find(|step| offered.iter().any(|option| option.stored_value == **step))
+            .map(|step| (*step).to_string());
+    }
+    if let Some(speed) = traits.speed {
+        profile.codex_speed = match (tool, speed) {
+            ("codex", TraitSpeed::Fast) => gwt_agent::CodexSpeed::Fast,
+            ("codex", TraitSpeed::Fastest) => gwt_agent::CodexSpeed::Ultrafast,
+            _ => gwt_agent::CodexSpeed::Off,
+        };
+        profile.fast_mode = tool == "claude" && speed != TraitSpeed::Normal;
+    }
+}
+
 pub(super) const EXECUTION_MODE_OPTIONS: [ExecutionModeOption; 3] = [
     ExecutionModeOption {
         label: "Normal",
@@ -1244,6 +1295,103 @@ mod tests {
         );
         state.set_agent_id("grok");
         state
+    }
+
+    fn traits_candidate(
+        agent_id: &str,
+        model: Option<&str>,
+    ) -> crate::issue_monitor::IssueMonitorLaunchProfile {
+        serde_json::from_value(serde_json::json!({
+            "agent_id": agent_id, "model": model, "reasoning": "saved",
+        }))
+        .unwrap()
+    }
+
+    // Issue #7647 AC-1 (items 48 and 181): the agent's common level becomes
+    // the tool's own, rounded down when the tool has no such step.
+    #[test]
+    fn agent_traits_map_to_the_tool_level_rounding_down() {
+        use crate::agent_names::{AgentTraits, TraitReasoningLevel as Level, TraitSpeed as Speed};
+        let reasoning = |agent: &str, model: Option<&str>, level: Level| {
+            let mut profile = traits_candidate(agent, model);
+            apply_agent_traits(
+                &mut profile,
+                &AgentTraits {
+                    reasoning_level: Some(level),
+                    ..AgentTraits::default()
+                },
+            );
+            profile.reasoning
+        };
+        for (level, expected) in [
+            (Level::Low, "low"),
+            (Level::Standard, "medium"),
+            (Level::High, "high"),
+            (Level::Max, "max"),
+        ] {
+            assert_eq!(
+                reasoning("claude", Some("opus"), level).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            reasoning("claude", Some("sonnet"), Level::Max).as_deref(),
+            Some("high"),
+            "a tool without the step takes the nearest one below it"
+        );
+        assert_eq!(
+            reasoning("codex", Some("unlisted-model"), Level::Max).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            reasoning("grok", None, Level::Standard).as_deref(),
+            Some("medium")
+        );
+        for (agent, model) in [("claude", Some("haiku")), ("opencode", None)] {
+            assert_eq!(
+                reasoning(agent, model, Level::High),
+                None,
+                "{agent} has no reasoning steps, so none is passed"
+            );
+        }
+
+        let speed = |agent: &str, speed: Speed| {
+            let mut profile = traits_candidate(agent, None);
+            profile.fast_mode = true;
+            profile.codex_speed = gwt_agent::CodexSpeed::Fast;
+            apply_agent_traits(
+                &mut profile,
+                &AgentTraits {
+                    speed: Some(speed),
+                    ..AgentTraits::default()
+                },
+            );
+            (profile.fast_mode, profile.codex_speed)
+        };
+        use gwt_agent::CodexSpeed::{Fast, Off, Ultrafast};
+        assert_eq!(speed("codex", Speed::Normal), (false, Off));
+        assert_eq!(speed("codex", Speed::Fast), (false, Fast));
+        assert_eq!(speed("codex", Speed::Fastest), (false, Ultrafast));
+        assert_eq!(speed("claude", Speed::Normal), (false, Off));
+        assert_eq!(speed("claude", Speed::Fast), (true, Off));
+        assert_eq!(
+            speed("claude", Speed::Fastest),
+            (true, Off),
+            "Claude Code has one fast step, so the fastest rounds down to it"
+        );
+        assert_eq!(speed("grok", Speed::Fastest), (false, Off));
+
+        let mut untouched = traits_candidate("codex", Some("unlisted-model"));
+        untouched.codex_speed = Fast;
+        let before = untouched.clone();
+        apply_agent_traits(
+            &mut untouched,
+            &AgentTraits {
+                personality: Some("Verify first.".into()),
+                ..AgentTraits::default()
+            },
+        );
+        assert_eq!(untouched, before, "an unset level or speed changes nothing");
     }
 
     #[test]

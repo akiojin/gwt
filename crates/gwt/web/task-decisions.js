@@ -3,12 +3,13 @@ import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 
 // Task-centered Decide host (SPEC #7007). Rendered by the React surface
 // `TaskDecisions` (crates/gwt/web-react). The caller derives the decision
-// state from the PM reports snapshot and feeds it through `receive`; answer
-// and reply callbacks stay with the caller, which owns the PM chat send path.
-export function createTaskDecisions({ document, onAnswerDecision, onReplyInChat, scheduleFrame }) {
+// state from the gwtd decision queue (Issue #7742) and feeds it through
+// `receive`; answer, reply and defer callbacks stay with the caller, which
+// owns the queue requests.
+export function createTaskDecisions({ document, onAnswerDecision, onReplyInChat, onDeferDecision, scheduleFrame }) {
   const model = createUiStateStore(null, { scheduleFrame });
   const container = createDetachedIslandContainer(document);
-  const island = mountIsland("task-decisions", container, { store: model, onAnswerDecision, onReplyInChat });
+  const island = mountIsland("task-decisions", container, { store: model, onAnswerDecision, onReplyInChat, onDeferDecision });
   function receive(state) {
     model.update(() => state);
   }

@@ -1,12 +1,24 @@
 import { createCloseProjectController } from "./close-project-confirm-modal.js";
-// Issue #4538 AC-3: the Hub served at `/`. It is a picker only — Open Folder,
-// Clone, Recent, and the open Projects — and never a workspace, dashboard, or
-// tab strip. Every Project entry is a real, path-free link that opens the
-// Project in its own browser tab.
+import { createProjectAutonomyControl } from "./project-autonomy.js";
+// The page served at `/` (Issue #4538 AC-3, Issue #7639). It has three views
+// and is never a workspace, dashboard, or tab strip:
+// - Home: the conversation with the Project Manager. It shows no project
+//   contents (design items 5 and 46).
+// - Projects: the picker — Open Folder, Clone, Recent, and the open Projects —
+//   opened from the header. Every Project entry is a real, path-free link that
+//   opens the Project in its own browser tab.
+// - Setup: the first-run setup (Issue #7731). It opens by itself while this
+//   machine still needs it, and from Settings at any time.
 import { renderProjectCloneModal, createFolderPickerController, createOpenProjectPathForm } from "./project-clone-modal.js";
 import { HUB_URL_PATH, projectUrlPath, routeWebSocketUrl } from "./frontend-route.js";
 import { createProjectExecutionPolicyModel, mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { createAppChrome } from "./app-chrome.js";
+import { createHomeConversation } from "./home-conversation.js";
+import { createFirstRunSetup } from "./first-run-setup.js";
+
+// The view a `/?view=…` link opens; anything else is Home.
+const HUB_VIEWS = Object.freeze(["home", "projects", "setup"]);
 
 const HUB_RESULT_KINDS = new Set([
   "hub_state",
@@ -38,7 +50,7 @@ function initialCloneState() {
   };
 }
 
-function createHubApp({ document: doc, window: win }) {
+function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}, setActiveSurface = () => {} }) {
   const node = (tag, className, text) => {
     const element = doc.createElement(tag);
     if (className) element.className = className;
@@ -72,13 +84,23 @@ function createHubApp({ document: doc, window: win }) {
   });
   const openResults = createUiStateStore(null);
 
-  const root = node("main", "gwt-hub");
+  // `data-hub` marks the page; the picker is the Projects view inside it.
+  const root = node("main", "gwt-hub-page");
   root.dataset.hub = "";
+  const projectsView = node("section", "gwt-hub");
+  projectsView.dataset.hubProjects = "";
+  projectsView.setAttribute("aria-labelledby", "gwt-hub-title");
   const header = node("header", "gwt-hub__header");
-  const title = node("h1", "gwt-hub__title", "gwt");
-  const version = node("span", "gwt-hub__version");
-  version.hidden = true;
-  header.append(title, version);
+  const title = node("h1", "gwt-hub__title", "Projects");
+  title.id = "gwt-hub-title";
+  header.append(title);
+  // Projects are found by name; a path never reaches this page's markup.
+  const search = node("input", "gwt-hub__search");
+  search.type = "search";
+  search.placeholder = "Search projects…";
+  search.setAttribute("aria-label", "Search projects");
+  search.dataset.hubSearch = "";
+  search.addEventListener("input", () => render());
 
   const actions = node("div", "gwt-hub__actions");
   const openFolder = node("button", "wizard-button primary", "Open Folder…");
@@ -148,7 +170,37 @@ function createHubApp({ document: doc, window: win }) {
     },
   });
 
-  root.append(header, actions, notice, error, openSection.element, recentSection.element, orphanSection.element);
+  const home = createHomeConversation({
+    document: doc, window: win, send,
+    onPmChange: setPm,
+    onOpenFolder: () => openFolderDialog(),
+    onClone: mode => openCloneDialog(mode),
+    onOpenProjects: () => showView("projects"),
+  });
+  const homeView = home.element;
+  const setup = createFirstRunSetup({
+    document: doc, send,
+    onOpenFolder: () => openFolderDialog(),
+    onClone: () => openCloneDialog(),
+    onHome: () => showView("home"),
+    // A machine that cannot start work yet lands on its setup.
+    onRequired: needed => { if (needed) showView("setup"); },
+  });
+  const setupView = setup.element;
+  projectsView.append(header, actions, search, openSection.element, recentSection.element, orphanSection.element);
+  root.append(notice, error, homeView, projectsView, setupView);
+
+  let view = "home";
+  function showView(next) {
+    view = HUB_VIEWS.includes(next) ? next : "home";
+    root.dataset.hubView = view;
+    homeView.hidden = view !== "home";
+    projectsView.hidden = view !== "projects";
+    setupView.hidden = view !== "setup";
+    // Home fills the screen and scrolls its own timeline.
+    doc.body.classList.toggle("route-body--chat", view === "home");
+    setActiveSurface(view);
+  }
 
   function projectLink(project, className = "gwt-hub__project") {
     const link = node("a", className, project.title || project.project_key);
@@ -159,10 +211,14 @@ function createHubApp({ document: doc, window: win }) {
     return link;
   }
 
-  function renderList(list, entries, emptyText, renderEntry) {
+  function renderList(list, all, emptyText, renderEntry) {
     list.replaceChildren();
+    const needle = search.value.trim().toLowerCase();
+    const entries = needle
+      ? all.filter(entry => String(entry.title || entry.project_key || "").toLowerCase().includes(needle))
+      : all;
     if (entries.length === 0) {
-      list.append(node("li", "gwt-hub__empty", emptyText));
+      list.append(node("li", "gwt-hub__empty", all.length ? "No project matches." : emptyText));
       return;
     }
     for (const entry of entries) {
@@ -179,11 +235,22 @@ function createHubApp({ document: doc, window: win }) {
     },
   });
 
+  // Issue #7728: the Hub list and Settings mount the same stop/start surface.
+  function autonomyControl(project) {
+    const control = createProjectAutonomyControl({
+      document: doc, projectTitle: project.title || project.project_key,
+      send: running => send({ kind: "set_project_autonomy", project_key: project.project_key, running }),
+    });
+    control.element.dataset.projectAutonomy = project.project_key;
+    control.update(project.autonomy);
+    releaseExecutionViews.push(() => control.unmount());
+    return control.element;
+  }
+
   function render() {
     for (const release of releaseExecutionViews) release();
     releaseExecutionViews = [];
-    version.hidden = !catalog.app_version;
-    version.textContent = catalog.app_version ? `v${catalog.app_version}` : "";
+    setVersion(catalog.app_version ? `v${catalog.app_version}` : "");
     renderList(openSection.list, catalog.projects, "No open projects", (project) => {
       const row = node("div", "gwt-hub__project-actions");
       const close = node("button", "text-button", "Close Project");
@@ -200,7 +267,7 @@ function createHubApp({ document: doc, window: win }) {
         badge.setAttribute("role", "status");
         row.append(badge);
       }
-      row.append(close, executionView(project));
+      row.append(autonomyControl(project), close, executionView(project));
       return row;
     });
     renderList(orphanSection.list, catalog.orphan_daemons || [], "No projects awaiting shutdown", (project) => {
@@ -263,6 +330,7 @@ function createHubApp({ document: doc, window: win }) {
       orphan_daemons: Array.isArray(hub?.orphan_daemons) ? hub.orphan_daemons : [],
     };
     render();
+    home.receiveCatalog({ open: catalog.projects.length, recent: catalog.recent_projects.length });
   }
 
   catalogResults.subscribe(state => state, hub => {
@@ -407,6 +475,8 @@ function createHubApp({ document: doc, window: win }) {
 
   function receive(event) {
     if (event && picker.receive(event)) return;
+    if (event && home.receive(event)) return;
+    if (event && setup.receive(event)) return;
     if (event && closeController.receive(event)) return;
     if (event?.kind === "project_execution_status") {
       executionResults.update(() => event.status);
@@ -431,7 +501,8 @@ function createHubApp({ document: doc, window: win }) {
       socket.send(JSON.stringify(message));
       return "sent";
     }
-    if (["confirm_close_project", "cancel_close_project", "preview_close_project"].includes(message.kind)) return "unavailable";
+    if (["confirm_close_project", "cancel_close_project", "preview_close_project", "load_home_conversation", "home_pm_send", "home_answer_decision", "home_defer_decision",
+      "get_first_run_setup", "save_first_run_setup"].includes(message.kind)) return "unavailable";
     queued.push(message);
     return "queued";
   }
@@ -446,6 +517,8 @@ function createHubApp({ document: doc, window: win }) {
       catalogConnectionFresh = true;
       connection.send(JSON.stringify({ kind: "frontend_ready" }));
       closeController.reconnect();
+      home.connected();
+      setup.connected();
       const replayedCloneSearchQueries = [];
       for (const message of queued.splice(0)) {
         connection.send(JSON.stringify(message));
@@ -472,6 +545,8 @@ function createHubApp({ document: doc, window: win }) {
     connection.addEventListener("close", () => {
       if (socket !== connection) return;
       closeController.connectionLost();
+      home.connectionLost();
+      setup.connectionLost();
       for (const policy of executionPolicies.values()) policy.connectionLost();
       closeCloneTab();
       if (cloneState.cloning) {
@@ -479,19 +554,21 @@ function createHubApp({ document: doc, window: win }) {
       }
       picker.connectionLost();
       queued = queued.filter(({ kind }) =>
-        !["open_project_dialog", "select_clone_project_parent", "clone_project_start"].includes(kind));
+        !["open_project_dialog", "select_clone_project_parent", "clone_project_start", "load_home_conversation", "home_pm_send", "home_answer_decision", "home_defer_decision"].includes(kind));
       reconnectTimer = win.setTimeout(connect, 1000);
     });
   }
 
-  openFolder.addEventListener("click", () => {
+  function openFolderDialog() {
     beginOpenRequest();
     picker.begin("open");
-  });
-  cloneButton.addEventListener("click", () => {
-    cloneState = { ...cloneState, open: true, error: "", progress: "", existingProjectUrl: "" };
+  }
+  function openCloneDialog(mode = cloneState.mode) {
+    cloneState = { ...cloneState, open: true, mode, error: "", progress: "", existingProjectUrl: "" };
     renderClone();
-  });
+  }
+  openFolder.addEventListener("click", () => openFolderDialog());
+  cloneButton.addEventListener("click", () => openCloneDialog());
 
   function installTestBridge() {
     if (win.__gwtPlaywrightTestBridge !== true || win.__gwtPlaywrightTestBridgeInstalled === true) {
@@ -504,25 +581,36 @@ function createHubApp({ document: doc, window: win }) {
   }
 
   function openInitialAction() {
-    const action = new URL(win.location.href).searchParams.get("action");
-    if (action === "open-folder") {
-      beginOpenRequest();
-      picker.begin("open");
-    } else if (action === "clone") {
-      cloneState = { ...cloneState, open: true };
-      renderClone();
-    }
+    const params = new URL(win.location.href).searchParams;
+    const action = params.get("action");
+    // An action link opens the picker's own flow, so it lands on Projects.
+    showView(action === "open-folder" || action === "clone" ? "projects" : params.get("view"));
+    // A Settings link opens the setup on the step it names.
+    if (params.get("step")) setup.showStep(params.get("step"));
+    if (action === "open-folder") openFolderDialog();
+    else if (action === "clone") openCloneDialog();
   }
 
   render();
-  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, homeUrl: HUB_URL_PATH };
+  showView("home");
+  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, showView, home, setup, homeUrl: HUB_URL_PATH };
 }
 
 export function mountHubApp({ window: win, document: doc }) {
-  doc.title = "gwt — Hub";
-  const app = createHubApp({ window: win, document: doc });
+  doc.title = "gwt — Home";
+  // Issue #7740: this page shares the header and footer; the version lives in
+  // the footer. Issue #7639: the header's PM entry is Home and its Projects
+  // entry is the picker.
+  let app = null;
+  const chrome = createAppChrome({ document: doc, handlers: {
+    pm: () => app?.showView("home"),
+    projects: () => app?.showView("projects"),
+  } });
+  const page = chrome.mountPage();
+  app = createHubApp({ window: win, document: doc, setVersion: chrome.setVersion,
+    setPm: chrome.setPm, setActiveSurface: chrome.setActiveSurface });
   doc.body.className = "route-body";
-  doc.body.replaceChildren(app.root, app.cloneModal, app.closeModal);
+  doc.body.replaceChildren(page.header, app.root, app.cloneModal, app.closeModal, page.footer);
   // Run once after mounting, before connecting: picker requests queue behind
   // frontend_ready, while reconnect only re-establishes the Hub connection.
   app.openInitialAction();

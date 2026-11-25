@@ -205,7 +205,7 @@ impl Default for QueryWorkerStatus {
     }
 }
 
-fn query_worker_status_at(worker_dir: &Path) -> QueryWorkerStatus {
+pub(crate) fn query_worker_status_at(worker_dir: &Path) -> QueryWorkerStatus {
     let read = || -> Option<QueryWorkerStatus> {
         let endpoint: serde_json::Value =
             serde_json::from_slice(&std::fs::read(worker_dir.join("endpoint.json")).ok()?).ok()?;

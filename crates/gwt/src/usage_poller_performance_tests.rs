@@ -231,9 +231,12 @@ impl Fixture {
 
     fn poller(&self) -> Poller {
         Poller {
-            codex_auth_observed: true,
-            codex_account_id: self.account_id.clone(),
-            codex_authenticated_at: Some(self.authenticated_at),
+            primary: AccountState {
+                codex_auth_observed: true,
+                codex_account_id: self.account_id.clone(),
+                codex_authenticated_at: Some(self.authenticated_at),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -295,7 +298,7 @@ fn usage_line(provider: UsageProvider, now: UtcTimestamp, appended: bool) -> Str
                 "rate_limits":{"primary":{"used_percent":10,"window_minutes":300,"resets_at":now.timestamp()+3600}}
             }
         }),
-        UsageProvider::ClaudeCode => serde_json::json!({
+        _ => serde_json::json!({
             "timestamp":now.to_rfc3339(), "type":"assistant",
             "message":{"model":"claude-sonnet-4","usage":{"input_tokens":if appended {40} else {20},"output_tokens":10,"cache_read_input_tokens":5}}
         }),

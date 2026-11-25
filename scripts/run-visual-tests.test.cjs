@@ -12,23 +12,31 @@ const shellPath = value => process.platform === "win32"
 const nativePath = value => process.platform === "win32"
   ? value.replace(/^\/([A-Za-z])\//, (_, drive) => `${drive}:/`) : value;
 
-test("runner rejects Node 26 before preparing Playwright", () => {
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-node-version-"));
-  try {
-    fs.writeFileSync(path.join(bin, "node"), '#!/usr/bin/env bash\nprintf "v26.13.0\\n"\n', { mode: 0o755 });
-    fs.writeFileSync(path.join(bin, "mktemp"), "#!/usr/bin/env bash\nexit 77\n", { mode: 0o755 });
-    const result = spawnSync(bash, [shellPath(path.join(__dirname, "run-visual-tests.sh")), "--list"], {
-      encoding: "utf8",
-      env: { ...process.env, PATH: [bin, process.env.PATH].join(path.delimiter) },
-    });
-    assert.equal(result.status, 1, result.stderr);
-    assert.match(result.stderr, /requires Node\.js 22\.x/);
-    assert.match(result.stderr, /v26\.13\.0/);
-    assert.match(result.stderr, /PATH/);
-  } finally {
-    fs.rmSync(bin, { recursive: true, force: true });
-  }
-});
+// A stub mktemp exits 77 at the runner's first preparation step, so a 77
+// status proves the version check let the run through.
+for (const [version, supported] of [["v22.23.4", true], ["v26.13.0", true], ["v24.11.0", false]]) {
+  test(`runner ${supported ? "accepts" : "rejects"} Node ${version} before preparing Playwright`, () => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-node-version-"));
+    try {
+      fs.writeFileSync(path.join(bin, "node"), `#!/usr/bin/env bash\nprintf "${version}\\n"\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(bin, "mktemp"), "#!/usr/bin/env bash\nexit 77\n", { mode: 0o755 });
+      const result = spawnSync(bash, [shellPath(path.join(__dirname, "run-visual-tests.sh")), "--list"], {
+        encoding: "utf8",
+        env: { ...process.env, PATH: [bin, process.env.PATH].join(path.delimiter) },
+      });
+      if (supported) {
+        assert.equal(result.status, 77, result.stderr);
+        return;
+      }
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /requires Node\.js 22\.x or 26\.x/);
+      assert.ok(result.stderr.includes(version), result.stderr);
+      assert.match(result.stderr, /PATH/);
+    } finally {
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+}
 
 test("project isolation runner preserves the caller repository under inherited Git state", () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-isolation-git-env-"));
@@ -66,7 +74,7 @@ for (const exitCode of [0, 1]) {
         fs.mkdirSync(path.join(fixture, directory), { recursive: true });
       }
       fs.copyFileSync(path.join(__dirname, "run-visual-tests.sh"), path.join(fixture, "scripts/run-visual-tests.sh"));
-      fs.writeFileSync(path.join(fixture, "scripts/playwright-version.txt"), "1.49.1\n");
+      fs.writeFileSync(path.join(fixture, "scripts/playwright-version.txt"), "1.65.1\n");
       fs.writeFileSync(path.join(fixture, "crates/gwt/playwright/playwright.config.ts"), "");
       fs.writeFileSync(path.join(fixture, "crates/gwt/web/index.html"), "fixture");
       fs.writeFileSync(path.join(fixture, "deps/node_modules/@playwright/test/index.js"), 'module.exports = { origin: "pinned" };');

@@ -31,9 +31,9 @@ test("Issues strip reads shared attention summaries on model-only updates", asyn
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Off");
   model.update(state => ({ ...state, status: { enabled: true, state: "active" },
     counts: { queue: 3, active: 1, maxActive: 2 } }));
-  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q3 A1/2");
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Running · 3 queued · 1 of 2 active");
   model.update(state => ({ ...state, counts: { queue: 0, active: 0, maxActive: 0 } }));
-  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q0 A0/0");
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Running · 0 queued · 0 of 0 active");
   model.update(state => ({ ...state, decisionAttention: { count: null, summary: "" },
     status: { ...state.status, needs_human_count: 2 } }));
   const count = document.getElementById("op-strip-needs-human");
@@ -114,12 +114,12 @@ test("runtime health batches a frame into the same latest immutable cell and det
   flush();
   const detail = document.getElementById("op-runtime-health-detail");
   detail.querySelector('[data-sort="cpu"]')?.dispatchEvent(new window.Event("click"));
-  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  assert.equal(cell.textContent, "High 80% 1.0G");
   assert.match(detail.textContent, /original/);
   assert.doesNotMatch(detail.textContent, /mutated/);
   assert.equal(previous.processes[0].name, "original");
   model.update(() => ({ state: "ok", cpu_percent: 5, processes: [] }));
-  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  assert.equal(cell.textContent, "High 80% 1.0G");
   flush();
   assert.match(cell.textContent, /^OK 5%/);
   assert.doesNotMatch(detail.textContent, /original/);
@@ -330,11 +330,11 @@ test("Runtime health renderer updates severity-first compact PERF values", async
   const cell = document.getElementById("op-strip-runtime-health");
   const value = document.getElementById("op-strip-runtime-health-value");
   assert.equal(cell?.dataset.state, "warn");
-  assert.equal(value?.textContent, "WARN 42% 768M");
-  assert.match(cell?.getAttribute("title") ?? "", /processes: 3/);
-  assert.match(cell?.getAttribute("title") ?? "", /dropped: \+2/);
+  assert.equal(value?.textContent, "Elevated 42% 768M");
+  assert.match(cell?.getAttribute("title") ?? "", /Processes: 3/);
+  assert.match(cell?.getAttribute("title") ?? "", /Dropped events: \+2/);
   assert.match(cell?.getAttribute("title") ?? "", runtimeCpuUnitsPattern);
-  assert.match(cell?.getAttribute("aria-label") ?? "", /WARN.*42%.*768M/i);
+  assert.match(cell?.getAttribute("aria-label") ?? "", /Elevated.*42%.*768M/);
   assert.match(cell?.getAttribute("aria-label") ?? "", runtimeCpuUnitsPattern);
 
   cell?.dispatchEvent(new window.Event("focus", { bubbles: true }));
@@ -395,10 +395,10 @@ test("Runtime health renderer shows structured diagnostic hover detail", async (
   assert.equal(processRows.length, 2);
   assert.equal(
     document.getElementById("op-strip-runtime-health-value")?.textContent,
-    "HOT 100% 2.0G",
+    "High 100% 2.0G",
     "legacy aggregate payloads must clamp to the host-share ceiling",
   );
-  assert.match(summary?.textContent ?? "", /HOT/);
+  assert.match(summary?.textContent ?? "", /StateHigh/);
   assert.match(summary?.textContent ?? "", /100%/);
   assert.doesNotMatch(summary?.textContent ?? "", /501%/);
   assert.match(summary?.textContent ?? "", /2.0G/);
@@ -912,7 +912,7 @@ test("Issue #3884 AC-3: RUNNING cell breaks out inline-terminal agents", async (
 
   applyTelemetryCounts(document, { running: 6, running_inline: 5 });
   assert.equal(document.getElementById("op-strip-running")?.textContent, "6");
-  assert.equal(inline()?.textContent, "5 inline");
+  assert.equal(inline()?.textContent, "5 in Issues");
   assert.equal(inline()?.hidden, false);
   assert.match(
     runningCell()?.title || "",
@@ -949,7 +949,7 @@ test("project health renders its immutable latest frame without changing ONLINE"
   assert.equal(cell.dataset.state, "degraded");
   assert.match(cell.textContent, /unavailable/i);
   assert.equal(cell.title, "Project connection lost");
-  assert.equal(document.querySelector('[data-role="connection-label"]').textContent, "ONLINE");
+  assert.equal(document.querySelector('[data-role="connection-label"]').textContent, "Connected");
   model.update(() => ({ state: "healthy", detail: null }));
   flush();
   assert.equal(cell.dataset.state, "healthy");
@@ -973,7 +973,7 @@ test("Issue #6992: wedged recovery requires a current explicit confirmation", as
   model.update(() => ({ state: "wedged", recovery_id: "wedge-test-1", detail: "Health timed out repeatedly" })); flush();
   const cell = document.querySelector("[data-project-owner-health]");
   assert.equal(cell.dataset.state, "wedged");
-  assert.match(cell.textContent, /Wedged/);
+  assert.match(cell.textContent, /Not responding/);
   const restart = cell.querySelector("[data-owner-restart]");
   assert.ok(restart);
   restart.click();
@@ -1052,7 +1052,7 @@ test("Issue #7519: all four running counters read the same server aggregate", as
     applyOperatorTelemetryCounts: counts => applyTelemetryCounts(document, counts) };
   const recomputeStrip = Function(...Object.keys(dependencies), `${definition}; return recomputeOperatorTelemetry;`)(...Object.values(dependencies));
   const surfaces = () => {
-    const [, run, block] = document.title.match(/RUN (\d+) · BLOCK (\d+)/);
+    const [, run, block] = document.title.match(/(\d+) running · (\d+) blocked/);
     const strip = id => document.getElementById(`op-strip-${id}`).textContent;
     const heading = key => works.element.querySelector(`[data-count="${key}"]`).textContent;
     return {

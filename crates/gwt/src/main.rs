@@ -2001,6 +2001,12 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
         event,
         FrontendEvent::RefreshOrphanDaemons
             | FrontendEvent::ReapOrphanDaemon { .. }
+            | FrontendEvent::LoadHomeConversation { .. }
+            | FrontendEvent::HomePmSend { .. }
+            | FrontendEvent::HomeAnswerDecision { .. }
+            | FrontendEvent::HomeDeferDecision { .. }
+            | FrontendEvent::GetFirstRunSetup { .. }
+            | FrontendEvent::SaveFirstRunSetup { .. }
             | FrontendEvent::FrontendReady
             | FrontendEvent::StartupFirstFrame { .. }
             | FrontendEvent::RefreshUsage
@@ -2333,7 +2339,7 @@ enum UserEvent {
         status: Box<gwt::IssueMonitorStatusView>,
     },
     IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
-    IssueMonitorMaxActivePrepared(Box<app_runtime::PreparedIssueMonitorMaxActive>),
+    IssueMonitorLaneControlPrepared(Box<app_runtime::PreparedIssueMonitorLaneControl>),
     IssueMonitorProfilesSaved(Box<app_runtime::IssueMonitorProfilesSaveCompletion>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -2415,6 +2421,11 @@ enum UserEvent {
         window_id: String,
         data: Vec<u8>,
     },
+    HomeAttachmentsReady {
+        operation: Box<app_runtime::AttachmentOperation>,
+        request_id: u64,
+        prompt: String,
+    },
     AttachmentPromptReady {
         operation: Box<app_runtime::AttachmentOperation>,
         prompt: String,
@@ -2476,6 +2487,16 @@ enum UserEvent {
     BrowserDisconnected {
         client_id: String,
     },
+    PoolAccountLoginPrepared {
+        client_id: String,
+        login_id: String,
+        project_root: Option<PathBuf>,
+        result: Result<gwt::execution_environments::Account, String>,
+    },
+    PoolAccountLoginEnded {
+        client_id: String,
+        login_id: String,
+    },
     ProjectExecutionChoiceCompleted(
         Box<app_runtime::project_execution_policy::ProjectExecutionChoiceCompleted>,
     ),
@@ -2497,6 +2518,13 @@ enum UserEvent {
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
         current_error: Option<String>,
+        decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
+    },
+    /// Issue #7742: answers recorded in the decision queue that still have to
+    /// reach their waiting sessions.
+    DecisionAnswersPending {
+        project_root: PathBuf,
+        deliveries: Vec<gwt_core::decision_queue::PendingDelivery>,
     },
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -3087,6 +3115,29 @@ mod tests {
         assert!(hub_frontend_event_allowed(
             &FrontendEvent::OpenProjectDialog
         ));
+        // Issue #7639: Home reads decisions and sends to a PM by project.
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::LoadHomeConversation {
+                request_id: 1,
+                history: Default::default()
+            }
+        ));
+        assert!(hub_frontend_event_allowed(&FrontendEvent::HomePmSend {
+            project_key: "0123456789abcdef".to_string(),
+            text: "Approve it".to_string(),
+            request_id: 2,
+            attachments: Vec::new(),
+        }));
+        // Issue #7731: the first-run setup is read and saved from the Hub.
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::GetFirstRunSetup { refresh: true }
+        ));
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::SaveFirstRunSetup {
+                pm_member_id: None,
+                pm_name: Some("Aoi".to_string()),
+            }
+        ));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::RestartPmAgent));
         assert!(!hub_frontend_event_allowed(&FrontendEvent::TerminalInput {
             id: "pane".to_string(),
@@ -3589,6 +3640,7 @@ mod tests {
             terminal_queue: Vec::new(),
             terminal_queue_auto_refill: false,
             terminal_queue_auto_refill_limit: 0,
+            terminal_queue_refill_hold: None,
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 0,
@@ -3699,6 +3751,7 @@ mod tests {
             reviewed_sha: "abc123".to_string(),
             required_criteria: vec!["tests pass".to_string()],
             diff: "diff --git a/a b/a".to_string(),
+            merged_evidence: None,
             linked_issue_kind: gwt::LinkedIssueKind::Issue,
         };
         let review_payload = gwt::runtime_daemon_events::issue_monitor_payload(
@@ -5107,6 +5160,7 @@ mod tests {
             proxy,
             blocking_tasks,
             hook_doctor_in_flight: Default::default(),
+            coalesced_reads: Default::default(),
             agent_maintenance: Default::default(),
             sessions_dir,
             launch_wizard_cache,
@@ -5118,12 +5172,14 @@ mod tests {
             issue_monitor_launch_failure_causes: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
             issue_monitor_launch_attempts: std::collections::HashMap::new(),
+            issue_monitor_stale_retry_at: HashMap::new(),
+            issue_monitor_cleanup_retries: HashMap::new(),
             issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             issue_monitor_profile_saves: HashMap::new(),
-            issue_monitor_max_active_saves: HashMap::new(),
+            issue_monitor_control_lanes: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
@@ -5137,6 +5193,7 @@ mod tests {
             initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
+            pending_pm_launch_retry_tabs: Vec::new(),
             pending_frontend_ready_snapshots: Vec::new(),
             gui_slice_continue_queued: false,
             deferred_issue_monitor_launches: None,
@@ -5154,6 +5211,10 @@ mod tests {
             update_drain_released_projects: Vec::new(),
             pending_update_resume_notice: None,
             active_agent_sessions: HashMap::new(),
+            pool_account_logins: HashMap::new(),
+            decision_answers_sent: Default::default(),
+            decision_answers_in_flight: Default::default(),
+            decision_answer_sequence: 0,
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             update_drain_scan_in_flight: false,
@@ -11558,9 +11619,9 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 projection,
             }) => {
-                let mut events = app.handle_workspace_state_loaded(&project_root);
+                let events = app.handle_workspace_state_loaded(&project_root);
                 if let Some(projection) = projection {
-                    events.extend(app.handle_workspace_projection_changed_events(&project_root, &projection));
+                    app.queue_workspace_projection_patch(&project_root, projection);
                 }
                 clients.dispatch(events);
             }
@@ -11714,6 +11775,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
                 app.retry_project_observation_invalidations();
+                // Issue #7742: answers recorded outside this process (the PM
+                // closing a decision through gwtd) are delivered on this tick.
+                app.scan_decision_answers();
                 let mut events = app.terminal_convergence_tick_events();
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
@@ -11772,8 +11836,8 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));
             }
-            Event::UserEvent(UserEvent::IssueMonitorMaxActivePrepared(prepared)) => {
-                clients.dispatch(app.issue_monitor_max_active_prepared_events(*prepared));
+            Event::UserEvent(UserEvent::IssueMonitorLaneControlPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_lane_control_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);
@@ -11843,6 +11907,9 @@ fn main() -> std::io::Result<()> {
                         },
                     )]);
                 }
+            }
+            Event::UserEvent(UserEvent::HomeAttachmentsReady { operation, request_id, prompt }) => {
+                clients.dispatch(app.deliver_home_message(*operation, &prompt, request_id));
             }
             Event::UserEvent(UserEvent::AttachmentPromptReady { operation, prompt }) => {
                 let events = app.inject_attachment_prompt_events(*operation, prompt);
@@ -11951,7 +12018,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
-            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error, current_error }) => {
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error, current_error, decisions }) => {
                 clients.dispatch(app.pm_reports_loaded_events(client_id, BackendEvent::PmReports {
                     id: window_id,
                     session_id: Some(session_id),
@@ -11962,14 +12029,24 @@ fn main() -> std::io::Result<()> {
                     current,
                     error,
                     current_error,
+                    decisions,
                 }));
+            }
+            Event::UserEvent(UserEvent::DecisionAnswersPending { project_root, deliveries }) => {
+                clients.dispatch(app.deliver_decision_answers(&project_root, deliveries));
             }
             Event::UserEvent(UserEvent::ProjectObservationInvalidationCompleted(completed)) => {
                 app.project_observation_invalidation_completed(*completed);
             }
             Event::UserEvent(UserEvent::BrowserDisconnected { client_id }) => {
-                let _ = client_id;
+                app.close_pool_account_login(&client_id);
                 clients.dispatch(app.reconcile_project_view_connections(&clients));
+            }
+            Event::UserEvent(UserEvent::PoolAccountLoginPrepared { client_id, login_id, project_root, result }) => {
+                clients.dispatch(app.pool_account_login_prepared(client_id, login_id, project_root, result));
+            }
+            Event::UserEvent(UserEvent::PoolAccountLoginEnded { client_id, login_id }) => {
+                clients.dispatch(app.pool_account_login_ended(client_id, login_id));
             }
             Event::UserEvent(UserEvent::ProjectExecutionChoiceCompleted(completed)) => {
                 clients.dispatch(app.project_execution_choice_completed(*completed));

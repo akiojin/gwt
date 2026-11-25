@@ -65,3 +65,42 @@
    - If the verification needs an agent window but not Start Work itself,
      prepare or launch it on the current checkout/current branch path instead
      of asking the user to create a new work branch from the fresh browser.
+
+2. Hold a browser session through automated suites:
+   - A `--no-tray` instance shuts down after a 5s reconnect grace once its
+     last browser WebSocket closes. A headed run closes every page between
+     Playwright projects (for example dark then light), so the second theme
+     can time out in `beforeEach` and then hit `ERR_CONNECTION_REFUSED`.
+   - Before running automated browser tests in the owner shell, start one
+     read-only Hub WebSocket keeper and keep it open until the whole suite
+     ends. It exits by itself when the fresh server stops, so the existing
+     cleanup trap still ends both processes:
+
+     ```bash
+     # browser-check-session-keeper-begin
+     KEEPER_LOG="$CHECK_HOME/session-keeper.log"
+     node -e '
+       const url = new URL("/ws", process.argv[1]);
+       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+       url.search = "";
+       const ws = new WebSocket(url);
+       ws.onopen = () => console.log("connected");
+       ws.onerror = () => process.exit(1);
+       ws.onclose = () => process.exit(0);
+     ' "$(head -n 1 "$URL_FILE")" > "$KEEPER_LOG" 2>&1 &
+     KEEPER_PID=$!
+     for ((KEEPER_WAIT=0; KEEPER_WAIT<100; KEEPER_WAIT++)); do
+       if grep -qs '^connected$' "$KEEPER_LOG"; then break; fi
+       if ! kill -0 "$KEEPER_PID" 2>/dev/null; then break; fi
+       sleep 0.1
+     done
+     if ! grep -qs '^connected$' "$KEEPER_LOG"; then
+       echo "browser-check session keeper failed to connect" >&2
+       cat "$KEEPER_LOG" >&2
+       exit 1
+     fi
+     # browser-check-session-keeper-end
+     ```
+
+   - Manual inspection does not need the keeper; the user's browser holds
+     the session. Requires Node 22 or later for the global `WebSocket`.

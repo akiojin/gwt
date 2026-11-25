@@ -17,6 +17,74 @@ struct TurnReceipt {
     fetched: bool,
 }
 
+struct ReceiptScope {
+    repository_root: PathBuf,
+    common_dir: PathBuf,
+    path: PathBuf,
+}
+
+fn registered_scope(cwd: &Path, session: &str) -> io::Result<Option<ReceiptScope>> {
+    let repository_root = repository_root_for_cwd(cwd);
+    let identity_root = repository_root.as_deref().unwrap_or(cwd);
+    let project_store = if crate::pm_registry::is_canonical_pm_worktree(identity_root) {
+        // HOME may retain /var while the resolved cwd uses /private/var.
+        identity_root
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| io::Error::other("project store is unknown"))?
+            .to_path_buf()
+    } else {
+        crate::board_read_receipts::project_store(identity_root)
+    };
+    let prefs = crate::pm_registry::load_pm_prefs(&project_store.join("project-state/pm.json"))?;
+    if !prefs
+        .registration
+        .is_some_and(|registration| registration.session_id == session)
+    {
+        return Ok(None);
+    }
+    let unknown = || io::Error::other("repository identity is unknown");
+    let repository_root = repository_root.ok_or_else(unknown)?;
+    let common_dir =
+        gwt_core::repo_hash::repository_common_dir(&repository_root).ok_or_else(unknown)?;
+    // Neither session IDs nor repository spellings become path components.
+    // A common-dir key also separates independent clones with the same origin.
+    let receipt = project_store
+        .join("pm/branch-freshness")
+        .join(digest(common_dir.as_os_str().as_encoded_bytes()))
+        .join(format!("{}.json", digest(session.as_bytes())));
+    Ok(Some(ReceiptScope {
+        repository_root,
+        common_dir,
+        path: receipt,
+    }))
+}
+
+/// Execute the recovery directly so it works even if the provider sends
+/// command output without the exit status in PostToolUse.
+pub(crate) fn refresh(cwd: &Path, session: &str) -> io::Result<()> {
+    let Some(scope) = registered_scope(cwd, session)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "requires this project's registered PM session",
+        ));
+    };
+    let output = gwt_core::process::run_git_logged_scrubbed(
+        &["fetch", "origin"],
+        Some(&scope.repository_root),
+    )?;
+    if !output.status.success() {
+        let detail = gwt_core::error_ledger::sanitize_error_message(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
+        return Err(io::Error::other(format!(
+            "git fetch origin: {} {detail}",
+            output.status
+        )));
+    }
+    save_receipt(&scope.path, true)
+}
+
 /// Return advisory text only. Optional bookkeeping failures must never deny a
 /// tool call or turn boundary, and a provider's payload is never PM identity.
 pub(crate) fn handle_with_input(
@@ -32,34 +100,16 @@ pub(crate) fn handle_with_input(
         return None;
     }
     let session = current_session?;
-    let repository_root = repository_root_for_cwd(worktree_root);
-    let identity_root = repository_root.as_deref().unwrap_or(worktree_root);
-    let project_store = if crate::pm_registry::is_canonical_pm_worktree(identity_root) {
-        // HOME may retain /var while the resolved cwd uses /private/var.
-        identity_root.parent()?.parent()?.to_path_buf()
-    } else {
-        crate::board_read_receipts::project_store(identity_root)
-    };
-    let prefs_path = project_store.join("project-state/pm.json");
-    if !crate::pm_registry::session_is_registered_pm(&prefs_path, session) {
-        if let Err(error) = crate::pm_registry::load_pm_prefs(&prefs_path) {
-            return Some(unavailable(worktree_root, error));
-        }
-        return None;
-    }
-    let Some(repository_root) = repository_root else {
-        return Some(unavailable(worktree_root, "repository identity is unknown"));
+    let ReceiptScope {
+        repository_root,
+        common_dir,
+        path,
+    } = match registered_scope(worktree_root, session) {
+        Ok(Some(scope)) => scope,
+        Ok(None) => return None,
+        Err(error) => return Some(unavailable(worktree_root, error)),
     };
     let worktree_root = repository_root.as_path();
-    let Some(common_dir) = gwt_core::repo_hash::repository_common_dir(worktree_root) else {
-        return Some(unavailable(worktree_root, "repository identity is unknown"));
-    };
-    // Neither session IDs nor repository spellings become path components.
-    // A common-dir key also separates independent clones with the same origin.
-    let path = project_store
-        .join("pm/branch-freshness")
-        .join(digest(common_dir.as_os_str().as_encoded_bytes()))
-        .join(format!("{}.json", digest(session.as_bytes())));
     if matches!(event, "SessionStart" | "UserPromptSubmit") {
         return save_receipt(&path, false)
             .err()
@@ -139,11 +189,11 @@ pub(crate) fn handle_with_input(
     match std::fs::read(&path) {
         Ok(bytes) => match serde_json::from_slice::<TurnReceipt>(&bytes) {
             Ok(receipt) if receipt.schema_version == 1 && receipt.fetched => None,
-            Ok(receipt) if receipt.schema_version == 1 => Some(warning(worktree_root)),
+            Ok(receipt) if receipt.schema_version == 1 => Some(warning()),
             Ok(_) => Some(unavailable(worktree_root, "unsupported receipt schema")),
             Err(error) => Some(unavailable(worktree_root, error)),
         },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(warning(worktree_root)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(warning()),
         Err(error) => Some(unavailable(worktree_root, error)),
     }
 }
@@ -190,21 +240,23 @@ fn save_receipt(path: &Path, fetched: bool) -> io::Result<()> {
     gwt_core::atomic_file::write_atomic(path, &bytes)
 }
 
-fn warning(worktree: &Path) -> String {
-    let quoted = worktree.to_string_lossy().replace('\'', "'\\''");
-    format!(
-        "Branch freshness warning: this PM turn has no confirmed successful `git fetch origin` \
-         for this repository. Run `git -C '{quoted}' fetch origin`, then repeat the branch \
-         inspection. Execution is allowed."
-    )
+fn warning() -> String {
+    "Branch freshness warning: this PM turn has no confirmed successful `git fetch origin` \
+     for this repository. Send this JSON envelope to gwtd on stdin, then repeat the branch \
+     inspection. Execution is allowed.\n\n\
+     {\"schema_version\":1,\"operation\":\"pm.branch_freshness.refresh\",\"params\":{}}"
+        .into()
 }
 
 fn unavailable(worktree: &Path, error: impl std::fmt::Display) -> String {
-    eprintln!("gwtd hook branch-freshness: optional evidence unavailable: {error}");
+    eprintln!(
+        "gwtd hook branch-freshness: optional evidence unavailable in {}: {error}",
+        worktree.display()
+    );
     format!(
         "Branch freshness warning: optional evidence is unavailable ({error}); freshness is \
          unknown. {}",
-        warning(worktree)
+        warning()
     )
 }
 
@@ -277,7 +329,7 @@ fn git_invocation(command: &str, cwd: &Path) -> Option<GitInvocation> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::test_support::ScopedGwtHome;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use serde_json::json;
 
     fn repository(path: &Path) {
@@ -382,6 +434,7 @@ mod tests {
         for response in [
             json!({"exit_code": 1}),
             json!({"stdout": "success"}),
+            json!(""),
             json!({"exit_code": "0"}),
             json!({"exit_code": 0, "interrupted": true}),
             json!(null),
@@ -650,28 +703,71 @@ mod tests {
     }
 
     #[test]
-    fn advertised_recovery_is_recognized_for_a_repository_path_with_spaces() {
+    fn codex_without_an_exit_status_gets_a_recovery_that_can_record_one() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(dir.path().join("home"));
         let repo = dir.path().join("repository with spaces");
         repository(&repo);
+        assert!(gwt_core::process::run_git_logged_scrubbed(
+            &["remote", "add", "origin", "../origin"],
+            Some(&repo),
+        )
+        .unwrap()
+        .status
+        .success());
         register_pm(&repo, "pm-a");
         let inspection = payload("git status", &repo, json!(null));
         let advisory = handle_with_input("PreToolUse", &inspection, &repo, Some("pm-a")).unwrap();
-        let recovery = advisory
-            .split("Run `")
-            .nth(1)
-            .unwrap()
-            .split('`')
-            .next()
-            .unwrap();
+        let recovery = advisory.lines().last().unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+            assert_ne!(
+                crate::cli::dispatch_json_input(&mut env, "gwtd", recovery),
+                0
+            );
+        }
+        assert!(handle_with_input("PreToolUse", &inspection, &repo, Some("pm-a")).is_some());
+
+        repository(&dir.path().join("origin"));
+        assert!(
+            gwt_core::process::run_git_logged_scrubbed(&["fetch", "origin"], Some(&repo))
+                .unwrap()
+                .status
+                .success()
+        );
         handle_with_input(
             "PostToolUse",
-            &payload(recovery, &repo, json!({"exit_code":0})),
+            &payload(
+                &format!("git -C '{}' fetch origin", repo.display()),
+                &repo,
+                json!(""),
+            ),
             &repo,
             Some("pm-a"),
         );
+        assert_eq!(
+            handle_with_input("PreToolUse", &inspection, &repo, Some("pm-a")),
+            Some(advisory.clone()),
+        );
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "other-session");
+            assert_ne!(
+                crate::cli::dispatch_json_input(&mut env, "gwtd", recovery),
+                0
+            );
+        }
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        assert_eq!(
+            crate::cli::dispatch_json_input(&mut env, "gwtd", recovery),
+            0
+        );
         assert!(handle_with_input("PreToolUse", &inspection, &repo, Some("pm-a")).is_none());
+        handle_with_input("UserPromptSubmit", "{}", &repo, Some("pm-a"));
+        assert!(handle_with_input("PreToolUse", &inspection, &repo, Some("pm-a")).is_some());
     }
 
     #[test]

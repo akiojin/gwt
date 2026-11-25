@@ -8,6 +8,7 @@ import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
 import { gotoLiveGwt, installLiveGwtInitScript, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 import { startManagedBrowserSource, useManagedBrowserSource } from './_helpers/managed-browser-source';
 import { withNativeHiddenPage } from './_helpers/native-chromium';
+import { openWorks } from './_helpers/works-entry';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
@@ -85,7 +86,7 @@ test.describe('PM reports', () => {
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
 
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         await expect(body).toBeHidden();
         appendFileSync(history, report(37) + '\n');
         await refreshPmReports(page);
@@ -94,7 +95,7 @@ test.describe('PM reports', () => {
         await expect(body).toBeVisible();
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
         await body.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         appendFileSync(history, report(38) + '\n');
         await refreshPmReports(page);
         await expect(messages).toHaveCount(39);
@@ -334,7 +335,7 @@ test.describe('PM reports', () => {
         await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
         await expect(draft).toHaveValue('Keep this unsent PM draft');
         await info.attach(`Chat terminal action ${theme}`, { body: await pane.screenshot(), contentType: 'image/png' });
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         await full.getByRole('button', { name: 'Back to Works' }).click();
         const row = works.locator(`.work-row[data-window-id="${id}"]`);
         await expect(row.locator('.window-role-badge')).toHaveText('PM');
@@ -465,7 +466,7 @@ test.describe('PM reports', () => {
       await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
       await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 220');
       await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
-      await page.getByRole('button', { name: 'Works', exact: true }).click();
+      await openWorks(page);
       await emit('terminal_snapshot', 240);
       await page.locator('#op-pm-entry').click();
       await expect(pane.locator('.pm-conversation-log')).toBeVisible();
@@ -1401,18 +1402,24 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       page.on('websocket', socket => {
         socket.on('framesent', ({ payload }) => {
           const event = JSON.parse(String(payload));
-          if (event.kind === 'pane_send_input') choiceRequests.push(event);
+          if (['answer_decision', 'defer_decision', 'pane_send_input'].includes(event.kind)) choiceRequests.push(event);
         });
         socket.on('framereceived', ({ payload }) => {
           const event = JSON.parse(String(payload));
-          if (event.kind === 'pane_send_result') choiceResults.push(event);
+          if (event.kind === 'decision_result') choiceResults.push(event);
         });
       });
       await gotoPmReports(page, undefined, BASE);
       const primaryKey = new URL(page.url()).pathname.split('/').at(-1)!;
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
-      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
+      // T-023 / Issue #7742 AC-5: a decision is drawn only by Decide and the PM
+      // conversation, both from the gwtd decision queue. The unanswered legacy
+      // decision report is bridged into that queue, so it still waits there
+      // after the restart, not in Reports.
+      await expect(pane.locator('.task-decisions__card').filter({ hasText: 'Persisted before restart' }))
+        .toHaveCount(1);
+      await expect(reports.locator('article[data-report-id="persisted-before-restart"]')).toHaveCount(0);
       const originalCount = await reports.locator('article').count();
       const state = ownedState;
       const fixture = { repo_hash: basename(join(state, '..')) };
@@ -1565,63 +1572,82 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         expect(listed.receipts.find((row: any) => row.request_id === unchanged.request_id)).toEqual(unchanged);
         expect(listed.events.find((row: any) => row.event_id === initialEvent.event_id)).toMatchObject({ revision: 3, state: { status: 'resolved' } });
         await refreshPmReports(page);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
         await expect(details).toHaveAttribute('open', '');
+        const decisionId = mixed.reports[1].id;
         for (const receipt of [mixed, resolved]) {
-          for (const row of receipt.reports) await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(1);
+          for (const row of receipt.reports) {
+            await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(row.id === decisionId ? 0 : 1);
+          }
         }
-        const decisionRow = reports.locator(`article[data-report-id="${mixed.reports[1].id}"]`);
-        await expect(decisionRow).toContainText('1. Retry — repeat the check\n2. Wait — keep the current state\n3. Investigate — collect more evidence\n4. Cancel — stop this attempt');
-        await expect(decisionRow).toContainText('Reply with the option number, or Other: your own answer.');
-        await decisionRow.getByRole('button', { name: 'Copy report' }).click();
-        await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('4. Cancel — stop this attempt');
-        await saveEvidence('four-choice-decision', await decisionRow.screenshot(), 'image/png');
+        await expect(reports.locator('.pm-chat__decision-controls')).toHaveCount(0);
 
-        // T-ASK-SURFACE: actual Reports -> existing send path -> stopped-pane
-        // refusal. This fixture proves the request and visible failure, never
-        // a provider-accepted answer or a human Q&A capture.
-        const choices = decisionRow.locator('.pm-chat__decision-option');
-        await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
-        await choices.nth(1).focus();
-        await page.keyboard.press('Enter');
-        await expect.poll(() => choiceRequests.length).toBe(1);
-        expect(choiceRequests[0]).toEqual({ kind: 'pane_send_input', session_id: SESSION,
-          text: 'Answer to "Which recovery?": 2. Wait — keep the current state\r', request_id: expect.any(Number) });
-        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
-          .toMatchObject({ ok: false, request_id: choiceRequests[0].request_id });
-        await expect(decisionRow.getByRole('alert')).not.toBeEmpty();
-        await expect(choices.nth(1)).toBeEnabled();
-        await expect(choices.nth(1)).toBeFocused();
-        const refusal = await decisionRow.getByRole('alert').innerText();
+        // T-ASK-SURFACE / T-023 / Issue #7742: the PM conversation and Decide
+        // read the gwtd decision queue. A deferral and an answer are queue
+        // requests; nothing travels through the (stopped) PM pane, and the
+        // answer is accepted even though the PM session is not running.
         await pane.getByRole('button', { name: 'Chat', exact: true }).click();
-        const chatDecisions = pane.getByRole('region', { name: 'Decision reports', exact: true });
-        const chatDecision = chatDecisions.locator(`[data-decision-id="${mixed.reports[1].id}"]`);
-        await expect(chatDecision.getByRole('alert')).toHaveText(refusal);
-        await expect(chatDecision.locator('.pm-chat__decision-option')).toHaveCount(4);
+        await expect(pane.getByRole('region', { name: 'Decision reports', exact: true })).toHaveCount(0);
+        const conversation = pane.getByRole('log', { name: 'PM conversation messages' });
+        const chatDecision = conversation.locator('.pm-chat__decision').filter({ hasText: 'Which recovery?' });
+        await expect(chatDecision).toHaveCount(1);
+        await expect(chatDecision).toContainText('I recommend: Retry.');
+        const queueId = await chatDecision.getAttribute('data-decision-id');
+        expect(queueId, 'the queue owns the decision identity, not the report').not.toBe(decisionId);
+        await saveEvidence('four-choice-decision', await chatDecision.screenshot(), 'image/png');
+        const choices = chatDecision.locator('.pm-chat__decision-option');
+        await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
         const draft = pane.getByRole('textbox', { name: 'Message to PM' });
         await draft.fill('Keep this original reply');
-        await chatDecision.getByRole('button', { name: 'Other: reply in chat', exact: true }).click();
+        await chatDecision.getByRole('button', { name: 'Other: write a reply', exact: true }).click();
         await expect(draft).toBeFocused();
         await expect(draft).toHaveValue('Keep this original reply');
-        expect(choiceRequests).toHaveLength(1);
-        await chatDecision.locator('.pm-chat__decision-option').nth(0).click();
-        await expect.poll(() => choiceRequests.length).toBe(2);
-        expect(choiceRequests[1].text).toBe('Answer to "Which recovery?": 1. Retry — repeat the check\r');
-        expect(choiceRequests[1].request_id).not.toBe(choiceRequests[0].request_id);
-        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
-          .toMatchObject({ ok: false });
-        await expect(chatDecision.getByRole('alert')).not.toBeEmpty();
-        await expect(draft).toHaveValue('Keep this original reply');
+        const replyTarget = pane.locator('.pm-chat__reply-target');
+        await expect(replyTarget).toContainText('Replying to: Which recovery?');
+        expect(choiceRequests).toHaveLength(0);
+        await replyTarget.getByRole('button', { name: 'Cancel reply', exact: true }).click();
+        await expect(replyTarget).toBeHidden();
         await page.setViewportSize({ width: 404, height: 1000 });
         await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(400);
-        await expect.poll(() => chatDecisions.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+        await expect.poll(() => conversation.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
         await chatDecision.scrollIntoViewIfNeeded();
         await saveEvidence('chat-decision-narrow', await pane.screenshot(), 'image/png');
         await page.setViewportSize({ width: 1440, height: 1000 });
-        const retryRefusal = choiceResults.find(result => result.request_id === choiceRequests[1].request_id).error;
+        // AC-4: "Decide later" keeps the decision waiting at the end of the
+        // queue, and the waiting count does not change.
         await pane.getByRole('button', { name: 'Decide', exact: true }).click();
-        await expect(pane.locator(`.task-decisions__card[data-decision-id="${mixed.reports[1].id}"]`)
-          .getByRole('alert')).toContainText(retryRefusal);
+        const decideCard = pane.locator(`.task-decisions__card[data-decision-id="${queueId}"]`);
+        const waitingCount = await pane.locator('.task-decisions__count').innerText();
+        const waitingBefore = Number(waitingCount.match(/^(\d+) decisions? waiting$/)?.[1]);
+        expect(waitingBefore, 'the bridged legacy decision and the typed one both wait').toBeGreaterThanOrEqual(2);
+        await decideCard.getByRole('button', { name: 'Decide later', exact: true }).click();
+        await expect.poll(() => choiceRequests.length).toBe(1);
+        expect(choiceRequests[0]).toEqual({ kind: 'defer_decision', id: expect.any(String),
+          request_id: expect.any(Number), decision_id: queueId });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
+          .toMatchObject({ ok: true, action: 'defer', decision_id: queueId });
+        await expect(pane.locator('.task-decisions__card').last()).toHaveAttribute('data-decision-id', queueId!);
+        await expect(pane.locator('.task-decisions__notice')).toContainText('Kept waiting');
+        await expect(pane.locator('.task-decisions__count')).toHaveText(waitingCount);
+        // AC-2: the answer is recorded by the queue while the PM is stopped;
+        // the decision leaves both surfaces and the count drops by one.
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        await choices.nth(1).focus();
+        await page.keyboard.press('Enter');
+        await expect.poll(() => choiceRequests.length).toBe(2);
+        expect(choiceRequests[1]).toEqual({ kind: 'answer_decision', id: expect.any(String),
+          request_id: expect.any(Number), decision_id: queueId, answer: '2. Wait — keep the current state' });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
+          .toMatchObject({ ok: true, action: 'answer', decision_id: queueId });
+        await expect(chatDecision).toHaveCount(0);
+        await expect(draft).toHaveValue('Keep this original reply');
+        await pane.getByRole('button', { name: 'Decide', exact: true }).click();
+        await expect(decideCard).toHaveCount(0);
+        await expect(pane.locator('.task-decisions__count'))
+          .toHaveText(`${waitingBefore - 1} decision${waitingBefore - 1 === 1 ? '' : 's'} waiting`);
+        await expect(pane.locator('.task-decisions__notice')).toHaveText('Answer sent. The waiting session continues with it.');
+        expect(choiceRequests.filter(request => request.kind === 'pane_send_input'),
+          'a decision never travels through the PM pane').toEqual([]);
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await saveEvidence('decision-controls-requests', JSON.stringify({ choiceRequests, choiceResults }), 'application/json');
         const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
@@ -1697,7 +1723,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
         await saveEvidence('second-project-reports', await pane.screenshot(), 'image/png');
         await gotoPmReports(page, primaryKey, BASE);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
         await expect(reports).not.toContainText(`RPT-F second project only ${theme}`);
         expect(invoke('pm.report.list', {}).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(3);
         expect(invoke('pm.report.list', {}, secondSession, secondRoot).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(1);

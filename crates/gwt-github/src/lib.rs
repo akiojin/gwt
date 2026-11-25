@@ -28,7 +28,7 @@ pub mod spec_validate;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
 pub use cache::{
-    Cache, CacheEntry, CacheError, CacheGeneration, CacheMeta, IssueSummary,
+    Cache, CacheEntry, CacheError, CacheGeneration, CacheMeta, CloseIntakeRecord, IssueSummary,
     IssueValidationReceipt, ValidatedCacheEntry, VersionedCacheEntry,
 };
 pub use client::{

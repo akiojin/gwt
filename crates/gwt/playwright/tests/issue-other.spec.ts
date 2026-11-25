@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 // SPEC #3885 Phase 3: deterministic protocol data, real Chromium and checkout assets.
 // A browser-check Project URL uses the isolated binary's assets; without one the
@@ -125,7 +126,7 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(worksBlockCell).toHaveAttribute("title", attention.replaceAll("Await token", "Await review"));
   await expect(page.locator("#op-strip-waiting")).toHaveText("7");
   await expect(worksBlock).toHaveText("7");
-  await page.locator('[data-surface="works"]').click();
+  await openWorks(page);
   await expect(page.locator(".works-heading")).toBeVisible();
   await page.screenshot({ path: info.outputPath("workspace-attention-shared-state.png"), fullPage: true });
   await page.locator('[data-surface="issues"]').click();
@@ -188,9 +189,9 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
     await page.evaluate(enabled => (window as any).__operatorShell.applyIssueMonitorStatus({
       enabled, autonomous_mode: enabled, state: "idle", queue_len: 0, active_count: 0, max_active_agents: 2,
     }), enabled);
-    await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText(enabled ? "Stop" : "Start");
+    await expect(page.locator('[data-role="monitor-state"]')).toHaveText(enabled ? "Assigning" : "Not assigning");
     await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", String(enabled));
-    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle Q0 A0/2" : "Off");
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle · 0 queued · 0 of 2 active" : "Off");
     await expect(search).toBeFocused();
     await expect(other).toHaveAttribute("open");
     expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
@@ -198,9 +199,9 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
   await page.evaluate(() => (window as any).__otherEmit({ kind: "issue_monitor_status", status: {
     enabled: true, autonomous_mode: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
   } }));
-  await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
+  await expect(page.locator('[data-role="monitor-state"]')).toHaveText("Assigning");
   await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Running · 3 queued · 1 of 2 active");
   await expect(page.locator('[data-metric="queue"]')).toHaveText("Queue 3");
   await expect(page.locator('[data-metric="capacity"]')).toHaveText("1 of 2");
   for (const [status, queue] of [
@@ -208,7 +209,7 @@ test("Status bridge shares canonical Issue state with the Issues strip", async (
     [{ queue_len: 4 }, 4],
   ] as const) {
     await page.evaluate(status => (window as any).__otherEmit({ kind: "issue_monitor_status", status }), status);
-    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(`Run Q${queue} A0/0`);
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(`Running · ${queue} queued · 0 of 0 active`);
     await expect(page.locator('[data-metric="queue"]')).toHaveText(`Queue ${queue}`);
     await expect(page.locator('[data-metric="capacity"]')).toHaveText("0 of 0");
     await expect(page.locator('[data-metric="active"]')).toHaveAttribute("aria-description", /Issues agent capacity: 0\/0/);

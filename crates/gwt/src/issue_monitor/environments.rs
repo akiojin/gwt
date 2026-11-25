@@ -1,0 +1,795 @@
+use super::*;
+use crate::execution_environments::{self, Store};
+
+/// Issue #7741 (SPEC #7007 item 82): one entry of a project's "available
+/// execution environments" list. The order of the list is the priority.
+///
+/// The tool is saved with the id because it never changes for an environment,
+/// so choosing a launch candidate needs no other file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectExecutionEnvironment {
+    pub environment_id: String,
+    /// Command id of the tool this environment starts sessions with.
+    pub tool: String,
+}
+
+/// Keep the first entry per tool: a project's launch candidates are unique
+/// per tool, so a second environment through the same tool could never be
+/// told apart from the first.
+pub fn normalize_project_execution_environments(
+    list: Vec<ProjectExecutionEnvironment>,
+) -> Vec<ProjectExecutionEnvironment> {
+    let mut seen = BTreeSet::new();
+    list.into_iter()
+        .filter_map(|entry| {
+            let tool = normalize_issue_monitor_provider(&entry.tool)?;
+            let environment_id = entry.environment_id.trim().to_string();
+            (!environment_id.is_empty() && seen.insert(tool.clone())).then_some(
+                ProjectExecutionEnvironment {
+                    environment_id,
+                    tool,
+                },
+            )
+        })
+        .collect()
+}
+
+fn environment_candidate(tool: &str) -> IssueMonitorLaunchProfile {
+    IssueMonitorLaunchProfile::for_tool(tool)
+}
+
+impl IssueMonitorLaunchProfile {
+    /// A candidate that starts `tool` with the tool's own defaults.
+    pub fn for_tool(tool: &str) -> Self {
+        Self {
+            agent_member_id: None,
+            agent_id: tool.to_string(),
+            model: None,
+            reasoning: None,
+            version: None,
+            session_mode: Default::default(),
+            skip_permissions: false,
+            fast_mode: false,
+            codex_speed: Default::default(),
+            runtime_inherit: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+            prefer_for: Vec::new(),
+        }
+    }
+}
+
+impl IssueMonitorPrefs {
+    /// The saved list's tools in priority order, or `None` when the list was
+    /// never saved and launches choose as they always did.
+    pub(super) fn environment_tools(&self) -> Option<Vec<String>> {
+        if self.execution_environments.is_empty() {
+            return None;
+        }
+        let store = execution_environments::load().ok();
+        self.environment_tools_in(store.as_ref())
+    }
+
+    fn environment_tools_in(&self, store: Option<&Store>) -> Option<Vec<String>> {
+        let list = normalize_project_execution_environments(self.execution_environments.clone());
+        (!list.is_empty()).then(|| {
+            list.into_iter()
+                .filter(|entry| {
+                    store.is_none_or(|store| !store.environment_was_deleted(&entry.environment_id))
+                })
+                .map(|entry| entry.tool)
+                .collect()
+        })
+    }
+
+    /// The tools launches use today, in the order they are tried. This is the
+    /// list a project shows before it has saved one, so saving it unchanged
+    /// changes nothing.
+    pub fn current_launch_tools(&self) -> Vec<String> {
+        let pool = self.launch_profile_pool();
+        let candidates: Vec<_> = match pool.first() {
+            // A registered agent at the head fixes the tool.
+            Some(head) if head.agent_member_id.is_some() => vec![head.clone()],
+            _ => self
+                .effective_launch_tiers()
+                .into_iter()
+                .flatten()
+                .collect(),
+        };
+        let mut seen = BTreeSet::new();
+        candidates
+            .iter()
+            .filter_map(|profile| normalize_issue_monitor_provider(&profile.agent_id))
+            .filter(|tool| seen.insert(tool.clone()))
+            .collect()
+    }
+
+    /// Candidates of a pool that names no registered agent, limited to the
+    /// project's environments and put in their priority order. An environment
+    /// the pool has no candidate for starts with the tool's defaults.
+    pub(super) fn environment_candidates(
+        &self,
+        pool: Vec<IssueMonitorLaunchProfile>,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let Some(tools) = self.environment_tools() else {
+            return pool;
+        };
+        tools
+            .iter()
+            .map(|tool| {
+                pool.iter()
+                    .find(|profile| {
+                        normalize_issue_monitor_provider(&profile.agent_id).as_ref() == Some(tool)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| environment_candidate(tool))
+            })
+            .collect()
+    }
+
+    /// The saved pool as launches use it now: registered agents on the
+    /// environment they start with, any other pool limited to the project's
+    /// environments.
+    pub fn preview_launch_profile_pool(&self) -> Vec<IssueMonitorLaunchProfile> {
+        let pool = self.launch_profile_pool();
+        if pool
+            .first()
+            .is_some_and(|profile| profile.agent_member_id.is_some())
+        {
+            return self.agent_candidates_on_environment(pool, |_| true);
+        }
+        self.environment_candidates(pool)
+    }
+
+    /// Issue #7647 (SPEC #7007 items 82 and 243): a registered agent is not
+    /// tied to a tool. Its sessions start with the first of the project's
+    /// environments that is not held by a refused launch; when every one is
+    /// held, the first is kept so the wait names it. `None` when the project
+    /// never saved a list, where an agent keeps the tool it was registered
+    /// with.
+    fn first_environment_tool(&self, tools: Vec<String>) -> Option<String> {
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        tools
+            .iter()
+            .find(|tool| hold_reset_after(&self.provider_quota_holds, tool, now).is_none())
+            .or(tools.first())
+            .cloned()
+    }
+
+    fn member_environment_order(&self, store: &Store, member_id: &str) -> Option<Vec<String>> {
+        let priority = store.agent_priority_ids(member_id)?;
+        let (_, allowed) = execution_environments::project_list(store, self);
+        let allowed_tool = |id: &str| {
+            let entry = allowed.iter().find(|entry| entry.environment_id == id)?;
+            let environment = store.environment(id)?;
+            (entry.tool == environment.via_tool).then(|| entry.tool.clone())
+        };
+        Some(priority.iter().filter_map(|id| allowed_tool(id)).collect())
+    }
+
+    pub(super) fn member_environment_tool(
+        &self,
+        store: &Store,
+        member_id: &str,
+        mut usable: impl FnMut(&str) -> bool,
+    ) -> Option<String> {
+        let Some(tools) = self.member_environment_order(store, member_id) else {
+            return self.first_environment_tool(self.environment_tools_in(Some(store))?);
+        };
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        tools.into_iter().find(|tool| {
+            hold_reset_after(&self.provider_quota_holds, tool, now).is_none() && usable(tool)
+        })
+    }
+
+    pub(crate) fn member_environment_allows_tool(&self, member_id: &str, tool: &str) -> bool {
+        execution_environments::load().is_ok_and(|store| {
+            self.member_environment_order(&store, member_id)
+                .map_or_else(
+                    || {
+                        let id = self
+                            .execution_environments
+                            .iter()
+                            .find(|entry| entry.tool == tool)
+                            .map_or(tool, |entry| &entry.environment_id);
+                        !store.environment_was_deleted(id)
+                    },
+                    |tools| tools.iter().any(|candidate| candidate == tool),
+                )
+        })
+    }
+
+    pub(crate) fn member_environment_overrides_tool(&self, member_id: &str, tool: &str) -> bool {
+        execution_environments::load().ok().is_some_and(|store| {
+            self.member_environment_order(&store, member_id)
+                .is_some_and(|tools| tools.iter().any(|candidate| candidate == tool))
+        })
+    }
+
+    /// Registered agents' saved candidates as they start now. The saved pool
+    /// itself keeps each agent's registered tool.
+    pub(super) fn agent_candidates_on_environment(
+        &self,
+        candidates: Vec<IssueMonitorLaunchProfile>,
+        usable: impl Fn(&str) -> bool,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let Ok(store) = execution_environments::load() else {
+            return Vec::new();
+        };
+        candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                let id = candidate.agent_member_id.as_deref().unwrap_or_default();
+                if let Some(tool) = self.member_environment_tool(&store, id, &usable) {
+                    return Some(candidate.on_tool(&tool));
+                }
+                (self.environment_tools_in(Some(&store)).is_none()
+                    && store.agent_priority_ids(id).is_none()
+                    && !store.environment_was_deleted(&candidate.agent_id))
+                .then_some(candidate)
+            })
+            .collect()
+    }
+
+    /// Issue #7771: resolve a registered member's launch as it would start.
+    /// A saved project environment supplies the tool for every member.
+    /// Projects without a list use the member's saved launch profile or a
+    /// general launch profile for the member's registered tool.
+    pub fn member_launch_candidate(&self, member_id: &str) -> Option<IssueMonitorLaunchProfile> {
+        self.member_launch_candidate_with_tool_filter(member_id, |_| true)
+    }
+
+    pub fn member_launch_candidate_with_tool_filter(
+        &self,
+        member_id: &str,
+        usable: impl Fn(&str) -> bool,
+    ) -> Option<IssueMonitorLaunchProfile> {
+        let store = execution_environments::load().ok()?;
+        let pool = self.launch_profile_pool();
+        let member = self
+            .agent_roster
+            .as_ref()?
+            .members
+            .iter()
+            .find(|member| member.agent_member_id == member_id)?;
+        self.member_candidate_with_store(&store, &pool, member, usable)
+    }
+
+    pub(super) fn member_candidate_with_store(
+        &self,
+        store: &Store,
+        pool: &[IssueMonitorLaunchProfile],
+        member: &crate::agent_names::AgentMember,
+        usable: impl FnMut(&str) -> bool,
+    ) -> Option<IssueMonitorLaunchProfile> {
+        let member_id = &member.agent_member_id;
+        if let Some(tool) = self.member_environment_tool(store, member_id, usable) {
+            return Some(self.member_candidate_on_environment(pool, member_id, &tool));
+        }
+        if store.agent_priority_ids(member_id).is_some()
+            || self.environment_tools_in(Some(store)).is_some()
+        {
+            return None;
+        }
+        self.legacy_member_candidate(pool, member)
+            .filter(|candidate| !store.environment_was_deleted(&candidate.agent_id))
+    }
+
+    pub(super) fn legacy_member_profile<'pool>(
+        pool: &'pool [IssueMonitorLaunchProfile],
+        member: &crate::agent_names::AgentMember,
+    ) -> Option<&'pool IssueMonitorLaunchProfile> {
+        pool.iter()
+            .find(|profile| profile.agent_member_id.as_deref() == Some(&member.agent_member_id))
+            .or_else(|| {
+                let tool = normalize_issue_monitor_provider(member.agent_id.as_deref()?)?;
+                pool.iter().find(|profile| {
+                    profile.prefer_for.is_empty()
+                        && normalize_issue_monitor_provider(&profile.agent_id).as_ref()
+                            == Some(&tool)
+                })
+            })
+    }
+
+    pub(super) fn legacy_member_candidate(
+        &self,
+        pool: &[IssueMonitorLaunchProfile],
+        member: &crate::agent_names::AgentMember,
+    ) -> Option<IssueMonitorLaunchProfile> {
+        let profile = Self::legacy_member_profile(pool, member)?;
+        let tool = member
+            .agent_id
+            .as_deref()
+            .and_then(normalize_issue_monitor_provider);
+        if normalize_issue_monitor_provider(&profile.agent_id) != tool {
+            return None;
+        }
+        let mut candidate = if profile
+            .agent_member_id
+            .as_ref()
+            .is_some_and(|id| id != &member.agent_member_id)
+        {
+            // Another member's general profile authorizes the tool. Its
+            // per-member launch settings stay with that member.
+            self.default_member_candidate(&member.agent_member_id, &profile.agent_id)
+        } else {
+            profile.clone()
+        };
+        candidate.agent_member_id = Some(member.agent_member_id.clone());
+        Some(candidate)
+    }
+
+    pub(super) fn member_candidate_on_environment(
+        &self,
+        pool: &[IssueMonitorLaunchProfile],
+        member_id: &str,
+        tool: &str,
+    ) -> IssueMonitorLaunchProfile {
+        let mut candidate = pool
+            .iter()
+            .find(|profile| profile.agent_member_id.as_deref() == Some(member_id))
+            .cloned()
+            .map_or_else(
+                || self.default_member_candidate(member_id, tool),
+                |profile| profile.on_tool(tool),
+            );
+        candidate.agent_member_id = Some(member_id.to_string());
+        candidate
+    }
+
+    fn default_member_candidate(&self, member_id: &str, tool: &str) -> IssueMonitorLaunchProfile {
+        let mut candidate = environment_candidate(tool);
+        if let Some(core) = self.agent_registry_profiles.get(member_id) {
+            core.apply(&mut candidate);
+        }
+        candidate.on_tool(tool)
+    }
+
+    /// Whether `tool` is one of the project's saved environments, which any
+    /// registered agent may start a session with.
+    pub fn environment_lists_tool(&self, tool: &str) -> bool {
+        normalize_issue_monitor_provider(tool).is_some_and(|tool| {
+            self.environment_tools()
+                .is_some_and(|tools| tools.contains(&tool))
+        })
+    }
+
+    /// Order one tier's candidates by the project's environments and drop the
+    /// ones the project does not use.
+    pub(super) fn environment_tier(
+        &self,
+        tier: Vec<IssueMonitorLaunchProfile>,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let Some(tools) = self.environment_tools() else {
+            return tier;
+        };
+        let position = |profile: &IssueMonitorLaunchProfile| {
+            let tool = normalize_issue_monitor_provider(&profile.agent_id)?;
+            tools.iter().position(|listed| *listed == tool)
+        };
+        let mut tier: Vec<_> = tier
+            .into_iter()
+            .filter_map(|profile| Some((position(&profile)?, profile)))
+            .collect();
+        tier.sort_by_key(|(position, _)| *position);
+        tier.into_iter().map(|(_, profile)| profile).collect()
+    }
+}
+
+impl IssueMonitorLaunchProfile {
+    /// This candidate started with `tool`. Tuning saved for another tool does
+    /// not carry over: the agent's traits and the environment's runtime
+    /// options fill it in when the session starts.
+    pub fn on_tool(mut self, tool: &str) -> Self {
+        if normalize_issue_monitor_provider(&self.agent_id).as_deref() != Some(tool) {
+            self.agent_id = tool.to_string();
+            self.model = None;
+            self.reasoning = None;
+            self.version = None;
+            self.fast_mode = false;
+            self.codex_speed = Default::default();
+        }
+        self
+    }
+}
+
+impl IssueMonitorState {
+    /// Replace the project's available execution environments. The order is
+    /// the priority; an empty list returns the project to its earlier choice.
+    pub fn set_execution_environments(&mut self, list: Vec<ProjectExecutionEnvironment>) -> bool {
+        let list = normalize_project_execution_environments(list);
+        if self.execution_environments == list {
+            return false;
+        }
+        self.execution_environments = list;
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: &str = "2026-11-20T00:00:00Z";
+    const LATER: &str = "2999-01-01T00:00:00Z";
+
+    fn candidate(agent_id: &str, member: Option<&str>) -> IssueMonitorLaunchProfile {
+        IssueMonitorLaunchProfile {
+            agent_member_id: member.map(str::to_string),
+            model: Some(format!("{agent_id}-model")),
+            ..environment_candidate(agent_id)
+        }
+    }
+
+    fn listed(entries: &[(&str, &str)]) -> Vec<ProjectExecutionEnvironment> {
+        entries
+            .iter()
+            .map(|(environment_id, tool)| ProjectExecutionEnvironment {
+                environment_id: environment_id.to_string(),
+                tool: tool.to_string(),
+            })
+            .collect()
+    }
+
+    fn tools(profiles: &[IssueMonitorLaunchProfile]) -> Vec<&str> {
+        profiles
+            .iter()
+            .map(|profile| profile.agent_id.as_str())
+            .collect()
+    }
+
+    fn pick(prefs: &IssueMonitorPrefs, issue_number: u64) -> Option<String> {
+        let pool = prefs.registered_launch_profiles_for_issue(issue_number);
+        let selection = select_launch_profile(
+            &pool,
+            &prefs.launch_admission_provider_quota_holds(),
+            &[],
+            None,
+            NOW,
+        );
+        selection.selected.map(|index| pool[index].agent_id.clone())
+    }
+
+    fn roster_prefs() -> IssueMonitorPrefs {
+        let member = |id: &str, tool: &str| {
+            serde_json::json!({
+                "agent_member_id": id, "agent_id": tool, "name": id,
+                "enabled": true, "created_at": NOW,
+            })
+        };
+        let mut prefs = IssueMonitorPrefs {
+            agent_roster: Some(
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 1, "revision": 1,
+                    "members": [member("m-claude", "claude"), member("m-codex", "codex")],
+                }))
+                .unwrap(),
+            ),
+            ..IssueMonitorPrefs::default()
+        };
+        prefs.set_launch_profile_pool(vec![
+            candidate("claude", Some("m-claude")),
+            candidate("codex", Some("m-codex")),
+        ]);
+        prefs
+    }
+
+    #[test]
+    fn a_project_that_never_saved_a_list_chooses_as_before() {
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![candidate("codex", None), candidate("claude", None)]);
+        let before = prefs.registered_launch_profiles_for_issue(42);
+
+        assert_eq!(tools(&before), ["codex", "claude"]);
+        assert_eq!(prefs.current_launch_tools(), ["codex", "claude"]);
+        // Saving the list a project already shows changes nothing.
+        prefs.execution_environments = listed(&[("codex", "codex"), ("claude", "claude")]);
+        assert_eq!(prefs.registered_launch_profiles_for_issue(42), before);
+    }
+
+    #[test]
+    fn the_list_order_is_the_priority_and_an_unlisted_tool_is_not_used() {
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![candidate("codex", None), candidate("claude", None)]);
+
+        prefs.execution_environments = listed(&[("claude", "claude"), ("codex", "codex")]);
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("claude"));
+
+        prefs.execution_environments = listed(&[("codex", "codex")]);
+        assert_eq!(
+            tools(&prefs.registered_launch_profiles_for_issue(42)),
+            ["codex"]
+        );
+    }
+
+    #[test]
+    fn an_environment_that_cannot_be_used_is_skipped_for_the_next_one() {
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![candidate("claude", None)]);
+        // Grok Build has no saved candidate; the list alone makes it usable.
+        prefs.execution_environments =
+            listed(&[("claude", "claude"), ("codex", "codex"), ("grok", "grok")]);
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("claude"));
+
+        prefs
+            .provider_quota_holds
+            .insert("claude".into(), LATER.into());
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
+
+        prefs
+            .provider_quota_holds
+            .insert("codex".into(), LATER.into());
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("grok"));
+        let pool = prefs.registered_launch_profiles_for_issue(42);
+        assert_eq!(pool[0].model.as_deref(), Some("claude-model"));
+        assert_eq!(pool[2], environment_candidate("grok"));
+
+        prefs
+            .provider_quota_holds
+            .insert("grok".into(), LATER.into());
+        assert_eq!(pick(&prefs, 42), None, "every environment is held");
+    }
+
+    /// Issue #7647 AC-3: the tool comes from the project's list, not from
+    /// the agent.
+    #[test]
+    fn registered_agents_start_with_the_environment_in_the_list_order() {
+        let mut prefs = roster_prefs();
+        // Never saved: each agent keeps the tool it was registered with.
+        assert_eq!(prefs.current_launch_tools(), ["claude"]);
+        assert_eq!(
+            prefs.registered_launch_profiles_for_issue(42),
+            [candidate("claude", Some("m-claude"))]
+        );
+        prefs
+            .provider_quota_holds
+            .insert("claude".into(), LATER.into());
+        assert_eq!(pick(&prefs, 42), None);
+        prefs.provider_quota_holds.clear();
+
+        // Saved: every agent starts with the first environment.
+        prefs.execution_environments = listed(&[("claude", "claude"), ("codex", "codex")]);
+        let members = |pool: &[IssueMonitorLaunchProfile]| -> Vec<String> {
+            pool.iter()
+                .map(|profile| profile.agent_member_id.clone().unwrap())
+                .collect()
+        };
+        let pool = prefs.registered_launch_profiles_for_issue(42);
+        assert_eq!(tools(&pool), ["claude", "claude"]);
+        assert_eq!(members(&pool), ["m-claude", "m-codex"]);
+        assert_eq!(pool[0], candidate("claude", Some("m-claude")));
+        // Tuning saved for another tool is not carried over.
+        assert_eq!(
+            pool[1],
+            IssueMonitorLaunchProfile {
+                agent_member_id: Some("m-codex".into()),
+                ..environment_candidate("claude")
+            }
+        );
+        assert_eq!(prefs.preview_launch_profile_pool(), pool);
+        // The saved pool keeps each agent's registered tool.
+        assert_eq!(tools(&prefs.launch_profile_pool()), ["claude", "codex"]);
+
+        // A held environment is passed for the next one.
+        prefs
+            .provider_quota_holds
+            .insert("claude".into(), LATER.into());
+        let pool = prefs.registered_launch_profiles_for_issue(42);
+        assert_eq!(tools(&pool), ["codex", "codex"]);
+        assert_eq!(members(&pool), ["m-claude", "m-codex"]);
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
+
+        // Every environment held: the first one is kept so the wait names it.
+        prefs
+            .provider_quota_holds
+            .insert("codex".into(), LATER.into());
+        assert_eq!(
+            tools(&prefs.registered_launch_profiles_for_issue(42)),
+            ["claude", "claude"]
+        );
+        assert_eq!(pick(&prefs, 42), None);
+    }
+
+    #[test]
+    fn an_environment_no_agent_was_registered_with_is_used() {
+        let mut prefs = roster_prefs();
+        prefs.execution_environments = listed(&[("grok", "grok"), ("codex", "codex")]);
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("grok"));
+        assert!(prefs.environment_lists_tool("grok"));
+        assert!(!prefs.environment_lists_tool("claude"));
+        assert!(!IssueMonitorPrefs::default().environment_lists_tool("codex"));
+    }
+
+    #[test]
+    fn a_members_priority_intersects_each_projects_allowed_environment_ids() {
+        let mut prefs = roster_prefs();
+        let mut store = crate::execution_environments::Store::default();
+        for tool in ["claude", "codex", "grok"] {
+            store.register_account(tool).unwrap();
+        }
+        prefs.execution_environments = listed(&[("claude", "claude"), ("codex", "codex")]);
+        store
+            .set_agent_list(
+                "m-claude",
+                &["grok".into(), "codex".into(), "claude".into()],
+            )
+            .unwrap();
+        let choice = |prefs: &IssueMonitorPrefs, member: &str| {
+            prefs.member_environment_tool(&store, member, |_| true)
+        };
+        assert_eq!(choice(&prefs, "m-codex").as_deref(), Some("claude"));
+        assert_eq!(choice(&prefs, "m-claude").as_deref(), Some("codex"));
+        assert_eq!(
+            prefs
+                .member_environment_tool(&store, "m-claude", |tool| tool != "codex")
+                .as_deref(),
+            Some("claude")
+        );
+        let mut other = prefs.clone();
+        other
+            .execution_environments
+            .insert(0, listed(&[("grok", "grok")]).remove(0));
+        assert_eq!(choice(&other, "m-claude").as_deref(), Some("grok"));
+        prefs
+            .execution_environments
+            .retain(|entry| entry.tool != "codex");
+        assert_eq!(choice(&prefs, "m-claude").as_deref(), Some("claude"));
+        assert_eq!(choice(&other, "m-claude").as_deref(), Some("grok"));
+        assert_eq!(
+            store.agent_priorities["m-claude"].environment_ids,
+            ["grok", "codex", "claude"]
+        );
+    }
+
+    #[test]
+    fn a_registered_launch_skips_a_removed_environment_even_with_a_stale_project_list() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut prefs = roster_prefs();
+        prefs.execution_environments = listed(&[("codex", "codex"), ("claude:hermes", "hermes")]);
+        execution_environments::mutate(|store| {
+            store.register_account("codex").unwrap();
+            store.register_account("claude").unwrap();
+            store.register_via("claude", "hermes", None)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
+
+        execution_environments::mutate(|store| {
+            store.set_agent_list("m-claude", &["claude:hermes".into()])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("hermes"));
+
+        execution_environments::mutate(|store| Ok(store.delete_environment("claude:hermes")?))
+            .unwrap();
+        assert_eq!(pick(&prefs, 42).as_deref(), Some("codex"));
+        assert!(!prefs.member_environment_allows_tool("m-claude", "hermes"));
+        assert!(
+            execution_environments::load().unwrap().agent_priorities["m-claude"]
+                .reverted_to_project
+        );
+    }
+
+    #[test]
+    fn an_issue_planned_for_an_agent_starts_it_with_the_environment() {
+        let mut prefs = roster_prefs();
+        prefs.pending_launch_deliveries.push(
+            serde_json::from_value(serde_json::json!({
+                "agent_member_id": "m-codex", "delivery_id": "delivery-41", "issue_number": 41,
+                "branch_name": "work/issue-41",
+                "linked_issue_kind": crate::LinkedIssueKind::Issue,
+                "claim_id": "claim-41", "created_at": NOW,
+            }))
+            .unwrap(),
+        );
+        assert_eq!(pick(&prefs, 41).as_deref(), Some("codex"));
+
+        prefs.execution_environments = listed(&[("claude", "claude")]);
+        let mut pool = prefs.launch_profile_pool();
+        pool.retain(|profile| profile.agent_member_id.as_deref() != Some("m-codex"));
+        prefs.set_launch_profile_pool(pool);
+        let pool = prefs.registered_launch_profiles_for_issue(41);
+        assert_eq!(tools(&pool), ["claude"]);
+        assert_eq!(pool[0].agent_member_id.as_deref(), Some("m-codex"));
+        assert_eq!(
+            prefs.member_launch_candidate("m-codex"),
+            pool.first().cloned()
+        );
+    }
+
+    #[test]
+    fn registered_agents_tiers_are_those_of_the_environment() {
+        let mut prefs = roster_prefs();
+        prefs.launch_auto = true;
+        let tier_tools = |prefs: &IssueMonitorPrefs| -> Vec<(String, Option<String>)> {
+            prefs.effective_launch_tiers()[0]
+                .iter()
+                .map(|profile| (profile.agent_id.clone(), profile.agent_member_id.clone()))
+                .collect()
+        };
+        assert_eq!(
+            tier_tools(&prefs),
+            [("claude".to_string(), Some("m-claude".to_string()))]
+        );
+        prefs.execution_environments = listed(&[("codex", "codex")]);
+        assert_eq!(
+            tier_tools(&prefs),
+            [
+                ("codex".to_string(), Some("m-claude".to_string())),
+                ("codex".to_string(), Some("m-codex".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_tiers_try_environments_in_the_list_order() {
+        let mut prefs = IssueMonitorPrefs {
+            launch_auto: true,
+            ..IssueMonitorPrefs::default()
+        };
+        let choose = |prefs: &IssueMonitorPrefs| {
+            let holds = prefs.launch_admission_provider_quota_holds();
+            prefs
+                .select_auto_launch_profile(42, false, None, |pool| {
+                    select_launch_profile(pool, &holds, &[], None, NOW)
+                })
+                .map(|selection| selection.profile.agent_id)
+        };
+        assert_eq!(prefs.current_launch_tools(), ["codex", "claude"]);
+        assert_eq!(choose(&prefs).as_deref(), Some("codex"));
+
+        prefs.execution_environments = listed(&[("claude", "claude"), ("codex", "codex")]);
+        assert_eq!(choose(&prefs).as_deref(), Some("claude"));
+        prefs
+            .provider_quota_holds
+            .insert("claude".into(), LATER.into());
+        assert_eq!(choose(&prefs).as_deref(), Some("codex"));
+
+        prefs.provider_quota_holds.clear();
+        prefs.execution_environments = listed(&[("codex", "codex")]);
+        prefs
+            .provider_quota_holds
+            .insert("codex".into(), LATER.into());
+        assert_eq!(choose(&prefs), None, "claude is not in the list");
+    }
+
+    #[test]
+    fn the_saved_list_is_unique_per_tool_and_survives_a_round_trip() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs::default(),
+        );
+        assert!(monitor.set_execution_environments(listed(&[
+            ("claude", "Claude Code"),
+            ("claude:hermes", "hermes"),
+            ("other", "claude"),
+            ("", "codex"),
+        ])));
+        let prefs = monitor.prefs();
+        assert_eq!(
+            prefs.execution_environments,
+            listed(&[("claude", "claude"), ("claude:hermes", "hermes")])
+        );
+        assert!(!monitor.set_execution_environments(prefs.execution_environments.clone()));
+
+        let saved = serde_json::to_string(&prefs).unwrap();
+        let restored: IssueMonitorPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.execution_environments,
+            prefs.execution_environments
+        );
+        // Settings saved before the list existed read as "never saved".
+        let legacy = serde_json::to_string(&IssueMonitorPrefs::default()).unwrap();
+        assert!(!legacy.contains("execution_environments"));
+        let legacy: IssueMonitorPrefs = serde_json::from_str(&legacy).unwrap();
+        assert!(legacy.execution_environments.is_empty());
+    }
+}

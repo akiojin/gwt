@@ -407,6 +407,7 @@ fn revalidate_issue_monitor_launch_prepared(
     cache: &LaunchWizardMemoryCache,
     provider_usage: &[gwt_core::usage::ProviderUsage],
     profile_config_path: &Result<PathBuf, String>,
+    auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
 ) {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&prepared.request.project_root);
     // Answered handoffs carry no source facts: they keep their original prefs
@@ -435,6 +436,7 @@ fn revalidate_issue_monitor_launch_prepared(
             &prepared.request,
             profile_config_path,
             expected.codex_preflight.clone(),
+            auth_probe,
         );
         if current != *expected || !expected.base_branch_is_current(&prepared.request.project_root)
         {
@@ -906,6 +908,7 @@ impl IssueMonitorLaunchSourceFacts {
         request: &super::DeferredIssueMonitorLaunch,
         profile_config_path: &Result<PathBuf, String>,
         mut codex_preflight: IssueMonitorCodexPreflightMemo,
+        auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
     ) -> Self {
         let issue_number = request.issue_number;
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
@@ -928,6 +931,7 @@ impl IssueMonitorLaunchSourceFacts {
                         request,
                         profile_config_path,
                         &mut codex_preflight,
+                        auth_probe,
                     )
                     .map(|choice| {
                         choice.map(|choice| {
@@ -958,6 +962,7 @@ fn issue_monitor_preparation_choice(
     request: &super::DeferredIssueMonitorLaunch,
     profile_config_path: &Result<PathBuf, String>,
     codex_preflight: &mut IssueMonitorCodexPreflightMemo,
+    auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
 ) -> Result<Option<IssueMonitorLaunchProfileChoice>, String> {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
@@ -974,6 +979,7 @@ fn issue_monitor_preparation_choice(
         request.issue_number,
         request.linked_issue_kind,
         None,
+        auth_probe,
     )?;
     let preferred_profile = choice.profiles.preferred_profile();
     let config_error = codex_preflight.check(preferred_profile, || {
@@ -989,6 +995,7 @@ fn issue_monitor_preparation_choice(
         request.issue_number,
         request.linked_issue_kind,
         Some(&config_error),
+        auth_probe,
     )
     .map(Some)
 }
@@ -1021,8 +1028,9 @@ fn issue_monitor_codex_config_error(
         builder = builder.reasoning_level(reasoning);
     }
     let mut config = builder.build();
-    gwt_agent::LaunchEnvironment::from_active_profile(
+    gwt_agent::LaunchEnvironment::for_project(
         profile_config_path.as_ref().map_err(Clone::clone)?,
+        &request.project_root,
         gwt_agent::LaunchRuntimeTarget::Host,
     )?
     .with_project_root(&cwd)
@@ -1190,7 +1198,7 @@ fn prepare_issue_monitor_launch(
             resume: Ok(PreparedIssueMonitorResumeAttempt::default()),
         });
     };
-    if auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated {
+    if issue_monitor_launch_provider_signed_out(profile, auth_probe) {
         return Err(gwt::issue_monitor::provider_unauthenticated_message(
             &profile.agent_id,
         ));
@@ -1292,7 +1300,7 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
         &dispatch.reviewed_sha,
         &dispatch.diff,
     );
-    format!(
+    let prompt = format!(
         "{base}\n\nReview completion order for PR #{pr}: inspect the diff now, but before \
          finalizing or publishing a verdict, wait for all required CI checks to finish \
          using `gh pr checks {pr} --required --watch`. Pending, missing, or unreadable \
@@ -1320,6 +1328,16 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
         issue = dispatch.issue_number,
         pr = dispatch.pr_number,
         sha = dispatch.reviewed_sha,
+    );
+    let Some(evidence) = &dispatch.merged_evidence else {
+        return prompt;
+    };
+    format!(
+        "{prompt}\n\nThis is a fresh review of already-merged source. Re-evaluate every acceptance criterion using the updated external evidence at {:?} (PM authorization comment {}). Preserve the previous FAIL, identified by {:?}. Add \"evidence_review_token\": {:?} to the verdict operation params.",
+        evidence.review.evidence_revision,
+        evidence.review.authorization_comment_id,
+        evidence.review.previous_fail_id,
+        evidence.verdict_token,
     )
 }
 
@@ -1561,8 +1579,6 @@ impl AppRuntime {
                         member.agent_id.as_deref().unwrap_or("Tool unavailable"),
                         if !member.implementation_eligible() {
                             "Configured or reserved as PM; unavailable for implementation"
-                        } else if !member.enabled {
-                            "Resting; launches wait"
                         } else if member.assignment.is_some() {
                             "Busy; launches wait"
                         } else {
@@ -1599,6 +1615,43 @@ impl AppRuntime {
                     view.issue_monitor_pool =
                         Some(self.agent_settings_sets_view(&sets, &session.wizard));
                 }
+            }
+        } else if view.selected_launch_target == "agent" {
+            // Issue #7652: a launch that starts an agent names the execution
+            // environment it runs on. Definitions or settings that cannot be
+            // read leave the row out, so they never stop a launch.
+            let root = &session.project_context.project_root;
+            let prefs =
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root));
+            if let (Ok(store), Ok(prefs)) = (gwt::execution_environments::load(), prefs) {
+                let installed = self.installed_tools();
+                view.execution_environment =
+                    super::execution_environments::launch_wizard_environment_view(
+                        &store,
+                        &prefs,
+                        &view.selected_agent_id,
+                        &|tool| {
+                            gwt_agent::resolve_agent_id(tool).is_some_and(|agent| {
+                                installed.iter().any(|id| {
+                                    gwt_agent::resolve_agent_id(id).as_ref() == Some(&agent)
+                                })
+                            })
+                        },
+                    );
+            }
+            if let Some(environment) = view.execution_environment.as_ref() {
+                let after_agent = view
+                    .launch_summary
+                    .iter()
+                    .position(|item| item.label == "Agent")
+                    .map_or(view.launch_summary.len(), |index| index + 1);
+                view.launch_summary.insert(
+                    after_agent,
+                    gwt::LaunchWizardSummaryView {
+                        label: "Execution environment".to_string(),
+                        value: format!("{} · {}", environment.name, environment.note),
+                    },
+                );
             }
         }
         view
@@ -2011,7 +2064,9 @@ impl AppRuntime {
             return launch_agent_open_error(client_id, "Window not found");
         };
 
-        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
+        // Work and Branches canonicalize to Issues on create and on load, so the
+        // Issues window is what hosts the Workspace launch buttons (Issue #7768).
+        if window.preset.canonical_surface_preset() != WindowPreset::Issue {
             tracing::warn!(
                 preset = ?window.preset,
                 window_id = id,
@@ -2122,6 +2177,12 @@ impl AppRuntime {
         );
         Self::apply_agent_configuration_state(&mut wizard);
         wizard.mark_runtime_context_unresolved();
+        if linked_issue_number.is_some() && workspace_resume_context.is_none() {
+            wizard.enable_issue_plan(issue_plan_assignee_candidates(
+                project_root,
+                &self.installed_tools(),
+            ));
+        }
         let origin = if workspace_resume_context.is_some() {
             super::LaunchWizardOrigin::WorkspaceResume
         } else {
@@ -3591,7 +3652,7 @@ impl AppRuntime {
             if let Some(member) = roster
                 .members
                 .iter()
-                .find(|member| member.enabled && member.implementation_eligible())
+                .find(|member| member.implementation_eligible())
             {
                 if let Some(tool) = member.agent_id.as_ref() {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent {
@@ -3733,7 +3794,7 @@ impl AppRuntime {
                 roster
                     .members
                     .into_iter()
-                    .find(|member| member.enabled && member.implementation_eligible())
+                    .find(|member| member.implementation_eligible())
             }) {
                 if let Some(tool) = member.agent_id {
                     wizard.apply(gwt::LaunchWizardAction::SetAgent { agent_id: tool });
@@ -3938,6 +3999,7 @@ impl AppRuntime {
             issue_number,
             linked_issue_kind,
             None,
+            self.issue_monitor_provider_auth_probe,
         )
     }
 
@@ -4035,6 +4097,21 @@ impl AppRuntime {
         })
     }
 
+    fn issue_monitor_preparation_held(
+        &self,
+        context: &super::ProjectContext,
+        issue_number: u64,
+        now: std::time::Instant,
+    ) -> bool {
+        self.issue_monitor_stale_retry_at
+            .get(&(context.project_key.clone(), issue_number))
+            .is_some_and(|until| now < *until)
+            || self.issue_monitor_cleanup_retries.values().any(|retry| {
+                retry.issue_number == issue_number
+                    && retry.completion.context.project_key == context.project_key
+            })
+    }
+
     fn queue_issue_monitor_launch(
         &mut self,
         context: super::ProjectContext,
@@ -4086,10 +4163,17 @@ impl AppRuntime {
     /// Speculate only on the current FIFO prefix. Pending completions keep their
     /// slot until the GUI consumes them, even after the worker has returned.
     fn prefetch_issue_monitor_launch_facts(&mut self) {
+        let now = std::time::Instant::now();
         let mut positions = HashMap::new();
         for index in 0..self.issue_monitor_launch_queue.len() {
             let pending = &self.issue_monitor_launch_queue[index];
-            if !self.project_context_is_current(&pending.context) {
+            if !self.project_context_is_current(&pending.context)
+                || self.issue_monitor_preparation_held(
+                    &pending.context,
+                    pending.request.issue_number,
+                    now,
+                )
+            {
                 continue;
             }
             let limit = if self.issue_monitor_launch_lane_busy(&pending.context) {
@@ -4151,7 +4235,7 @@ impl AppRuntime {
                 // This worker performs reads only. The normal head worker owns
                 // claim, tier writes, admission and all Answer side effects.
                 let reusable = (|| {
-                    let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut IssueMonitorCodexPreflightMemo::default()).ok()??;
+                    let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut IssueMonitorCodexPreflightMemo::default(), auth_probe).ok()??;
                     let handoff = issue_monitor_resume_handoff(&request.project_root, request.issue_number);
                     if !handoff.as_ref().is_ok_and(Option::is_none) {
                         return None;
@@ -4191,10 +4275,28 @@ impl AppRuntime {
     /// Independent branches can materialize concurrently; shared Git config
     /// writers and same-branch freshness are protected at their own boundaries.
     pub(super) fn advance_issue_monitor_launch_queue_events(&mut self) -> Vec<OutboundEvent> {
+        self.advance_issue_monitor_launch_queue_events_at(std::time::Instant::now())
+    }
+
+    pub(super) fn advance_issue_monitor_launch_queue_events_at(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<OutboundEvent> {
+        self.retry_issue_monitor_launch_cleanups(now);
+        self.issue_monitor_stale_retry_at
+            .retain(|_, until| now < *until);
         let mut events = Vec::new();
         let mut waiting = HashSet::new();
         for pending in std::mem::take(&mut self.issue_monitor_launch_queue) {
             if self.project_context_is_current(&pending.context) {
+                if self.issue_monitor_preparation_held(
+                    &pending.context,
+                    pending.request.issue_number,
+                    now,
+                ) {
+                    self.issue_monitor_launch_queue.push(pending);
+                    continue;
+                }
                 let duplicate_inflight_delivery =
                     pending
                         .request
@@ -4365,6 +4467,10 @@ impl AppRuntime {
             deferred.push(request);
             return Vec::new();
         }
+        if self.issue_monitor_preparation_held(&context, issue_number, std::time::Instant::now()) {
+            self.queue_issue_monitor_launch(context, request, reusable, queue_head);
+            return Vec::new();
+        }
         // A reserved writer has not started its replacement Pane yet. Keep
         // this delivery pending instead of acknowledging the prior runtime.
         if self.issue_monitor_issue_launch_pending(&context, issue_number, linked_issue_kind) {
@@ -4533,7 +4639,7 @@ impl AppRuntime {
             } else {
                 gwt::agent_names::read_project_roster(&request.project_root, &sessions_dir).map(|_| ())
             };
-            let choice = roster_ready.and_then(|_| issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut codex_preflight));
+            let choice = roster_ready.and_then(|_| issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut codex_preflight, auth_probe));
             let selection = choice.as_ref().map(|choice| choice.as_ref().map(|choice| (choice.profiles.clone(), choice.tier, choice.selected_agent_member_id.clone()))).map_err(Clone::clone);
             let reusable_facts = match reusable {
                 Some(IssueMonitorLaunchPreparation::Launch(facts))
@@ -4548,7 +4654,7 @@ impl AppRuntime {
                 Some(choice) => {
                     if let Some(mut facts) = reusable_facts {
                         if let Some(profile) = choice.profiles.preferred_profile() {
-                            if auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated {
+                            if issue_monitor_launch_provider_signed_out(profile, auth_probe) {
                                 return Err(gwt::issue_monitor::provider_unauthenticated_message(&profile.agent_id));
                             }
                         }
@@ -4592,7 +4698,7 @@ impl AppRuntime {
                 _ => None,
             };
             let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, base_branch, codex_preflight, answer_profile_expectation };
-            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone())
+            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone(), auth_probe)
                 || !source_facts.base_branch_is_current(&request.project_root)
             {
                 result = Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
@@ -5010,6 +5116,20 @@ impl AppRuntime {
         if let Some(rejection) = rejection {
             return self.queue_monitor_preflight_rejection(context, rejection);
         }
+        // Issue #7726: an exhausted budget is terminal even when no durable
+        // delivery is left to reject (the Issue was closed or stopped). Its
+        // result carries no prefs stamp, so the freshness check below would
+        // read it as changed prefs and prepare the same delivery forever.
+        if delivery.result.as_ref().is_err_and(|error| {
+            error == gwt::project_runtime::events::MONITOR_PREPARATION_EXHAUSTED
+        }) {
+            return self.schedule_issue_monitor_launch_failure(
+                context,
+                request,
+                gwt::project_runtime::events::MONITOR_PREPARATION_EXHAUSTED.to_string(),
+                None,
+            );
+        }
         record_issue_monitor_gui_phase(
             "monitor_gui_context",
             &mut phase_started,
@@ -5131,6 +5251,7 @@ impl AppRuntime {
                 let cache = self.launch_wizard_cache.clone();
                 let profile_config_path = self.profile_config_path();
                 let current_provider_usage = self.provider_usage_accounts.clone();
+                let auth_probe = self.issue_monitor_provider_auth_probe;
                 let mut refreshed = IssueMonitorLaunchPrepared {
                     context: context.clone(),
                     request: request.clone(),
@@ -5165,6 +5286,7 @@ impl AppRuntime {
                         &cache,
                         &current_provider_usage,
                         &profile_config_path,
+                        auth_probe,
                     );
                     record_issue_monitor_worker_phase("monitor_admission_refresh", &mut started);
                     proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(refreshed)));
@@ -5204,6 +5326,12 @@ impl AppRuntime {
             let reusable = (!session_changed && provider_usage == self.provider_usage_accounts)
                 .then(|| delivery.reusable_fresh_launch(request.launch_session_strategy))
                 .flatten();
+            if admission_stale || source_changed {
+                self.issue_monitor_stale_retry_at.insert(
+                    (context.project_key.clone(), request.issue_number),
+                    std::time::Instant::now() + super::monitor_stale_retry_delay(),
+                );
+            }
             return self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
                 &request.project_root,
                 request.issue_number,
@@ -5525,6 +5653,10 @@ impl AppRuntime {
                 if error == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE
                     && failed_attempt.is_none()
                 {
+                    self.issue_monitor_stale_retry_at.insert(
+                        (context.project_key.clone(), issue_number),
+                        std::time::Instant::now() + super::monitor_stale_retry_delay(),
+                    );
                     recovery_events.extend(
                         self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
                             project_root,
@@ -6027,8 +6159,14 @@ impl AppRuntime {
         // funnels through the normal launch-failed path, so the active slot
         // is released instead of burning on a provider login screen.
         if prepared.is_none()
-            && (self.issue_monitor_provider_auth_probe)(&profile_agent_id)
-                == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+            && previous_profiles
+                .preferred_profile()
+                .is_some_and(|profile| {
+                    issue_monitor_launch_provider_signed_out(
+                        profile,
+                        self.issue_monitor_provider_auth_probe,
+                    )
+                })
         {
             return Err(gwt::issue_monitor::provider_unauthenticated_message(
                 &profile_agent_id,
@@ -6718,7 +6856,14 @@ impl AppRuntime {
                     issue_number,
                     linked_issue_kind,
                 ) {
-                    Ok(()) => vec![self.launch_wizard_state_outbound(&context)],
+                    Ok(()) => {
+                        let candidates =
+                            issue_plan_assignee_candidates(&project_root, &self.installed_tools());
+                        if let Some(session) = self.launch_wizard_for_mut(&context) {
+                            session.wizard.enable_issue_plan(candidates);
+                        }
+                        vec![self.launch_wizard_state_outbound(&context)]
+                    }
                     Err(error) => vec![OutboundEvent::reply(
                         &client_id,
                         knowledge_error_event(id, knowledge_kind, error, None, None),
@@ -7706,7 +7851,17 @@ impl AppRuntime {
                             issue_monitor_autonomous_submit_started: false,
                             issue_monitor_review_dispatch: false,
                         });
-                    if let Some(target) = session.agent_kanban_target.clone() {
+                    if let Some(agent_member_id) =
+                        session.wizard.issue_plan_assignee_id().map(str::to_string)
+                    {
+                        runtime.spawn_agent_window_as_member(
+                            &session.tab_id,
+                            *config,
+                            workspace_resume_context,
+                            launch_feedback_context,
+                            agent_member_id,
+                        )
+                    } else if let Some(target) = session.agent_kanban_target.clone() {
                         runtime.spawn_agent_window_in_agent_kanban(
                             &session.tab_id,
                             *config,
@@ -8068,6 +8223,77 @@ impl AppRuntime {
     }
 }
 
+/// Issue #7771: the registered agents a launch on an Issue can be assigned
+/// to, in roster order, each as its sessions start here: its traits on the
+/// project's execution environment (Issue #7647). An agent that cannot take
+/// the launch stays on the list with the reason. A roster or settings that
+/// cannot be read offers nobody, which leaves the launch on the settings
+/// form.
+fn issue_plan_assignee_candidates(
+    project_root: &Path,
+    installed: &[String],
+) -> Vec<gwt::LaunchWizardAssigneeCandidate> {
+    let Ok(prefs) =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+    else {
+        return Vec::new();
+    };
+    let Some(roster) = prefs.agent_roster.as_ref() else {
+        return Vec::new();
+    };
+    let is_installed = |tool: &str| {
+        gwt_agent::resolve_agent_id(tool).is_some_and(|agent| {
+            installed
+                .iter()
+                .any(|id| gwt_agent::resolve_agent_id(id).as_ref() == Some(&agent))
+        })
+    };
+    roster
+        .members
+        .iter()
+        .map(|member| {
+            let profile = prefs
+                .member_launch_candidate_with_tool_filter(&member.agent_member_id, is_installed)
+                .map(|candidate| {
+                    gwt::execution_environments::candidate_as_started(&prefs, candidate, false)
+                });
+            let unavailable_reason = if !member.implementation_eligible() {
+                Some("Reserved as Project Manager.".to_string())
+            } else if let Some(assignment) = member.assignment.as_ref() {
+                Some(match assignment.issue_number {
+                    Some(number) => format!(
+                        "Working on #{number} now. It can be chosen once that work ends."
+                    ),
+                    None => "Working on another launch now. It can be chosen once that work ends."
+                        .to_string(),
+                })
+            } else {
+                match profile.as_ref() {
+                    None => Some(
+                        "Not one of this project's launch candidates. Add it under Configure Issues."
+                            .to_string(),
+                    ),
+                    Some(profile) if !is_installed(&profile.agent_id) => Some(format!(
+                        "{} is not installed on this machine.",
+                        gwt_agent::resolve_agent_id(&profile.agent_id).map_or_else(
+                            || profile.agent_id.clone(),
+                            |agent| agent.display_name().to_string(),
+                        )
+                    )),
+                    Some(_) => None,
+                }
+            };
+            gwt::LaunchWizardAssigneeCandidate {
+                agent_member_id: member.agent_member_id.clone(),
+                name: member.name.clone(),
+                traits: member.traits.clone(),
+                unavailable_reason,
+                profile: profile.map(Into::into),
+            }
+        })
+        .collect()
+}
+
 fn agent_settings_launch_defaults(
     project_root: &Path,
     previous: gwt::LaunchWizardPreviousProfiles,
@@ -8242,6 +8468,7 @@ mod review_dispatch_tests {
             reviewed_sha: "abc123".to_string(),
             required_criteria: vec!["AC-1".to_string()],
             diff: "diff --git a/x b/x".to_string(),
+            merged_evidence: None,
             linked_issue_kind: gwt::LinkedIssueKind::Spec,
         };
         let prompt = build_review_dispatch_prompt(&dispatch);
@@ -8670,21 +8897,95 @@ mod launch_agent_branch_resolution_tests {
     }
 }
 
+#[cfg(test)]
 fn select_issue_monitor_profiles_with_codex_config(
     pool: &[gwt::IssueMonitorLaunchProfile],
     config_error: Option<&str>,
     select: impl FnOnce(&[gwt::IssueMonitorLaunchProfile]) -> gwt::LaunchProfileSelection,
 ) -> gwt::LaunchProfileSelection {
-    let Some(config_error) = config_error else {
+    select_issue_monitor_profiles_excluding(
+        pool,
+        |profile, _| codex_config_exclusion(profile, config_error),
+        select,
+    )
+}
+
+fn codex_config_exclusion(
+    profile: &gwt::IssueMonitorLaunchProfile,
+    config_error: Option<&str>,
+) -> Option<String> {
+    (profile.agent_id.eq_ignore_ascii_case("codex")
+        && profile.runtime_target == gwt_agent::LaunchRuntimeTarget::Host)
+        .then_some(config_error?.to_string())
+}
+
+/// Issue #7741: why a candidate cannot start a session right now. A
+/// candidate whose tool is signed out is passed over for the next execution
+/// environment instead of failing the launch.
+///
+/// Sign-in is read only when the pool offers another candidate to move on
+/// to. A lone candidate is checked once, where the launch is prepared, as it
+/// always was.
+fn issue_monitor_candidate_exclusion(
+    profile: &gwt::IssueMonitorLaunchProfile,
+    pool_size: usize,
+    codex_config_error: Option<&str>,
+    auth_probe: impl Fn(&str) -> gwt::issue_monitor::ProviderAuthState,
+) -> Option<String> {
+    codex_config_exclusion(profile, codex_config_error).or_else(|| {
+        (pool_size > 1
+            && auth_probe(&profile.agent_id)
+                == gwt::issue_monitor::ProviderAuthState::Unauthenticated)
+            .then(|| gwt::issue_monitor::provider_unauthenticated_message(&profile.agent_id))
+    })
+}
+
+fn issue_monitor_launch_provider_signed_out(
+    profile: &gwt::LaunchWizardPreviousProfile,
+    auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
+) -> bool {
+    auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated
+        && (profile.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+            || !gwt::execution_environments::load()
+                .is_ok_and(|store| store.has_signed_in_managed_account(&profile.agent_id)))
+}
+
+/// The reason no candidate was eligible: the refusal that names what to fix,
+/// when one of the skipped candidates carries it.
+fn issue_monitor_no_candidate_error(
+    codex_config_error: Option<&str>,
+    skipped: &[gwt::LaunchProfileSkip],
+    fallback: &str,
+) -> String {
+    codex_config_error
+        .or_else(|| {
+            skipped
+                .iter()
+                .map(|skip| skip.reason.as_str())
+                .find(|reason| reason.starts_with("provider_unauthenticated"))
+        })
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+/// Run `select` over the candidates `exclusion` leaves, reporting the
+/// excluded ones as skipped with their reason and the pool's own indexes.
+fn select_issue_monitor_profiles_excluding(
+    pool: &[gwt::IssueMonitorLaunchProfile],
+    exclusion: impl Fn(&gwt::IssueMonitorLaunchProfile, usize) -> Option<String>,
+    select: impl FnOnce(&[gwt::IssueMonitorLaunchProfile]) -> gwt::LaunchProfileSelection,
+) -> gwt::LaunchProfileSelection {
+    let reasons: Vec<_> = pool
+        .iter()
+        .map(|profile| exclusion(profile, pool.len()))
+        .collect();
+    if reasons.iter().all(Option::is_none) {
         return select(pool);
-    };
+    }
     let eligible: Vec<_> = pool
         .iter()
         .enumerate()
-        .filter(|(_, profile)| {
-            !profile.agent_id.eq_ignore_ascii_case("codex")
-                || profile.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
-        })
+        .filter(|(index, _)| reasons[*index].is_none())
         .collect();
     let profiles: Vec<_> = eligible
         .iter()
@@ -8695,14 +8996,12 @@ fn select_issue_monitor_profiles_with_codex_config(
     for skipped in &mut selection.skipped {
         skipped.index = eligible[skipped.index].0;
     }
-    for (index, profile) in pool.iter().enumerate() {
-        if profile.agent_id.eq_ignore_ascii_case("codex")
-            && profile.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-        {
+    for (index, reason) in reasons.into_iter().enumerate() {
+        if let Some(reason) = reason {
             selection.skipped.push(gwt::LaunchProfileSkip {
                 index,
-                agent_id: profile.agent_id.clone(),
-                reason: config_error.to_string(),
+                agent_id: pool[index].agent_id.clone(),
+                reason,
             });
         }
     }
@@ -8767,6 +9066,202 @@ mod codex_config_candidate_tests {
     }
 }
 
+/// Issue #7741: what an Issues launch chooses for a project, read through the
+/// same selector the launch worker uses.
+#[cfg(test)]
+mod execution_environment_choice_tests {
+    use super::*;
+    use gwt::execution_environments::{self as environments, RuntimeOptions};
+    use gwt::issue_monitor::ProviderAuthState;
+
+    struct Project {
+        _lock: gwt_core::test_support::EnvLockGuard,
+        _home: gwt_core::test_support::ScopedGwtHome,
+        temp: tempfile::TempDir,
+        cache: LaunchWizardMemoryCache,
+    }
+
+    impl Project {
+        /// A project whose Issues settings are exactly `prefs`, as a file an
+        /// earlier gwt could have written.
+        fn with_saved_settings(prefs: serde_json::Value) -> Self {
+            let lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+            let project = Self {
+                _lock: lock,
+                _home: home,
+                cache: LaunchWizardMemoryCache::load_with_agent_options(temp.path(), Vec::new()),
+                temp,
+            };
+            let mut saved = serde_json::to_value(gwt::IssueMonitorPrefs::default()).unwrap();
+            for (key, value) in prefs.as_object().expect("settings object") {
+                saved[key] = value.clone();
+            }
+            let prefs: gwt::IssueMonitorPrefs = serde_json::from_value(saved).expect("prefs");
+            gwt::save_issue_monitor_prefs(&project.prefs_path(), &prefs).expect("save prefs");
+            project
+        }
+
+        fn root(&self) -> PathBuf {
+            self.temp.path().join("repo")
+        }
+
+        fn prefs_path(&self) -> PathBuf {
+            gwt::issue_monitor_prefs_path_for_repo_path(&self.root())
+        }
+
+        fn list(&self, entries: &[(&str, &str)]) {
+            gwt::mutate_issue_monitor_prefs(&self.prefs_path(), |prefs| {
+                prefs.execution_environments = entries
+                    .iter()
+                    .map(|(environment_id, tool)| gwt::ProjectExecutionEnvironment {
+                        environment_id: environment_id.to_string(),
+                        tool: tool.to_string(),
+                    })
+                    .collect();
+            })
+            .expect("save list");
+        }
+
+        fn choose(
+            &self,
+            auth_probe: fn(&str) -> ProviderAuthState,
+        ) -> Result<IssueMonitorLaunchProfileChoice, String> {
+            issue_monitor_owner_launch_profile_choice(
+                &self.cache,
+                &[],
+                &self.root(),
+                42,
+                gwt::LinkedIssueKind::Issue,
+                None,
+                auth_probe,
+            )
+        }
+    }
+
+    fn signed_in(_: &str) -> ProviderAuthState {
+        ProviderAuthState::Unknown
+    }
+
+    fn claude_signed_out(agent_id: &str) -> ProviderAuthState {
+        if agent_id == "claude" {
+            ProviderAuthState::Unauthenticated
+        } else {
+            ProviderAuthState::Unknown
+        }
+    }
+
+    fn all_signed_out(_: &str) -> ProviderAuthState {
+        ProviderAuthState::Unauthenticated
+    }
+
+    fn two_candidates() -> serde_json::Value {
+        serde_json::json!({
+            "launch_profiles": [
+                {"agent_id": "codex", "model": "gpt-6-sol"},
+                {"agent_id": "claude", "model": "opus"},
+            ],
+        })
+    }
+
+    #[test]
+    fn an_existing_project_launches_the_same_before_and_after_the_carry_over() {
+        let project = Project::with_saved_settings(two_candidates());
+        let saved = std::fs::read(project.prefs_path()).unwrap();
+        let before = project.choose(signed_in).expect("launches before");
+        assert_eq!(before.selected_agent_id.as_deref(), Some("codex"));
+
+        // The first read of the screens creates the accounts and environments
+        // from what the project already launches.
+        let prefs = gwt::load_issue_monitor_prefs(&project.prefs_path()).unwrap();
+        let store = environments::ensure_accounts(&prefs.current_launch_tools()).unwrap();
+        let (list_saved, list) = environments::project_list(&store, &prefs);
+        let ids: Vec<_> = list
+            .iter()
+            .map(|entry| entry.environment_id.as_str())
+            .collect();
+        assert_eq!((list_saved, ids), (false, vec!["codex", "claude"]));
+
+        let after = project.choose(signed_in).expect("launches after");
+        assert_eq!(after.selected_agent_id, before.selected_agent_id);
+        assert_eq!(
+            after.profiles, before.profiles,
+            "model and options are kept"
+        );
+        assert_eq!(
+            std::fs::read(project.prefs_path()).unwrap(),
+            saved,
+            "the project's saved settings are not rewritten"
+        );
+    }
+
+    #[test]
+    fn a_signed_out_environment_is_skipped_for_the_next_one_on_the_list() {
+        let project = Project::with_saved_settings(two_candidates());
+        project.list(&[("claude", "claude"), ("codex", "codex")]);
+        assert_eq!(
+            project
+                .choose(signed_in)
+                .unwrap()
+                .selected_agent_id
+                .as_deref(),
+            Some("claude"),
+            "the list order is the priority"
+        );
+
+        let choice = project
+            .choose(claude_signed_out)
+            .expect("uses the next one");
+        assert_eq!(choice.selected_agent_id.as_deref(), Some("codex"));
+        assert_eq!(choice.skipped.len(), 1);
+        assert_eq!(choice.skipped[0].agent_id, "claude");
+        assert!(choice.skipped[0]
+            .reason
+            .starts_with("provider_unauthenticated"));
+
+        let refused = project.choose(all_signed_out).unwrap_err();
+        assert!(refused.starts_with("provider_unauthenticated"), "{refused}");
+    }
+
+    #[test]
+    fn a_runtime_option_change_takes_effect_from_the_next_session() {
+        let project = Project::with_saved_settings(two_candidates());
+        project.list(&[("claude", "claude"), ("codex", "codex")]);
+        environments::ensure_accounts(&["claude".into(), "codex".into()]).unwrap();
+        let profile = |project: &Project| {
+            project
+                .choose(signed_in)
+                .unwrap()
+                .profiles
+                .preferred_profile()
+                .cloned()
+                .unwrap()
+        };
+        let first = profile(&project);
+        assert_eq!(first.model.as_deref(), Some("opus"));
+        assert!(!first.fast_mode);
+
+        environments::mutate(|store| {
+            let runtime = RuntimeOptions {
+                model: Some("sonnet".into()),
+                skip_permissions: false,
+                fast_mode: true,
+            };
+            store.update_environment("claude", None, Some(runtime))?;
+            Ok(())
+        })
+        .unwrap();
+
+        let next = profile(&project);
+        assert_eq!(next.agent_id, "claude");
+        assert_eq!(next.model.as_deref(), Some("sonnet"));
+        assert!(next.fast_mode);
+    }
+}
+
 fn issue_monitor_owner_launch_profile_choice(
     cache: &LaunchWizardMemoryCache,
     provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
@@ -8774,11 +9269,40 @@ fn issue_monitor_owner_launch_profile_choice(
     issue_number: u64,
     linked_issue_kind: gwt::LinkedIssueKind,
     codex_config_error: Option<&str>,
+    auth_probe: fn(&str) -> gwt::issue_monitor::ProviderAuthState,
 ) -> Result<IssueMonitorLaunchProfileChoice, String> {
+    use gwt::issue_monitor::ProviderAuthState;
+
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
+    let store = gwt::execution_environments::load().ok();
+    let auth_state = |tool: &str| {
+        let state = auth_probe(tool);
+        if state == ProviderAuthState::Unauthenticated
+            && store
+                .as_ref()
+                .is_some_and(|store| store.has_signed_in_managed_account(tool))
+        {
+            ProviderAuthState::Authenticated
+        } else {
+            state
+        }
+    };
+    let exclusion = |profile: &gwt::IssueMonitorLaunchProfile, pool_size: usize| {
+        issue_monitor_candidate_exclusion(profile, pool_size, codex_config_error, auth_state)
+    };
+    let options = cache.agent_options();
+    let usable = |tool: &str| {
+        gwt_agent::resolve_agent_id(tool)
+            .is_some_and(|agent| agent.supports_monitor_initial_prompt())
+            && options
+                .iter()
+                .find(|option| option.id == tool)
+                .is_none_or(|option| option.available)
+            && auth_state(tool) != ProviderAuthState::Unauthenticated
+    };
     if !prefs.launch_auto {
-        let pool = prefs.registered_launch_profiles_for_issue(issue_number);
+        let pool = prefs.registered_launch_profiles_with_tool_filter(issue_number, usable);
         if prefs
             .launch_profile_pool()
             .first()
@@ -8789,25 +9313,27 @@ fn issue_monitor_owner_launch_profile_choice(
         }
         if !pool.is_empty() {
             let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
-            let selection = select_issue_monitor_profiles_with_codex_config(
-                &pool,
-                codex_config_error,
-                |pool| {
-                    gwt::select_launch_profile(
-                        pool,
-                        &prefs.launch_admission_provider_quota_holds(),
-                        &[],
-                        None,
-                        &now,
-                    )
-                },
-            );
+            let selection = select_issue_monitor_profiles_excluding(&pool, exclusion, |pool| {
+                gwt::select_launch_profile(
+                    pool,
+                    &prefs.launch_admission_provider_quota_holds(),
+                    &[],
+                    None,
+                    &now,
+                )
+            });
             let index = selection.selected.ok_or_else(|| {
-                codex_config_error
-                    .unwrap_or("No eligible Issues launch candidate: every provider is held")
-                    .to_string()
+                issue_monitor_no_candidate_error(
+                    codex_config_error,
+                    &selection.skipped,
+                    "No eligible Issues launch candidate: every provider is held",
+                )
             })?;
-            let profile = pool[index].clone();
+            let profile = with_environment_runtime(
+                &prefs,
+                with_inherited_runtime(cache, project_root, pool[index].clone()),
+                false,
+            );
             return Ok(IssueMonitorLaunchProfileChoice {
                 profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
                     profile.clone().into(),
@@ -8817,6 +9343,9 @@ fn issue_monitor_owner_launch_profile_choice(
                 skipped: selection.skipped,
                 tier: None,
             });
+        }
+        if !prefs.execution_environments.is_empty() {
+            return Err("No eligible execution environment is available for this project.".into());
         }
         let choice =
             issue_monitor_launch_profile_choice(cache, provider_usage_accounts, project_root, None);
@@ -8830,35 +9359,73 @@ fn issue_monitor_owner_launch_profile_choice(
         }
         return Ok(choice);
     }
-    let available = cache
-        .agent_options()
-        .into_iter()
+    let available = options
+        .iter()
         .filter(|option| option.available)
-        .map(|option| option.id)
+        .map(|option| option.id.clone())
         .collect::<Vec<_>>();
     let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
-    let selection = select_issue_monitor_automatic_profile(
+    let unauthenticated = std::cell::RefCell::new(Vec::new());
+    let selection = select_issue_monitor_automatic_profile_excluding(
         &prefs,
         &available,
         issue_number,
         linked_issue_kind == gwt::LinkedIssueKind::Spec,
-        codex_config_error,
+        usable,
+        |profile, pool_size| {
+            let reason = exclusion(profile, pool_size);
+            if let Some(reason) = &reason {
+                unauthenticated.borrow_mut().push(gwt::LaunchProfileSkip {
+                    index: 0,
+                    agent_id: profile.agent_id.clone(),
+                    reason: reason.clone(),
+                });
+            }
+            reason
+        },
         &now,
     )
     .ok_or_else(|| {
-        codex_config_error
-            .unwrap_or("No eligible Issues automatic tier candidate")
-            .to_string()
+        issue_monitor_no_candidate_error(
+            codex_config_error,
+            &unauthenticated.borrow(),
+            "No eligible Issues automatic tier candidate",
+        )
     })?;
+    let profile = with_environment_runtime(
+        &prefs,
+        with_inherited_runtime(cache, project_root, selection.profile),
+        true,
+    );
     Ok(IssueMonitorLaunchProfileChoice {
-        profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
-            selection.profile.clone().into(),
-        )),
-        selected_agent_member_id: selection.profile.agent_member_id.clone(),
-        selected_agent_id: Some(selection.profile.agent_id),
+        profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.clone().into())),
+        selected_agent_member_id: profile.agent_member_id.clone(),
+        selected_agent_id: Some(profile.agent_id),
         skipped: selection.skipped,
         tier: Some(selection.tier),
     })
+}
+
+/// Issue #7729 AC-4 (SPEC #7007 item 197): a candidate that inherits its place
+/// runs where this project's last launch ran. The session history is read
+/// only for such a candidate.
+fn with_inherited_runtime(
+    cache: &LaunchWizardMemoryCache,
+    project_root: &Path,
+    mut profile: gwt::IssueMonitorLaunchProfile,
+) -> gwt::IssueMonitorLaunchProfile {
+    if profile.runtime_inherit {
+        profile.resolve_inherited_runtime(cache.previous_profiles(project_root).repo_local());
+    }
+    profile
+}
+
+fn with_environment_runtime(
+    prefs: &gwt::IssueMonitorPrefs,
+    profile: gwt::IssueMonitorLaunchProfile,
+    model_chosen_by_tier: bool,
+) -> gwt::IssueMonitorLaunchProfile {
+    gwt::execution_environments::candidate_as_started(prefs, profile, model_chosen_by_tier)
 }
 
 /// Shared current-candidate selector. Preview callers use cached availability
@@ -8871,17 +9438,43 @@ pub(super) fn select_issue_monitor_automatic_profile(
     codex_config_error: Option<&str>,
     now: &str,
 ) -> Option<gwt::issue_monitor::IssueMonitorTierSelection> {
+    select_issue_monitor_automatic_profile_excluding(
+        prefs,
+        available,
+        issue_number,
+        is_spec,
+        |_| true,
+        |profile, _| codex_config_exclusion(profile, codex_config_error),
+        now,
+    )
+}
+
+fn select_issue_monitor_automatic_profile_excluding(
+    prefs: &gwt::IssueMonitorPrefs,
+    available: &[String],
+    issue_number: u64,
+    is_spec: bool,
+    usable: impl Fn(&str) -> bool,
+    exclusion: impl Fn(&gwt::IssueMonitorLaunchProfile, usize) -> Option<String>,
+    now: &str,
+) -> Option<gwt::issue_monitor::IssueMonitorTierSelection> {
     let holds = prefs.launch_admission_provider_quota_holds();
     let work_tags = vec![if is_spec {
         "kind:spec".to_string()
     } else {
         "kind:issue".to_string()
     }];
-    prefs.select_auto_launch_profile(issue_number, is_spec, Some(available), |pool| {
-        select_issue_monitor_profiles_with_codex_config(pool, codex_config_error, |pool| {
-            gwt::select_launch_profile(pool, &holds, &work_tags, None, now)
-        })
-    })
+    prefs.select_auto_launch_profile_with_tool_filter(
+        issue_number,
+        is_spec,
+        Some(available),
+        usable,
+        |pool| {
+            select_issue_monitor_profiles_excluding(pool, &exclusion, |pool| {
+                gwt::select_launch_profile(pool, &holds, &work_tags, None, now)
+            })
+        },
+    )
 }
 
 fn issue_monitor_launch_profile_choice(
@@ -8892,7 +9485,7 @@ fn issue_monitor_launch_profile_choice(
 ) -> IssueMonitorLaunchProfileChoice {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
     if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
-        let pool = prefs.launch_profile_pool();
+        let pool = prefs.preview_launch_profile_pool();
         if !pool.is_empty() {
             let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let selection = gwt::select_launch_profile(
@@ -8913,7 +9506,11 @@ fn issue_monitor_launch_profile_choice(
                     (0, Vec::new())
                 }
             };
-            let profile = pool[index].clone();
+            let profile = with_environment_runtime(
+                &prefs,
+                with_inherited_runtime(cache, project_root, pool[index].clone()),
+                false,
+            );
             return IssueMonitorLaunchProfileChoice {
                 profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
                     profile.clone().into(),

@@ -558,6 +558,7 @@ Recommended alternatives:\n\
 - Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Branch protection toggles: JSON operation `repository.branch_protection.update` (develop/main; allow_force_pushes, required_conversation_resolution, enforce_admins, strict only)\n\
 - Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
 - Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
 - Automatic updates: JSON operation `update.settings.set`\n\
@@ -938,6 +939,7 @@ Recommended alternatives:\n\
 - Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Branch protection toggles: JSON operation `repository.branch_protection.update` (develop/main; allow_force_pushes, required_conversation_resolution, enforce_admins, strict only)\n\
 - PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
 - Actions: JSON operations `actions.rerun` and `actions.cancel`\n\

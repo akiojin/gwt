@@ -26,9 +26,9 @@ Reads the last N lines (default 50) of the specified pane's scrollback.
 
 ### Coordinate
 
-- `board.post` with `params.kind:"request"` and `params.targets:["<id>"]`:
+- `board.post` with `params.kind:"request"` and `params.mentions:["session:<id>"]`:
   ask a specific agent to act or respond.
-- `board.post` with `params.kind:"handoff"` and `params.targets:["<id>"]`:
+- `board.post` with `params.kind:"handoff"` and `params.mentions:["agent:<id>"]`:
   hand off context or next ownership.
 - `board.post` with `params.kind:"blocked"`: expose a blocker and ask for
   unblock help.

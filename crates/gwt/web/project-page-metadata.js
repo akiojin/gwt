@@ -29,13 +29,13 @@ export function createProjectPageMetadata({
   let attentionSyncPending = false;
   function render() {
     if (!project) {
-      documentRef.title = "gwt — Hub";
+      documentRef.title = "gwt — Home";
       try { documentRef.querySelector('link[rel="icon"]')?.setAttribute("href", "data:,"); } catch { /* optional favicon */ }
       return;
     }
     const { unread = false } = model.read();
     const { running, block: blocked, error: errors } = summary.read();
-    documentRef.title = `${unread ? "● " : ""}${name} — RUN ${running} · BLOCK ${blocked} — gwt`;
+    documentRef.title = `${unread ? "● " : ""}${name} — ${running} running · ${blocked} blocked — gwt`;
     try {
       let icon = documentRef.querySelector('link[rel="icon"]');
       if (!icon) {

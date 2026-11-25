@@ -34,7 +34,7 @@ use crate::client::{
     MergedPullRequest, OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient,
     RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity,
     RepositoryIssue, RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter,
-    SpecSummary, UpdatedAt,
+    SpecSummary, ThemeIssue, ThemeListing, ThemeSubIssue, UpdatedAt,
 };
 
 /// HTTP method.
@@ -656,9 +656,179 @@ pub fn validate_pm_settings(operation: &str, params: &Value) -> Result<(), ApiEr
                 }
             }
         }
+        "repository.branch_protection.update" => {
+            if !matches!(params["branch"].as_str(), Some("develop" | "main"))
+                || fields.len() < 2
+                || fields.iter().any(|(key, value)| {
+                    key != "branch"
+                        && (!BRANCH_PROTECTION_TOGGLES.contains(&key.as_str())
+                            || !value.is_boolean())
+                })
+            {
+                return Err(invalid());
+            }
+        }
         _ => return Err(invalid()),
     }
     Ok(())
+}
+
+/// Issue #7311: the typed protection fields a PM may change. `strict` lives in
+/// `required_status_checks`; the rest are top-level PUT booleans.
+const BRANCH_PROTECTION_TOGGLES: &[&str] = &[
+    "allow_force_pushes",
+    "required_conversation_resolution",
+    "enforce_admins",
+    "strict",
+];
+
+/// `{enabled: bool}` protection flags carried through the full-replacement PUT.
+const BRANCH_PROTECTION_FLAGS: &[&str] = &[
+    "enforce_admins",
+    "required_linear_history",
+    "allow_force_pushes",
+    "allow_deletions",
+    "block_creations",
+    "required_conversation_resolution",
+    "lock_branch",
+    "allow_fork_syncing",
+];
+
+/// Inverse of [`branch_protection_put_body`], used to prove a recorded
+/// snapshot is already in canonical PUT form.
+fn put_body_as_protection(body: &Value) -> Value {
+    let actors = |value: &Value| {
+        if !value.is_object() {
+            return value.clone();
+        }
+        let wrap = |key: &str, field: &str| {
+            value[key].as_array().map_or(Value::Null, |names| {
+                names.iter().map(|name| json!({ field: name })).collect()
+            })
+        };
+        json!({"users":wrap("users","login"),"teams":wrap("teams","slug"),"apps":wrap("apps","slug")})
+    };
+    let mut protection = serde_json::Map::new();
+    for key in BRANCH_PROTECTION_FLAGS {
+        protection.insert((*key).into(), json!({"enabled": body[*key]}));
+    }
+    protection.insert(
+        "required_status_checks".into(),
+        body["required_status_checks"].clone(),
+    );
+    protection.insert("restrictions".into(), actors(&body["restrictions"]));
+    let mut reviews = body["required_pull_request_reviews"].clone();
+    if let Some(fields) = reviews.as_object_mut() {
+        for key in ["dismissal_restrictions", "bypass_pull_request_allowances"] {
+            if let Some(restriction) = fields.get(key).map(actors) {
+                fields.insert(key.into(), restriction);
+            }
+        }
+    }
+    protection.insert("required_pull_request_reviews".into(), reviews);
+    Value::Object(protection)
+}
+
+/// Project a `GET .../branches/{branch}/protection` body into the exact
+/// `PUT` body shape, so a full replacement keeps every unrequested field.
+/// Fails closed on any field that cannot be carried faithfully.
+fn branch_protection_put_body(value: &Value) -> Option<Value> {
+    let names = |value: Option<&Value>, key: &str| -> Option<Value> {
+        let mut names = match value {
+            None | Some(Value::Null) => Vec::new(),
+            Some(list) => list
+                .as_array()?
+                .iter()
+                .map(|item| item[key].as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()?,
+        };
+        names.sort();
+        Some(json!(names))
+    };
+    let actors = |value: &Value| -> Option<Value> {
+        value.as_object()?;
+        Some(json!({
+            "users": names(value.get("users"), "login")?,
+            "teams": names(value.get("teams"), "slug")?,
+            "apps": names(value.get("apps"), "slug")?,
+        }))
+    };
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "required_status_checks".into(),
+        match value.get("required_status_checks") {
+            None | Some(Value::Null) => Value::Null,
+            Some(checks) => {
+                let mut list = checks["checks"]
+                    .as_array()?
+                    .iter()
+                    .map(|check| {
+                        let context = check["context"].as_str().filter(|c| !c.is_empty())?;
+                        let app_id = match &check["app_id"] {
+                            Value::Null => -1,
+                            id => id.as_i64().filter(|id| *id >= -1)?,
+                        };
+                        Some((context.to_owned(), app_id))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                list.sort();
+                json!({
+                    "strict": checks["strict"].as_bool()?,
+                    "checks": list
+                        .into_iter()
+                        .map(|(context, app_id)| json!({"context":context,"app_id":app_id}))
+                        .collect::<Vec<_>>(),
+                })
+            }
+        },
+    );
+    body.insert(
+        "required_pull_request_reviews".into(),
+        match value.get("required_pull_request_reviews") {
+            None | Some(Value::Null) => Value::Null,
+            Some(reviews) => {
+                let mut out = serde_json::Map::new();
+                for key in [
+                    "dismiss_stale_reviews",
+                    "require_code_owner_reviews",
+                    "require_last_push_approval",
+                ] {
+                    out.insert(
+                        key.into(),
+                        Value::Bool(match reviews.get(key) {
+                            None => false,
+                            Some(flag) => flag.as_bool()?,
+                        }),
+                    );
+                }
+                out.insert(
+                    "required_approving_review_count".into(),
+                    json!(reviews["required_approving_review_count"].as_u64()?),
+                );
+                for key in ["dismissal_restrictions", "bypass_pull_request_allowances"] {
+                    if let Some(restriction) = reviews.get(key) {
+                        out.insert(key.into(), actors(restriction)?);
+                    }
+                }
+                Value::Object(out)
+            }
+        },
+    );
+    body.insert(
+        "restrictions".into(),
+        match value.get("restrictions") {
+            None | Some(Value::Null) => Value::Null,
+            Some(restrictions) => actors(restrictions)?,
+        },
+    );
+    for key in BRANCH_PROTECTION_FLAGS {
+        let enabled = match value.get(*key) {
+            None => false,
+            Some(flag) => flag["enabled"].as_bool()?,
+        };
+        body.insert((*key).into(), Value::Bool(enabled));
+    }
+    Some(Value::Object(body))
 }
 
 fn valid_topics(value: &Value) -> bool {
@@ -1665,6 +1835,10 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             ),
             "repository.settings.set" if params.get("topics").is_some() => format!("{root}/topics"),
             "repository.settings.set" => root,
+            "repository.branch_protection.update" => format!(
+                "{root}/branches/{}/protection",
+                params["branch"].as_str().expect("validated branch")
+            ),
             _ => unreachable!("validated operation"),
         };
         let body = self.workflow_get(
@@ -1684,6 +1858,9 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         before: &Value,
     ) -> Result<Value, ApiError> {
         validate_pm_settings(operation, params)?;
+        if operation == "repository.branch_protection.update" {
+            return self.branch_protection_mutate(params, before);
+        }
         let invalid = || {
             pm_settings_error(operation, "settings identity or requested change was not confirmed; inspect remote state before retrying")
         };
@@ -1817,6 +1994,12 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         };
         let repository = format!("{}/{}", self.owner, self.repo);
         let mut projected = match operation {
+            "repository.branch_protection.update" => {
+                let mut projected = branch_protection_put_body(value).ok_or_else(invalid)?;
+                projected["repository"] = repository.into();
+                projected["branch"] = params["branch"].clone();
+                return Ok(projected);
+            }
             "pr.reopen" | "pr.review.submit" => {
                 let repo = value
                     .pointer("/base/repo/full_name")
@@ -1907,6 +2090,63 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             }
         }
         Ok(projected)
+    }
+
+    /// Issue #7311: rewrite only the requested protection fields through the
+    /// full-replacement PUT, then confirm every field of the response.
+    fn branch_protection_mutate(&self, params: &Value, before: &Value) -> Result<Value, ApiError> {
+        let operation = "repository.branch_protection.update";
+        let unconfirmed = || {
+            pm_settings_error(operation, "branch protection identity or requested change was not confirmed; inspect remote state before retrying")
+        };
+        let branch = params["branch"].as_str().expect("validated branch");
+        let mut desired = before.as_object().cloned().ok_or_else(unconfirmed)?;
+        if desired
+            .remove("repository")
+            .as_ref()
+            .and_then(Value::as_str)
+            != Some(format!("{}/{}", self.owner, self.repo).as_str())
+            || desired.remove("branch").as_ref().and_then(Value::as_str) != Some(branch)
+        {
+            return Err(unconfirmed());
+        }
+        let mut desired = Value::Object(desired);
+        // The authorized snapshot must already be a faithful PUT body.
+        if branch_protection_put_body(&put_body_as_protection(&desired)).as_ref() != Some(&desired)
+        {
+            return Err(unconfirmed());
+        }
+        for (key, value) in params.as_object().expect("validated params") {
+            match key.as_str() {
+                "branch" => {}
+                "strict" => {
+                    let checks = desired["required_status_checks"]
+                        .as_object_mut()
+                        .ok_or_else(|| {
+                            pm_settings_error(
+                                operation,
+                                "strict requires existing required status checks; add a context with repository.required_checks.update first",
+                            )
+                        })?;
+                    checks.insert("strict".into(), value.clone());
+                }
+                _ => desired[key] = value.clone(),
+            }
+        }
+        let path = format!(
+            "/repos/{}/{}/branches/{branch}/protection",
+            self.owner, self.repo
+        );
+        let response = self.rest_put(&path, desired.clone())?;
+        let value: Value = serde_json::from_str(&response.body).map_err(|_| unconfirmed())?;
+        let actual = branch_protection_put_body(&value).ok_or_else(unconfirmed)?;
+        if actual != desired {
+            return Err(unconfirmed());
+        }
+        let mut after = actual;
+        after["repository"] = format!("{}/{}", self.owner, self.repo).into();
+        after["branch"] = branch.into();
+        Ok(after)
     }
 
     fn rest_put(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
@@ -2823,6 +3063,46 @@ mod transport_tests {
     }
 }
 
+/// A theme is an Issue that has sub-issues or carries the theme label; any
+/// other node yields `None`.
+fn parse_theme_issue(node: &Value, repository: &str) -> Option<ThemeIssue> {
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_string();
+    let total = node["subIssuesSummary"]["total"].as_u64().unwrap_or(0);
+    let recorded = node["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|label| label["name"].as_str() == Some(super::THEME_LABEL));
+    if total == 0 && !recorded {
+        return None;
+    }
+    let sub_issues = node["subIssues"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|sub| {
+            Some(ThemeSubIssue {
+                number: IssueNumber(sub["number"].as_u64()?),
+                title: text(sub, "title"),
+                state: parse_issue_state(sub["state"].as_str().unwrap_or_default()),
+                url: text(sub, "url"),
+                in_repository: sub["repository"]["nameWithOwner"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(repository)),
+            })
+        })
+        .collect();
+    Some(ThemeIssue {
+        number: IssueNumber(node["number"].as_u64()?),
+        title: text(node, "title"),
+        body: text(node, "body"),
+        url: text(node, "url"),
+        sub_issues_total: total,
+        sub_issues_completed: node["subIssuesSummary"]["completed"].as_u64().unwrap_or(0),
+        sub_issues,
+    })
+}
+
 fn parse_issue_state(s: &str) -> IssueState {
     match s {
         "CLOSED" | "closed" => IssueState::Closed,
@@ -3329,6 +3609,26 @@ query($owner:String!,$repo:String!,$number:Int!){
 }
 "#;
 
+/// How many pages of open Issues one theme listing reads (100 per page).
+const THEME_LISTING_MAX_PAGES: usize = 10;
+
+const LIST_THEMES_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
+  repository(owner:$owner, name:$repo){
+    issues(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT,direction:DESC}){
+      nodes{
+        number title body url
+        labels(first:20){ nodes{ name } }
+        subIssuesSummary{ total completed }
+        subIssues(first:100){ nodes{ number title state url repository{ nameWithOwner } } }
+      }
+      pageInfo{ hasNextPage endCursor }
+    }
+  }
+}
+"#;
+
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
@@ -3790,6 +4090,28 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("set_state json: {e}")))?;
         parse_rest_issue(&value)
+    }
+
+    fn list_themes(&self) -> Result<ThemeListing, ApiError> {
+        let repository = format!("{}/{}", self.owner, self.repo);
+        let mut listing = ThemeListing::default();
+        let mut after = Value::Null;
+        for _ in 0..THEME_LISTING_MAX_PAGES {
+            let value = self.graphql(
+                LIST_THEMES_QUERY,
+                json!({ "owner": self.owner, "repo": self.repo, "after": after }),
+            )?;
+            let issues = &value["data"]["repository"]["issues"];
+            for node in issues["nodes"].as_array().into_iter().flatten() {
+                listing.themes.extend(parse_theme_issue(node, &repository));
+            }
+            if issues["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                return Ok(listing);
+            }
+            after = issues["pageInfo"]["endCursor"].clone();
+        }
+        listing.truncated = true;
+        Ok(listing)
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {

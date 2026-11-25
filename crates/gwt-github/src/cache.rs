@@ -288,6 +288,17 @@ pub enum ValidatedCacheEntry {
     Fresh(VersionedCacheEntry),
 }
 
+const CLOSE_INTAKE_FILE: &str = "close-intake.jsonl";
+const CLOSE_INTAKE_RETENTION: time::Duration = time::Duration::days(2);
+
+/// One GitHub close this cache took in (Issue #7643).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseIntakeRecord {
+    pub number: u64,
+    /// When the close was written to the cache, RFC 3339 in UTC.
+    pub ingested_at: String,
+}
+
 /// Root of the on-disk cache.
 #[derive(Debug, Clone)]
 pub struct Cache {
@@ -691,9 +702,80 @@ impl Cache {
         }
 
         // Finally publish the new generation in meta.json.
+        let meta_path = dir.join("meta.json");
+        let was_open = fs::read(&meta_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<CacheMeta>(&bytes).ok())
+            .is_some_and(|previous| previous.state == "open");
         let meta = CacheMeta::from_snapshot(snapshot, generation.0);
         let meta_bytes = serde_json::to_vec_pretty(&meta)?;
-        write_atomic(&dir.join("meta.json"), &meta_bytes)?;
+        write_atomic(&meta_path, &meta_bytes)?;
+        if was_open && snapshot.state == IssueState::Closed {
+            self.record_close_intake(snapshot.number)?;
+        }
+        Ok(())
+    }
+
+    /// Drop one Issue from the cache. Used when the Issue was deleted on
+    /// GitHub, where no later refresh would ever report it again.
+    pub fn remove_issue(&self, number: IssueNumber) -> Result<(), CacheError> {
+        self.with_issue_lock(number, || {
+            match fs::remove_dir_all(self.issue_dir(number)) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    Err(CacheError::Io(error))
+                }
+                _ => Ok(()),
+            }
+        })
+    }
+
+    fn close_intake_path(&self) -> PathBuf {
+        self.root.join(CLOSE_INTAKE_FILE)
+    }
+
+    /// The closes this cache took in recently: one record each time a cached
+    /// open Issue was written as closed, with the time of that write
+    /// (Issue #7643). Unreadable lines are skipped.
+    pub fn close_intake_records(&self) -> Vec<CloseIntakeRecord> {
+        fs::read_to_string(self.close_intake_path())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    /// Append one close to the intake record, dropping records older than
+    /// [`CLOSE_INTAKE_RETENTION`]: closed Issues grow without bound, so the
+    /// record keeps only what "completed today" can still count.
+    fn record_close_intake(&self, number: IssueNumber) -> Result<(), CacheError> {
+        let directory = self.root.join(".locks");
+        fs::create_dir_all(&directory)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(directory.join("close-intake.lock"))?;
+        lock.lock_exclusive()?;
+        let now = UtcTimestamp::now();
+        let mut records: Vec<CloseIntakeRecord> = self
+            .close_intake_records()
+            .into_iter()
+            .filter(|record| {
+                UtcTimestamp::parse_rfc3339(&record.ingested_at)
+                    .is_some_and(|at| now.signed_duration_since(at) < CLOSE_INTAKE_RETENTION)
+            })
+            .collect();
+        records.push(CloseIntakeRecord {
+            number: number.0,
+            ingested_at: now.to_rfc3339(),
+        });
+        let mut bytes = Vec::new();
+        for record in &records {
+            serde_json::to_writer(&mut bytes, record)?;
+            bytes.push(b'\n');
+        }
+        write_atomic(&self.close_intake_path(), &bytes)?;
         Ok(())
     }
 

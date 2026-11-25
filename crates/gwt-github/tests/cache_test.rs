@@ -975,3 +975,104 @@ fn every_renewal_outcome_names_the_operation_that_recovers_it() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #7643: the close intake record behind "completed today"
+// ---------------------------------------------------------------------------
+
+fn snapshot_in_state(number: u64, state: IssueState) -> IssueSnapshot {
+    IssueSnapshot {
+        state,
+        ..mk_snapshot(number, "plain body".to_string())
+    }
+}
+
+#[test]
+fn taking_in_a_close_of_a_cached_open_issue_records_it_once() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    cache
+        .write_snapshot(&snapshot_in_state(10, IssueState::Open))
+        .unwrap();
+    assert!(cache.close_intake_records().is_empty());
+
+    cache
+        .write_snapshot(&snapshot_in_state(10, IssueState::Closed))
+        .unwrap();
+    // Writing the already closed Issue again is not another close.
+    cache
+        .write_snapshot(&snapshot_in_state(10, IssueState::Closed))
+        .unwrap();
+
+    let records = cache.close_intake_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].number, 10);
+    assert!(
+        gwt_core::timestamp::UtcTimestamp::parse_rfc3339(&records[0].ingested_at).is_some(),
+        "the record carries when gwt took the close in: {}",
+        records[0].ingested_at
+    );
+}
+
+#[test]
+fn an_issue_first_seen_closed_is_not_a_close_taken_in() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    cache
+        .write_snapshot(&snapshot_in_state(11, IssueState::Closed))
+        .unwrap();
+    assert!(cache.close_intake_records().is_empty());
+}
+
+#[test]
+fn close_intake_keeps_only_recent_records() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    fs::create_dir_all(tmp.path()).unwrap();
+    fs::write(
+        tmp.path().join("close-intake.jsonl"),
+        "{\"number\":1,\"ingested_at\":\"2020-01-01T00:00:00Z\"}\nnot json\n",
+    )
+    .unwrap();
+    cache
+        .write_snapshot(&snapshot_in_state(12, IssueState::Open))
+        .unwrap();
+    cache
+        .write_snapshot(&snapshot_in_state(12, IssueState::Closed))
+        .unwrap();
+
+    let numbers: Vec<u64> = cache
+        .close_intake_records()
+        .iter()
+        .map(|record| record.number)
+        .collect();
+    assert_eq!(numbers, vec![12], "old and unreadable lines are dropped");
+    let persisted = fs::read_to_string(tmp.path().join("close-intake.jsonl")).unwrap();
+    assert_eq!(persisted.lines().count(), 1);
+}
+
+#[test]
+fn removing_an_issue_drops_it_from_every_read() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    cache
+        .write_snapshot(&snapshot_in_state(13, IssueState::Open))
+        .unwrap();
+    cache
+        .write_snapshot(&snapshot_in_state(14, IssueState::Open))
+        .unwrap();
+    assert_eq!(cache.list_summaries().unwrap().len(), 2);
+
+    cache.remove_issue(IssueNumber(13)).unwrap();
+    // Removing what is already gone is not an error.
+    cache.remove_issue(IssueNumber(13)).unwrap();
+
+    assert!(cache.load_entry(IssueNumber(13)).is_none());
+    let numbers: Vec<u64> = cache
+        .list_summaries()
+        .unwrap()
+        .iter()
+        .map(|summary| summary.number)
+        .collect();
+    assert_eq!(numbers, vec![14]);
+}

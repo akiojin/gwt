@@ -161,10 +161,7 @@ pub fn provider_usage_readings(
 }
 
 fn provider_name(provider: UsageProvider) -> &'static str {
-    match provider {
-        UsageProvider::Codex => "codex",
-        UsageProvider::ClaudeCode => "claude",
-    }
+    provider.agent_command()
 }
 
 fn rfc3339(instant: UtcTimestamp) -> String {
@@ -208,6 +205,7 @@ impl ProviderUsageReading {
                 Some("the provider has produced no usage data yet".to_string()),
             ),
             UsageState::Unavailable { reason } => ("unavailable", Some(reason.clone())),
+            UsageState::Unknown { reason } => ("unknown", Some(reason.clone())),
         };
         // A row the poller stopped refreshing is old whatever it says: a
         // reading is no longer fresh, and a cause may no longer hold.
@@ -260,6 +258,8 @@ mod tests {
     fn codex_at_limit(fetched_at: UtcTimestamp) -> ProviderUsage {
         ProviderUsage {
             provider: UsageProvider::Codex,
+            pool_account_id: None,
+            last_limit: None,
             account_id: Some("acct".to_string()),
             account_label: Some("someone@example.com".to_string()),
             plan: Some("pro".to_string()),
@@ -355,6 +355,36 @@ mod tests {
                 "a row without a reading carries no numbers: {json}"
             );
         }
+    }
+
+    /// Issue #7841 AC-4: a file published before accounts were pooled (no
+    /// pool account, no observed limit, only Codex and Claude) still reads.
+    #[test]
+    fn a_snapshot_published_before_account_pools_still_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("provider-usage.json");
+        let observed_at = t(0).to_rfc3339_seconds();
+        fs::write(
+            &path,
+            serde_json::json!({
+                "observed_at": observed_at,
+                "accounts": [
+                    {"provider":"codex","account_id":"acct","plan":"pro",
+                     "windows":[{"kind":"weekly","used_percent":40.0,"resets_at":null}],
+                     "limit_reached":false,"state":{"kind":"ok"},"fetched_at":observed_at},
+                    {"provider":"claude_code","plan":null,"windows":[],
+                     "limit_reached":false,"state":{"kind":"disabled"},"fetched_at":null}
+                ]
+            })
+            .to_string(),
+        )
+        .expect("legacy snapshot");
+
+        let readings = read_provider_usage_readings(&path, t(10));
+        let codex = reading(&readings, "codex");
+        assert_eq!(codex.state, "ok");
+        assert_eq!(codex.windows.len(), 1);
+        assert_eq!(reading(&readings, "claude").state, "disabled");
     }
 
     /// AC-6: every way the poller can fail to produce numbers keeps its own

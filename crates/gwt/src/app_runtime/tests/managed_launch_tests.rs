@@ -2527,7 +2527,7 @@ fn app_runtime_resumed_work_dedupes_missing_lexically_equivalent_worktree_paths(
     assert_eq!(view.active_works[0].owner.as_deref(), Some("SPEC-2359"));
     assert_eq!(view.active_works[0].pr_number, Some(2359));
     assert_eq!(
-        view.active_works[0].board_refs,
+        view.active_works[0].board_refs.as_ref(),
         vec!["resumed-board-ref".to_string()]
     );
 }

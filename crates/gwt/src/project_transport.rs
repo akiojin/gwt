@@ -521,6 +521,7 @@ fn defers_serialization(event: &BackendEvent) -> bool {
     matches!(
         event,
         BackendEvent::ActiveWorkProjectionPatch { .. }
+            | BackendEvent::BoardEntries { .. }
             | BackendEvent::TerminalSnapshot { .. }
             | BackendEvent::IssueMonitorInbox { .. }
             | BackendEvent::IssueMonitorStatus { .. }
@@ -3301,7 +3302,15 @@ async fn client_session_with_scope(
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) => {
+                        // Issue #7346: the transport queues the Close reply on
+                        // receipt but only writes it on the next flush.
+                        // Dropping the socket here would reset the connection
+                        // and the client would observe abnormal 1006.
+                        let _ = tokio::time::timeout(Duration::from_secs(1), sender.close()).await;
+                        break;
+                    }
+                    None => break,
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         eprintln!("websocket error: {error}");
@@ -4580,6 +4589,11 @@ mod tests {
                 state: crate::WindowProcessStatus::Stopped,
             },
             BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            BackendEvent::BoardEntries {
+                id: "board".into(),
+                entries: Vec::new(),
+                has_more_before: false,
+            },
             BackendEvent::IssueMonitorStatus {
                 status: Box::new(
                     crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
@@ -4615,7 +4629,11 @@ mod tests {
         // these new kinds directly so eager encoding cannot pass with zero.
         for queue in [&first, &second] {
             let state = queue.state.lock().unwrap();
-            for kind in ["issue_monitor_inbox", "issue_monitor_status"] {
+            for kind in [
+                "issue_monitor_inbox",
+                "issue_monitor_status",
+                "board_entries",
+            ] {
                 let queued = state
                     .entries
                     .iter()
@@ -4628,7 +4646,7 @@ mod tests {
             }
         }
 
-        for (queue, encodings) in [(first, 3), (second, 0)] {
+        for (queue, encodings) in [(first, 4), (second, 0)] {
             let expected = expected.clone();
             std::thread::spawn(move || {
                 DEFERRED_SERIALIZATIONS.with(|count| count.set(0));

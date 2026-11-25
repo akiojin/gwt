@@ -1,6 +1,6 @@
-//! Host-wide admission and background work for supported-agent maintenance.
+//! Per-tool admission and background work for supported-agent maintenance.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use gwt::agent_maintenance::{
     latest_version, run_maintenance, supports_updates, update_available, version_is_current,
@@ -11,7 +11,7 @@ use super::{
     AppRuntime, BackendEvent, ClientId, LaunchWizardMemoryCache, OutboundEvent, UserEvent,
 };
 
-pub(super) const AGENT_MAINTENANCE_BUSY: &str =
+const AGENT_MAINTENANCE_BUSY: &str =
     "Agent maintenance is in progress. Try launching the agent again when it finishes.";
 
 #[derive(Default)]
@@ -21,6 +21,25 @@ pub(crate) struct AgentMaintenanceState {
     pub(super) catalog_generation: u64,
     saved_auto_update: Option<bool>,
     pub(super) deferred_startup_ready: bool,
+    /// Tools the running worker may replace. `None` while `busy` holds every
+    /// agent launch.
+    scope: Option<MaintenanceScope>,
+}
+
+enum MaintenanceScope {
+    Only(String),
+    /// Startup auto-update: every tool but the ones skipped as in use.
+    AllExcept(Vec<String>),
+}
+
+/// Catalog command of the tool an agent identifier runs. Custom and
+/// unidentified agents yield `None`, which callers treat as "any tool".
+fn catalog_tool(agent: Option<&str>) -> Option<&'static str> {
+    match gwt_agent::resolve_agent_id(agent?)? {
+        gwt_agent::AgentId::Custom(_) => None,
+        id => gwt_agent::builtin_agent_descriptor_for_command(id.command())
+            .map(|descriptor| descriptor.command),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,40 +141,101 @@ impl AppRuntime {
         vec![OutboundEvent::reply(client_id, event)]
     }
 
-    pub(super) fn agent_maintenance_rejection(&self) -> Option<&'static str> {
+    /// Why `tool` cannot be installed or updated now. Only agents running
+    /// that tool, and launches already bound to it, hold its admission.
+    pub(super) fn agent_maintenance_rejection(&self, tool: &str) -> Option<String> {
         if self.agent_maintenance.busy {
-            return Some(AGENT_MAINTENANCE_BUSY);
+            return Some(AGENT_MAINTENANCE_BUSY.into());
         }
         if self.agent_maintenance.app_update_committing {
-            return Some("gwt is applying an update. Start agent maintenance after it restarts.");
+            return Some(
+                "gwt is applying an update. Start agent maintenance after it restarts.".into(),
+            );
         }
-        let live_agent = self.tabs.iter().any(|tab| {
-            tab.workspace.persisted().windows.iter().any(|window| {
-                crate::runtime_support::window_is_agent_pane(window)
-                    && (window.status == gwt::WindowProcessStatus::Starting
-                        || self
-                            .runtimes
-                            .contains_key(&crate::combined_window_id(&tab.id, &window.id)))
-            })
-        }) || self
+        let name = gwt_agent::builtin_agent_descriptor_for_command(tool)
+            .map_or(tool, |descriptor| descriptor.display_name);
+        let uses = |agent: Option<&str>| catalog_tool(agent).is_none_or(|used| used == tool);
+        let mut live = HashSet::new();
+        let mut users = Vec::new();
+        for tab in &self.tabs {
+            for window in &tab.workspace.persisted().windows {
+                let id = crate::combined_window_id(&tab.id, &window.id);
+                if !crate::runtime_support::window_is_agent_pane(window)
+                    || !(window.status == gwt::WindowProcessStatus::Starting
+                        || self.runtimes.contains_key(&id))
+                {
+                    continue;
+                }
+                live.insert(id);
+                if uses(window.agent_id.as_deref().or(window.preset.command_name())) {
+                    let agent = window
+                        .agent_name
+                        .as_deref()
+                        .or(window.purpose_title.as_deref())
+                        .unwrap_or(&window.title);
+                    users.push(match window.linked_issue_number {
+                        Some(issue) => format!("{agent} (Issue #{issue})"),
+                        None => agent.to_string(),
+                    });
+                }
+            }
+        }
+        let mut detached: Vec<_> = self
             .active_agent_sessions
-            .keys()
-            .any(|id| self.runtimes.contains_key(id));
-        let pending_launch = !self.inflight_launches.is_empty()
-            || !self.pending_launch_completions.is_empty()
-            || !self.issue_monitor_launch_preparations.is_empty()
-            || !self.issue_monitor_launch_queue.is_empty()
-            || !self.pending_continue_work.is_empty()
-            || !self.pending_fresh_execution_launches.is_empty()
-            || !self.pending_startup_auto_resume_sessions.is_empty()
+            .iter()
+            .filter(|(id, session)| {
+                self.runtimes.contains_key(*id)
+                    && !live.contains(*id)
+                    && uses(Some(&session.agent_id))
+            })
+            .map(|(_, session)| session.display_name.clone())
+            .collect();
+        detached.sort();
+        users.extend(detached);
+        if !users.is_empty() {
+            return Some(format!(
+                "{name} is in use by {}. Close those agent panes before maintenance.",
+                users.join(", ")
+            ));
+        }
+        // Launches that have not chosen a tool yet are not counted here:
+        // `agent_maintenance_launch_block` refuses them if they pick this one.
+        let pending_launch = self
+            .pending_continue_work
+            .values()
+            .any(|pending| uses(Some(pending.work_agent_id.command())))
+            || self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .any(|pending| uses(Some(pending.session.agent_id.command())))
             || self.project_states.values().any(|state| {
-                !state.pending_pm_launches.is_empty()
-                    || !state.pending_pm_worktree_preparations.is_empty()
-                    || !state.pending_launch_wizard_materializations.is_empty()
+                state
+                    .pending_launch_wizard_materializations
+                    .values()
+                    .any(|session| uses(Some(&session.wizard.agent_id)))
             });
-        (live_agent || pending_launch).then_some(
-            "Close all live agent panes and wait for pending agent launches before maintenance.",
-        )
+        pending_launch.then(|| {
+            format!("{name} has a pending agent launch. Wait for it to start before maintenance.")
+        })
+    }
+
+    /// Refuses a launch that would run a tool the maintenance worker may be
+    /// replacing. Other tools keep launching.
+    pub(super) fn agent_maintenance_launch_block(
+        &self,
+        agent: Option<&str>,
+    ) -> Option<&'static str> {
+        if !self.agent_maintenance.busy {
+            return None;
+        }
+        let untouched = match (&self.agent_maintenance.scope, catalog_tool(agent)) {
+            (Some(MaintenanceScope::Only(target)), Some(tool)) => tool != target,
+            (Some(MaintenanceScope::AllExcept(skipped)), Some(tool)) => {
+                skipped.iter().any(|skipped| skipped == tool)
+            }
+            _ => false,
+        };
+        (!untouched).then_some(AGENT_MAINTENANCE_BUSY)
     }
 
     pub(super) fn maintain_supported_agent_events(
@@ -164,10 +244,10 @@ impl AppRuntime {
         agent_id: String,
         action: MaintenanceAction,
     ) -> Vec<OutboundEvent> {
-        if let Some(message) = self.agent_maintenance_rejection() {
+        if let Some(message) = self.agent_maintenance_rejection(&agent_id) {
             return vec![OutboundEvent::reply(
                 client_id,
-                result_event(failed_result(agent_id, action, message.into())),
+                result_event(failed_result(agent_id, action, message)),
             )];
         }
         if gwt_agent::builtin_agent_descriptor_for_command(&agent_id).is_none() {
@@ -180,7 +260,9 @@ impl AppRuntime {
                 )),
             )];
         }
-        if let Err(message) = self.spawn_agent_maintenance(Some((agent_id.clone(), action))) {
+        if let Err(message) =
+            self.spawn_agent_maintenance(Some((agent_id.clone(), action)), Vec::new())
+        {
             return vec![OutboundEvent::reply(
                 client_id,
                 result_event(failed_result(agent_id, action, message)),
@@ -236,16 +318,30 @@ impl AppRuntime {
 
     /// Called once before startup can create agent panes. This never installs
     /// missing agents, and changing the setting does not invoke this method.
+    /// Tools already in use are skipped; the rest still update.
     pub(super) fn start_agent_auto_update(&mut self) {
         let enabled = self
             .profile_config_path()
             .ok()
             .and_then(|path| gwt_config::Settings::load_from_path(&path).ok())
             .is_some_and(|settings| settings.agent.auto_update);
-        if !enabled || self.agent_maintenance_rejection().is_some() {
+        if !enabled {
             return;
         }
-        if let Err(error) = self.spawn_agent_maintenance(None) {
+        let updatable: Vec<_> = gwt_agent::builtin_agent_descriptors()
+            .iter()
+            .filter(|descriptor| supports_updates(descriptor))
+            .map(|descriptor| descriptor.command)
+            .collect();
+        let skipped: Vec<_> = updatable
+            .iter()
+            .filter(|tool| self.agent_maintenance_rejection(tool).is_some())
+            .map(|tool| tool.to_string())
+            .collect();
+        if skipped.len() == updatable.len() {
+            return;
+        }
+        if let Err(error) = self.spawn_agent_maintenance(None, skipped) {
             tracing::warn!(%error, "automatic agent maintenance could not start");
         }
     }
@@ -253,6 +349,7 @@ impl AppRuntime {
     fn spawn_agent_maintenance(
         &mut self,
         manual: Option<(String, MaintenanceAction)>,
+        skipped: Vec<String>,
     ) -> Result<(), String> {
         let config_path = self.profile_config_path()?;
         let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -264,6 +361,10 @@ impl AppRuntime {
             .checked_add(1)
             .expect("supported agent catalog generation exhausted");
         self.agent_maintenance.busy = true;
+        self.agent_maintenance.scope = Some(match &manual {
+            Some((tool, _)) => MaintenanceScope::Only(tool.clone()),
+            None => MaintenanceScope::AllExcept(skipped.clone()),
+        });
         let spawn = self.blocking_tasks.try_spawn(move || {
             let fallback = manual
                 .clone()
@@ -278,6 +379,7 @@ impl AppRuntime {
                             .into_iter()
                             .filter(|agent| {
                                 agent.installed
+                                    && !skipped.contains(&agent.id)
                                     && gwt_agent::builtin_agent_descriptor_for_command(&agent.id)
                                         .is_some_and(supports_updates)
                             })
@@ -312,6 +414,7 @@ impl AppRuntime {
         });
         if let Err(error) = spawn {
             self.agent_maintenance.busy = false;
+            self.agent_maintenance.scope = None;
             return Err(error);
         }
         Ok(())
@@ -327,6 +430,7 @@ impl AppRuntime {
             .checked_add(1)
             .expect("supported agent catalog generation exhausted");
         self.agent_maintenance.busy = false;
+        self.agent_maintenance.scope = None;
         let mut events: Vec<_> = completion
             .results
             .into_iter()

@@ -272,6 +272,16 @@
 .roster-detail-heading > div { min-width: 0; }
 :root[data-theme] .agents-surface .roster-name-field { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); margin-top: var(--space-2); }
 .roster-detail-heading .roster-avatar { flex-shrink: 0; }
+/* Issue 7635: the avatar choice in a member's detail. */
+.roster-avatar-picker { margin-top: var(--space-2); }
+.roster-avatar-picker h4 { margin: 0 0 var(--space-1); font-size: var(--type-sm); }
+.roster-avatar-choices { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.agents-surface button.roster-avatar-choice { padding: 0; border-color: var(--color-border); border-radius: var(--radius-pill); font-size: var(--type-md); }
+.agents-surface button.roster-avatar-choice[aria-checked="true"] { border-color: var(--color-state-active); box-shadow: 0 0 0 2px var(--color-focus-ring); }
+.agents-surface button.roster-avatar-choice:disabled { cursor: not-allowed; opacity: 0.6; }
+/* Issue 7636: a refused upload says why, under the choices. */
+.roster-avatar { overflow: hidden; }
+.roster-avatar-error { margin: var(--space-1) 0 0; font-size: var(--type-xs); color: var(--color-state-blocked); }
 .roster-detail-heading h3 { margin: 0; font-size: var(--type-md); white-space: nowrap; overflow-x: auto; }
 .roster-detail-heading p { margin: var(--space-1) 0 0; font-size: var(--type-xs); color: var(--color-text-muted); overflow-wrap: anywhere; }
 .roster-history h4 { margin: var(--space-1) 0 var(--space-2); font-size: var(--type-sm); }
@@ -293,9 +303,15 @@
 .roster-history small { font-family: var(--font-mono); font-size: var(--type-xs); color: var(--color-text-muted); }
 .roster-history button { text-align: start; color: var(--color-link); }
 .roster-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Issue 7647: an agent's fixed traits, edited in the member detail and summarized on its row. */
+.roster-row-traits { max-width: 100%; color: var(--color-text-muted); font-size: var(--type-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.roster-traits { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; margin-top: var(--space-3); border-top: 1px solid var(--color-border); padding-top: var(--space-2); }
+.roster-traits h4 { margin: 0; font-size: var(--type-sm); }
+.roster-traits textarea { min-width: 0; min-height: 88px; padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; line-height: 1.5; resize: vertical; }
+.roster-traits textarea:disabled { color: var(--color-text-disabled); }
+.roster-traits > [data-action="save-traits"] { align-self: flex-start; margin-top: var(--space-1); }
 /* Issue 7646: ledger order and deletion controls on every member row. */
 /* Buttons take their label's width, so the body of a row stays its selection target. */
-.roster-who > [data-action="activate"] { align-self: flex-start; }
 .roster-row > .roster-avatar,
 .roster-row > .roster-who { grid-row: 1 / span 2; }
 .roster-row > .roster-state { grid-row: 1; grid-column: 3; }
@@ -314,6 +330,23 @@
 .roster-past-empty,
 .roster-error { color: var(--color-text-muted); }
 .roster-preview-host { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+/* Issue 7649: agent history and planned assignments on the project's agents screen. */
+.agent-history-plans { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; margin-top: var(--space-4); }
+.agent-history,
+.agent-plans { min-width: 0; border-top: 1px solid var(--color-border); padding-top: var(--space-3); }
+.agent-history-plans h3 { margin: 0 0 var(--space-1); font-size: var(--type-base); }
+.agent-history__scroll { max-width: 100%; overflow-x: auto; }
+.agent-history table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: var(--type-xs); }
+.agent-history th,
+.agent-history td { padding: var(--space-2); border-bottom: 1px solid var(--color-border); text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+.agent-history th { color: var(--color-text-muted); font-weight: 600; white-space: nowrap; }
+.agent-history td .window-role-badge { margin-inline-start: var(--space-2); }
+.agent-history__empty,
+.agent-plans__empty { color: var(--color-text-muted); font-size: var(--type-xs); }
+.agent-plans ol { list-style: none; margin: var(--space-2) 0 0; padding: 0; }
+.agent-plans li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border); overflow-wrap: anywhere; }
+.agent-plans li .roster-plan-reason { flex: 1 1 160px; margin: 0; }
+.agent-plans__badge { border: 1px solid var(--color-border-strong); border-radius: var(--radius-pill); padding: 0 var(--space-2); color: var(--color-text-muted); font-size: var(--type-xs); }
 @container (max-width: 800px) {
   .work-body { grid-template-columns: minmax(0, 1fr) minmax(120px, auto); }
   .work-tail { grid-column: 1; grid-row: 2; }

@@ -285,6 +285,27 @@ impl PmLaunchProfile {
         self
     }
 
+    /// Issue #7647 (SPEC #7007 item 26): the reasoning level and speed of the
+    /// agent serving as Project Manager, mapped to this profile's tool the way
+    /// an implementation session maps them. An unset trait keeps the
+    /// profile's value.
+    pub fn with_traits(mut self, traits: &crate::agent_names::AgentTraits) -> Self {
+        let mut candidate = crate::IssueMonitorLaunchProfile {
+            model: self.model.clone(),
+            reasoning: self.reasoning.clone(),
+            codex_speed: self.codex_speed.unwrap_or_default(),
+            fast_mode: self.fast_mode.unwrap_or(false),
+            ..crate::IssueMonitorLaunchProfile::for_tool(&self.agent_id)
+        };
+        crate::launch_wizard::apply_agent_traits(&mut candidate, traits);
+        self.reasoning = candidate.reasoning;
+        if traits.speed.is_some() {
+            self.codex_speed = Some(candidate.codex_speed);
+            self.fast_mode = Some(candidate.fast_mode);
+        }
+        self
+    }
+
     /// Canonicalize user-entered optional tuning without changing the agent
     /// identity or the legacy optional schema. Blank values mean provider
     /// defaults; non-blank values are persisted and launched without their UI
@@ -580,7 +601,27 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
     ))
 }
 
+/// Claude Code 2.1.328 hands pasted input to its hooks and native transcript
+/// inside `<pasted_content id="…">`, and gwt delivers every PM notification by
+/// paste (Issue #7785). Returns the pasted text and whatever follows it.
+pub fn split_provider_paste_envelope(text: &str) -> Option<(&str, &str)> {
+    let (id, rest) = text
+        .trim_start()
+        .strip_prefix("<pasted_content id=\"")?
+        .split_once("\">")?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let (pasted, rest) = rest.split_once(&format!("</pasted_content id=\"{id}\">"))?;
+    Some((pasted.trim_matches(['\r', '\n']), rest))
+}
+
 pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, String)> {
+    // Only a paste that is the whole prompt is the delivery itself.
+    let prompt = match split_provider_paste_envelope(prompt) {
+        Some((pasted, rest)) if rest.trim().is_empty() => pasted,
+        _ => prompt,
+    };
     let prompt = prompt.strip_suffix('\r').unwrap_or(prompt);
     let marker_start = prompt.rfind(" [gwt-delivery:")?;
     let body = &prompt[..marker_start];
@@ -2942,17 +2983,19 @@ fn resolve_pm_worktree_base(git_root: &Path) -> io::Result<String> {
             }
         }
     }
-    let remote = gwt_core::process::run_git_logged(
+    let remote = run_pm_network_git(
+        git_root,
         &["ls-remote", "--symref", "origin", "HEAD"],
-        Some(git_root),
-    )?;
-    if !remote.status.success() {
+        PM_NETWORK_GIT_TIMEOUT,
+    )
+    .map_err(|error| io::Error::other(format!("resolve PM remote default branch: {error}")))?;
+    if !remote.success() {
         return Err(io::Error::other(format!(
             "resolve PM remote default branch: {}",
-            String::from_utf8_lossy(&remote.stderr).trim()
+            remote.stderr.trim()
         )));
     }
-    for line in String::from_utf8_lossy(&remote.stdout).lines() {
+    for line in remote.stdout.lines() {
         if let Some(branch) = line
             .strip_prefix("ref: refs/heads/")
             .and_then(|line| line.strip_suffix("\tHEAD"))
@@ -2966,21 +3009,57 @@ fn resolve_pm_worktree_base(git_root: &Path) -> io::Result<String> {
     ))
 }
 
+/// Issue #7664 AC-3: the longest one network Git command may run while the
+/// PM worktree refresh holds `pm-refresh.lock`. Every other PM start in this
+/// project waits on that lock, so an unanswered remote (a stalled network or
+/// a credential helper waiting for input after an update) must degrade the
+/// refresh to its cached base instead of holding the lock for minutes.
+const PM_NETWORK_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run one network Git command for the PM refresh under
+/// [`PM_NETWORK_GIT_TIMEOUT`] (or the caller's earlier operation deadline),
+/// with interactive credential prompts disabled.
+fn run_pm_network_git(
+    git_root: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> io::Result<gwt_core::process_console::SpawnOutput> {
+    let bound = std::time::Instant::now() + timeout;
+    let deadline =
+        gwt_core::operation_deadline::current().map_or(bound, |caller| caller.min(bound));
+    gwt_core::process_console::spawn_logged_blocking_with_deadline(
+        &gwt_core::process_console::global(),
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        args,
+        gwt_core::process_console::SpawnOptions::new(format!("git {}", args.join(" ")))
+            .current_dir(git_root)
+            .env("GIT_TERMINAL_PROMPT", "0"),
+        deadline,
+    )
+}
+
 fn fetch_pm_worktree_base(git_root: &Path, base_ref: &str) -> io::Result<()> {
+    fetch_pm_worktree_base_within(git_root, base_ref, PM_NETWORK_GIT_TIMEOUT)
+}
+
+fn fetch_pm_worktree_base_within(
+    git_root: &Path,
+    base_ref: &str,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
     let branch = base_ref
         .strip_prefix("origin/")
         .ok_or_else(|| io::Error::other(format!("PM base {base_ref} is not a remote branch")))?;
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-    let output = gwt_core::process::run_git_logged(
-        &["fetch", "origin", "--prune", &refspec],
-        Some(git_root),
-    )?;
-    if output.status.success() {
+    let output = run_pm_network_git(git_root, &["fetch", "origin", "--prune", &refspec], timeout)
+        .map_err(|error| io::Error::other(format!("fetch PM base {base_ref}: {error}")))?;
+    if output.success() {
         Ok(())
     } else {
         Err(io::Error::other(format!(
             "fetch PM base {base_ref}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )))
     }
 }
@@ -5821,6 +5900,43 @@ pub fn clear_pm_start_block(prefs_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #7664 AC-3: a remote that never answers must not keep the PM
+    /// refresh (and `pm-refresh.lock`) waiting; the fetch fails within its
+    /// bound so the refresh degrades to the cached base.
+    #[cfg(unix)]
+    #[test]
+    fn pm_base_fetch_gives_up_on_an_unanswered_remote() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let repo = temp.path().join("repo");
+        let git = |dir: &Path, args: &[&str]| {
+            let output = gwt_core::process::run_git_logged(args, Some(dir)).expect("git");
+            assert!(output.status.success(), "git {args:?}");
+        };
+        git(
+            temp.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git(temp.path(), &["init", "-q", repo.to_str().unwrap()]);
+        git(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        // The remote side never advertises its refs.
+        git(
+            &repo,
+            &["config", "remote.origin.uploadpack", "sh -c 'sleep 600' --"],
+        );
+
+        let error =
+            fetch_pm_worktree_base_within(&repo, "origin/main", std::time::Duration::from_secs(1))
+                .expect_err("an unanswered fetch fails");
+        assert_eq!(
+            error.to_string(),
+            "fetch PM base origin/main: process deadline expired"
+        );
+    }
 
     /// Issue #3767 AC-2 / AC-3: the terse wake clause and the full Stop-gate
     /// clause name the same ruling channels and the same Monitor boundary, so
@@ -8991,8 +9107,29 @@ mod tests {
         let legacy = format!("{body} [gwt-delivery:{operation_id}:{hash}]\r");
         assert_eq!(
             parse_protected_pm_delivery_prompt(&legacy),
+            Some((operation_id.to_string(), hash.clone()))
+        );
+        // Issue #7785: Claude Code 2.1.328 reports pasted input in this envelope.
+        let marked = legacy.trim_end_matches('\r');
+        let pasted =
+            format!("\n\n<pasted_content id=\"c676\">\n{marked}\n</pasted_content id=\"c676\">\n");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&pasted),
             Some((operation_id.to_string(), hash))
         );
+        for not_only_the_delivery in [
+            format!("{pasted}これは何？"),
+            format!("これは何？{pasted}"),
+            pasted.replace(
+                "</pasted_content id=\"c676\">",
+                "</pasted_content id=\"other\">",
+            ),
+        ] {
+            assert!(
+                parse_protected_pm_delivery_prompt(&not_only_the_delivery).is_none(),
+                "{not_only_the_delivery}"
+            );
+        }
     }
 
     #[test]

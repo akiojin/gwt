@@ -834,11 +834,9 @@ pub fn ready_to_promote_blocker(fields: &PrInventoryFields) -> Option<&'static s
         Some(0) => {}
         Some(_) => return Some("unresolved_review_threads"),
     }
-    match fields.coderabbit_review_complete {
-        None => return Some("coderabbit_review_unknown"),
-        Some(false) => return Some("coderabbit_review_pending"),
-        Some(true) => {}
-    }
+    // Issue #7810 AC-1b (owner ruling 2026-11-23): a CodeRabbit review is
+    // not a merge condition. Branch-protection checks and the independent
+    // review verdict decide; `coderabbit_review_complete` is informational.
     match agent_visual_check(&fields.body) {
         AgentVisualCheck::Fail => return Some("agent_visual_check_failed"),
         AgentVisualCheck::Absent => return Some("agent_visual_check_unknown"),
@@ -2211,9 +2209,7 @@ where
         // its review threads read.
         if !matches!(
             item.ready_to_promote_blocker.as_deref(),
-            Some("review_threads_unknown")
-                | Some("coderabbit_review_unknown")
-                | Some("agent_visual_check_unknown")
+            Some("review_threads_unknown") | Some("agent_visual_check_unknown")
         ) {
             continue;
         }
@@ -4115,6 +4111,39 @@ fn pinned_pr_command_args(repository: Option<&str>, args: &[&str]) -> Vec<String
     args
 }
 
+/// GitHub can return concurrent workflow attempts together for the same head.
+fn remove_superseded_cancellations(rollup: &mut serde_json::Value) {
+    fn check_run(node: &serde_json::Value) -> Option<((&str, &str), UtcTimestamp)> {
+        if node.get("__typename")?.as_str()? != "CheckRun" {
+            return None;
+        }
+        let workflow = node.get("workflowName")?.as_str()?;
+        let name = node.get("name")?.as_str()?;
+        let started_at = parse_github_timestamp(node.get("startedAt")?.as_str())?;
+        (!workflow.is_empty() && !name.is_empty()).then_some(((workflow, name), started_at))
+    }
+
+    let Some(checks) = rollup.as_array_mut() else {
+        return;
+    };
+    let mut latest = BTreeMap::<_, UtcTimestamp>::new();
+    for (key, started_at) in checks.iter().filter_map(check_run) {
+        latest
+            .entry(key)
+            .and_modify(|previous| *previous = (*previous).max(started_at))
+            .or_insert(started_at);
+    }
+    let mut keep = checks
+        .iter()
+        .map(|node| {
+            node.get("conclusion").and_then(serde_json::Value::as_str) != Some("CANCELLED")
+                || check_run(node).is_none_or(|(key, started_at)| latest[&key] == started_at)
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+    checks.retain(|_| keep.next().unwrap_or(true));
+}
+
 fn fetch_pr_completion_snapshot_with<F>(
     repository: Option<&str>,
     repo_path: &Path,
@@ -4167,6 +4196,9 @@ where
     let state = parse_pr_status_json(&output.stdout)?.state;
     let now = UtcTimestamp::now();
     if state == PrState::Open {
+        if let Some(rollup) = value.get_mut("statusCheckRollup") {
+            remove_superseded_cancellations(rollup);
+        }
         let url = value
             .get("url")
             .and_then(serde_json::Value::as_str)
@@ -4262,6 +4294,18 @@ pub fn try_fetch_pr_diff(
     max_bytes: usize,
 ) -> Result<Option<String>> {
     try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
+}
+
+pub fn try_fetch_pr_diff_in_repository(
+    repo_path: &Path,
+    repository: &str,
+    number: u64,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, |path, args| {
+        let args = pinned_pr_command_args(Some(repository), args);
+        run_gh_command(path, &args.iter().map(String::as_str).collect::<Vec<_>>())
+    })
 }
 
 fn try_fetch_pr_diff_with<F>(
@@ -4644,17 +4688,25 @@ pub fn disarm_pr_auto_merge(
     number: u64,
     remote: &PrAutoMergeRemoteState,
 ) -> AutoMergeMutationOutcome {
-    disarm_pr_auto_merge_with(repo_path, number, remote, run_auto_merge_command)
+    disarm_pr_auto_merge_with(repo_path, number, remote, run_auto_merge_command, || {
+        fetch_pr_auto_merge_remote_state(repo_path, number)
+    })
 }
 
-fn disarm_pr_auto_merge_with<F>(
+/// Issue #7697 AC-6: a disarm is `Confirmed` only once a fresh readback shows
+/// GitHub no longer has auto-merge requested. `gh` exiting zero is not that
+/// proof, and a `gh` that ran and left the request in place is a definite
+/// failure the caller must hand to a human before required CI merges the PR.
+fn disarm_pr_auto_merge_with<F, R>(
     repo_path: &Path,
     number: u64,
     remote: &PrAutoMergeRemoteState,
     mut run_gh: F,
+    mut read_back: R,
 ) -> AutoMergeMutationOutcome
 where
     F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+    R: FnMut() -> Option<PrAutoMergeRemoteState>,
 {
     match remote {
         PrAutoMergeRemoteState::Open {
@@ -4676,10 +4728,42 @@ where
     }
 
     let number = number.to_string();
-    classify_auto_merge_command(run_gh(
-        repo_path,
-        &["pr", "merge", &number, "--disable-auto"],
-    ))
+    let command = run_gh(repo_path, &["pr", "merge", &number, "--disable-auto"]);
+    let failure = match command {
+        Err(AutoMergeCommandError::PreSubmit(message)) => {
+            return AutoMergeMutationOutcome::PreSubmit(message);
+        }
+        Err(AutoMergeCommandError::RemoteOutcomeUnknown(message)) => {
+            return AutoMergeMutationOutcome::RemoteOutcomeUnknown(message);
+        }
+        Ok(output) if output.success => None,
+        Ok(output) => Some(output.stderr.trim().to_string()),
+    };
+    match read_back() {
+        Some(
+            PrAutoMergeRemoteState::Open {
+                auto_merge_requested: false,
+                ..
+            }
+            | PrAutoMergeRemoteState::Closed { .. },
+        ) => AutoMergeMutationOutcome::Confirmed,
+        Some(PrAutoMergeRemoteState::Merged { .. }) => AutoMergeMutationOutcome::AuthorityMismatch(
+            "pull request merged before kill-switch disarm was confirmed".to_string(),
+        ),
+        Some(PrAutoMergeRemoteState::Open {
+            auto_merge_requested: true,
+            ..
+        }) => AutoMergeMutationOutcome::AuthorityMismatch(match failure {
+            Some(stderr) => {
+                format!("auto-merge is still requested on GitHub; the disarm failed: {stderr}")
+            }
+            None => "auto-merge is still requested on GitHub after the disarm reported success"
+                .to_string(),
+        }),
+        None => AutoMergeMutationOutcome::RemoteOutcomeUnknown(
+            "auto-merge readback unavailable after the disarm".to_string(),
+        ),
+    }
 }
 
 fn classify_auto_merge_command(
@@ -4697,7 +4781,32 @@ fn classify_auto_merge_command(
     }
 }
 
+/// Issue #7697 AC-6: run from the same directory as every other `gh` call.
+///
+/// A workspace home is not a Git repository (the bare repository is its
+/// child), so `gh pr merge` started there exited before reaching GitHub and
+/// no arm or disarm ever applied.
 fn run_auto_merge_command(
+    repo_path: &Path,
+    args: &[&str],
+) -> std::result::Result<GhCliOutput, AutoMergeCommandError> {
+    run_auto_merge_command_with(repo_path, args, spawn_auto_merge_command)
+}
+
+fn run_auto_merge_command_with<F>(
+    repo_path: &Path,
+    args: &[&str],
+    mut spawn_gh: F,
+) -> std::result::Result<GhCliOutput, AutoMergeCommandError>
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    let command_root =
+        crate::worktree::main_worktree_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    spawn_gh(&command_root, args)
+}
+
+fn spawn_auto_merge_command(
     repo_path: &Path,
     args: &[&str],
 ) -> std::result::Result<GhCliOutput, AutoMergeCommandError> {
@@ -4889,6 +4998,8 @@ pub struct PrGateReadback {
     pub status_check_rollup: String,
     pub head_sha: Option<String>,
     pub merge: PrMergeReadback,
+    /// Issue #7810: the PR's base branch, whose protection the gate applies.
+    pub base_ref: Option<String>,
 }
 
 pub fn try_fetch_pr_gate_readback(repo_path: &Path, number: u64) -> Result<PrGateReadback> {
@@ -4911,7 +5022,7 @@ where
             "view",
             &number,
             "--json",
-            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus",
+            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName",
         ],
     )?;
     if !output.success {
@@ -4926,6 +5037,16 @@ where
         status_check_rollup: extract_status_check_rollup(&output.stdout),
         head_sha: parse_pr_head_sha(&output.stdout),
         merge,
+        base_ref: serde_json::from_str::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("baseRefName")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|base| !base.is_empty())
+                    .map(str::to_string)
+            }),
     })
 }
 
@@ -4948,12 +5069,12 @@ mod tests {
                     "view",
                     "7",
                     "--json",
-                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus"
+                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName"
                 ]
             );
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","baseRefName":"develop"}"#.to_string(),
                 stderr: String::new(),
             })
         })
@@ -4961,6 +5082,8 @@ mod tests {
         assert_eq!(calls, 1);
         assert!(readback.status_check_rollup.contains("\"build\""));
         assert_eq!(readback.head_sha.as_deref(), Some("abc"));
+        // Issue #7810: the gate reads the protection of the PR's own base.
+        assert_eq!(readback.base_ref.as_deref(), Some("develop"));
         assert_eq!(readback.merge.state, "OPEN");
         assert!(
             try_fetch_pr_gate_readback_with(Path::new("/repo"), 7, |_, _| Ok(GhCliOutput {
@@ -6279,6 +6402,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(
             already_disarmed,
@@ -6301,6 +6425,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(closed, AutoMergeMutationOutcome::AlreadyTargetState);
         assert!(closed.is_success());
@@ -6320,6 +6445,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(
             merged,
@@ -6334,35 +6460,178 @@ mod tests {
             head_sha: "abc123".to_string(),
             auto_merge_requested: true,
         };
-        let confirmed = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, args| {
-            calls += 1;
-            assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
-            Ok(GhCliOutput {
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
+        let disarmed = || {
+            Some(PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: false,
             })
-        });
+        };
+        let gh_exit = |success: bool, stderr: &str| {
+            Ok(GhCliOutput {
+                success,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+            })
+        };
+        let confirmed = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, args| {
+                calls += 1;
+                assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
+                gh_exit(true, "")
+            },
+            disarmed,
+        );
         assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
         assert_eq!(calls, 1);
 
-        let pre_submit = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
-            Err(AutoMergeCommandError::PreSubmit("not started".to_string()))
-        });
+        let pre_submit = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, _args| Err(AutoMergeCommandError::PreSubmit("not started".to_string())),
+            || unreachable!("gh never started, so nothing is read back"),
+        );
         assert_eq!(
             pre_submit,
             AutoMergeMutationOutcome::PreSubmit("not started".to_string())
         );
 
-        let ambiguous = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
-            Err(AutoMergeCommandError::RemoteOutcomeUnknown(
-                "response lost".to_string(),
-            ))
-        });
+        let ambiguous = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, _args| {
+                Err(AutoMergeCommandError::RemoteOutcomeUnknown(
+                    "response lost".to_string(),
+                ))
+            },
+            || unreachable!("the next attempt starts from its own readback"),
+        );
         assert_eq!(
             ambiguous,
             AutoMergeMutationOutcome::RemoteOutcomeUnknown("response lost".to_string())
         );
+    }
+
+    /// Issue #7697 AC-6: `gh` exiting zero does not prove the disarm. Only a
+    /// readback showing auto-merge no longer requested does, and a `gh` that
+    /// ran and left it requested is a failure a human has to resolve.
+    #[test]
+    fn issue_7697_disarm_is_confirmed_only_by_a_github_readback() {
+        let repo = Path::new("/tmp/repo");
+        let armed = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: true,
+        };
+        let gh_exit = |success: bool, stderr: &str| {
+            Ok(GhCliOutput {
+                success,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+            })
+        };
+        let disarm =
+            |success: bool, stderr: &'static str, after: Option<PrAutoMergeRemoteState>| {
+                disarm_pr_auto_merge_with(
+                    repo,
+                    7,
+                    &armed,
+                    |_p, _args| gh_exit(success, stderr),
+                    || after.clone(),
+                )
+            };
+
+        let still_armed = disarm(true, "", Some(armed.clone()));
+        assert_eq!(
+            still_armed,
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "auto-merge is still requested on GitHub after the disarm reported success"
+                    .to_string()
+            )
+        );
+        assert!(!still_armed.is_success());
+
+        // The production failure: `gh` exited 1 without reaching GitHub.
+        assert_eq!(
+            disarm(false, "fatal: not a git repository\n", Some(armed.clone())),
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "auto-merge is still requested on GitHub; the disarm failed: fatal: not a git repository"
+                    .to_string()
+            )
+        );
+
+        // A non-zero exit whose mutation did apply is still a disarm.
+        assert_eq!(
+            disarm(
+                false,
+                "warning",
+                Some(PrAutoMergeRemoteState::Closed {
+                    head_sha: "abc123".to_string(),
+                })
+            ),
+            AutoMergeMutationOutcome::Confirmed
+        );
+
+        assert_eq!(
+            disarm(
+                true,
+                "",
+                Some(PrAutoMergeRemoteState::Merged {
+                    head_sha: "abc123".to_string(),
+                })
+            ),
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "pull request merged before kill-switch disarm was confirmed".to_string()
+            )
+        );
+
+        assert_eq!(
+            disarm(true, "", None),
+            AutoMergeMutationOutcome::RemoteOutcomeUnknown(
+                "auto-merge readback unavailable after the disarm".to_string()
+            )
+        );
+    }
+
+    /// Issue #7697 AC-6: a workspace home is not a Git repository, so an arm
+    /// or disarm started there never reached GitHub.
+    #[test]
+    fn issue_7697_auto_merge_commands_run_from_the_child_bare_repository() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo = tmp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let expected = gwt_core::paths::normalize_windows_child_process_path(
+            &std::fs::canonicalize(&bare_repo).expect("canonical bare repo"),
+        );
+        let mut observed_cwd = None;
+
+        let output = run_auto_merge_command_with(
+            tmp.path(),
+            &["pr", "merge", "7", "--disable-auto"],
+            |cwd, _args| {
+                observed_cwd = Some(cwd.to_path_buf());
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        )
+        .expect("fake gh");
+
+        assert!(output.success);
+        assert_eq!(observed_cwd.as_deref(), Some(expected.as_path()));
     }
 
     #[test]
@@ -6726,6 +6995,62 @@ mod tests {
     }
 
     #[test]
+    fn completion_snapshot_ignores_only_superseded_cancelled_checks() {
+        let check = |workflow, started_at, conclusion| {
+            serde_json::json!({
+                "__typename": "CheckRun", "name": "verify", "workflowName": workflow,
+                "startedAt": started_at, "status": "COMPLETED", "conclusion": conclusion
+            })
+        };
+        let old = check("CI", "2026-10-09T00:01:00Z", "CANCELLED");
+        let new = check("CI", "2026-10-09T00:02:00Z", "SUCCESS");
+        let blocker = |checks: Vec<serde_json::Value>| {
+            let payload = serde_json::json!({
+                "number": 42, "state": "OPEN", "isDraft": false, "headRefName": "work/issue-7310",
+                "headRefOid": "same-head", "url": "https://github.com/o/r/pull/42",
+                "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": checks,
+                "body": "Agent Visual Check: n/a (no UI surface)"
+            });
+            fetch_pr_completion_snapshot_with(None, Path::new("/repo"), 42, |_, args| {
+                let stdout = if args[0] == "pr" {
+                    payload.to_string()
+                } else {
+                    serde_json::json!({"data":{"repository":{"pullRequest":{
+                        "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}
+                    }}}})
+                    .to_string()
+                };
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout,
+                    stderr: String::new(),
+                })
+            })
+            .unwrap()
+            .inventory
+            .completion_blocker()
+        };
+        assert_eq!(blocker(vec![new.clone(), old.clone()]), None);
+        let red = Some("checks_not_green");
+        assert_eq!(blocker(vec![old.clone()]), red);
+        assert_eq!(
+            blocker(vec![
+                old.clone(),
+                check("Other CI", "2026-10-09T00:02:00Z", "SUCCESS")
+            ]),
+            red
+        );
+        assert_eq!(
+            blocker(vec![old, check("CI", "2026-10-09T00:02:00Z", "FAILURE")]),
+            red
+        );
+        assert_eq!(
+            blocker(vec![new, check("CI", "2026-10-09T00:03:00Z", "CANCELLED")]),
+            red
+        );
+    }
+
+    #[test]
     fn completion_snapshot_refuses_unknown_draft_and_unread_review() {
         let payload = serde_json::json!({"number":42,"state":"OPEN","headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"});
         let read = |value: serde_json::Value| {
@@ -6764,6 +7089,26 @@ mod tests {
             snapshot.inventory.completion_blocker(),
             Some("review_threads_unknown")
         );
+    }
+
+    /// Issue #7810 AC-1b: a PR with no CodeRabbit review — unread, never
+    /// posted, or skipped by a rate limit — is promotable and completable on
+    /// its required checks alone.
+    #[test]
+    fn issue_7810_coderabbit_review_is_not_a_promotion_or_completion_condition() {
+        for coderabbit in [None, Some(false), Some(true)] {
+            let fields = PrInventoryFields {
+                coderabbit_review_complete: coderabbit,
+                ..promotable_fields()
+            };
+            assert_eq!(ready_to_promote_blocker(&fields), None, "{coderabbit:?}");
+            let row = inventory_item_from_fields(
+                fields,
+                UtcTimestamp::now(),
+                &PrInventoryOptions::default(),
+            );
+            assert_eq!(row.completion_blocker(), None, "{coderabbit:?}");
+        }
     }
 
     #[test]
@@ -9529,20 +9874,6 @@ mod tests {
                 "unresolved_review_threads",
                 PrInventoryFields {
                     unresolved_review_threads: Some(2),
-                    ..promotable_fields()
-                },
-            ),
-            (
-                "coderabbit_review_unknown",
-                PrInventoryFields {
-                    coderabbit_review_complete: None,
-                    ..promotable_fields()
-                },
-            ),
-            (
-                "coderabbit_review_pending",
-                PrInventoryFields {
-                    coderabbit_review_complete: Some(false),
                     ..promotable_fields()
                 },
             ),
