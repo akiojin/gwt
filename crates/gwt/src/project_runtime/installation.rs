@@ -5413,6 +5413,7 @@ mod owner_admission_tests {
                 hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                     pr_number: 99,
                     lifecycle: "open".into(),
+                    auto_merge_enabled: None,
                 }),
             },
         );
