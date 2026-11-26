@@ -448,6 +448,25 @@ fn reserve_member_after_census<T>(
     .map_err(|error| error.to_string())
 }
 
+/// Whether a Monitor row binds one of the restore's windows to its Session.
+/// A restore with no placeholder window, or unreadable prefs, counts as
+/// bound: this check refuses only on a row it could read and did not find.
+fn restore_has_monitor_row(root: &Path, restore: &OwnerSavedSessionRestore) -> bool {
+    if restore.placeholders.is_empty() {
+        return true;
+    }
+    let Ok(prefs) =
+        crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(root))
+    else {
+        return true;
+    };
+    let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+    restore.placeholders.iter().any(|row| {
+        let id = format!("{}::{}", gwt_core::paths::project_scope_hash(root), row.id);
+        super::monitor::restored_issue_number(&monitor, &restore.source, &id, row).is_some()
+    })
+}
+
 pub(crate) fn prepare_owner_saved_session_restore(
     root: &Path,
     sessions_dir: &Path,
@@ -601,6 +620,23 @@ pub(crate) fn prepare_owner_saved_session_restore(
             return Err(restore.refuse(
                 "completed_work_retained",
                 "Automatic restore refused: completed_work_retained",
+                false,
+            ));
+        }
+        if !is_pm
+            && !session.review_dispatch
+            && session.launch_route == gwt_agent::LaunchRoute::Autonomous
+            && !restore_has_monitor_row(root, restore)
+        {
+            // Issue #7630 AC-5: Issues launched this Session, but no Monitor
+            // row binds its window any more, so a restored pane would run
+            // unlinked with nobody to look after it. Keep the placeholder (a
+            // reversible hold; the user can still resume it by hand) and stop
+            // retrying the source on every startup.
+            mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
+            return Err(restore.refuse(
+                "no_monitor_row",
+                "Automatic restore refused: no_monitor_row",
                 false,
             ));
         }

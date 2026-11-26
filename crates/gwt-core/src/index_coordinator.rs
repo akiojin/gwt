@@ -446,7 +446,14 @@ pub struct HeavyLeaseStatus {
     /// exists, or it published a terminal job status. Such a ticket is
     /// residue, so `held` is false and no TTL is worth waiting out.
     pub holder_stale: bool,
+    /// Issue #7630 AC-2: the id of a held lock that no readable ticket
+    /// describes, so it has no lease_id, project, owner or TTL of its own.
+    /// [`IndexCoordinator::release_untracked_heavy_holder`] accepts it.
+    pub untracked_lease_id: Option<String>,
 }
+
+/// Prefix of [`HeavyLeaseStatus::untracked_lease_id`].
+pub const UNTRACKED_HEAVY_LEASE_PREFIX: &str = "untracked:";
 
 impl HeavyLeaseStatus {
     /// Preserve an observed overrun before an external reclaim ends the holder.
@@ -1335,6 +1342,7 @@ impl IndexCoordinator {
                 held: true,
                 pending,
                 queue,
+                untracked_lease_id: Some(self.untracked_heavy_lease_id(storage)),
                 ..HeavyLeaseStatus::default()
             });
         };
@@ -1380,6 +1388,7 @@ impl IndexCoordinator {
                 holder_alive,
                 holder_job_status,
                 holder_stale,
+                untracked_lease_id: None,
             });
         }
         let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
@@ -1440,6 +1449,7 @@ impl IndexCoordinator {
             holder_alive,
             holder_job_status,
             holder_stale,
+            untracked_lease_id: None,
         })
     }
 
@@ -1590,6 +1600,82 @@ impl IndexCoordinator {
 
     pub fn lease_event_log_path(&self) -> PathBuf {
         self.root.join(LEASE_EVENT_LOG_NAME)
+    }
+
+    fn untracked_heavy_lease_id(&self, storage: &Path) -> String {
+        match storage
+            .strip_prefix(self.root.join("slots"))
+            .ok()
+            .and_then(Path::to_str)
+        {
+            Some(slot) => format!("{UNTRACKED_HEAVY_LEASE_PREFIX}slot-{slot}"),
+            None => format!("{UNTRACKED_HEAVY_LEASE_PREFIX}root"),
+        }
+    }
+
+    fn untracked_heavy_storage(&self, lease_id: &str) -> Option<PathBuf> {
+        let slot = lease_id.strip_prefix(UNTRACKED_HEAVY_LEASE_PREFIX)?;
+        if slot == "root" {
+            return Some(self.root.clone());
+        }
+        let slot: usize = slot.strip_prefix("slot-")?.parse().ok()?;
+        Some(self.root.join("slots").join(slot.to_string()))
+    }
+
+    /// Whether `lease_id` still names a held lock that no ticket describes.
+    pub fn untracked_heavy_holder_present(&self, lease_id: &str) -> Result<bool, CoordinatorError> {
+        let Some(storage) = self.untracked_heavy_storage(lease_id) else {
+            return Ok(false);
+        };
+        if !storage.join("heavy.lock").exists() {
+            return Ok(false);
+        }
+        Ok(self
+            .heavy_storage_status(&storage)?
+            .untracked_lease_id
+            .as_deref()
+            == Some(lease_id))
+    }
+
+    /// Issue #7630 AC-2: detach a held lock that no ticket describes.
+    ///
+    /// Without a ticket there is no owner to observe or end, so the lock file
+    /// itself is moved aside under the allocator lock: the unknown holder
+    /// keeps its descriptor on the old file, and the next claimant locks a
+    /// fresh one. Returns `false` when the slot no longer holds an untracked
+    /// lock (it settled, or a ticketed holder took it). The release is
+    /// recorded in the lease ledger with `reason`.
+    pub fn release_untracked_heavy_holder(
+        &self,
+        lease_id: &str,
+        reason: &str,
+    ) -> Result<bool, CoordinatorError> {
+        let Some(storage) = self.untracked_heavy_storage(lease_id) else {
+            return Ok(false);
+        };
+        let allocator = open_lock_file(&self.root.join(VERIFICATION_ALLOCATOR_LOCK))?;
+        fs2::FileExt::lock_exclusive(&allocator)?;
+        let result = (|| {
+            if !self.untracked_heavy_holder_present(lease_id)? {
+                return Ok(false);
+            }
+            let lock = storage.join("heavy.lock");
+            let detached = storage.join(format!("heavy.lock.untracked-{}", now_ms()));
+            fs::rename(&lock, &detached)?;
+            let _ = fs::remove_file(&detached);
+            self.record_lease_reclaimed(
+                lease_id,
+                "unknown",
+                OwnerIdentity::current(),
+                &format!(
+                    "untracked holder detached by pid {}: {reason}",
+                    std::process::id()
+                ),
+            );
+            Ok(true)
+        })();
+        let _ = fs2::FileExt::unlock(&allocator);
+        result
     }
 
     /// Record that the lease `lease_id`, held by `owner` for `target`, was
