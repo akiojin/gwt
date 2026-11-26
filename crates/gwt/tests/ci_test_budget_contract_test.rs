@@ -1005,7 +1005,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
             assert!(feedback["continue-on-error"].is_null());
             let feedback_run = feedback["run"].as_str().unwrap();
             assert!(feedback_run.contains("node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\""));
-            assert!(feedback_run.contains("grep -Fq 'test result: ok. 41 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/feedback-ownership.log\""));
+            assert!(feedback_run.contains("grep -Fq 'test result: ok. 42 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/feedback-ownership.log\""));
             assert_eq!(
                 steps[build + 3]["name"].as_str(),
                 Some("Run native fleet orphan process handle contracts"),
@@ -1219,6 +1219,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt process::tests -- --test-threads=1",
         "gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1",
         "gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1",
+        "gwt lib gwt cli::verification_record::tests::windows_verify_run_launches_bare_npm_global_pnpm -- --exact --test-threads=1",
         "gwt lib gwt cli::verification_lease:: -- --test-threads=1",
         "gwt lib gwt cli::verification_record::driver:: -- --test-threads=1",
         "gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1",
@@ -1244,7 +1245,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 74);
+    assert_eq!(expected_filters.len(), 75);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

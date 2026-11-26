@@ -180,7 +180,11 @@ pub enum AutoReason {
     PolicyUnavailable,
     PolicyRevoked,
     WorkerUnavailable,
+    /// No usable non-interactive credential (GH_TOKEN / GITHUB_TOKEN) or the
+    /// client could not be initialized; nothing was sent to GitHub.
     AuthUnavailable,
+    /// GitHub answered and rejected the presented credential (HTTP 401).
+    AuthRejected,
     PreSubmitFailed,
     RemoteOutcomeUnknown,
     SenderInterrupted,

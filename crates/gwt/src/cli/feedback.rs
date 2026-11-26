@@ -668,7 +668,7 @@ pub(super) fn send_to_upstream(
 fn auto_send_error(error: OwnerMutationError) -> AutoReason {
     match error {
         OwnerMutationError::PreSubmit(gwt_github::client::ApiError::Unauthorized) => {
-            AutoReason::AuthUnavailable
+            AutoReason::AuthRejected
         }
         OwnerMutationError::PreSubmit(_) => AutoReason::PreSubmitFailed,
         OwnerMutationError::RemoteOutcomeUnknown(_) => AutoReason::RemoteOutcomeUnknown,
@@ -931,6 +931,24 @@ mod tests {
         FakeIssueClient, IssueNumber, IssueState, UpdatedAt,
     };
 
+    #[test]
+    fn auto_auth_failures_distinguish_missing_credentials_from_github_rejection() {
+        // Issue #7984: a 401 from GitHub is not the same as having no usable
+        // environment credential. Both stay closed enum values (no token/body).
+        assert_eq!(
+            auto_send_error(OwnerMutationError::PreSubmit(ApiError::Unauthorized)),
+            AutoReason::AuthRejected
+        );
+        assert_eq!(
+            serde_json::to_value(AutoReason::AuthRejected).unwrap(),
+            "auth_rejected"
+        );
+        assert_eq!(
+            serde_json::to_value(AutoReason::AuthUnavailable).unwrap(),
+            "auth_unavailable"
+        );
+    }
+
     // PM0393 component proof: this entry exists only in the test executable.
     // Production run_owned_sender still uses the fixed GitHub constructor.
     mod loopback {
@@ -1093,6 +1111,7 @@ mod tests {
                     Some(AutoReason::PolicyRevoked) => "policy_revoked",
                     Some(AutoReason::WorkerUnavailable) => "worker_unavailable",
                     Some(AutoReason::AuthUnavailable) => "auth_unavailable",
+                    Some(AutoReason::AuthRejected) => "auth_rejected",
                     Some(AutoReason::PreSubmitFailed) => "pre_submit_failed",
                     Some(AutoReason::RemoteOutcomeUnknown) => "remote_outcome_unknown",
                     Some(AutoReason::SenderInterrupted) => "sender_interrupted",
