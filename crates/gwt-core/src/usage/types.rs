@@ -640,6 +640,7 @@ mod tests {
                 display_name: "OpenCode".into(),
                 short_label: "OC".into(),
                 acquisition: crate::usage::source::UsageAcquisition::None,
+                default_account_id: Some("opencode".into()),
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();

@@ -6011,6 +6011,17 @@ button.workspace-board-ref:focus-visible {
 .exec-env__manage-row p { margin: 0; color: var(--color-text-muted); }
 .exec-env__detail { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
 .exec-env__usage-slot > .op-usage-card:first-child { padding-top: 0; border-top: 0; }
+.exec-env__providers { margin-top: var(--space-3); }
+.exec-env__providers h2 { margin: 0 0 var(--space-2); font-size: var(--type-md); }
+/* Usage by provider (SPEC 7347 AC-7): every built-in provider fits; rows wrap on narrow widths. */
+.exec-env__provider-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr)); gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.exec-env__provider { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; column-gap: var(--space-2); row-gap: var(--space-1); min-width: 0; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.exec-env__provider-label { flex-shrink: 0; font-family: var(--font-mono); font-size: var(--type-xs); color: var(--color-text-muted); }
+.exec-env__provider-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.exec-env__provider-usage { grid-column: 2; font-variant-numeric: tabular-nums; font-size: var(--type-sm); }
+.exec-env__provider[data-severity="warning"] .exec-env__provider-usage { color: var(--color-state-needs-input); }
+.exec-env__provider[data-severity="danger"] .exec-env__provider-usage { color: var(--color-state-blocked); }
+.exec-env__provider[data-na] .exec-env__provider-usage { color: var(--color-text-muted); cursor: help; }
 .exec-env__hint { margin: var(--space-2) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .exec-env button:disabled { color: var(--color-text-muted); border-color: var(--color-border); cursor: not-allowed; }
 .exec-env button:disabled:hover { background: var(--color-surface); }

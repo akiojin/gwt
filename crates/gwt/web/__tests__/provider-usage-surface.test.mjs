@@ -635,3 +635,35 @@ test("Usage snapshot owns its data and batches Workspace refreshes per frame", a
     Object.assign(globalThis, previous);
   }
 });
+
+// SPEC #7347 FR-004 / AC-3: a card is named and labelled from the backend's
+// provider list, and its credits and windows are drawn from the fields the
+// row carries, so a provider the display has never heard of draws as-is.
+test("Account card draws any listed provider from its descriptor and fields", async () => {
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
+  const { document, window } = parseHTML("<html><body></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  try {
+    const surface = createProviderUsageSurface({ renderWorkspaceWindows() {} });
+    surface.applyProviderUsageUi({
+      providers: [
+        { provider: "codex", display_name: "Codex", short_label: "CX", acquisition: "cli_output", default_account_id: "codex" },
+        { provider: "test_dummy", display_name: "Test Dummy", short_label: "TD", acquisition: "api", default_account_id: "dummy" },
+      ],
+      accounts: [{ provider: "test_dummy", pool_account_id: "dummy", state: { kind: "ok" }, limit_reached: false,
+        windows: [{ kind: "five_hour", used_percent: 41, resets_at: null }],
+        credits: { has_credits: true, unlimited: false, balance: 7 } }],
+      sessions: [], consumption: [],
+    });
+    const card = usageCard(surface, document, "test_dummy");
+    assert.equal(card.querySelector(".op-usage-card__name").textContent, "Test Dummy");
+    assert.equal(card.querySelector(".op-usage-card__icon").textContent, "TD");
+    assert.match(card.textContent, /Balance: 7 credits/);
+    assert.equal(card.querySelectorAll(".op-usage-win").length, 1);
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});

@@ -40,6 +40,10 @@ pub struct UsageSourceDescriptor {
     pub display_name: String,
     pub short_label: String,
     pub acquisition: UsageAcquisition,
+    /// The pool account whose row is the provider's default home, when the
+    /// caller knows it. Lets a display find that row without a provider table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_account_id: Option<String>,
 }
 
 /// Inputs shared by every source during one poll.
@@ -142,6 +146,7 @@ impl UnknownUsageSource {
                 display_name: display_name.to_string(),
                 short_label: short_label.to_string(),
                 acquisition: UsageAcquisition::None,
+                default_account_id: None,
             },
         }
     }
@@ -199,6 +204,7 @@ mod tests {
             display_name: name.to_string(),
             short_label: label.to_string(),
             acquisition: UsageAcquisition::CliOutput,
+            default_account_id: None,
         }
     }
 
