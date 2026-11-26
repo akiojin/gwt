@@ -682,6 +682,7 @@ pub struct PtyHandle {
     grok_prompt_readiness: AtomicU8,
     /// Published only after bounded confirmation that the captured tree exited.
     tree_exit_confirmed: AtomicBool,
+    finalizer_stop_requested: AtomicBool,
     /// Set under the process group lock after relinquishing termination authority.
     termination_disarmed: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -984,6 +985,7 @@ impl PtyHandle {
             transcript_overlay: AtomicBool::new(false),
             grok_prompt_readiness: AtomicU8::new(GrokPromptReadiness::Unknown as u8),
             tree_exit_confirmed: AtomicBool::new(false),
+            finalizer_stop_requested: AtomicBool::new(false),
             termination_disarmed: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
@@ -1630,6 +1632,35 @@ impl PtyHandle {
             );
         }
         group_result
+    }
+
+    /// Record a teardown request before signalling the exact captured child.
+    pub fn record_finalizer_stop(&self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            self.finalizer_stop_requested.store(true, Ordering::Release);
+        }
+    }
+
+    /// An exit must agree with the termination requested by the finalizer.
+    pub fn stopped_by_finalizer(&self) -> bool {
+        if !self.finalizer_stop_requested.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(Some(status)) = self.child.try_wait() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+
+            let killed = ExitStatus::from(std::process::ExitStatus::from_raw(libc::SIGKILL));
+            status.signal() == killed.signal()
+        }
+        #[cfg(not(unix))]
+        {
+            // The Windows Job and ConPTY child killer both use exit code 1.
+            status.exit_code() == 1
+        }
     }
 
     /// Terminate the captured tree and confirm all its members have exited.
