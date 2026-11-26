@@ -531,12 +531,17 @@ test.describe("Profile environment variable grid", () => {
         return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 40) || node.className,
           left: box.left, right: box.right, width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
       }));
+      // The window heading renders before the profile snapshot reply. Take the
+      // desktop baseline only after the editor rows exist, otherwise it holds
+      // just the list-pane buttons and the 601px comparison sees new controls.
+      const pathRow = profile.locator(".profile-env-row", { hasText: "PATH" });
+      await expect(pathRow).toBeVisible();
+      await expect(profile.getByRole("button", { name: "+ Add variable" })).toBeVisible();
       const desktop = (await measure()).map(control => control.minHeight);
       expect(desktop).not.toContain("44px");
       await page.setViewportSize({ width: 601, height: 900 });
       await expect.poll(async () => (await measure()).map(control => control.minHeight),
         { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
-      const pathRow = profile.locator(".profile-env-row", { hasText: "PATH" });
       expect(await pathRow.evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
         "601px keeps the five-column environment grid").toBe(5);
       const assertOnce = async (width: number) => {

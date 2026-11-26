@@ -14857,8 +14857,9 @@ fn finalize_recovery_probes(
     snapshot.recovery_hint = if prepared_launch {
         Some("prepared_launch_readiness_required".to_string())
     } else if gate_closed && snapshot.available_recoveries.is_empty() {
+        let handoff = recovery_exhausted_pm_handoff(&snapshot, session_id);
         snapshot.warnings.push(format!(
-            "{RECOVERY_HINT_RECOVERY_EXHAUSTED}: the Workspace identity gate is closed and no recovery it admits can lift it (gate-refused: [{}]); record execution.blocked with params.reason and escalate with board.post kind:\"blocked\" or issue.comment",
+            "{RECOVERY_HINT_RECOVERY_EXHAUSTED}: the Workspace identity gate is closed and no recovery it admits can lift it (gate-refused: [{}]); record execution.blocked with params.reason and escalate with board.post kind:\"blocked\" or issue.comment, copying this pm_handoff into the body. {handoff}",
             gate_refused.join(", ")
         ));
         Some(RECOVERY_HINT_RECOVERY_EXHAUSTED.to_string())
@@ -14880,6 +14881,57 @@ fn finalize_recovery_probes(
         snapshot.warnings.push(guidance);
     }
     snapshot
+}
+
+/// Issue #7630 AC-1: when no recovery the identity gate admits remains, the
+/// agent cannot proceed on its own. Name everything a PM needs to take over
+/// in one line, so the escalation does not have to be re-diagnosed: the
+/// owner, the Session, the ECR generation against the Session's bound
+/// generation, and why each probed recovery was refused.
+fn recovery_exhausted_pm_handoff(
+    snapshot: &ExecutionDiagnosisSnapshot,
+    session_id: Option<&str>,
+) -> String {
+    let owner = match (snapshot.owner_kind, snapshot.owner_number) {
+        (Some(kind), Some(number)) => format!("{} #{number}", kind.as_str()),
+        _ => "unknown".to_string(),
+    };
+    let session = session_id.unwrap_or("unknown");
+    let session_generation = session_id
+        .and_then(|id| {
+            gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{id}.toml")),
+            )
+            .ok()
+        })
+        .and_then(|session| session.execution_binding)
+        .map_or_else(
+            || "none".to_string(),
+            |binding| binding.identity.generation_id,
+        );
+    let refusals = snapshot
+        .recovery_probes
+        .iter()
+        .filter(|probe| probe.state != crate::cli::governance::RecoveryProbeState::Satisfied)
+        .map(|probe| {
+            format!(
+                "{}={}",
+                probe.operation,
+                probe.reason.as_deref().unwrap_or("unavailable")
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "pm_handoff: owner={owner} session={session} execution_generation={} \
+         session_generation={session_generation} binding={}({}) refused=[{}]",
+        snapshot.generation_id.as_deref().unwrap_or("none"),
+        serde_json::to_value(snapshot.binding_state)
+            .ok()
+            .and_then(|state| state.as_str().map(str::to_string))
+            .unwrap_or_default(),
+        snapshot.binding_cause,
+        refusals.join(", "),
+    )
 }
 
 /// Advertise Work-only recovery only to the current primary actor while its
@@ -15144,8 +15196,8 @@ fn terminal_canonical_work_guidance(
             "canonical Work {work_id} is {terminal_status} (terminal); run gwt-execute for {owner} \
              in a new Session using the regular linked-owner fresh launch \
              (Launch Agent / Start Work workflow). \
-             The launch coordinator provides successor Work materialization (#4074) and binding \
-             after authenticated readiness. Preserve the old Work \
+             That launch materializes the successor Work and binds it after authenticated \
+             readiness. Preserve the old Work \
              and Session; release the previous live launch before retrying."
         )
     })
@@ -15324,7 +15376,7 @@ fn execution_reopen_work_prerequisite(
                 format!(
                     "reopen requires an Assigned Session and nonterminal canonical Work: {error}; \
                      use the linked-owner fresh launch (Launch Agent / Start Work) to materialize \
-                     successor Work after authenticated readiness (#4074)"
+                     successor Work after authenticated readiness"
                 ),
             )
         })
