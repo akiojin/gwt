@@ -2980,6 +2980,9 @@ pub enum BackendEvent {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
         sessions: Vec<gwt_core::usage::SessionUsage>,
         consumption: Vec<gwt_core::usage::ProviderConsumption>,
+        /// SPEC #7347: every provider to list, in display order.
+        #[serde(default)]
+        providers: Vec<gwt_core::usage::UsageSourceDescriptor>,
     },
     RuntimeHealth {
         snapshot: RuntimeHealthSnapshotView,

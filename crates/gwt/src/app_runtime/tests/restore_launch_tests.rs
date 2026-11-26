@@ -572,6 +572,84 @@ fn automatic_restore_discards_session_no_longer_marked_for_restore_quietly() {
     );
 }
 
+/// Issue #7630 AC-5: a Session that Issues launched autonomously but whose
+/// window no Monitor row binds any more has nobody to look after it. The
+/// restore used to bring it back unlinked; it now stays a stopped placeholder
+/// (a reversible Monitor hold) and the source is not retried on the next
+/// startup.
+#[test]
+fn automatic_restore_skips_an_autonomous_session_without_a_monitor_row() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = restore_fixture_tab(
+        "tab-rowless",
+        &repo,
+        &[("agent-rowless".into(), "session-rowless".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-rowless"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-rowless",
+        &repo,
+        Some("native-rowless"),
+        Some(7630),
+    );
+    let path = runtime.sessions_dir.join("session-rowless.toml");
+    let mut source = gwt_agent::Session::load(&path).unwrap();
+    source.status = gwt_agent::AgentStatus::Interrupted;
+    source.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    source.save(&runtime.sessions_dir).unwrap();
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    save_workspace_state(
+        &workspace_state_path(&repo),
+        runtime.tabs[0].workspace.persisted(),
+    )
+    .unwrap();
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    drain_startup_auto_resume(&mut runtime);
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+        AppEventProxy::Stub(events) => events,
+        _ => panic!("recorded restore completion"),
+    });
+    assert_eq!(
+        completion
+            .restore_refusal
+            .as_ref()
+            .map(|refusal| refusal.code.as_str()),
+        Some("no_monitor_row")
+    );
+    let _ = runtime.handle_remote_owner_launch_complete(completion);
+    assert!(runtime.runtimes.is_empty());
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+    owner_fixture_block_on(owner.shutdown());
+
+    let mut tab = restore_fixture_tab("tab-rowless", &repo, &[]);
+    tab.workspace =
+        WindowRegistry::from_persisted(load_workspace_state(&workspace_state_path(&repo)).unwrap());
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-rowless"));
+    restarted.sessions_dir = runtime.sessions_dir.clone();
+    restarted.queue_startup_auto_resume_sessions(&HashSet::new());
+    assert!(
+        restarted.pending_startup_auto_resume_sessions.is_empty(),
+        "no second attempt"
+    );
+}
+
 #[test]
 fn restore_pending_worktree_reservation_ends_when_window_closes() {
     let temp = tempdir().expect("tempdir");

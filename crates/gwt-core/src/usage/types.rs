@@ -27,6 +27,14 @@ pub enum UsageProvider {
     Copilot,
     /// No official usage source yet: reported as [`UsageState::Unknown`].
     Antigravity,
+    /// Only local token counts, no limits (SPEC #7347): [`UsageState::Unknown`].
+    #[serde(rename = "opencode")]
+    OpenCode,
+    /// No usage source of its own yet: reported as [`UsageState::Unknown`].
+    #[serde(rename = "openclaw")]
+    OpenClaw,
+    /// No usage source of its own yet: reported as [`UsageState::Unknown`].
+    Hermes,
 }
 
 impl UsageProvider {
@@ -38,6 +46,9 @@ impl UsageProvider {
             UsageProvider::GrokBuild => "grok_build",
             UsageProvider::Copilot => "copilot",
             UsageProvider::Antigravity => "antigravity",
+            UsageProvider::OpenCode => "opencode",
+            UsageProvider::OpenClaw => "openclaw",
+            UsageProvider::Hermes => "hermes",
         }
     }
 
@@ -50,6 +61,9 @@ impl UsageProvider {
             UsageProvider::GrokBuild => "grok",
             UsageProvider::Copilot => "gh",
             UsageProvider::Antigravity => "agy",
+            UsageProvider::OpenCode => "opencode",
+            UsageProvider::OpenClaw => "openclaw",
+            UsageProvider::Hermes => "hermes",
         }
     }
 }
@@ -353,6 +367,10 @@ pub struct UsageSnapshot {
     pub sessions: Vec<SessionUsage>,
     #[serde(default)]
     pub consumption: Vec<super::consumption::ProviderConsumption>,
+    /// Every provider the usage source registry lists, in display order,
+    /// including those without an account row (SPEC #7347 FR-002).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<super::source::UsageSourceDescriptor>,
 }
 
 #[cfg(test)]
@@ -429,6 +447,10 @@ mod tests {
             (UsageProvider::GrokBuild, "grok_build", "grok"),
             (UsageProvider::Copilot, "copilot", "gh"),
             (UsageProvider::Antigravity, "antigravity", "agy"),
+            // SPEC #7347: every built-in agent has a provider row.
+            (UsageProvider::OpenCode, "opencode", "opencode"),
+            (UsageProvider::OpenClaw, "openclaw", "openclaw"),
+            (UsageProvider::Hermes, "hermes", "hermes"),
         ] {
             assert_eq!(provider.as_str(), wire);
             assert_eq!(provider.agent_command(), command);
@@ -613,8 +635,18 @@ mod tests {
                 state: UsageState::Ok,
             }],
             consumption: Vec::new(),
+            providers: vec![crate::usage::source::UsageSourceDescriptor {
+                provider: UsageProvider::OpenCode,
+                display_name: "OpenCode".into(),
+                short_label: "OC".into(),
+                acquisition: crate::usage::source::UsageAcquisition::None,
+            }],
         };
         let json = serde_json::to_string(&snap).unwrap();
+        assert!(
+            json.contains(r#""providers":[{"provider":"opencode""#),
+            "{json}"
+        );
         let round: UsageSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, round);
         let mut legacy = serde_json::to_value(&snap).unwrap();
@@ -639,9 +671,14 @@ mod tests {
         ] {
             session.remove(key);
         }
+        // Snapshots from before SPEC #7347 carry no provider list.
+        legacy.as_object_mut().unwrap().remove("providers");
         assert_eq!(
             serde_json::from_value::<UsageSnapshot>(legacy).unwrap(),
-            snap
+            UsageSnapshot {
+                providers: Vec::new(),
+                ..snap
+            }
         );
     }
 }

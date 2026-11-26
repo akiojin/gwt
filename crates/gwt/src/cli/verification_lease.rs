@@ -528,6 +528,9 @@ fn release(
     reclaimer: &mut dyn OrphanReclaimer,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if lease_id.starts_with(gwt_core::index_coordinator::UNTRACKED_HEAVY_LEASE_PREFIX) {
+        return release_untracked(current_project, lease_id, reason, reclaimer, out);
+    }
     let snapshot = status_for_lease(lease_id)?.ok_or_else(|| missing_lease(lease_id))?;
     let relation = holder_project_relation(snapshot.target.as_deref(), current_project);
     if relation != HolderProjectRelation::SameProject {
@@ -563,6 +566,57 @@ fn release(
     Ok(0)
 }
 
+/// Issue #7630 AC-2: a lock with no ticket has no owner to observe or end
+/// and no TTL to wait out, so without this route a hung holder blocks every
+/// verification on the host. It must still be untracked after
+/// [`ORPHAN_CONFIRM_WINDOW`] — a fresh holder writes its ticket right after
+/// it locks — and the caller must say why. The lock file is then detached;
+/// no process is ended.
+fn release_untracked(
+    current_project: &str,
+    lease_id: &str,
+    reason: Option<&str>,
+    reclaimer: &mut dyn OrphanReclaimer,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let coordinator = open_coordinator()?;
+    let present = |coordinator: &IndexCoordinator| {
+        coordinator
+            .untracked_heavy_holder_present(lease_id)
+            .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))
+    };
+    if !present(&coordinator)? {
+        return Err(missing_lease(lease_id));
+    }
+    let Some(reason) = reason.map(str::trim).filter(|reason| !reason.is_empty()) else {
+        return Err(unexpected(format!(
+            "verification lease {lease_id} is held with no ticket. Detaching it frees the \
+             slot for the next claimant and is recorded in the lease ledger, so it needs a \
+             reason: pass `params.reason`."
+        )));
+    };
+    reclaimer.pause(ORPHAN_CONFIRM_WINDOW);
+    let released = coordinator
+        .release_untracked_heavy_holder(lease_id, reason)
+        .map_err(|err| {
+            unexpected(format!(
+                "failed to detach verification lease {lease_id}: {err}"
+            ))
+        })?;
+    if !released {
+        return Err(missing_lease(lease_id));
+    }
+    out.push_str("verification lease: released\n");
+    out.push_str(&format!("lease_id: {lease_id}\n"));
+    out.push_str(&format!("reason: {reason}\n"));
+    out.push_str(&format!(
+        "recorded: {} (kind reclaimed)\n",
+        coordinator.lease_event_log_path().display()
+    ));
+    push_status_fields(out, &status()?, current_project);
+    Ok(0)
+}
+
 /// How long a holder that looked reclaimable is watched again
 /// before it is ended. The first reading spans [`PROGRESS_WINDOW`]; this one
 /// has to show the same — nothing of its own running, no CPU
@@ -586,6 +640,11 @@ trait OrphanReclaimer {
 
     /// End the holder: politely first, then — `force` — unconditionally.
     fn terminate(&mut self, pid: u32, force: bool) -> Result<(), String>;
+
+    /// Wait between two readings of a holder that has no process to sample.
+    fn pause(&mut self, pause: Duration) {
+        std::thread::sleep(pause);
+    }
 }
 
 struct SystemReclaimer {
@@ -1034,6 +1093,9 @@ struct LeaseStatusSnapshot {
     legacy_release_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lease_id: Option<String>,
+    /// Issue #7630 AC-2: a held lock no ticket describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    untracked_lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1134,6 +1196,7 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             held: status.held,
             legacy_release_available: false,
             lease_id: status.lease_id,
+            untracked_lease_id: status.untracked_lease_id,
             target: status.target,
             owner_pid: status.owner.map(|owner| owner.pid),
             acquired_at_ms: status.acquired_at_ms,
@@ -1808,7 +1871,13 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
     if let Some(target) = &status.target {
         out.push_str(&format!("target: {target}\n"));
     }
-    if status.held {
+    if let (true, Some(untracked)) = (status.held, &status.untracked_lease_id) {
+        out.push_str(&format!("untracked_lease_id: {untracked}\n"));
+        out.push_str("holder_project_relation: unknown\n");
+        out.push_str("holder_reclaim_candidate: true\n");
+        out.push_str("holder_intervention: untracked_release\n");
+        out.push_str("holder_intervention_reason: no ticket describes this holder, so it has no project, lease_id, owner or TTL and can never expire; verify.lease.release with this untracked_lease_id and params.reason re-checks it and detaches the lock without ending any process; never use kill or pkill\n");
+    } else if status.held {
         let relation = holder_project_relation(status.target.as_deref(), current_project);
         let candidate = relation == HolderProjectRelation::SameProject
             && (status.legacy_release_available
@@ -3157,6 +3226,8 @@ mod tests {
                 self.held.lease.take();
                 Ok(())
             }
+
+            fn pause(&mut self, _pause: Duration) {}
         }
 
         /// Reads the real process table but refuses to end anything: the
@@ -3286,6 +3357,79 @@ mod tests {
         /// Issue #4633 AC-2 / AC-6 (b): an orphan confirmed twice is ended,
         /// the lease frees without waiting for its TTL, and the ledger says
         /// who reclaimed it and why.
+        /// Issue #7630 AC-2: a held lock that no ticket describes has no
+        /// project, lease_id, owner or TTL. Status used to forbid any
+        /// intervention and `verify.lease.release` had no id to address it,
+        /// so a hung holder blocked every verification on the host. Status
+        /// now names it by slot, and release re-checks it and detaches the
+        /// lock without ending any process.
+        #[test]
+        fn an_untracked_holder_is_named_and_released_without_ending_a_process() {
+            let mut held = hold_lease();
+            let ticket = open_coordinator()
+                .unwrap()
+                .heavy_ticket_path_for_lease(&held.lease_id)
+                .unwrap()
+                .expect("the held lease has a ticket");
+            std::fs::remove_file(&ticket).unwrap();
+            let worktree = tempfile::tempdir().unwrap();
+            let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+            let mut out = String::new();
+            run(&mut env, VerificationLeaseCommand::Status, &mut out).unwrap();
+            assert!(out.contains("verification lease: held\n"), "{out}");
+            let untracked = out
+                .lines()
+                .find_map(|line| line.strip_prefix("untracked_lease_id: "))
+                .unwrap_or_else(|| panic!("status names the untracked holder: {out}"))
+                .to_string();
+            assert!(
+                out.contains("holder_intervention: untracked_release\n"),
+                "{out}"
+            );
+
+            let mut reclaimer = ScriptedReclaimer {
+                readings: Vec::new(),
+                held: &mut held,
+                terminated: Vec::new(),
+            };
+            let mut refused = String::new();
+            let error = release(
+                "99a8660247f5bc49",
+                &untracked,
+                None,
+                &mut reclaimer,
+                &mut refused,
+            )
+            .expect_err("detaching an untracked holder needs a reason");
+            assert!(format!("{error:?}").contains("params.reason"), "{error:?}");
+
+            let mut out = String::new();
+            release(
+                "99a8660247f5bc49",
+                &untracked,
+                Some("holder hung with no ticket since 00:31"),
+                &mut reclaimer,
+                &mut out,
+            )
+            .unwrap();
+            assert!(reclaimer.terminated.is_empty(), "no process is ended");
+            assert!(out.contains("verification lease: released\n"), "{out}");
+            assert!(out.contains("running: 0\n"), "{out}");
+            assert!(!out.contains("untracked_lease_id"), "{out}");
+            let events = open_coordinator().unwrap().lease_events().unwrap();
+            let event = events.last().expect("the release is recorded");
+            assert_eq!(event.kind, LeaseEventKind::Reclaimed, "{events:?}");
+            assert_eq!(event.lease_id, untracked);
+            assert!(
+                event
+                    .reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("holder hung"),
+                "{events:?}"
+            );
+        }
+
         #[test]
         fn a_confirmed_orphan_is_reclaimed_and_recorded() {
             let mut held = hold_lease();

@@ -11844,7 +11844,7 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.issue_monitor_lane_control_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
-                app.pm_wake_delivery_complete(delivery);
+                clients.dispatch(app.pm_wake_delivery_complete(delivery));
             }
             Event::UserEvent(UserEvent::IssueMonitorCapacityChanged { context, revision, update }) => {
                 clients.dispatch(app.issue_monitor_capacity_changed_events(&context, revision, update));

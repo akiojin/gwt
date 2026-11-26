@@ -1744,6 +1744,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             registering_issue: "Registering issues",
             deciding: "Making a decision",
             waiting: "Waiting for work",
+            stalled: "Not receiving wakes",
           }[windowData.pm_activity] || "Starting";
           const identity = name ? `${PM_WINDOW_TITLE} · ${name}` : PM_WINDOW_TITLE;
           return `${identity} — ${activity}`;

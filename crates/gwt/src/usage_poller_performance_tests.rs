@@ -118,6 +118,22 @@ fn sorted(mut snapshot: UsageSnapshot) -> UsageSnapshot {
     snapshot
         .sessions
         .sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    // The baseline reads only the default Codex and Claude homes. Pool
+    // account ids (Issue #7841) and the rows and descriptors of the other
+    // built-in providers (SPEC #7347) are outside the compared pipeline.
+    snapshot.accounts.retain(|account| {
+        matches!(
+            account.provider,
+            UsageProvider::Codex | UsageProvider::ClaudeCode
+        )
+    });
+    snapshot
+        .accounts
+        .sort_by_key(|account| account.provider.as_str());
+    for account in &mut snapshot.accounts {
+        account.pool_account_id = None;
+    }
+    snapshot.providers.clear();
     snapshot
 }
 
@@ -373,6 +389,7 @@ impl Baseline {
                 accounts,
                 sessions: out,
                 consumption: self.consumption.clone().unwrap(),
+                providers: Vec::new(),
             },
             bytes,
         )

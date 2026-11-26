@@ -10198,8 +10198,7 @@ pub(crate) mod tests {
         for required in [
             &work_id,
             "Discarded",
-            "successor Work materialization",
-            "#4074",
+            "materializes the successor Work",
             "Start Work",
         ] {
             assert!(
@@ -10207,13 +10206,17 @@ pub(crate) mod tests {
                 "missing {required}: {guidance}"
             );
         }
+        // Issue #7630 AC-3: #4074 has shipped; the guidance names the current
+        // launch route instead of pointing at that closed Issue.
+        assert!(!guidance.contains("#4074"), "{guidance}");
         let error =
             ensure_workspace_for_agent(&worktree, workspace_ensure_status_candidate(session_id))
-                .expect_err("Discarded Work requires successor support owned by #4074")
+                .expect_err("Discarded Work requires a successor launch")
                 .to_string();
-        for required in ["successor Work materialization", "#4074", "Start Work"] {
+        for required in ["materializes the successor Work", "Start Work"] {
             assert!(error.contains(required), "missing {required}: {error}");
         }
+        assert!(!error.contains("#4074"), "{error}");
         assert!(!error.contains("run workspace.ensure"), "{error}");
         assert!(!error.contains("retry workspace.ensure"), "{error}");
         assert_eq!(workspace_recovery_state_bytes(&paths), before);

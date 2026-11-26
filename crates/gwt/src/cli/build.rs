@@ -1281,12 +1281,16 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                 WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
             },
         };
-        if matches!(close_kind, WorkTerminalKind::Done)
-            && compatibility_authority.is_confirmation_only()
-        {
+        let blocked_build_abort = compatibility_authority
+            .requires_blocked_build_abort_bridge()
+            .map_err(|error| terminal_refusal(error.to_string()))?;
+        if compatibility_authority.is_confirmation_only() && !blocked_build_abort {
             // Issue #5070 / SPEC #3590: an exact canonical Done Work needs
             // only read-only confirmation under the current identity lease.
             // Sending another terminal mutation can strand delivered work.
+            // Issue #7630 AC-3: the same holds for an already Discarded Work:
+            // the Host has nothing left to change, so its binding check must
+            // not decide whether build.abort can finish.
             let confirmation = if let Some(held_trusted_dir) = held_trusted_dir {
                 crate::agent_project_state::confirm_bound_terminal_compatibility_authority_held_global_lease(
                     &compatibility_authority,
@@ -1307,9 +1311,6 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                 }
             });
         }
-        let blocked_build_abort = compatibility_authority
-            .requires_blocked_build_abort_bridge()
-            .map_err(|error| terminal_refusal(error.to_string()))?;
         let receipt = if blocked_build_abort {
             let reason = abort_reason
                 .filter(|reason| !reason.trim().is_empty())
@@ -2080,6 +2081,10 @@ mod tests {
         }
 
         fn terminalize_canonical_done(&self) {
+            self.terminalize_canonical(crate::AgentWorkTerminalKind::Done);
+        }
+
+        fn terminalize_canonical(&self, terminal_kind: crate::AgentWorkTerminalKind) {
             let receipt = crate::apply_bound_authenticated_work_terminalization(
                 &self.git.repo,
                 &self.session.id,
@@ -2090,7 +2095,7 @@ mod tests {
                     claimed_session_id: self.session.id.clone(),
                     observation: crate::observe_agent_runtime(&self.git.repo)
                         .expect("observe fixture runtime"),
-                    terminal_kind: crate::AgentWorkTerminalKind::Done,
+                    terminal_kind,
                 },
             )
             .expect("terminalize canonical fixture");
@@ -3304,6 +3309,55 @@ format_version: Some(1),
                 .unwrap()
                 .active
         );
+        server.assert_no_request();
+        server.assert_no_abort_request();
+    }
+
+    /// Issue #7630 AC-3: a build left active after its canonical Work was
+    /// already Discarded (for example by Close Work) must finish `build.abort`
+    /// with a read-only confirmation. Re-sending the terminal to the Host made
+    /// the abort depend on a Host binding check that has nothing left to
+    /// change, so a Host refusal stranded the build state.
+    #[test]
+    fn managed_build_abort_confirms_already_discarded_work_without_host_request() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        fixture.terminalize_canonical(crate::AgentWorkTerminalKind::Discarded);
+        assert!(fixture.canonical_work().discarded);
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        let works_before = std::fs::read(&works_path).expect("discarded Work history");
+        // The Host refuses the binding check; nothing may depend on it.
+        let server = TerminalBridgeServer::start(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({"error": "execution binding verification failed"}),
+        );
+
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Build(SkillStateAction::Abort {
+                    spec: 3327,
+                    reason: Some("Work was discarded from Close Work".to_string()),
+                }),
+            )
+            .expect("run build.abort on Discarded Work")
+        });
+
+        assert_eq!(code, 0, "{output}");
+        assert!(
+            !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert_eq!(std::fs::read(&works_path).unwrap(), works_before);
         server.assert_no_request();
         server.assert_no_abort_request();
     }

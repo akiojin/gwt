@@ -20064,6 +20064,7 @@ exit 0
                         hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                             pr_number: pr,
                             lifecycle: "IN-PROGRESS".into(),
+                            auto_merge_enabled: None,
                         }),
                     },
                 );

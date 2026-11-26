@@ -69,12 +69,23 @@ pub enum UpdateBlocker {
 impl fmt::Display for UpdateBlocker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ActivePane { label, state, .. } => {
+            Self::ActivePane {
+                window_id,
+                label,
+                state,
+            } => {
                 let state = match state {
                     WindowState::Starting => "starting",
                     _ => "running",
                 };
-                write!(f, "pane {label} ({state})")
+                // Issue #7630 AC-4: a pane without a work name is still
+                // addressable by its window.
+                let name = if label.trim().is_empty() {
+                    window_id
+                } else {
+                    label
+                };
+                write!(f, "pane {name} ({state})")
             }
             Self::PendingAcquireClaim { issue_number } => {
                 write!(f, "pending claim for #{issue_number}")
@@ -85,6 +96,41 @@ impl fmt::Display for UpdateBlocker {
             }
         }
     }
+}
+
+/// Issue #7630 AC-4: what a drain is waiting for, in words, even when its
+/// `blocking[]` is empty. Blockers are named first; otherwise the latest
+/// free-text wait observation; otherwise what an empty list means for this
+/// kind of drain.
+///
+/// A long drain is deliberately not promoted to `needs_human`: that state
+/// parks one owner Issue, while a drain is host-wide and has no owner, and
+/// every blocker is an agent still making progress that the drain never
+/// stops. The repeating "still pending" notice
+/// ([`update_drain_notice_due`]) is the escalation.
+pub fn drain_waiting_for(
+    blocking: &[UpdateBlocker],
+    wait_reason: Option<&str>,
+    manual: bool,
+) -> Vec<String> {
+    if !blocking.is_empty() {
+        return blocking.iter().map(ToString::to_string).collect();
+    }
+    let observed = wait_reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .filter(|reason| serde_json::from_str::<Vec<UpdateBlocker>>(reason).is_err());
+    let text = match (observed, manual) {
+        (_, true) => format!(
+            "manual drain: new launches stay held until it is released with {}",
+            crate::UPDATE_DRAIN_RELEASE_OPERATION
+        ),
+        (Some(reason), false) => reason.to_string(),
+        (None, false) => "no blocker observed; waiting for consecutive quiet observations and \
+             the apply grace before applying"
+            .to_string(),
+    };
+    vec![text]
 }
 
 /// AC-8: the host is quiescent when no non-PM pane is Running / Starting, no
@@ -510,6 +556,41 @@ mod tests {
         for (blocker, expected) in cases {
             assert_eq!(blocker.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn a_blocker_with_an_empty_label_is_named_by_its_window() {
+        // Issue #7630 AC-4: an empty label printed "pane  (running)".
+        let blocker = UpdateBlocker::ActivePane {
+            window_id: "tab-1::agent-3".to_string(),
+            label: "  ".to_string(),
+            state: WindowState::Running,
+        };
+        assert_eq!(blocker.to_string(), "pane tab-1::agent-3 (running)");
+    }
+
+    #[test]
+    fn drain_waiting_for_names_what_an_empty_blocking_list_waits_on() {
+        // Issue #7630 AC-4: an empty `blocking[]` must still say what the
+        // drain is waiting for.
+        let pane = UpdateBlocker::PendingAcquireClaim { issue_number: 7 };
+        assert_eq!(
+            drain_waiting_for(std::slice::from_ref(&pane), None, false),
+            vec!["pending claim for #7".to_string()]
+        );
+        assert_eq!(
+            drain_waiting_for(&[], Some("host quiescent and grace elapsed"), false),
+            vec!["host quiescent and grace elapsed".to_string()]
+        );
+        let auto = drain_waiting_for(&[], None, false);
+        assert_eq!(auto.len(), 1);
+        assert!(auto[0].contains("quiet observations"), "{auto:?}");
+        // A JSON blocker list that parsed to nothing is not a reason.
+        let auto = drain_waiting_for(&[], Some("[]"), false);
+        assert!(auto[0].contains("quiet observations"), "{auto:?}");
+        let manual = drain_waiting_for(&[], Some(""), true);
+        assert!(manual[0].contains("manual drain"), "{manual:?}");
+        assert!(manual[0].contains("update_drain"), "{manual:?}");
     }
 
     #[test]

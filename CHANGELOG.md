@@ -1,6 +1,49 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.177.0] - 2026-11-26
+
+### Bug Fixes
+
+- **agents:** Antigravity のモデル選択を agy models のラベルと推論段階に合わせる
+- **pm:** 定期 wake が届かない PM のタイトルを最後の操作名から「Not receiving wakes」に切り替える
+- **pm:** 失敗した PM 起動が一時的な容量拒否の再試行を止めないようにする
+- **test:** Census worker を止めて reused session 不変性テストの断続失敗を解消する
+- **runtime:** 回復経路が途中で尽きる 5 件に出口を用意する
+- **issue-monitor:** 紐付けを失った独立レビューを再試行する
+- **issue-monitor:** ワークツリーに live Session がある間は Monitor 起動を保留する
+- **test:** Stabilize Home history and Issues tap target checks
+- **test:** Measure Profile desktop baseline after the editor renders
+- **issues:** 初回状態の受信前は Issues スイッチの操作を送信しない
+- **work:** Preserve settlement on post-completion session launches
+- **verify:** Relocated command TEMP をテスト HOME 隔離で信頼する
+- **runtime:** Report finalizer-killed panes as stopped
+- **runtime:** Scope stopped projection to settled cleanup
+
+### Features
+
+- **usage:** Add provider usage source registry skeleton
+- **usage:** Read default account usage through the source registry
+- **usage:** List every built-in agent as a usage provider
+
+### Miscellaneous Tasks
+
+- **work:** #7778 の Work イベントを記録する
+- **work:** Issue #7922 の Work イベントを記録する
+- **work:** #7778 の Work 完了イベントを記録する
+- **work:** Issue #7696 の Work イベントを記録
+- **work:** Issue #7696 の Work イベントを記録
+- **work:** Issue #7630 の Work イベントを記録
+- **work:** Issue #7628 の Work イベントを記録
+- **work:** Record Issue #7990 work events
+- **work:** Record Issue #7347 work events
+
+### Testing
+
+- **pm:** 再起動後の復元の一時拒否から periodic wake が再開することを確認する
+- **issue-monitor:** Stabilize registry churn coverage
+- **work:** Seed monitor predecessor history before settlement
+
 ## [9.176.0] - 2026-11-26
 
 ### Bug Fixes
