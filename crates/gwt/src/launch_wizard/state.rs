@@ -1603,7 +1603,7 @@ impl LaunchWizardState {
 
     pub(super) fn reasoning_level_for_launch(&self) -> Option<&str> {
         match self.effective_agent_id() {
-            "codex" if !self.reasoning.is_empty() => Some(self.reasoning.as_str()),
+            "codex" | "agy" if !self.reasoning.is_empty() => Some(self.reasoning.as_str()),
             "grok"
                 if !self.reasoning.trim().is_empty()
                     && !self.reasoning.trim().eq_ignore_ascii_case("auto") =>
@@ -1964,7 +1964,8 @@ impl LaunchWizardState {
     }
 
     pub(super) fn agent_has_models(&self) -> bool {
-        self.launch_target_is_agent() && matches!(self.effective_agent_id(), "claude" | "codex")
+        self.launch_target_is_agent()
+            && matches!(self.effective_agent_id(), "claude" | "codex" | "agy")
     }
 
     pub(super) fn agent_uses_reasoning_step(&self) -> bool {
@@ -1977,6 +1978,7 @@ impl LaunchWizardState {
         self.effective_agent_id() == "grok"
             || (self.effective_agent_id() == "claude"
                 && is_claude_effort_capable_model(self.model.as_str()))
+            || (self.effective_agent_id() == "agy" && !self.current_reasoning_options().is_empty())
     }
 
     pub(super) fn has_docker_workflow(&self) -> bool {

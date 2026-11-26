@@ -4,6 +4,7 @@
 //! launching, and tracking coding agent sessions (Claude Code, Codex,
 //! OpenCode, Copilot, and custom agents).
 
+pub mod antigravity_models;
 pub mod audit;
 pub mod backend;
 pub mod backend_store;
@@ -29,6 +30,10 @@ pub mod types;
 #[cfg(test)]
 pub(crate) mod test_capture;
 
+pub use antigravity_models::{
+    antigravity_model, antigravity_model_arg, antigravity_model_launch_error, AntigravityModel,
+    ANTIGRAVITY_MODELS,
+};
 pub use audit::{
     is_secret_env_key, redact_env_value_for_audit, redact_secrets_in_agent, REDACTED_PLACEHOLDER,
 };
