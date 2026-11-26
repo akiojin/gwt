@@ -701,7 +701,7 @@ fn send_auto_to_upstream_checked(
     let repository = RepositoryIdentity::gwt_upstream();
     let issues = client
         .list_issues(&repository, deadline)
-        .map_err(|_| AutoReason::PreSubmitFailed)?;
+        .map_err(|error| auto_send_error(OwnerMutationError::PreSubmit(error)))?;
     let marker = snapshot.marker();
     if let Some(issue) = issues
         .items()
@@ -720,7 +720,7 @@ fn send_auto_to_upstream_checked(
         before_read()?;
         let comments = client
             .list_comments(&repository, issue.number, deadline)
-            .map_err(|_| AutoReason::PreSubmitFailed)?;
+            .map_err(|error| auto_send_error(OwnerMutationError::PreSubmit(error)))?;
         if !comments
             .items()
             .iter()
@@ -947,6 +947,46 @@ mod tests {
             serde_json::to_value(AutoReason::AuthUnavailable).unwrap(),
             "auth_unavailable"
         );
+        // The first GitHub request is discovery, so a rejected token surfaces
+        // there before any mutation.
+        for operation in [
+            OwnerRepositoryOperation::ListIssues,
+            OwnerRepositoryOperation::ListComments,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyRun),
+                    UtcTimestamp::now(),
+                )
+                .unwrap();
+            let client = FakeIssueClient::new();
+            client.seed_repository_issue(RepositoryIssue {
+                repository: RepositoryIdentity::gwt_upstream(),
+                number: IssueNumber(42),
+                title: record.snapshot.report().title(),
+                body: "\"safe_auto_v1\"".into(),
+                labels: vec![],
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt(UtcTimestamp::now().to_rfc3339()),
+            });
+            client.fail_next_owner_operation(
+                operation,
+                OwnerRepositoryFaultTiming::BeforeSubmit,
+                ApiError::Unauthorized,
+            );
+            let outcome = send_auto_to_upstream_checked(
+                &client,
+                &record.snapshot,
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+                &|| Ok(()),
+                &|| Ok(()),
+            );
+            assert_eq!(outcome, Err(AutoReason::AuthRejected), "{operation:?}");
+            assert_eq!(client.owner_mutation_count(), 0);
+        }
     }
 
     // PM0393 component proof: this entry exists only in the test executable.
