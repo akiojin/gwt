@@ -301,6 +301,19 @@ pub fn save_workspace_launch_projection(
                         &preserved_sessions
                     }
                 };
+                // A regular launch on a completed execution can register its
+                // Session locally, but only fresh execution activation may
+                // start a successor Work lifetime and publish its events.
+                if crate::cli::execution_state::is_completed(&session.worktree_path) {
+                    projection.retain_live_agents_keep_shells(
+                        live_session_ids.iter().map(String::as_str),
+                        now,
+                    );
+                    projection
+                        .register_unassigned_agent(active_agent_summary_from_session(session, now));
+                    projection.updated_at = now;
+                    return Ok(((), Vec::new()));
+                }
                 let work_events = apply_workspace_launch_for_current_work(
                     project_root,
                     projection,
