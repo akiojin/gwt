@@ -202,14 +202,14 @@ test("manual rediscovery preserves the active phase and scheduled Retry never ca
   assert.equal(retry.hidden, true);
   retry.click();
   assert.deepEqual(fixture.sent, [], "Retry must never invoke scheduled cancellation");
-  cta.click();
+  fixture.document.querySelector("[data-update-cta-cancel]").click();
   assert.deepEqual(fixture.sent, [{ kind: "cancel_update_auto_apply" }]);
   controller.handleUpdateAutoApply({ version: "9.150.0", phase: "postponed" });
   controller.handleUpdateCheckResult(manual);
-  assert.equal(cta.dataset.status, "draining");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "draining");
   controller.handleUpdateAutoApply({ version: "9.150.0", phase: "applying" });
   controller.handleUpdateCheckResult(manual);
-  assert.equal(cta.dataset.status, "applying");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "applying");
 });
 
 test("update_state renders one reusable update CTA", () => {
@@ -1386,11 +1386,9 @@ test("issue #4376: the draining CTA names its blockers and the modal offers Stop
   assert.equal(fixture.document.getElementById("update-cta").textContent, "Update v9.99.0 ready — Restart now");
 });
 
-// Issue #3906 AC-7 / #4076 AC-5: the backend announces the cancel grace; the
-// CTA turns into the cancel control, and the cancellation returns it to the
-// staged state.
-test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends cancel_update_auto_apply", () => {
-  const fixture = createFixture({ now: () => Date.parse("2026-09-07T02:00:00Z") });
+test("issue #7250: scheduled auto-apply shows a countdown and a dedicated cancel button", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
   controller.handleUpdateApplyPendingPersisted({ version: "9.91.0" });
   controller.handleIssueMonitorStatus({
@@ -1401,18 +1399,29 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   let cta = fixture.document.getElementById("update-cta");
   assert.equal(cta.dataset.status, "scheduled");
   assert.equal(cta.className, "update-cta is-scheduled");
-  assert.equal(cta.textContent, "Update v9.91.0 applies in 60 s — click to cancel");
-  assert.equal(cta.disabled, false);
+  assert.equal(cta.textContent, "Update v9.91.0 applies in 60 s");
+  const cancel = fixture.document.querySelector("[data-update-cta-cancel]");
+  assert.equal(cancel.tagName, "BUTTON");
+  assert.equal(cancel.textContent, "Cancel automatic update");
+  assert.equal(cta.contains(cancel), false);
   assert.equal(fixture.document.getElementById("update-modal") === null, true);
 
   cta.click();
+  assert.deepEqual(fixture.sent, []);
+  t.mock.timers.tick(17000);
+  controller.handleUpdateAutoApply({ version: "9.91.0", phase: "scheduled", grace_secs: 60 });
+  assert.equal(cta.textContent, "Update v9.91.0 applies in 43 s");
+  cancel.click();
+  cancel.click();
   assert.deepEqual(fixture.sent, [{ kind: "cancel_update_auto_apply" }]);
+  t.mock.timers.tick(1000);
   assert.equal(fixture.document.getElementById("update-cta").textContent, "Cancelling automatic update…");
 
   controller.handleUpdateAutoApply({ version: "9.91.0", phase: "cancelled" });
   cta = fixture.document.getElementById("update-cta");
   assert.equal(cta.dataset.status, "ready");
   assert.equal(cta.textContent, "Update v9.91.0 ready — Restart now");
+  assert.equal(fixture.document.querySelector("[data-update-cta-cancel]"), null);
 
   controller.handleUpdateAutoApply({ version: "9.91.0", phase: "scheduled", grace_secs: 60 });
   controller.handleUpdateAutoApply({ version: "9.91.0", phase: "postponed" });
@@ -1427,6 +1436,7 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   assert.equal(cta.disabled, true);
 
   assert.match(cssRule(".update-cta.is-scheduled"), /var\(--color-state-needs-input\)/);
+  assert.match(cssRule(".update-cta__cancel"), /var\(--color-text\)/);
   assert.match(
     appSource,
     /case "update_auto_apply":[\s\S]{0,200}applyUpdateAutoApply\(/,
