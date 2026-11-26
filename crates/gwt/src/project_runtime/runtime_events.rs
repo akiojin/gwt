@@ -199,6 +199,24 @@ enum AgentErrorDetailKind {
     RecognizedActionable,
 }
 
+pub(crate) fn codex_windows_sandbox_startup_error(output: &str) -> Option<String> {
+    let signature =
+        "Could not read Windows sandbox configuration and requirements from the app server.";
+    // Codex pre-wraps its history lines to the current terminal width.
+    let matches_signature = output.match_indices("Could").any(|(start, _)| {
+        let mut words = output[start..].split_whitespace();
+        signature
+            .split_whitespace()
+            .all(|word| words.next() == Some(word))
+    });
+    matches_signature.then(|| {
+        format!(
+            "Agent startup failed: {signature}; {}",
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        )
+    })
+}
+
 fn tagged_agent_error_detail(
     base: Option<String>,
     tail: Option<&str>,
@@ -221,16 +239,8 @@ fn tagged_agent_error_detail(
             RecognizedActionable,
         );
     }
-    let sandbox_error =
-        "Could not read Windows sandbox configuration and requirements from the app server.";
-    if tail.contains(sandbox_error) {
-        return (
-            Some(format!(
-                "Agent startup failed: {sandbox_error}; {}",
-                gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
-            )),
-            RecognizedActionable,
-        );
+    if let Some(detail) = codex_windows_sandbox_startup_error(tail) {
+        return (Some(detail), RecognizedActionable);
     }
     // Issue #4445: an npm shim whose target executable was renamed away by the
     // provider's auto-update reports a localized shell message and a bare exit
