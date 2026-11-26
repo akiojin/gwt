@@ -312,8 +312,24 @@ pub(super) fn reasoning_options_for_agent_model(
             options
         }
         "claude" if model == "sonnet" => CLAUDE_SONNET_REASONING_OPTIONS.to_vec(),
+        "agy" => antigravity_reasoning_options_for_model(model),
         _ => Vec::new(),
     }
+}
+
+// Issue #7778: the steps an Antigravity model's `agy models` labels carry.
+fn antigravity_reasoning_options_for_model(model: &str) -> Vec<ReasoningDisplayOption> {
+    let Some(row) = gwt_agent::antigravity_model(model) else {
+        return Vec::new();
+    };
+    CODEX_REASONING_LADDER
+        .iter()
+        .filter(|option| row.efforts.contains(&option.stored_value))
+        .map(|option| ReasoningDisplayOption {
+            is_default: row.default_effort == Some(option.stored_value),
+            ..*option
+        })
+        .collect()
 }
 
 /// Project missing saved tuning through the same defaults as a fresh wizard.
@@ -793,6 +809,16 @@ pub(super) fn model_display_options(agent_id: &str) -> Vec<ModelDisplayOption> {
                 label: row.display_name.clone(),
                 stored_value: row.slug.clone(),
                 description: row.description.clone(),
+            })
+            .collect(),
+        // Issue #7778: `agy --model` takes the `agy models` label; the
+        // reasoning suffix is chosen on the reasoning step.
+        "agy" => gwt_agent::ANTIGRAVITY_MODELS
+            .iter()
+            .map(|model| ModelDisplayOption {
+                label: model.label.to_string(),
+                stored_value: model.label.to_string(),
+                description: model.description.to_string(),
             })
             .collect(),
         _ => Vec::new(),
@@ -1346,6 +1372,15 @@ mod tests {
         assert_eq!(
             reasoning("grok", None, Level::Standard).as_deref(),
             Some("medium")
+        );
+        // Issue #7778: Antigravity's label steps follow the same rounding.
+        assert_eq!(
+            reasoning("agy", Some("Gemini 3.1 Pro"), Level::Standard).as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            reasoning("agy", Some("Gemini 3.5 Flash"), Level::Max).as_deref(),
+            Some("high")
         );
         for (agent, model) in [("claude", Some("haiku")), ("opencode", None)] {
             assert_eq!(
@@ -1989,8 +2024,16 @@ mod tests {
         );
         assert!(current_model_options("gemini").is_empty());
         assert!(model_display_options("gemini").is_empty());
-        assert!(current_model_options("agy").is_empty());
-        assert!(model_display_options("agy").is_empty());
+        // Issue #7778: Antigravity offers `agy models` labels, never slugs.
+        let agy = current_model_options("agy");
+        assert!(agy.contains(&"Gemini 3.1 Pro".to_string()));
+        assert!(agy.iter().all(|model| model.contains(' ')));
+        let pro: Vec<_> = reasoning_options_for_agent_model("agy", "Gemini 3.1 Pro", false)
+            .iter()
+            .map(|option| (option.stored_value, option.is_default))
+            .collect();
+        assert_eq!(pro, vec![("low", false), ("high", true)]);
+        assert!(reasoning_options_for_agent_model("agy", "Claude Opus 4.6", false).is_empty());
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
         assert!(!model_display_options("codex").is_empty());
