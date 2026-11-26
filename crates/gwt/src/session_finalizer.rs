@@ -112,7 +112,6 @@ pub fn kill_and_reap(pty: &PtyHandle, window_id: &str) -> std::io::Result<bool> 
         "starting detached PTY teardown stage"
     );
     let kill_started = Instant::now();
-    pty.record_finalizer_stop();
     let kill_result = pty.terminate_and_wait_for_tree(Duration::from_secs(2));
     let tree_exited = matches!(&kill_result, Ok(true));
     let kill_elapsed_ms = u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -191,6 +190,7 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
         window_id,
         desired_restore_on_startup,
         exit_receipt,
+        false,
         |_| Ok(true),
     )
 }
@@ -205,6 +205,7 @@ pub(crate) fn finalize_exact_close_if(
     window_id: &str,
     desired_restore_on_startup: Option<bool>,
     exit_receipt: Option<&gwt_agent::SessionExitReceipt>,
+    settled_auto_close: bool,
     can_close: impl FnOnce(&gwt_agent::SessionRuntimeState) -> std::io::Result<bool>,
 ) -> std::io::Result<Option<()>> {
     let proof = gwt_agent::ManualLaunchRuntimeProof {
@@ -243,6 +244,9 @@ pub(crate) fn finalize_exact_close_if(
                 return Err(std::io::Error::other(
                     "captured runtime process identity changed before close",
                 ));
+            }
+            if settled_auto_close && child_running {
+                pty.record_finalizer_stop();
             }
             if !kill_and_reap(pty, window_id)? {
                 return Err(std::io::Error::other(

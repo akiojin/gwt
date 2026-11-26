@@ -16371,6 +16371,7 @@ mod tests {
             );
         }
         if finalized {
+            state.runtimes["pane"].pty.record_finalizer_stop();
             assert!(
                 crate::session_finalizer::kill_and_reap(&state.runtimes["pane"].pty, "pane")
                     .unwrap()
