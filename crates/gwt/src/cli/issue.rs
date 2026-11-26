@@ -1140,7 +1140,13 @@ fn run_monitor_status<E: CliEnv>(
             .and_then(|delay| {
                 gwt_core::timestamp::shift_rfc3339(&drain.since, time::Duration::seconds(delay))
             });
+        let waiting_for = crate::update_drain::drain_waiting_for(
+            &drain.blocking,
+            wait.as_ref().map(|wait| wait.reason.as_str()),
+            drain.reason == crate::IssueMonitorUpdateDrainReason::Manual,
+        );
         output["update_drain_evaluation"] = serde_json::json!({
+            "waiting_for": waiting_for,
             "observed_at": wait.as_ref().map(|wait| &wait.observed_at),
             "next_evaluation_at": wait.as_ref().and_then(|wait| wait.next_evaluation_at.as_ref()),
             "notify_at": notify_at,
@@ -1320,11 +1326,31 @@ fn session_row_mismatch(
             }));
         }
     }
+    // Issue #7630 AC-5: name the Sessions an automatic restore brought back,
+    // and whether an inbox row still tracks them. A restored Session with no
+    // row has nobody looking after it. Informational: it does not change
+    // `consistent`, because the resident PM is restored without an Issue too.
+    let automatic_restore_sessions = sessions
+        .iter()
+        .filter(|session| session.launch_origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore)
+        .map(|session| {
+            serde_json::json!({
+                "session_id": session.session_id,
+                "issue_number": session.issue_number,
+                "worktree_path": session.worktree_path,
+                "launch_origin": session.launch_origin,
+                "has_inbox_row": session.issue_number.is_some_and(|issue| {
+                    inbox.iter().any(|row| row.issue_number == issue)
+                }),
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "consistent": working_without_active_row.is_empty()
             && active_row_without_session.is_empty(),
         "working_without_active_row": working_without_active_row,
         "active_row_without_session": active_row_without_session,
+        "automatic_restore_sessions": automatic_restore_sessions,
     })
 }
 
@@ -8702,6 +8728,33 @@ mod tests {
         output
     }
 
+    /// Issue #7630 AC-5: a Session brought back by an automatic restore is
+    /// named as such in `issue.monitor.status`, next to whether an inbox row
+    /// still tracks it, so the PM no longer cross-checks `pane.list` by hand.
+    #[test]
+    fn automatic_restore_sessions_are_listed_with_their_inbox_row() {
+        let inbox = vec![mismatch_row(4777, crate::MonitorInboxState::Launched, None)];
+        let mut tracked = mismatch_session(Some(4777));
+        tracked.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        let mut rowless = mismatch_session(Some(695));
+        rowless.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        let launched = mismatch_session(Some(1));
+
+        let output = mismatch_status(&inbox, &[tracked, rowless, launched]);
+        let restored = output["session_row_mismatch"]["automatic_restore_sessions"]
+            .as_array()
+            .expect("array")
+            .clone();
+
+        assert_eq!(restored.len(), 2, "{restored:?}");
+        assert_eq!(restored[0]["issue_number"], 4777);
+        assert_eq!(restored[0]["launch_origin"], "automatic_restore");
+        assert_eq!(restored[0]["has_inbox_row"], true);
+        assert_eq!(restored[1]["issue_number"], 695);
+        assert_eq!(restored[1]["has_inbox_row"], false);
+        assert_eq!(restored[1]["session_id"], "session-695");
+    }
+
     /// The symptom a user reported: the card leaves Active while the agent is
     /// still working, because the row stopped saying `launched`.
     #[test]
@@ -15317,6 +15370,7 @@ mod tests {
                     "consistent": true,
                     "working_without_active_row": [],
                     "active_row_without_session": [],
+                    "automatic_restore_sessions": [],
                 },
                 "max_active": 3,
                 "max_active_agents_scope": "machine",
