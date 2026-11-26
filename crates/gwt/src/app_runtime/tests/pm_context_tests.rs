@@ -3620,6 +3620,51 @@ fn a_transient_capacity_refusal_retries_the_pm_on_the_scheduled_tick() {
     assert!(runtime.pending_startup_pm_tabs.is_empty());
 }
 
+/// Issue #7696 AC-2/AC-4: after the 9.175.1 update restart the PM restore was
+/// refused for a transient capacity reason, but the failed pane stayed as an
+/// Error window and kept its `pending_pm_launches` entry. The retry read that
+/// entry as a launch still in flight and deferred itself on every tick, so the
+/// project stayed without a PM until a human touched it (27 minutes).
+#[test]
+fn issue_7696_failed_pm_launch_does_not_block_its_transient_retry() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").expect("project context");
+    // Production only reports a PM launch failure for a tracked PM launch.
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .pending_pm_launches
+        .insert("tab-1::pm".into(), context.project_root.clone());
+
+    assert!(runtime.record_pm_launch_failure(
+        &context,
+        "tab-1::pm",
+        "Machine Agent capacity observation is unavailable; wait for the next fresh measurement",
+    ));
+    runtime.retry_transient_pm_launch_failures();
+
+    assert_eq!(
+        runtime.pending_startup_pm_tabs,
+        vec!["tab-1".to_string()],
+        "the failed launch is no longer in flight; the scheduled tick must retry the PM"
+    );
+}
+
 #[test]
 fn restart_pm_agent_keeps_the_worktree_and_respawns() {
     let _pm_gate = super::super::pm::test_gate::PmEnsureTestGuard::enable();

@@ -15,6 +15,9 @@ pub enum PmActivity {
     RegisteringIssue,
     Deciding,
     Waiting,
+    /// Issue #7922 AC-4: the periodic wake has not reached the live PM for
+    /// several loop intervals, so its last operation no longer describes it.
+    Stalled,
 }
 
 impl PmActivity {
@@ -57,11 +60,20 @@ pub(crate) fn record_operation(
     pm_registry::record_pm_title_activity(prefs_path, session_id, activity, updated_at_ms)
 }
 
+/// Issue #7922 AC-4: whether the wake owner has recorded a PM wake stall for
+/// this project. A missing or unreadable record reads as no stall.
+pub fn pm_wake_stalled(project_root: &Path) -> bool {
+    pm_registry::load_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(project_root))
+        .is_some()
+}
+
 /// An absent or previous PTY's activity always returns the PM's initial label.
+/// A recorded wake stall outranks the last operation (Issue #7922 AC-4).
 pub fn for_window(
     prefs: &PmPrefs,
     session_id: Option<&str>,
     runtime_started_at_ms: Option<u64>,
+    wake_stalled: bool,
 ) -> Option<PmActivity> {
     let session_id = session_id?;
     if !prefs
@@ -70,6 +82,9 @@ pub fn for_window(
         .is_some_and(|registration| registration.session_id == session_id)
     {
         return None;
+    }
+    if wake_stalled {
+        return Some(PmActivity::Stalled);
     }
     Some(
         prefs
@@ -180,25 +195,98 @@ mod tests {
 
         assert!(record_operation(&path, "resident-pm", "pr.ready", 2000).unwrap());
         let prefs = pm_registry::load_pm_prefs(&path).unwrap();
-        assert_eq!(for_window(&prefs, Some("worker"), Some(1000)), None);
+        assert_eq!(for_window(&prefs, Some("worker"), Some(1000), false), None);
         assert_eq!(
-            for_window(&prefs, Some("resident-pm"), Some(1000)),
+            for_window(&prefs, Some("resident-pm"), Some(1000), false),
             Some(PmActivity::DrivingPr)
         );
         assert_eq!(
-            for_window(&prefs, Some("resident-pm"), Some(3000)),
+            for_window(&prefs, Some("resident-pm"), Some(3000), false),
             Some(PmActivity::Starting)
         );
         assert_eq!(
-            for_window(&prefs, Some("resident-pm"), None),
+            for_window(&prefs, Some("resident-pm"), None, false),
             Some(PmActivity::Starting)
         );
 
         pm_registry::try_register_pm(&path, registration("successor-pm"), |_| false).unwrap();
         let prefs = pm_registry::load_pm_prefs(&path).unwrap();
         assert_eq!(
-            for_window(&prefs, Some("successor-pm"), Some(1000)),
+            for_window(&prefs, Some("successor-pm"), Some(1000), false),
             Some(PmActivity::Starting)
+        );
+    }
+
+    #[test]
+    fn pm_title_shows_a_stalled_wake_instead_of_its_last_operation() {
+        // Issue #7922 AC-4: on 2026-11-25 the title kept saying "Reconciling"
+        // while the PM sat at a prompt and no periodic wake reached it.
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = temp.path().join("pm.json");
+        pm_registry::save_pm_prefs(
+            &path,
+            &PmPrefs {
+                registration: Some(registration("resident-pm")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(record_operation(&path, "resident-pm", "issue.monitor.status", 2000).unwrap());
+        let prefs = pm_registry::load_pm_prefs(&path).unwrap();
+        assert!(!pm_wake_stalled(&repo));
+        assert_eq!(
+            for_window(
+                &prefs,
+                Some("resident-pm"),
+                Some(1000),
+                pm_wake_stalled(&repo)
+            ),
+            Some(PmActivity::Reconciling)
+        );
+
+        let stall_path = pm_registry::pm_wake_stall_path_for_repo_path(&repo);
+        pm_registry::save_pm_wake_stall(
+            &stall_path,
+            &pm_registry::PmWakeStall {
+                since: "2026-11-24T11:26:00Z".into(),
+                reason: "pane_busy".into(),
+                detail: None,
+                interval_secs: 300,
+                recorded_at: "2026-11-24T11:46:00Z".into(),
+            },
+        )
+        .unwrap();
+        assert!(pm_wake_stalled(&repo));
+        assert_eq!(
+            for_window(
+                &prefs,
+                Some("resident-pm"),
+                Some(1000),
+                pm_wake_stalled(&repo)
+            ),
+            Some(PmActivity::Stalled)
+        );
+        assert_eq!(
+            for_window(&prefs, Some("worker"), Some(1000), true),
+            None,
+            "only the registered PM window carries PM activity"
+        );
+
+        pm_registry::clear_pm_wake_stall(&stall_path);
+        assert_eq!(
+            for_window(
+                &prefs,
+                Some("resident-pm"),
+                Some(1000),
+                pm_wake_stalled(&repo)
+            ),
+            Some(PmActivity::Reconciling)
         );
     }
 

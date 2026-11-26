@@ -46,6 +46,10 @@ test.describe("Agent title role and worktree badges", () => {
     await expect(title).toHaveAttribute("title", "Project Manager · Maple — Driving PRs");
     await page.evaluate(() => (window as any).__injectPmTitle("reconciling", "idle"));
     await expect(title).toHaveText("Project Manager · Maple — Reconciling");
+    // Issue #7922 AC-4: a recorded wake stall replaces the last operation.
+    await page.evaluate(() => (window as any).__injectPmTitle("stalled", "waiting"));
+    await expect(title).toHaveText("Project Manager · Maple — Not receiving wakes");
+    await page.screenshot({ path: info.outputPath("pm-stalled-title.png") });
     // A restored runtime has no activity wire value until its own operation.
     await page.evaluate(() => (window as any).__injectPmTitle(null, "idle"));
     await expect(title).toHaveText("Project Manager · Maple — Starting");
