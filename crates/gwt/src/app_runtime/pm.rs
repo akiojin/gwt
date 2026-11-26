@@ -4069,6 +4069,77 @@ mod delivery_tests {
         );
     }
 
+    /// Issue #7696 AC-4/AC-5: the 9.175.1 update restart. The new process
+    /// starts with empty in-memory wake state and only the durable residue of
+    /// the wake held before the restart. Its automatic restore of the PM is
+    /// refused for a transient capacity reason; the scheduled retry must bring
+    /// the PM back and the next tick must reach it, with no human input.
+    #[test]
+    fn issue_7696_restart_with_a_transient_restore_refusal_resumes_the_periodic_wake() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        pm_registry::save_pm_loop_state(
+            &pm_registry::pm_loop_state_path_for_repo_path(&repo),
+            &pm_registry::PmLoopState {
+                last_wake_at: Some("2026-10-10T00:00:00Z".into()),
+                last_wake_id: Some("held-before-restart".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let context = runtime.test_context();
+        // The restore launch is tracked as a PM launch, then refused: the
+        // window stays without a live PM Session.
+        runtime.active_agent_sessions.remove(&window_id);
+        runtime
+            .project_state_mut(&context)
+            .unwrap()
+            .pending_pm_launches
+            .insert(window_id.clone(), repo.clone());
+        assert!(runtime.record_pm_launch_failure(
+            &context,
+            &window_id,
+            "Machine Agent capacity observation is unavailable; wait for the next fresh measurement",
+        ));
+
+        runtime.retry_transient_pm_launch_failures();
+        assert_eq!(
+            runtime.pending_startup_pm_tabs,
+            vec![context.tab_id.to_string()],
+            "the scheduled tick must retry the refused restore without a human"
+        );
+
+        // The retried launch brings the PM back.
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let (proxy, recorded) = AppEventProxy::stub();
+        runtime.proxy = proxy;
+        let capture = PromptCapture::begin(&repo);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+        );
+        runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+            &repo,
+            &monitor,
+            "2026-10-10T01:00:00Z",
+            true,
+        );
+        let results = drain_wake_deliveries(&mut runtime, &tasks, &recorded);
+
+        assert_eq!(
+            capture.prompts().len(),
+            1,
+            "the PM restored after the refusal must receive its periodic wake: {results:?}"
+        );
+    }
+
     /// Issue #7785 AC-2: a tick without an exact turn acknowledgement stays
     /// one operation. No further tick is decided while it is held, and the
     /// turn boundary that releases it starts a full interval of its own.
