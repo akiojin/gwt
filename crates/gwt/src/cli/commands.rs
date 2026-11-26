@@ -81,6 +81,9 @@ pub enum IssueCommand {
         number: u64,
         /// Explicit orphan artifact comments whose payload should be archived.
         archive_comments: Vec<u64>,
+        /// Issue #7825: wrap a body without gwt-spec header / sections index
+        /// unchanged as the `spec` section before repairing.
+        wrap_body: bool,
     },
     /// Issue #4541: run the deterministic SPEC artifact lint and, unless
     /// `snapshot` is off, finalize the Intake Inspection Snapshot with the

@@ -196,6 +196,8 @@ pub(super) fn admit<E: CliEnv>(
     let refuse = |reason: &str| {
         format!("PR #{} completion refused: {reason}. The owning implementation agent must repair the PR, rerun verification when needed, and retry completion.", pr.number)
     };
+    let wait_for_merge =
+        "PR is still open; wait for CI, auto-merge and confirmed merge before completion";
     if snapshot.head_sha != pr.head_sha {
         return Err(refuse("PR head changed after candidate selection"));
     }
@@ -227,8 +229,15 @@ pub(super) fn admit<E: CliEnv>(
             return Err(refuse("PR is closed without merging"));
         }
         if snapshot.state == PrState::Open {
-            if let Some(blocker) = fields.completion_blocker() {
+            let ci_headed = !fields.is_draft && super::pr::uses_ci_headed_evidence(&fields.body);
+            if let Some(blocker) = fields
+                .completion_blocker()
+                .filter(|blocker| !ci_headed || *blocker != "agent_visual_check_unknown")
+            {
                 return Err(refuse(blocker));
+            }
+            if ci_headed {
+                return Err(refuse(wait_for_merge));
             }
             let ready_record =
                 super::pr::ready_verification(&worktree, Some(session_id), &fields.body, true)
@@ -281,9 +290,7 @@ pub(super) fn admit<E: CliEnv>(
         }
     }
     if snapshot.state == PrState::Open {
-        return Err(refuse(
-            "PR is still open; wait for CI, auto-merge and confirmed merge before completion",
-        ));
+        return Err(refuse(wait_for_merge));
     }
     Ok(Some(verified.content_hash.clone()))
 }
@@ -918,15 +925,21 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "completion-pr-positive");
-        for (draft, state) in [
-            (true, gwt_git::pr_status::PrState::Open),
-            (false, gwt_git::pr_status::PrState::Open),
-            (false, gwt_git::pr_status::PrState::Merged),
+        for (draft, state, ci_headed) in [
+            (true, PrState::Open, false),
+            (false, PrState::Open, false),
+            (false, PrState::Open, true),
+            (false, PrState::Merged, false),
+            (false, PrState::Merged, true),
         ] {
             let repo = tempfile::tempdir().unwrap();
             prepare(repo.path(), "completion-pr-positive");
             let mut env = TestEnv::new(repo.path().into());
             seed_pr(&mut env, draft, state);
+            if ci_headed {
+                env.completion_prs.get_mut(&9001).unwrap().inventory.body =
+                    "User Verification Result: n/a (autonomous)\nHeaded Evidence: CI\nAgent Visual Check: pending (CI headed)\n".into();
+            }
             let mut out = String::new();
             let code =
                 execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap();

@@ -1,6 +1,7 @@
 import { chromium, defineConfig, devices } from "@playwright/test";
 
 const chromiumChannel = process.env.GWT_PLAYWRIGHT_CHROMIUM_CHANNEL;
+const ciHeadedEvidence = process.env.GWT_CI_HEADED_EVIDENCE === "1";
 const desktopChrome = chromiumChannel
   ? { ...devices["Desktop Chrome"], channel: chromiumChannel }
   : devices["Desktop Chrome"];
@@ -15,6 +16,7 @@ if (process.platform === "darwin") {
   const launch = chromium.launch.bind(chromium);
   chromium.launch = async options => {
     const browser = await launch(options);
+    if (options?.headless !== false) return browser;
     const session = await browser.newBrowserCDPSession();
     session.on("Target.targetCreated", ({ targetInfo }) => {
       if (targetInfo.type !== "page") return;
@@ -39,10 +41,15 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   use: {
     baseURL: process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/",
-    trace: "on-first-retry",
+    // Retain failures for the full suite; native terminal tests also retain
+    // passing traces for the agent's headed review.
+    trace: ciHeadedEvidence
+      ? { mode: "retain-on-failure", screenshots: false, snapshots: false, sources: false }
+      : "on-first-retry",
+    screenshot: ciHeadedEvidence ? "on" : "off",
     colorScheme: "dark",
-    // verify.run always adds --headed; open the window off screen so it does
-    // not cover or steal focus from the developer's work (#6977). Do not start it
+    // For explicit headed runs, open the window off screen where supported.
+    // Do not start it
     // minimized: a minimized page reports visibilityState "hidden".
     launchOptions: { args: ["--window-position=-32000,-32000"] },
   },

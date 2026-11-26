@@ -4847,6 +4847,85 @@ impl IssueMonitorStallReason {
     }
 }
 
+/// Issue #7922: how often a persisting launch stall is reported again.
+pub const ISSUE_MONITOR_LAUNCH_STALL_REPORT_INTERVAL_SECS: i64 = 600;
+
+/// Issue #7922: a change in the launch stall worth one log line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorLaunchStallEvent {
+    Started {
+        reason: IssueMonitorStallReason,
+        detail: String,
+    },
+    Sustained {
+        reason: IssueMonitorStallReason,
+        since: String,
+        detail: String,
+    },
+    Ended {
+        reason: IssueMonitorStallReason,
+        since: String,
+    },
+}
+
+impl IssueMonitorLaunchStallEvent {
+    /// Issue #7922 AC-1: an empty queue that outlived the report interval is
+    /// recovered by the Monitor itself with a fresh scan and admission, the
+    /// same work a PM `ScanNow` requests. Other gates are not lifted by a
+    /// rescan, and a stall just observed may still clear on the next scan.
+    pub fn requests_rescan(&self) -> bool {
+        matches!(
+            self,
+            Self::Sustained {
+                reason: IssueMonitorStallReason::QueueEmpty,
+                ..
+            }
+        )
+    }
+}
+
+/// Issue #7922: remembers the current launch stall across observations so a
+/// stall is reported when it starts, every report interval while it lasts,
+/// and when it ends. Held by the daemon loop, not by the persisted state.
+#[derive(Debug, Default)]
+pub struct IssueMonitorLaunchStallTracker {
+    /// The stalled gate, when the stall began, and when it was last reported.
+    current: Option<(IssueMonitorStallReason, String, String)>,
+}
+
+impl IssueMonitorLaunchStallTracker {
+    pub fn observe(
+        &mut self,
+        monitor: &IssueMonitorState,
+        now: &str,
+    ) -> Option<IssueMonitorLaunchStallEvent> {
+        let Some((reason, detail)) = monitor.launch_stall_at(now) else {
+            let (reason, since, _) = self.current.take()?;
+            return Some(IssueMonitorLaunchStallEvent::Ended { reason, since });
+        };
+        match &mut self.current {
+            Some((current, since, reported_at)) if *current == reason => {
+                let elapsed = parse_rfc3339_utc(now)
+                    .zip(parse_rfc3339_utc(reported_at))
+                    .map(|(now, reported)| now.whole_seconds_since(reported));
+                if elapsed? < ISSUE_MONITOR_LAUNCH_STALL_REPORT_INTERVAL_SECS {
+                    return None;
+                }
+                *reported_at = now.to_string();
+                Some(IssueMonitorLaunchStallEvent::Sustained {
+                    reason,
+                    since: since.clone(),
+                    detail,
+                })
+            }
+            _ => {
+                self.current = Some((reason, now.to_string(), now.to_string()));
+                Some(IssueMonitorLaunchStallEvent::Started { reason, detail })
+            }
+        }
+    }
+}
+
 fn unknown_stall_reason() -> Option<IssueMonitorStallReason> {
     Some(IssueMonitorStallReason::Unknown)
 }
@@ -16058,6 +16137,55 @@ impl IssueMonitorState {
             return Some(Reason::RetryBackoff);
         }
         None
+    }
+
+    /// Issue #7922: the gate holding launchable backlog while a slot is free,
+    /// with each backlog row's claim exclusions. `None` while the Monitor is
+    /// launching, idle, deliberately stopped, or saturated by running work.
+    fn launch_stall_at(&self, now: &str) -> Option<(IssueMonitorStallReason, String)> {
+        use IssueMonitorStallReason as Reason;
+        let reason = self.stall_reason_at(now)?;
+        let max_active = self.effective_max_active_agents();
+        if matches!(reason, Reason::Disabled | Reason::Unknown)
+            || (reason == Reason::MaxActiveSaturated && max_active > 0)
+        {
+            return None;
+        }
+        let backlog = self
+            .inbox
+            .iter()
+            .filter(|item| item.state == MonitorInboxState::Queued)
+            .map(|item| item.issue.number)
+            .collect::<Vec<_>>();
+        if backlog.is_empty() {
+            return None;
+        }
+        let occupied = self.occupied_slot_count();
+        let free_slots = max_active
+            .saturating_sub(occupied)
+            .saturating_sub(self.pending_claim_issue_numbers().len());
+        let rows = backlog
+            .iter()
+            .take(8)
+            .map(|number| {
+                let reasons = self.claim_candidate_exclusions(*number);
+                if reasons.is_empty() {
+                    format!("#{number}: claimable")
+                } else {
+                    format!("#{number}: {}", reasons.join("; "))
+                }
+            })
+            .collect::<Vec<_>>();
+        Some((
+            reason,
+            format!(
+                "free_slots={free_slots} max_active={max_active} occupied={occupied} \
+                 launch_queue={} backlog={} | {}",
+                self.queue.len(),
+                backlog.len(),
+                rows.join(" | ")
+            ),
+        ))
     }
 
     /// The admission-effective drain. Saved configuration is retained in prefs.
@@ -34998,6 +35126,122 @@ mod tests {
             "the backoff names when it lifts: {}",
             reason(44)
         );
+    }
+
+    /// Issue #7922: a launch stall with launchable backlog is logged when it
+    /// starts, again while it persists, and when it ends, with the reasons
+    /// each backlog row is excluded. Before this, the 2026-11-24 stall left
+    /// no record of why the scan selected nothing for 2h20m.
+    #[test]
+    fn launch_stall_is_reported_on_start_while_sustained_and_on_end() {
+        let t0 = "2026-11-24T11:30:00Z";
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], t0);
+        let mut tracker = IssueMonitorLaunchStallTracker::default();
+        assert_eq!(
+            tracker.observe(&monitor, t0),
+            None,
+            "admissible is no stall"
+        );
+
+        // The 2026-11-25 shape: the backlog row is queued but no candidate is
+        // claimable, so the queue reads empty while a slot is free.
+        monitor.queue.retain(|number| *number != 42);
+        let Some(IssueMonitorLaunchStallEvent::Started { reason, detail }) =
+            tracker.observe(&monitor, t0)
+        else {
+            panic!("a new stall must be reported");
+        };
+        assert_eq!(reason, IssueMonitorStallReason::QueueEmpty);
+        assert!(detail.contains("free_slots=2"), "{detail}");
+        assert!(detail.contains("#42: not_in_launch_queue"), "{detail}");
+
+        assert_eq!(
+            tracker.observe(&monitor, "2026-11-24T11:35:00Z"),
+            None,
+            "a stall is not re-reported on every observation"
+        );
+        assert!(matches!(
+            tracker.observe(&monitor, "2026-11-24T11:40:00Z"),
+            Some(IssueMonitorLaunchStallEvent::Sustained { since, .. }) if since == t0
+        ));
+
+        monitor.queue.push_back(42);
+        assert_eq!(
+            tracker.observe(&monitor, "2026-11-24T11:41:00Z"),
+            Some(IssueMonitorLaunchStallEvent::Ended {
+                reason: IssueMonitorStallReason::QueueEmpty,
+                since: t0.to_string(),
+            })
+        );
+    }
+
+    /// Issue #7922 AC-1: an empty queue that persists past the report interval
+    /// with launchable backlog and a free slot asks the daemon for a fresh
+    /// scan and admission on its own, without waiting for a PM turn. A stall
+    /// just observed, a gate a rescan cannot lift, and an end do not.
+    #[test]
+    fn only_a_sustained_empty_queue_requests_a_fresh_rescan() {
+        use IssueMonitorStallReason as Reason;
+        let sustained = |reason| IssueMonitorLaunchStallEvent::Sustained {
+            reason,
+            since: "2026-11-24T11:30:00Z".to_string(),
+            detail: String::new(),
+        };
+        assert!(sustained(Reason::QueueEmpty).requests_rescan());
+        assert!(!sustained(Reason::GuiDisconnected).requests_rescan());
+        assert!(!IssueMonitorLaunchStallEvent::Started {
+            reason: Reason::QueueEmpty,
+            detail: String::new(),
+        }
+        .requests_rescan());
+        assert!(!IssueMonitorLaunchStallEvent::Ended {
+            reason: Reason::QueueEmpty,
+            since: "2026-11-24T11:30:00Z".to_string(),
+        }
+        .requests_rescan());
+    }
+
+    /// Issue #7922: no backlog to launch, or every slot in use, is not a stall.
+    #[test]
+    fn launch_stall_ignores_idle_and_saturated_monitors() {
+        let now = "2026-11-24T11:30:00Z";
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 1,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(false);
+        let mut tracker = IssueMonitorLaunchStallTracker::default();
+        assert_eq!(tracker.observe(&monitor, now), None, "empty backlog");
+
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
+        monitor.active_launches.push(42);
+        assert_eq!(tracker.observe(&monitor, now), None, "saturated");
     }
 
     /// Issue #4249 FR-004: a GUI-only gate names the GUI action that lifts it;

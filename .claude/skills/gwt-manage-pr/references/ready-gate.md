@@ -15,10 +15,12 @@ Ready for review only when all of the following are true:
   alone does not create that request. Preserve an actual rejection and repair
   the reported defect. In autonomous launches, read `execution.status`
   (`launch_route`) and record `User Verification Result: n/a (autonomous)`.
-- UI work needs `Agent Visual Check: pass` and actual passing headed Chromium
-  dark/light evidence in the same fresh `verify.run` record (selected with
-  `params.headed_e2e_commands`). Never rewrite the agent's own check as human
-  `confirmed`.
+- UI work needs an Agent Visual Check and passing headed Chromium in both
+  themes. For a new protected gwt PR, follow the
+  [CI evidence path](../../gwt-verify/references/agent-visual.md). Its required
+  WebView job stays pending until the exact-head artifact is reviewed. For
+  other delivery paths use explicit `params.headed_e2e_commands` and a fresh
+  local record. Keep this evidence separate from human verification.
 - The legacy `deferred (autonomous execution)` value on existing autonomous
   PRs permits Ready with fresh passing evidence, without rewriting the body.
   `pr.list` exposes `deferred_user_verification` when `include: ["body"]` is

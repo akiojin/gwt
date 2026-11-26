@@ -22,13 +22,16 @@ or send a verification URL. Cover any UI surface with the agent's own automated
 headed E2E, recorded separately as `Agent Visual Check: pass` (`n/a (no UI
 surface)` otherwise). Never turn the agent's check into human `confirmed`.
 
-Run the full matrix through `verify.run`. For UI work, select its Playwright
+Run the full local matrix through `verify.run`. For new protected gwt PRs,
+follow the [CI visual evidence path](../../gwt-verify/references/agent-visual.md).
+For other UI work, select its Playwright
 commands with `params.headed_e2e_commands`; each entry must exactly match an
 entry in `params.commands`. gwtd adds `--headed` and its embedded reporter and
 records actual Chromium results for both dark and light themes. Use
 `browser-check` for an isolated checkout instance; the E2E tests must assert the
-changed behavior and zero console/page errors. An autonomous UI Ready handoff
+changed behavior and zero console/page errors. For a local headed UI handoff, Ready
 requires those measured passing results in the same fresh verification record.
+For protected CI, the exact-head WebView check enforces review before merge.
 
 Before Ready PR creation or enabling auto-merge, compare the owner Issue's
 acceptance criteria with the fresh `verify.run` evidence. Update only proven

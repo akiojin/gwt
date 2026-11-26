@@ -857,3 +857,123 @@ fn section_write_preserves_same_timestamp_remote_index_update() {
         "new remote spec"
     );
 }
+
+// Issue #7825: a hand-written gwt-spec Issue has neither the header nor the
+// sections index. Section writes must refuse it with guidance, and
+// `wrap_unstructured_body` must turn the unchanged prose into the `spec`
+// section so plan / tasks can be saved and read back.
+fn seed_headerless(client: &FakeIssueClient, cache: &Cache, number: u64, body: &str) {
+    let snapshot = IssueSnapshot {
+        author_login: None,
+        number: IssueNumber(number),
+        title: "hand-written SPEC".to_string(),
+        body: body.to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new(format!("seed-{number}")),
+        comments: Vec::new(),
+    };
+    client.seed(snapshot.clone());
+    cache.write_snapshot(&snapshot).unwrap();
+}
+
+#[test]
+fn headerless_spec_is_wrapped_then_accepts_plan_and_tasks() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let number = IssueNumber(7691);
+    let prose = "## 背景\n\n人が書いた SPEC。\n\n## 受け入れ基準\n\n- [ ] AC-1: something\n";
+    seed_headerless(&client, &cache, 7691, &format!("\n{prose}\n"));
+    let ops = SpecOps::new(client, cache);
+
+    let error = ops
+        .write_section(number, &n("plan"), "plan")
+        .expect_err("a headerless SPEC must refuse section writes");
+    let message = error.to_string();
+    assert!(matches!(error, SpecOpsError::Validation(_)), "{error:?}");
+    for needle in [
+        "sections index",
+        "issue.spec.repair",
+        "wrap_body",
+        "archive_comments",
+    ] {
+        assert!(message.contains(needle), "missing {needle}: {message}");
+    }
+    assert!(
+        !ops.client()
+            .call_log()
+            .iter()
+            .any(|entry| entry.starts_with("patch_body:") || entry.starts_with("create_comment:")),
+        "refusal must not mutate"
+    );
+
+    ops.wrap_unstructured_body(number).unwrap();
+    assert_eq!(
+        ops.read_section(number, &n("spec")).unwrap(),
+        prose.trim_matches('\n')
+    );
+
+    ops.write_section(number, &n("plan"), "the plan").unwrap();
+    ops.write_section(number, &n("tasks"), "- [ ] T-1: do it")
+        .unwrap();
+    assert_eq!(ops.read_section(number, &n("plan")).unwrap(), "the plan");
+    assert_eq!(
+        ops.read_section(number, &n("tasks")).unwrap(),
+        "- [ ] T-1: do it"
+    );
+    assert_eq!(
+        ops.read_section(number, &n("spec")).unwrap(),
+        prose.trim_matches('\n')
+    );
+    // The Monitor derives launch readiness from these cached sections.
+    let entry = ops.cache().load_entry(number).unwrap();
+    assert_eq!(entry.spec_parse_error, None);
+    assert!(entry.spec_body.sections.contains_key(&n("plan")));
+    assert!(entry.spec_body.sections.contains_key(&n("tasks")));
+
+    let again = ops
+        .wrap_unstructured_body(number)
+        .expect_err("an already structured SPEC must not be wrapped twice");
+    assert!(matches!(again, SpecOpsError::Validation(_)), "{again:?}");
+}
+
+#[test]
+fn oversized_headerless_spec_is_wrapped_into_comment_parts() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let number = IssueNumber(7826);
+    let prose = "line of a long hand-written SPEC\n".repeat(4000);
+    seed_headerless(&client, &cache, 7826, &prose);
+    let ops = SpecOps::new(client, cache);
+
+    ops.wrap_unstructured_body(number).unwrap();
+    assert_eq!(
+        ops.read_section(number, &n("spec")).unwrap(),
+        prose.trim_matches('\n')
+    );
+    ops.write_section(number, &n("plan"), "the plan").unwrap();
+    assert_eq!(ops.read_section(number, &n("plan")).unwrap(), "the plan");
+}
+
+#[test]
+fn wrap_refuses_body_with_artifact_markers() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    seed_headerless(
+        &client,
+        &cache,
+        9,
+        "prose\n<!-- artifact:plan BEGIN -->\nx\n<!-- artifact:plan END -->\n",
+    );
+    let ops = SpecOps::new(client, cache);
+    let error = ops.wrap_unstructured_body(IssueNumber(9)).unwrap_err();
+    assert!(matches!(error, SpecOpsError::Validation(_)), "{error:?}");
+    assert!(!ops
+        .client()
+        .call_log()
+        .iter()
+        .any(|entry| entry.starts_with("patch_body:")));
+}

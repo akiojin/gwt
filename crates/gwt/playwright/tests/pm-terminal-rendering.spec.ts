@@ -6,6 +6,10 @@ import { withNativeHiddenPage } from "./_helpers/native-chromium";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 import { openWorks } from "./_helpers/works-entry";
 
+if (process.env.GWT_CI_HEADED_EVIDENCE === "1") {
+  test.use({ trace: { mode: "on", screenshots: false, snapshots: false, sources: false } });
+}
+
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
 const PM = "pm-terminal";
@@ -110,8 +114,8 @@ test("Issue #7558 PM execution log stays in its window when the transport is rep
 // The reported trigger itself: a real hidden page returning to the foreground
 // replaces the transport through the trusted visibilitychange.
 test("Issue #7558 PM execution log survives a native page hide and return after a Works visit", async ({ page, playwright }, info) => {
+  test.skip(info.project.use.headless !== false, "requires native foreground and background windows");
   test.setTimeout(60_000);
-  test.skip(!liveBase, "Requires the isolated browser-check checkout server");
   await page.goto("about:blank");
   const theme = info.project.name.includes("light") ? "light" : "dark";
   const state = () => ({ ...(window as any).__gwtTerminalTestApi.metrics("pm-terminal"),
@@ -1422,8 +1426,8 @@ exit 67
 });
 
 test("ready Works terminal follows model header layout while native hidden", async ({ page, playwright }, info) => {
+  test.skip(info.project.use.headless !== false, "requires native foreground and background windows");
   test.setTimeout(60_000);
-  test.skip(!liveBase, "Requires the isolated browser-check checkout server");
   await page.goto("about:blank");
   const theme = info.project.name.includes("light") ? "light" : "dark";
   const title = "Model task update " + "implement shared rendering and recover terminal state ".repeat(6).trim();

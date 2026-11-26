@@ -148,12 +148,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::RetryWorkspaceStateLoad => {
             FrontendUserActionLog::new("retry_workspace_state_load", "workspace")
         }
-        FrontendEvent::LoadRecoveryCenter { .. } => {
-            FrontendUserActionLog::new("load_recovery_center", "recovery")
-        }
-        FrontendEvent::OpenRecoveryCenterBoardEntry { .. } => {
-            FrontendUserActionLog::new("open_recovery_center_board_entry", "recovery")
-        }
         FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
             FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
                 .mode(if *enabled { "on" } else { "off" })
@@ -246,9 +240,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::StopWindow { id } => {
             FrontendUserActionLog::new("stop_window", "window").window(id)
-        }
-        FrontendEvent::StopAllWindows {} => {
-            FrontendUserActionLog::new("stop_all_windows", "window")
         }
         FrontendEvent::RestartWindow { id } => {
             FrontendUserActionLog::new("restart_window", "window").window(id)
@@ -703,11 +694,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::UpdateAutostart { enabled } => {
             FrontendUserActionLog::new("update_autostart", "settings").force(*enabled)
-        }
-        FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
-            FrontendUserActionLog::new("workspace_projection_prune", "workspace")
-                .mode(if *dry_run { "dry_run" } else { "apply" })
-                .count(ids.len())
         }
         FrontendEvent::SaveUiTrace { trace } => {
             let entries = trace.entries().map(|entries| entries.len()).unwrap_or(0);

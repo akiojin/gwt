@@ -4015,19 +4015,50 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Read one stable registry/raw/registry generation without acquiring writer locks.
+#[cfg(test)]
+thread_local! {
+    static READ_PROJECT_UNLOCKED_ATTEMPT: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `observer` inside every lock-free attempt of this thread's reads.
+#[cfg(test)]
+pub(crate) fn set_unlocked_read_observer_for_test(observer: Option<std::rc::Rc<dyn Fn()>>) {
+    READ_PROJECT_UNLOCKED_ATTEMPT.with(|slot| *slot.borrow_mut() = observer);
+}
+
+/// Read one stable registry/raw/registry generation, lock-free unless a commit
+/// tears the first attempt (Issue #7851).
 pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>> {
     let Some(key) = source_key(path) else {
         return Ok(None);
     };
     let deadline = gwt_core::operation_deadline::current()
         .unwrap_or_else(|| gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5));
+    // Issue #7851: writers committing back to back can starve a lock-free
+    // reader until its deadline. After one torn attempt, hold the registry lock
+    // exclusively: every project transaction holds it shared and every core
+    // writer holds it, so the next attempt reads one generation. The wait is
+    // short and falls back to lock-free retries, so a thread that already
+    // holds the lock is never worse off than before.
+    let mut stable: Option<gwt_core::operation_deadline::NamedFileLock> = None;
+    let mut torn = false;
     loop {
         if gwt_core::operation_deadline::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Agent registry changed during read; retry the same operation",
             ));
+        }
+        if torn && stable.is_none() {
+            let wait = deadline
+                .min(gwt_core::operation_deadline::now() + std::time::Duration::from_millis(250));
+            stable = NamedFileLock::acquire_until(
+                &lock_path()?,
+                "shared Agent registry read",
+                Some(wait),
+            )
+            .ok();
         }
         let generation = || -> io::Result<Option<(String, Option<String>)>> {
             let Some(core) = raw(&self::path())? else {
@@ -4044,11 +4075,19 @@ pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>>
         if let Some(observer) = READ_PROJECT_AFTER_SOURCE.with(|slot| slot.borrow_mut().take()) {
             observer();
         }
+        #[cfg(test)]
+        if stable.is_none() {
+            if let Some(observer) = READ_PROJECT_UNLOCKED_ATTEMPT.with(|slot| slot.borrow().clone())
+            {
+                observer();
+            }
+        }
         let Some(after) = generation()? else {
             continue;
         };
         // Identical bytes are one generation: decode and prove it once.
         if before != after {
+            torn = true;
             std::thread::yield_now();
             continue;
         }

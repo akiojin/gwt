@@ -1101,6 +1101,11 @@ fn issue_5415_fresh_monitor_startup_timeout_requeues_without_spending_an_attempt
 }
 
 #[test]
+fn issue_7814_codex_sandbox_error_requeues_startup_and_records_launch_failure() {
+    assert_fresh_monitor_startup_failures_stop(&["codex-sandbox"]);
+}
+
+#[test]
 fn issue_5415_startup_timeout_preserves_submitted_and_replaced_sessions() {
     assert_fresh_monitor_startup_failures_stop(&["startup-submitted", "startup-replaced"]);
 }
@@ -1492,7 +1497,34 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         });
         let mut events = fixture.owner.subscribe();
         if !prepty {
-            if failure.starts_with("startup-timeout") {
+            if failure == "codex-sandbox" {
+                let current = fixture
+                    .executor
+                    .block_on(fixture.owner.probe(&id, incarnation))
+                    .unwrap();
+                current.pane.lock().unwrap().process_bytes(
+                    "\r\n■ Could not read Windows sandbox configuration and requirements from the app\r\nserver.\r\n".as_bytes(),
+                );
+                let observed_at = Instant::now();
+                fixture
+                    .executor
+                    .block_on(fixture.owner.observe_runtime_policy(
+                        &id,
+                        incarnation,
+                        gwt_core::timestamp::UtcTimestamp::now(),
+                        observed_at,
+                    ))
+                    .unwrap();
+                if let Ok(after) = fixture
+                    .executor
+                    .block_on(fixture.owner.probe(&id, incarnation))
+                {
+                    assert_ne!(
+                        after.monitor_startup_at, current.monitor_startup_at,
+                        "the Codex startup failure must advance the deadline on observation"
+                    );
+                }
+            } else if failure.starts_with("startup-timeout") {
                 let current = fixture
                     .executor
                     .block_on(fixture.owner.probe(&id, incarnation))
@@ -1647,7 +1679,14 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             .error_message
             .as_deref()
             .expect("durable actionable failure");
-        if failure.starts_with("startup-timeout") {
+        if failure == "codex-sandbox" {
+            assert!(reason.contains("Could not read Windows sandbox configuration"));
+            assert!(gwt_agent::is_transient_launch_failure(reason));
+            assert_eq!(
+                monitor.inbox_item(2359).unwrap().state,
+                gwt::MonitorInboxState::Queued
+            );
+        } else if failure.starts_with("startup-timeout") {
             assert!(reason.starts_with("Issues startup timed out after "));
             assert!(gwt_agent::is_transient_launch_failure(reason));
             assert_eq!(
@@ -1703,6 +1742,46 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             before,
             "{failure}: failure replay cannot spend another attempt or erase its reason"
         );
+        if failure == "codex-sandbox" {
+            let root = fixture
+                .pending
+                .launch_feedback_context
+                .as_ref()
+                .unwrap()
+                .issue_monitor_project_root
+                .as_ref()
+                .unwrap();
+            let mut retry = owner_monitor_read(root, 2359);
+            retry.synchronize_agent_issue_schedule(root).unwrap();
+            assert!(
+                retry.agent_schedule_launch_exclusion(2359).is_none(),
+                "the retired startup must leave the Issue schedulable"
+            );
+            let retry_at = retry
+                .autonomous_record(2359)
+                .unwrap()
+                .retry_not_before
+                .clone()
+                .unwrap();
+            // The custom PTY tools exist only to exercise physical retirement.
+            // Use a supported logical profile to exercise Monitor admission.
+            retry.set_launch_profile_pool(vec![pool_profile("codex")]);
+            assert!(
+                retry.apply_confirmed_claim(
+                    2359,
+                    "retry-claim-2359",
+                    "fixture-pm/session",
+                    "retry-effect-2359",
+                    &retry_at,
+                ),
+                "retry admission must accept a fresh claim: {:?}",
+                retry.inbox_item(2359)
+            );
+            assert_eq!(
+                retry.pending_launch_delivery_id(2359).as_deref(),
+                Some("launch:retry-effect-2359")
+            );
+        }
         if failure == "replacement" {
             let root = fixture
                 .pending
@@ -1727,7 +1806,19 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             assert!(successor.pty.try_wait().unwrap().is_none());
             super::pane_control_tests::control_close(&fixture.owner, &successor);
         }
+        let session_id = fixture.pending.binding.session_id.clone();
         fixture.shutdown();
+        if failure == "codex-sandbox" {
+            let errors = gwt_core::error_ledger::list_since(None).unwrap();
+            assert!(errors.iter().any(|record| {
+                record.kind == gwt_core::error_ledger::ErrorKind::LaunchFailure
+                    && record.target.issue == Some(2359)
+                    && record.target.session_id.as_deref() == Some(session_id.as_str())
+                    && record
+                        .message
+                        .contains("Could not read Windows sandbox configuration")
+            }));
+        }
     }
 }
 

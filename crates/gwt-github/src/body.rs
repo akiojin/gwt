@@ -364,7 +364,7 @@ fn validate_split_chunks(
     Ok(())
 }
 
-fn parse_header(body: &str) -> Result<SpecMeta, ParseError> {
+pub(crate) fn parse_header(body: &str) -> Result<SpecMeta, ParseError> {
     let re = Regex::new(r"<!--\s*gwt-spec\s+id=(?P<id>\S+)\s+version=(?P<version>\d+)\s*-->")
         .expect("valid header regex");
     let caps = re.captures(body).ok_or(ParseError::MissingHeader)?;
