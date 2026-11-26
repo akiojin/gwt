@@ -838,15 +838,16 @@ pub(crate) fn merge_board_escalations_into_needs_human(
     let closed_issue_numbers = projected_issue_numbers
         .into_iter()
         .filter(|issue_number| {
-            let Some(entry) = cache.load_entry(IssueNumber(*issue_number)) else {
+            // Issue #7851: state and revision only; loading every comment of
+            // every projected Issue dominated the status read.
+            let Some(meta) = cache.load_meta(IssueNumber(*issue_number)) else {
                 return false;
             };
-            if entry.snapshot.state != IssueState::Closed {
+            if meta.state != "closed" {
                 return false;
             }
             let cached_closed_at =
-                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&entry.snapshot.updated_at.0)
-                    .ok();
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&meta.updated_at).ok();
             let newer_live_open = status.inbox.iter().any(|item| {
                 if item.issue_number != *issue_number
                     || item.github_state != crate::IssueMonitorIssueState::Open
@@ -1103,7 +1104,7 @@ fn run_monitor_status<E: CliEnv>(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .filter_map(|number| {
-            let diagnosis = crate::cli::execution_state::diagnose_owner(
+            let diagnosis = crate::cli::execution_state::diagnose_owner_without_settlement_recheck(
                 &project_root,
                 crate::cli::execution_state::ExecutionOwnerKey {
                     kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
@@ -11728,6 +11729,82 @@ mod tests {
                 .expect("launch_now target")
                 .issue_number,
             42
+        );
+    }
+
+    /// Issue #7851 AC-2: while another writer keeps committing the Agent
+    /// registry (#7550's shape), every lock-free read straddles a commit. The
+    /// status read must still answer inside one second instead of spinning to
+    /// each read's deadline.
+    #[test]
+    fn issue_7851_monitor_status_answers_within_a_second_while_the_registry_keeps_changing() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = gwt_core::paths::gwt_home().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["agent_roster"] = serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811", "agent_id":"codex",
+            "name":"Cedar", "enabled":true, "created_at":"2026-10-01T00:00:00Z"
+        }]});
+        let raw = serde_json::to_string_pretty(&prefs).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        std::fs::write(path.with_extension("committed.json"), &raw).unwrap();
+        crate::agent_registry::ensure_active_for_project(&repo).unwrap();
+
+        let commits = std::sync::Arc::new(AtomicU64::new(0));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (commits, stop, path) = (commits.clone(), stop.clone(), path.clone());
+            let home = tmp.path().join("home");
+            std::thread::spawn(move || {
+                let _home = ScopedGwtHome::set(home);
+                let mut toggle = false;
+                while !stop.load(Ordering::SeqCst) {
+                    toggle = !toggle;
+                    crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+                        prefs.priority_launch_now = toggle.then_some(7851);
+                        Ok(())
+                    })
+                    .unwrap();
+                    commits.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        // Every lock-free attempt observes a commit between its two reads.
+        let observed = commits.clone();
+        crate::agent_registry::set_unlocked_read_observer_for_test(Some(std::rc::Rc::new(
+            move || {
+                // The writer runs until the status read finishes and never
+                // waits on this thread's lock-free attempt, so a commit comes.
+                let start = observed.load(Ordering::SeqCst);
+                while observed.load(Ordering::SeqCst) == start {
+                    std::thread::yield_now();
+                }
+            },
+        )));
+
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let started = std::time::Instant::now();
+        let result = run_monitor_status(&env, None, &mut out);
+        let elapsed = started.elapsed();
+        crate::agent_registry::set_unlocked_read_observer_for_test(None);
+        stop.store(true, Ordering::SeqCst);
+        writer.join().unwrap();
+
+        result.expect("status answers under registry churn");
+        assert!(commits.load(Ordering::SeqCst) > 0, "the writer committed");
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(status.get("host_update_drain_error").is_none(), "{status}");
+        // test-hygiene: allow-wall-clock-deadline Issue #7851 AC-2 makes one second the contract under test
+        let within_contract = elapsed < std::time::Duration::from_secs(1);
+        assert!(
+            within_contract,
+            "issue.monitor.status took {elapsed:?} under registry churn"
         );
     }
 
