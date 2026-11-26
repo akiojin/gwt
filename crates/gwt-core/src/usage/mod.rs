@@ -19,6 +19,7 @@ pub(crate) mod incremental;
 pub mod limit_notice;
 pub mod model_context;
 pub mod snapshot_store;
+pub mod source;
 pub mod state;
 pub mod types;
 
@@ -28,6 +29,10 @@ pub use limit_notice::{
     describe_provider_limit_notice, detect_provider_limit_notice, ProviderLimitNotice,
 };
 pub use snapshot_store::{ProviderUsageReading, ProviderUsageWindowReading};
+pub use source::{
+    UnknownUsageSource, UsageAcquisition, UsageContext, UsagePoll, UsageSource,
+    UsageSourceDescriptor, UsageSourceRegistry,
+};
 pub use types::{
     CodexCredits, LimitObservation, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot,
     UsageState, UsageWindow, WindowKind,
