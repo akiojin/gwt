@@ -3029,6 +3029,22 @@ pub(super) fn confirm_open_monitor_issue(
     })
 }
 
+/// Issue #7628: a proven live Session whose worktree is `worktree`. Uncertain
+/// census rows do not hold a launch (Issue #7679: leftovers can stay uncertain).
+fn live_session_in_worktree(
+    project_root: &Path,
+    sessions_dir: &Path,
+    worktree: &Path,
+) -> Option<String> {
+    let normalized = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = normalized(worktree);
+    crate::session_inventory::observe_sessions(project_root, sessions_dir)
+        .sessions
+        .into_iter()
+        .find(|session| normalized(&session.worktree_path) == target)
+        .map(|session| session.session_id)
+}
+
 pub(crate) fn prepare_owner_agent_admission(
     input: OwnerAgentAdmissionInput<'_>,
     config: &mut gwt_agent::LaunchConfig,
@@ -3251,6 +3267,21 @@ pub(crate) fn prepare_owner_agent_admission(
             return Err(format!(
                 "Issues implementation pane already exists for Issue #{issue_number}"
             ));
+        }
+        // Issue #7628: the canvas snapshot only sees bound panes on this
+        // host's tabs. Every Monitor route (fresh, answered handoff resume,
+        // successor after Completed, requeue after a PR) converges here, so
+        // the process census of the target worktree decides as well. A live
+        // Session there holds the spawn until it exits; it never fails it.
+        if !review_dispatch {
+            if let Some(holder) = config.working_dir.as_deref().and_then(|worktree| {
+                live_session_in_worktree(input.project_root, input.sessions_dir, worktree)
+            }) {
+                return Err(format!(
+                    "{}{issue_number}: live Session {holder} already runs in the Issue worktree",
+                    crate::issue_monitor::MONITOR_SPAWN_HOLD_PREFIX
+                ));
+            }
         }
         if let Some(reason) = monitor.launch_source_exclusion(issue_number) {
             return Err(crate::issue_monitor::source_admission_refusal_message(
@@ -4936,6 +4967,131 @@ mod owner_admission_tests {
         admit(Some(0));
     }
 
+    /// Issue #7628 AC-1/AC-2: the wizard guard sees only bound panes on the
+    /// current tab, so answered handoff, successor-after-Completed and
+    /// requeue-after-PR launches reached the owner admission with an empty
+    /// canvas while a Session still ran in the worktree. The shared admission
+    /// now holds every such Monitor launch on the process census.
+    #[test]
+    fn issue_7628_live_worktree_session_holds_every_monitor_launch_route() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/fixture.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        let id = roster.members[0].agent_member_id.clone();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let profile = serde_json::from_value(serde_json::json!({"agent_id":"codex", "agent_member_id":id, "model":"m", "reasoning":"high"})).unwrap();
+            prefs.set_launch_profile_pool(vec![profile]);
+            Ok(())
+        })
+        .unwrap();
+        let roots = vec![root.clone()];
+        let known = std::collections::HashSet::new();
+        let runtime_handles = std::collections::HashMap::new();
+        // Fresh covers wizard, successor and requeue; Resume is the answered
+        // handoff relaunch. None of them has a bound pane on this canvas.
+        let admit = |mode: gwt_agent::SessionMode| {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .working_dir(&root)
+                .model("m")
+                .reasoning_level("high")
+                .build();
+            config.branch = Some("work/issue-43".into());
+            let result = prepare_owner_agent_admission(
+                OwnerAgentAdmissionInput {
+                    project_root: &root,
+                    sessions_dir: &sessions,
+                    issue_link_cache_dir: temp.path(),
+                    window_id: "pane",
+                    materializer_id: "test",
+                    host_project_roots: &roots,
+                    snapshot: crate::IssueMonitorWindowSnapshot {
+                        project_tab_id: "tab".into(),
+                        observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+                        windows: vec![],
+                    },
+                    snapshot_tabs: Default::default(),
+                    runtime_handles: &runtime_handles,
+                    known_names: &known,
+                    metadata: OwnerLaunchMetadata {
+                        selected_agent_member_id: Some(id.clone()),
+                        launch_feedback_context: Some(LaunchFeedbackContext {
+                            client_id: "test".into(),
+                            title: "test".into(),
+                            issue_monitor_issue_number: Some(43),
+                            issue_monitor_delivery_id: None,
+                            issue_monitor_project_root: Some(root.clone()),
+                            issue_monitor_session_mode: Some(mode),
+                            issue_monitor_autonomous_handoff: None,
+                            issue_monitor_autonomous_submit_started: false,
+                            issue_monitor_review_dispatch: false,
+                        }),
+                        ..Default::default()
+                    },
+                    is_continue_work: false,
+                    restore_source: None,
+                },
+                &mut config,
+            );
+            if result.is_ok() {
+                let reservation = config.env_vars.remove("GWT_AGENT_RESERVATION_ID").unwrap();
+                crate::agent_names::release_project_member(&root, &sessions, &id, &reservation)
+                    .unwrap();
+            }
+            result.err()
+        };
+        assert_eq!(admit(gwt_agent::SessionMode::Normal), None);
+
+        let mut holder = gwt_agent::Session::new(&root, "work/issue-43", gwt_agent::AgentId::Codex);
+        holder.id = "holder".into();
+        holder.project_state_root = Some(root.clone());
+        holder.linked_issue_number = Some(43);
+        holder.save(&sessions).unwrap();
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        runtime.child_pid = Some(std::process::id());
+        runtime.child_started_at = crate::process::host_process_start_time(std::process::id());
+        runtime
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &sessions,
+                2_000_000_000,
+                "holder",
+            ))
+            .unwrap();
+        for mode in [
+            gwt_agent::SessionMode::Normal,
+            gwt_agent::SessionMode::Resume,
+        ] {
+            let refusal = admit(mode).expect("a live worktree Session must hold the launch");
+            assert!(
+                crate::issue_monitor::is_monitor_spawn_hold_refusal(&refusal)
+                    && refusal.contains("holder"),
+                "{mode:?}: {refusal}"
+            );
+        }
+    }
+
     #[test]
     fn owner_rejects_stale_fresh_selected_member_tuning() {
         let _env_lock = crate::env_test_lock()
@@ -5449,6 +5605,7 @@ mod owner_admission_tests {
                 hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                     pr_number: 99,
                     lifecycle: "open".into(),
+                    auto_merge_enabled: None,
                 }),
             },
         );

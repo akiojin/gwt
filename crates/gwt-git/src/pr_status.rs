@@ -3979,7 +3979,7 @@ where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number_arg = number.to_string();
-    let fields = "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup";
+    let fields = "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest";
     let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
     if !output.success {
         return Err(GwtError::Git(format!(
@@ -6892,17 +6892,23 @@ mod tests {
         ] {
             let mut value = monitor_lifecycle_payload();
             value["statusCheckRollup"] = checks;
+            value["autoMergeRequest"] = if expected == "MERGE-CANDIDATE" {
+                serde_json::json!({"enabledAt": "2026-11-26T00:00:00Z"})
+            } else {
+                serde_json::Value::Null
+            };
             let mut calls = 0;
             let (state, item) = try_fetch_pr_lifecycle_for_monitor_with(
                 Path::new("/repo"), 42, |_, args| {
                     calls += 1;
                     assert_eq!(&args[..4], &["pr", "view", "42", "--json"]);
-                    assert_eq!(args[4], "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup");
+                    assert_eq!(args[4], "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest");
                     Ok(GhCliOutput { success: true, stdout: value.to_string(), stderr: String::new() })
                 },
             ).unwrap();
             assert_eq!(state, PrState::Open);
             assert_eq!(item.lifecycle, expected);
+            assert_eq!(item.auto_merge_enabled, expected == "MERGE-CANDIDATE");
             assert_eq!(calls, 1);
             assert_eq!(item.unresolved_review_threads, None);
         }
