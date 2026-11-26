@@ -120,6 +120,7 @@ async fn run(
                 accounts: snapshot.accounts,
                 sessions: snapshot.sessions,
                 consumption: snapshot.consumption,
+                providers: snapshot.providers,
             },
         )]);
     }
@@ -257,14 +258,7 @@ const NO_OFFICIAL_USAGE_SOURCE: &str = "no official usage source";
 
 /// The usage provider of a pool account's tool.
 fn provider_for_tool(tool: &str) -> Option<UsageProvider> {
-    match gwt_agent::resolve_agent_id(tool)? {
-        AgentId::Codex => Some(UsageProvider::Codex),
-        AgentId::ClaudeCode => Some(UsageProvider::ClaudeCode),
-        AgentId::GrokBuild => Some(UsageProvider::GrokBuild),
-        AgentId::Copilot => Some(UsageProvider::Copilot),
-        AgentId::Antigravity => Some(UsageProvider::Antigravity),
-        _ => None,
-    }
+    sources::usage_provider(&gwt_agent::resolve_agent_id(tool)?)
 }
 
 /// The default-home account id of `provider` in the pool store.
@@ -484,14 +478,20 @@ impl Poller {
             &crate::session_ledger_cache::SessionLedgerCache::new()
                 .load_shared(&gwt_core::paths::gwt_sessions_dir()),
         );
-        let mut accounts = sources::default_account_sources()
-            .poll_all(&mut sources::PollContext {
-                poller: self,
-                config: &config,
-                now,
-                force,
-            })
-            .await;
+        // The registry borrows the poller for this poll only.
+        let (providers, mut accounts) = {
+            let mut registry = sources::default_account_sources();
+            let providers = registry.descriptors();
+            let accounts = registry
+                .poll_all(&mut sources::PollContext {
+                    poller: self,
+                    config: &config,
+                    now,
+                    force,
+                })
+                .await;
+            (providers, accounts)
+        };
         for account in &mut accounts {
             account.pool_account_id = Some(default_account_id(&store, account.provider));
         }
@@ -509,11 +509,13 @@ impl Poller {
             accounts,
             sessions,
             consumption,
+            providers,
         }
     }
 
     /// Issue #7841: one row per pool account other than the default homes,
-    /// in pool order. Tools gwt cannot read usage for say so.
+    /// in pool order. Tools gwt cannot read usage for say so. The default
+    /// homes' rows come from the usage source registry (SPEC #7347).
     async fn pool_accounts(
         &mut self,
         config: &UsageConfig,
@@ -529,7 +531,7 @@ impl Poller {
             };
             let home = account.credential_home.as_deref().map(PathBuf::from);
             let mut row = match (provider, home) {
-                (UsageProvider::Codex | UsageProvider::ClaudeCode, None) => continue,
+                (_, None) => continue,
                 (UsageProvider::Codex, Some(_)) if !config.codex_enabled => {
                     ProviderUsage::degraded(provider, UsageState::Disabled)
                 }
@@ -1392,14 +1394,29 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(poller.collection_thread, Some(calling_thread));
-        assert_eq!(first.accounts.len(), 2);
+        // SPEC #7347: one default row per built-in agent.
+        assert_eq!(
+            first.accounts.len(),
+            gwt_agent::builtin_agent_descriptors().len()
+        );
         assert!(first.sessions.is_empty());
-        assert_eq!(first.accounts[1].state, UsageState::Disabled);
+        assert_eq!(
+            first.providers,
+            sources::default_account_sources().descriptors()
+        );
+        let row = |provider| {
+            first
+                .accounts
+                .iter()
+                .find(|account| account.provider == provider)
+                .unwrap()
+        };
+        assert_eq!(row(UsageProvider::ClaudeCode).state, UsageState::Disabled);
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
         let prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert_eq!(
             prefs.provider_quota_accounts["codex"].account_id,
-            first.accounts[0].account_id.as_deref().unwrap(),
+            row(UsageProvider::Codex).account_id.as_deref().unwrap(),
             "the collection worker must persist the same account recovery observation"
         );
         let (poller, second) = poller
@@ -1677,22 +1694,29 @@ mod tests {
     }
 
     // Issue #7841 AC-2: pool accounts of tools without an official usage
-    // source say so; the default homes stay the rows Issues reads.
+    // source say so; the default homes stay the rows Issues reads. SPEC #7347:
+    // the default homes' rows come from the source registry, so the pool adds
+    // only the accounts with a home of their own.
     #[tokio::test]
     async fn tools_without_a_usage_source_report_unknown_and_issues_reads_the_default_rows() {
         let mut store = gwt::execution_environments::Store::default();
         for tool in ["claude", "grok", "gh", "agy"] {
             store.register_account(tool);
         }
-        store.accounts.push(gwt::execution_environments::Account {
-            id: "claude-2".into(),
-            tool: "claude".into(),
-            name: "Claude Code 2".into(),
-            credential_home: Some("/nonexistent/claude-2".into()),
-            added_at: None,
-            origin: None,
-            sign_in_identity: None,
-        });
+        for (id, tool, home) in [
+            ("claude-2", "claude", "/nonexistent/claude-2"),
+            ("grok-2", "grok", "/nonexistent/grok-2"),
+        ] {
+            store.accounts.push(gwt::execution_environments::Account {
+                id: id.into(),
+                tool: tool.into(),
+                name: id.into(),
+                credential_home: Some(home.into()),
+                added_at: None,
+                origin: None,
+                sign_in_identity: None,
+            });
+        }
         let config = UsageConfig {
             codex_enabled: true,
             claude_account_enabled: false,
@@ -1710,16 +1734,15 @@ mod tests {
         assert_eq!(
             keys,
             [
-                (UsageProvider::GrokBuild, "grok", unknown()),
-                (UsageProvider::Copilot, "gh", unknown()),
-                (UsageProvider::Antigravity, "agy", unknown()),
                 (UsageProvider::ClaudeCode, "claude-2", UsageState::Disabled),
+                (UsageProvider::GrokBuild, "grok-2", unknown()),
             ]
         );
 
         let mut all = vec![
-            ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData),
             ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::Disabled),
+            ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData),
+            ProviderUsage::degraded(UsageProvider::GrokBuild, unknown()),
         ];
         all.extend(rows);
         let monitored = monitor_rows(&all);
