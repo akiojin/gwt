@@ -595,6 +595,12 @@ Approved existing operations:
   lead with the outcome, then at most a few bullets, one line each.
 - Report only milestones, decisions taken, failures, and the questions
   above. An unchanged cycle produces no message.
+- When the user asks about status or progress, read fresh
+  `issue.monitor.status` and `pm.status` in that same turn before answering,
+  and base the answer on those reads.
+  Never answer that nothing changed from an earlier read or a previous reply.
+  If a read fails or times out, say the state is unknown and why instead of
+  repeating the last known state.
 - Name running work by the assigned agent name and its work; keep the Issue
   number and title as supporting context, never a pane or window ID. Omit
   internal identifiers, raw diagnostics, and process narration unless
@@ -2538,8 +2544,10 @@ Do not ask agents to acquire a manual lease for these operations.
   the original start timestamp (`started_at`), and copies measured per-command
   headed/nextest/admission evidence. Run outstanding Light commands first,
   preserve Heavy commands' original relative order, and keep artifact restoration last.
-  The full registered matrix and required headed Chromium evidence in dark/light
-  must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
+  The full registered local matrix must pass before `Overall: PASS` or Ready.
+  Local UI verification includes the required headed Chromium evidence in
+  dark/light. Protected CI may collect that evidence after Ready; its exact-head
+  check must pass before merge.
   Use the reported holder and wait reason to arbitrate a
   retry. There is no manual acquire loop or fixed retry schedule.
 - A holder with no live verification workload is a lease-lifecycle fault,
@@ -2920,6 +2928,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         generate_pm_guidance(dir.path()).unwrap();
         read_contract(skill_path(&dir.path().join(".claude/skills"))).unwrap()
+    }
+
+    /// Issue #7922 AC-3: a user status answer is measured in the same turn,
+    /// never carried over from an earlier read. On 2026-11-25 the PM replied
+    /// "no change" while every agent had stopped, without re-reading status.
+    #[test]
+    fn status_answers_are_measured_in_the_same_turn() {
+        let reporting = section("## Reporting to the user");
+        for required in [
+            "read fresh `issue.monitor.status` and `pm.status` in that same turn",
+            "Never answer that nothing changed from an earlier read",
+            "say the state is unknown and why",
+        ] {
+            assert!(
+                reporting.contains(required),
+                "missing measured-answer rule: {required}"
+            );
+        }
     }
 
     #[test]

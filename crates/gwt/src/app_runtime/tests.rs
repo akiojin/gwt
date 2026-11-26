@@ -35,15 +35,10 @@ use gwt_config::{Profile, Settings};
 use gwt_core::{
     coordination::{
         coordination_events_path, load_snapshot, post_entry, AuthorKind, BoardAudienceScope,
-        BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, BoardWorktreeForm,
-        CoordinationEvent,
+        BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, CoordinationEvent,
     },
     logging::{current_log_file, init as init_logging, LogLevel, LoggingConfig},
     paths::gwt_cache_dir,
-    recovery::{
-        RecoveryAcknowledgement, RecoveryConflictKind, RecoveryIntent, RecoveryProvider,
-        RecoveryProviderReceipt, RecoveryState, RecoveryStore,
-    },
     repo_hash::detect_repo_hash,
     test_support::ScopedGwtHome,
 };
@@ -99,33 +94,6 @@ use crate::{
 #[test]
 fn pty_start_gate_helper() {
     gwt::project_runtime::test_support::run_pty_start_gate_helper();
-}
-
-fn recovery_center_test_intent(
-    session_id: &str,
-    recovery_id: &str,
-    entry_id: &str,
-    worktree_form: BoardWorktreeForm,
-    body: &str,
-) -> RecoveryIntent {
-    let mut entry = BoardEntry::new(
-        AuthorKind::Agent,
-        "codex",
-        BoardEntryKind::Status,
-        body,
-        Some("Recovery delivery".to_string()),
-        Some("Public recovery summary".to_string()),
-        Vec::new(),
-        Vec::new(),
-    );
-    entry.id = entry_id.to_string();
-    entry.origin_branch = Some("work/issue-1974".to_string());
-    entry.origin_session_id = Some(session_id.to_string());
-    entry.origin_agent_id = Some("codex".to_string());
-    entry.origin_worktree_form = Some(worktree_form);
-    entry.origin_recovery_id = Some(recovery_id.to_string());
-    RecoveryIntent::new(recovery_id, RecoveryProvider::Local, worktree_form, entry)
-        .expect("valid recovery intent")
 }
 
 #[derive(Debug, Clone)]

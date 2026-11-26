@@ -9756,6 +9756,7 @@ impl OwnerState {
                         &prefs,
                         wire.session_id.as_deref(),
                         wire.runtime_started_at_ms,
+                        crate::pm_activity::pm_wake_stalled(&self.root),
                     )
                 })
                 .unwrap_or(crate::pm_activity::PmActivity::Starting)
@@ -11191,18 +11192,43 @@ impl OwnerState {
                 .ok()
                 .map(|pane| pane.screen().contents())
         });
-        // Issue #7465: a failed managed hook hides every startup signal, so
-        // report it now instead of at the 180s deadline. Only the original
-        // deadline is pulled in; the 60s post-report watch is left alone.
-        if let Some(agent) = runtime.agent.as_mut() {
-            if agent.monitor_startup_at.is_some_and(|at| {
-                at > monotonic_now + std::time::Duration::from_secs(60)
-                    && screen
-                        .as_deref()
-                        .and_then(super::monitor::startup_hook_failure_line)
-                        .is_some()
-            }) {
+        // A failed managed hook (#7465) or Codex sandbox bootstrap (#7814)
+        // can prevent the initial prompt from ever starting. Pull in the
+        // original deadline once, leaving the 60s post-report watch alone.
+        if let Some(agent) = runtime.agent.as_mut().filter(|agent| {
+            agent
+                .monitor_startup_at
+                .is_some_and(|at| at > monotonic_now + std::time::Duration::from_secs(60))
+        }) {
+            let screen = screen.as_deref().unwrap_or_default();
+            let sandbox_failure =
+                super::runtime_events::codex_windows_sandbox_startup_error(screen);
+            if sandbox_failure.is_some()
+                || super::monitor::startup_hook_failure_line(screen).is_some()
+            {
                 agent.monitor_startup_at = Some(monotonic_now);
+            }
+            if let Some(detail) = sandbox_failure {
+                let target = gwt_core::error_ledger::ErrorTarget {
+                    window_id: Some(id.to_string()),
+                    session_id: Some(agent.active.session_id.clone()),
+                    project_root: Some(self.root.display().to_string()),
+                    issue: agent
+                        .feedback
+                        .as_ref()
+                        .and_then(|feedback| feedback.issue_monitor_launch_binding_issue_number()),
+                };
+                self.input_jobs += 1;
+                let sender = self.sender.clone();
+                spawn_owner_worker(move || {
+                    crate::error_report::report_error(
+                        gwt_core::error_ledger::ErrorKind::LaunchFailure,
+                        detail,
+                        target,
+                    );
+                    let _ =
+                        sender.send(OwnerMessage::MonitorNotificationFinished { result: Ok(()) });
+                });
             }
         }
         let approval_settle_due = runtime
@@ -11616,6 +11642,18 @@ impl OwnerState {
             return;
         };
         runtime.exit_drained = true;
+        if result.is_ok() && runtime.pty.stopped_by_finalizer() {
+            // The finalizer owns this stop. The natural-exit policy can infer
+            // a provider failure from old screen text and notify Issues again.
+            runtime.pty_status = WindowProcessStatus::Stopped;
+            runtime.hook_status = None;
+            runtime.policy = Default::default();
+            runtime.detail = None;
+            let runtime = self.runtimes.remove(&id).expect("exact stopped runtime");
+            let (reply, _) = oneshot::channel();
+            self.start_close(id, runtime, CloseCause::NaturalExit, reply);
+            return;
+        }
         let error = result.err().or_else(|| runtime.worker_error.take());
         if error.is_some() {
             runtime.policy.recoverable_error = true;
@@ -16259,15 +16297,20 @@ mod tests {
 
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
-        check_exit_after_reader_drain(false).await;
+        check_exit_after_reader_drain(false, false).await;
     }
 
     #[tokio::test]
     async fn reader_failure_before_clean_exit_retains_diagnostics_after_drain() {
-        check_exit_after_reader_drain(true).await;
+        check_exit_after_reader_drain(true, false).await;
     }
 
-    async fn check_exit_after_reader_drain(reader_error: bool) {
+    #[tokio::test]
+    async fn finalizer_killed_pty_is_published_as_stopped() {
+        check_exit_after_reader_drain(false, true).await;
+    }
+
+    async fn check_exit_after_reader_drain(reader_error: bool, finalized: bool) {
         let root = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
@@ -16328,8 +16371,15 @@ mod tests {
                 false,
             );
         }
+        if finalized {
+            state.runtimes["pane"].pty.record_finalizer_stop();
+            assert!(
+                crate::session_finalizer::kill_and_reap(&state.runtimes["pane"].pty, "pane")
+                    .unwrap()
+            );
+        }
         let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
-        if !reader_error {
+        if !reader_error && !finalized {
             handle
                 .request(request(OwnerCommand::Input {
                     id: "pane".into(),
@@ -16380,10 +16430,7 @@ mod tests {
         let child_gone = !crate::process::is_process_alive(child_pid);
         handle.shutdown().await;
         actor.join().unwrap();
-        assert!(
-            terminal.is_ok(),
-            "the actual owned PTY must report its exact exit"
-        );
+        assert_eq!(terminal.unwrap(), WindowProcessStatus::Stopped);
         assert_eq!(
             observed.status,
             gwt_agent::AgentStatus::Stopped,
@@ -16391,7 +16438,7 @@ mod tests {
         );
         assert_eq!(
             observed.last_exit_code,
-            Some(0),
+            Some(u32::from(finalized)),
             "Session must retain the physical exit receipt"
         );
         assert!(

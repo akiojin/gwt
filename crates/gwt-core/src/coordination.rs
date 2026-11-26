@@ -3868,6 +3868,116 @@ fn load_prompt_reminder_from_prepared(
     ))
 }
 
+/// One forward page of the durable Board log, starting after an explicitly
+/// acknowledged position. A page never reads the historical manifest or projection.
+pub struct BoardReadPage {
+    pub entries: Vec<BoardEntry>,
+    pub cursor: PromptBoardCursor,
+    pub has_more: bool,
+}
+
+pub fn load_board_read_page(
+    worktree_root: &Path,
+    cursor: PromptBoardCursor,
+    limit: usize,
+) -> Result<BoardReadPage> {
+    const PAGE_BYTES: u64 = 128 * 1024;
+
+    crate::operation_deadline::ensure_remaining("Board unread page")?;
+    let root = project_coordination_root_from_local_files(worktree_root)
+        .unwrap_or_else(|| legacy_coordination_dir(worktree_root));
+    let dir = coordination_events_segments_dir_from_root(&root);
+    let mut index = 1;
+    let mut offset = cursor.offset;
+    if let Some(segment) = cursor.segment.as_deref() {
+        validate_exact_legacy_import_target_file(segment)?;
+        index = segment
+            .trim_end_matches(".jsonl")
+            .parse()
+            .expect("validated index");
+    }
+    let mut page = BoardReadPage {
+        entries: Vec::new(),
+        cursor,
+        has_more: false,
+    };
+
+    // At most one rollover per page. The current file remains authoritative
+    // even when the writer has not yet published the next manifest.
+    for _ in 0..2 {
+        let segment = segment_file_name(index);
+        let mut file = match File::open(dir.join(&segment)) {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && page.cursor.segment.as_deref() != Some(segment.as_str()) =>
+            {
+                if index == 1 {
+                    let legacy_root = legacy_coordination_dir(worktree_root);
+                    if coordination_legacy_events_path_from_root(&root).try_exists()?
+                        || coordination_legacy_events_path_from_root(&legacy_root).try_exists()?
+                        || coordination_events_segments_dir_from_root(&legacy_root)
+                            .join(initial_segment_file_name())
+                            .try_exists()?
+                    {
+                        return Err(GwtError::Other("Board history requires migration".into()));
+                    }
+                }
+                return Ok(page);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let len = file.metadata()?.len();
+        if offset > len {
+            return Err(GwtError::Other(
+                "Board unread cursor is beyond the end of its segment".into(),
+            ));
+        }
+        if offset == len {
+            page.cursor = PromptBoardCursor {
+                segment: Some(segment),
+                offset,
+            };
+            index = index
+                .checked_add(1)
+                .ok_or_else(|| GwtError::Other("Board segment index overflow".into()))?;
+            offset = 0;
+            continue;
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let mut reader = BufReader::new(file.take(PAGE_BYTES.min(len - offset)));
+        let mut row = Vec::new();
+        while page.entries.len() < limit {
+            crate::operation_deadline::ensure_remaining("Board unread page")?;
+            row.clear();
+            if reader.read_until(b'\n', &mut row)? == 0 || !row.ends_with(b"\n") {
+                break;
+            }
+            let mut event = serde_json::from_slice(&row).map_err(json_error)?;
+            normalize_coordination_event(&mut event);
+            let CoordinationEvent::MessageAppended { entry } = event;
+            page.entries.push(entry);
+            offset += row.len() as u64;
+        }
+        if page.entries.is_empty() {
+            return Err(GwtError::Other(
+                "Board unread row is incomplete or exceeds the page budget".into(),
+            ));
+        }
+        page.cursor = PromptBoardCursor {
+            segment: Some(segment),
+            offset,
+        };
+        page.has_more = offset < reader.get_ref().get_ref().metadata()?.len()
+            || dir
+                .join(segment_file_name(index.saturating_add(1)))
+                .try_exists()?;
+        return Ok(page);
+    }
+    page.has_more = dir.join(segment_file_name(index)).try_exists()?;
+    Ok(page)
+}
+
 /// Prompt-only bounded view. The append log is authoritative even when a
 /// committed post failed to refresh the manifest or hot projection. Do not
 /// invoke storage initialization or repair on this deadline-bounded path.

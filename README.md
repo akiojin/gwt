@@ -270,7 +270,7 @@ design of #7007 (`docs/design/issue-7007/README.md`).
 | **Session** | One run of an agent on an issue in a terminal. |
 | **Board** (掲示板) | The record of posts by agents and you: status, decisions, handoffs, and blockers. It is a log, not where work is managed. |
 | **Notifications** | Events that need your attention, opened from the header. |
-| **Issues runtime / Issue Monitor** | The background loop that picks ready issues and starts agents on them, configured in **Issues execution settings**. |
+| **Issues runtime** | The background loop that picks ready issues and starts agents on them, configured in **Issues execution settings**. |
 | **Reports** | The PM's status reports on a project. They appear on the project's **Board**, not in the Home conversation, which keeps replies, decisions, and completions. |
 
 ## Usage
@@ -2754,6 +2754,11 @@ JSON
   markers from complete or incomplete orphan groups. Indexed comments are
   refused. Retrying the same IDs skips comments already archived.
   Run `issue.spec.lint` again to confirm index health.
+  A hand-written gwt-spec Issue without the `gwt-spec` header and sections
+  index refuses section edits. Pass `wrap_body` to the repair operation
+  (for example, `{"number":1784,"wrap_body":true}`) to wrap the existing body,
+  unchanged, as the `spec` section; the readback must match before the
+  structure is kept. Then save `plan` / `tasks` with `issue.spec.edit`.
 
 ```bash
 gwtd <<'JSON'

@@ -1103,7 +1103,6 @@ mod project_notifications;
 mod project_route;
 mod project_tabs;
 mod pty_io;
-mod recovery_center;
 mod runtime_events;
 mod settings_update;
 mod startup;
@@ -1241,13 +1240,6 @@ pub(crate) struct PendingStartupAutoResumeSession {
 #[cfg(test)]
 pub use gwt::project_transport::KnowledgeWireMetadata;
 pub use gwt::project_transport::{ClientScope, DispatchTarget, OutboundEvent};
-
-#[derive(Debug, Clone)]
-pub(crate) struct RecoveryCenterAction {
-    pub(crate) client_id: String,
-    pub(crate) generation: u64,
-    pub(crate) board_entry_id: Option<String>,
-}
 
 pub(crate) use gwt::project_runtime::agent_frontend::AgentFrontendDispatchOutcome;
 
@@ -1854,8 +1846,6 @@ pub(crate) struct ProjectRuntimeState {
     /// state instead of reporting a failure that never happened. Shared with
     /// the cleanup worker threads, and not persisted with the session state.
     pub(crate) branch_cleanup_operations: Arc<gwt::BranchCleanupOperationStore>,
-    pub(crate) recovery_center_handles: HashMap<String, RecoveryCenterAction>,
-    pub(crate) recovery_center_generation: u64,
     #[cfg(test)]
     pub(crate) continue_work_outcomes: HashMap<String, CachedContinueWorkOutcome>,
     pub(crate) update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner,
@@ -1919,8 +1909,6 @@ pub(crate) fn initial_project_states(
                     context,
                     launch_wizard: None,
                     update_auto_apply: Default::default(),
-                    recovery_center_handles: HashMap::new(),
-                    recovery_center_generation: 0,
                     #[cfg(test)]
                     continue_work_outcomes: HashMap::new(),
                 },
@@ -4988,8 +4976,6 @@ impl AppRuntime {
                     context,
                     launch_wizard: None,
                     update_auto_apply: Default::default(),
-                    recovery_center_handles: HashMap::new(),
-                    recovery_center_generation: 0,
                     #[cfg(test)]
                     continue_work_outcomes: HashMap::new(),
                 });
@@ -11825,7 +11811,6 @@ impl AppRuntime {
             | FrontendEvent::OpenActiveWorkLaunchWizard { .. }
             | FrontendEvent::RunWorkspaceCleanup { .. }
             | FrontendEvent::CycleFocus { .. }
-            | FrontendEvent::StopAllWindows { .. }
             | FrontendEvent::SaveUiTrace { .. }
             | FrontendEvent::OpenPmAgent { .. }
             | FrontendEvent::RestartPmAgent
@@ -11881,9 +11866,6 @@ impl AppRuntime {
                                 .or_else(|| self.rejected_attachment_request(&client_id, &event))
                                 .or_else(|| {
                                     pm_chat::rejected_request_task_events(&client_id, &event)
-                                })
-                                .or_else(|| {
-                                    recovery_center::rejected_action_events(&client_id, &event)
                                 })
                                 .unwrap_or_default()
                         }
@@ -12297,7 +12279,6 @@ impl AppRuntime {
             )
             .or_else(|| self.rejected_attachment_request(&client_id, &event))
             .or_else(|| pm_chat::rejected_request_task_events(&client_id, &event))
-            .or_else(|| recovery_center::rejected_action_events(&client_id, &event))
             .unwrap_or_default();
         }
         let project_scope = self.frontend_project_log_scope(Some(context), &event);
@@ -12503,20 +12484,6 @@ impl AppRuntime {
                 );
                 Vec::new()
             }
-            FrontendEvent::LoadRecoveryCenter { request_id } => {
-                self.load_recovery_center_events(context, &client_id, &request_id)
-            }
-            FrontendEvent::OpenRecoveryCenterBoardEntry {
-                request_id,
-                generation,
-                action_handle,
-            } => self.open_recovery_center_board_entry_events(
-                context,
-                &client_id,
-                &request_id,
-                generation,
-                &action_handle,
-            ),
             FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
                 self.set_claude_account_usage_enabled_events(enabled)
             }
@@ -12705,7 +12672,6 @@ impl AppRuntime {
                 },
             )],
             FrontendEvent::StopWindow { id } => self.stop_window_events(&id),
-            FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(context),
             FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::LoadPmConversation { id } => {
@@ -13619,9 +13585,6 @@ impl AppRuntime {
             FrontendEvent::UpdateAutostart { enabled } => {
                 self.autostart_update_events(client_id, enabled)
             }
-            FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
-                self.workspace_projection_prune_events(client_id, dry_run, ids)
-            }
             FrontendEvent::SaveUiTrace { trace } => {
                 self.save_ui_trace_events(Some(context), client_id, trace)
             }
@@ -14343,6 +14306,7 @@ impl AppRuntime {
                                 &prefs,
                                 window.session_id.as_deref(),
                                 window.runtime_started_at_ms,
+                                gwt::pm_activity::pm_wake_stalled(&tab.project_root),
                             )
                         })
                         .unwrap_or(gwt::pm_activity::PmActivity::Starting)
@@ -18012,6 +17976,7 @@ impl AppRuntime {
                     prefs,
                     snapshot.session_id.as_deref(),
                     Some(snapshot.started_at_ms),
+                    gwt::pm_activity::pm_wake_stalled(&context.project_root),
                 )
             });
             let connection_id = self

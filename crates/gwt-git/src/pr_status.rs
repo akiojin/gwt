@@ -7,6 +7,7 @@ use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
 use gwt_core::github_quota::{GitHubQuota, RATE_LIMITED_ERROR_CODE};
 use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{GwtError, Result};
+use pulldown_cmark::{Event, Parser, Tag};
 use serde::{Deserialize, Serialize};
 
 /// Pull Request state.
@@ -750,11 +751,55 @@ impl PrInventoryItem {
 }
 
 fn looks_superseded(title: &str, body: &str) -> bool {
-    let mut haystack = String::with_capacity(title.len() + body.len() + 1);
-    haystack.push_str(title);
-    haystack.push('\n');
-    haystack.push_str(body);
-    haystack.to_ascii_lowercase().contains("superseded")
+    let title = title.trim().to_ascii_lowercase();
+    let title_suffix = title
+        .strip_suffix(')')
+        .and_then(|title| title.rsplit_once(" ("))
+        .map(|(_, suffix)| suffix);
+
+    names_superseding_pr(&title)
+        || title_suffix.is_some_and(names_superseding_pr)
+        || body_declares_supersession(body)
+}
+
+fn body_declares_supersession(body: &str) -> bool {
+    let is_declaration = |text: &str| {
+        let text = text.trim().trim_end_matches('.').to_ascii_lowercase();
+        let declaration = text
+            .strip_prefix("this pr is ")
+            .or_else(|| text.strip_prefix("this pr was "));
+        declaration == Some("superseded") || names_superseding_pr(declaration.unwrap_or(&text))
+    };
+    if !body.lines().any(is_declaration) {
+        return false;
+    }
+
+    // Check top-level paragraphs so examples in code blocks and quotes do not
+    // count as statements about this PR.
+    let mut depth = 0;
+    Parser::new(body)
+        .into_offset_iter()
+        .any(|(event, range)| match event {
+            Event::Start(tag) => {
+                let matches = depth == 0 && tag == Tag::Paragraph && is_declaration(&body[range]);
+                depth += 1;
+                matches
+            }
+            Event::End(_) => {
+                depth -= 1;
+                false
+            }
+            _ => false,
+        })
+}
+
+fn names_superseding_pr(declaration: &str) -> bool {
+    declaration
+        .strip_prefix("superseded by #")
+        .is_some_and(|number| {
+            number.bytes().all(|byte| byte.is_ascii_digit())
+                && number.parse::<u64>().is_ok_and(|number| number > 0)
+        })
 }
 
 fn owner_issue_is_closed(issues: &[PrClosingIssue]) -> bool {
@@ -3934,7 +3979,7 @@ where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number_arg = number.to_string();
-    let fields = "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup";
+    let fields = "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest";
     let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
     if !output.success {
         return Err(GwtError::Git(format!(
@@ -6847,17 +6892,23 @@ mod tests {
         ] {
             let mut value = monitor_lifecycle_payload();
             value["statusCheckRollup"] = checks;
+            value["autoMergeRequest"] = if expected == "MERGE-CANDIDATE" {
+                serde_json::json!({"enabledAt": "2026-11-26T00:00:00Z"})
+            } else {
+                serde_json::Value::Null
+            };
             let mut calls = 0;
             let (state, item) = try_fetch_pr_lifecycle_for_monitor_with(
                 Path::new("/repo"), 42, |_, args| {
                     calls += 1;
                     assert_eq!(&args[..4], &["pr", "view", "42", "--json"]);
-                    assert_eq!(args[4], "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup");
+                    assert_eq!(args[4], "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest");
                     Ok(GhCliOutput { success: true, stdout: value.to_string(), stderr: String::new() })
                 },
             ).unwrap();
             assert_eq!(state, PrState::Open);
             assert_eq!(item.lifecycle, expected);
+            assert_eq!(item.auto_merge_enabled, expected == "MERGE-CANDIDATE");
             assert_eq!(calls, 1);
             assert_eq!(item.unresolved_review_threads, None);
         }
@@ -7318,6 +7369,27 @@ mod tests {
         fields.body = "This PR is superseded by #100".to_string();
         let decision = classify_pr_lifecycle(&fields, "2026-08-30T00:00:00Z".parse().expect("now"));
         assert_eq!(decision.class, PrLifecycleClass::Superseded);
+    }
+
+    #[test]
+    fn superseded_checks_in_title_or_body_preserve_the_actual_lifecycle() {
+        let mut fields = sample_inventory_fields();
+        fields.title = "fix(build): ignore superseded cancelled checks in completion".to_string();
+        fields.ci_status = "PENDING".to_string();
+        let classify = |fields: &PrInventoryFields| classify_pr_lifecycle(fields, now_3868()).class;
+        assert_eq!(classify(&fields), PrLifecycleClass::InProgress);
+
+        fields.title = "fix(build): handle cancelled checks".to_string();
+        fields.body =
+            "Ignore superseded cancelled checks. A run can be superseded by #100.".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        assert_eq!(classify(&fields), PrLifecycleClass::CiRed);
+
+        fields.mergeable = "CONFLICTING".to_string();
+        assert_eq!(classify(&fields), PrLifecycleClass::Conflicted);
+
+        fields.body = "Example:\n\n```text\nThis PR is superseded by #100\n```".to_string();
+        assert_eq!(classify(&fields), PrLifecycleClass::Conflicted);
     }
 
     #[test]

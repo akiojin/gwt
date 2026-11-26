@@ -40,6 +40,9 @@ test("Issue #3823: PM titles use only their own typed operation activity", () =>
   assert.equal(title({ ...foreign, pm_activity: "registering_issue" }), "Project Manager · Maple — Registering issues");
   assert.equal(title({ ...foreign, pm_activity: "deciding" }), "Project Manager · Maple — Making a decision");
   assert.equal(title({ ...foreign, pm_activity: "waiting" }), "Project Manager · Maple — Waiting for work");
+  // Issue #7922 AC-4: a PM whose periodic wake has not arrived for several
+  // intervals says so instead of repeating its last operation.
+  assert.equal(title({ ...foreign, pm_activity: "stalled" }), "Project Manager · Maple — Not receiving wakes");
   assert.equal(title({ ...foreign, pm_activity: "Other agent's failure", agent_name: null }), "Project Manager — Starting");
   assert.equal(title({ ...foreign, pm_activity: "reconciling", status: "idle" }),
     title({ ...foreign, pm_activity: "reconciling", status: "running" }), "runtime state belongs to badges");

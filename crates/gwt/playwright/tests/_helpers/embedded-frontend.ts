@@ -8,6 +8,8 @@
  * `tests/kanban.spec.ts` and `tests/index-status.spec.ts` for examples.
  */
 import path from "node:path";
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 
 const WEB_ROOT = path.resolve(process.cwd(), "crates/gwt/web");
 
@@ -61,7 +63,6 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",
-  "recovery-center-modal.js",
   "branch-cleanup-modal.js",
   // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
   // self-heal / last-known retention / stale-load guard.
@@ -170,6 +171,38 @@ export async function installEmbeddedRoutes(page: any): Promise<void> {
       contentType: contentTypeFor(assetPath),
     });
   });
+}
+
+// Native CDP pages deliberately avoid Playwright's page and route fixtures.
+export async function serveEmbeddedFrontend() {
+  const server = createServer(async (request, response) => {
+    const pathname = new URL(request.url ?? "/", ORIGIN_URL).pathname;
+    if (pathname === "/favicon.ico") {
+      response.writeHead(204).end();
+      return;
+    }
+    const assetPath = resolveAssetPath(pathname);
+    try {
+      if (assetPath) {
+        const body = await readFile(assetPath);
+        response.writeHead(200, { "Content-Type": contentTypeFor(assetPath) }).end(body);
+        return;
+      }
+    } catch { /* Report a missing fixture asset to the browser. */ }
+    response.writeHead(404).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing embedded fixture server address");
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    }),
+  };
 }
 
 function resolveAssetPath(pathname: string): string | null {

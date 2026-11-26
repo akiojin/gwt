@@ -73,6 +73,7 @@ fn frontend_step(name: &str) -> String {
 
 const INSTALLER: &str = "scripts/install-playwright-browsers.sh";
 const VERSION_FILE: &str = "scripts/playwright-version.txt";
+const HEADED_WEBVIEW_STEP: &str = "Measure headed WebView E2E";
 
 // ---------------------------------------------------------------------------
 // Workflow contracts
@@ -87,7 +88,7 @@ fn frontend_runs_only_browser_specs_in_the_pinned_official_image() {
         !job.contains("\n    container:"),
         "host regressions need the hosted runner's Git/Rust toolchain"
     );
-    let browser = frontend_step("Run WebView E2E (embedded Playwright specs)");
+    let browser = frontend_step(HEADED_WEBVIEW_STEP);
     assert!(browser.contains(VERSION_FILE));
     assert!(browser.contains("docker run --rm"));
     assert!(browser.contains("mcr.microsoft.com/playwright:v${version}-noble"));
@@ -154,10 +155,12 @@ fn frontend_unit_files_run_with_bounded_concurrency_on_the_host() {
 /// Replacing browser bootstrap must retain the embedded E2E suite itself.
 #[test]
 fn the_frontend_job_runs_the_embedded_e2e_suite() {
+    let step = frontend_step(HEADED_WEBVIEW_STEP);
     assert!(
-        frontend_step("Run WebView E2E (embedded Playwright specs)")
-            .contains("bash scripts/run-visual-tests.sh --workers=2"),
-        "the frontend job must retain all embedded Playwright specs with two workers"
+        step.contains("xvfb-run -a bash scripts/run-visual-tests.sh")
+            && step.contains("--workers=1 --retries=0 --headed")
+            && step.contains("headed_e2e_reporter.cjs"),
+        "the frontend job must give the whole headed suite exclusive use of the display"
     );
 }
 
@@ -165,7 +168,7 @@ fn the_frontend_job_runs_the_embedded_e2e_suite() {
 /// overhead. Keep a finite deadline with headroom for the full suite and retries.
 #[test]
 fn the_embedded_e2e_step_is_time_bounded() {
-    let minutes = frontend_step("Run WebView E2E (embedded Playwright specs)")
+    let minutes = frontend_step(HEADED_WEBVIEW_STEP)
         .lines()
         .find_map(|line| {
             line.trim()

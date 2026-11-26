@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { expect, type BrowserType, type TestInfo } from "@playwright/test";
+import { ORIGIN_URL, serveEmbeddedFrontend } from "./embedded-frontend";
 
 export interface NativePage {
   addInitScript<A>(fn: (arg: A) => unknown, arg?: A): Promise<void>;
@@ -22,7 +23,9 @@ export async function withNativeHiddenPage<T, A>(
     ] });
   const owned = server.process();
   const errors: string[] = [], failures: unknown[] = [];
+  const attentionCommands: string[] = [];
   let native: NativeCdp | undefined, result: T | undefined;
+  let embedded: Awaited<ReturnType<typeof serveEmbeddedFrontend>> | undefined;
   try {
     await info.attach("native-chromium-launch.json", { contentType: "application/json",
       body: JSON.stringify({ pid: owned.pid, executable: owned.spawnfile, args: owned.spawnargs }) });
@@ -64,6 +67,11 @@ export async function withNativeHiddenPage<T, A>(
       addInitScript: async (fn, value) => { await send("Page.addScriptToEvaluateOnNewDocument", { source: source(fn, value) }); },
       evaluate: (fn, value) => evaluate(source(fn, value)),
       goto: async url => {
+        const target = new URL(url);
+        if (target.origin === new URL(ORIGIN_URL).origin) {
+          embedded ??= await serveEmbeddedFrontend();
+          url = new URL(target.pathname + target.search + target.hash, embedded.origin).href;
+        }
         const requested = new URL(url).href;
         const navigation = await send("Page.navigate", { url: requested });
         if (navigation.errorText) throw new Error(`native navigation failed: ${navigation.errorText}`);
@@ -74,6 +82,7 @@ export async function withNativeHiddenPage<T, A>(
     await prepare(page);
     const peer = await native.send("Target.createTarget", { url: "about:blank", newWindow: false, background: false });
     await native.send("Target.activateTarget", { targetId: peer.targetId });
+    attentionCommands.push("Target.activateTarget");
     const attention = () => evaluate("({ hidden: document.hidden, focused: document.hasFocus() })");
     try {
       await expect.poll(attention, { message: "a real foreground peer hides and unfocuses the measured page" })
@@ -84,6 +93,7 @@ export async function withNativeHiddenPage<T, A>(
     }
     result = await evaluate(source(observe, arg));
     await send("Page.bringToFront");
+    attentionCommands.push("Page.bringToFront");
     if (restored) {
       await expect.poll(attention, { message: "the measured page natively returns to the foreground" })
         .toMatchObject({ hidden: false });
@@ -97,7 +107,10 @@ export async function withNativeHiddenPage<T, A>(
   finally {
     native?.close();
     try { await server.close(); } catch (error) { failures.push(error); }
+    try { await embedded?.close(); } catch (error) { failures.push(error); }
     try {
+      await info.attach("native-chromium-actions.json", { contentType: "application/json",
+        body: JSON.stringify({ attentionCommands, errors }) });
       await info.attach("native-chromium-owned-cleanup.json", { contentType: "application/json",
         body: JSON.stringify({ pid: owned.pid, exitCode: owned.exitCode, signalCode: owned.signalCode }) });
       expect(owned.exitCode !== null || owned.signalCode !== null, "owned Chromium exited").toBe(true);

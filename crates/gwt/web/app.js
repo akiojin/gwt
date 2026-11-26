@@ -50,7 +50,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
-      import { createRecoveryCenterController } from "/recovery-center-modal.js";
       import {
         continueWorkOutcomeNotice,
         createContinueWorkDispatcher,
@@ -521,7 +520,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // dropped after the swap completes.
       let socketReceiveDispatcher = null;
       let socketReceiveDispatcherGeneration = 0;
-      let recoveryCenterController = null;
       let reconnectTimer = null;
       let focusedId = null;
 
@@ -1252,7 +1250,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function requestSocketSnapshots() {
         if (socket?.readyState !== WebSocket.OPEN) return;
         send({ kind: "frontend_ready" });
-        recoveryCenterController?.reconnect();
         releaseNotesWindow.reconnect();
         resyncSocketSurfaces();
         if (socketProjectKey) requestVisiblePmReports(true);
@@ -1305,7 +1302,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
         let replayedReleaseNotesId = null;
-        let replayedRecoveryCenterId = null;
         const replayedWorkAdvisoryIds = [];
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
@@ -1321,11 +1317,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           }
           socket.send(JSON.stringify(pending.message));
           if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
-          if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
           if (pending.message.kind === "request_work_advisory") replayedWorkAdvisoryIds.push(pending.message.request_id);
         }
         resyncWorkAdvisory(replayedWorkAdvisoryIds);
-        recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
@@ -1750,6 +1744,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             registering_issue: "Registering issues",
             deciding: "Making a decision",
             waiting: "Waiting for work",
+            stalled: "Not receiving wakes",
           }[windowData.pm_activity] || "Starting";
           const identity = name ? `${PM_WINDOW_TITLE} · ${name}` : PM_WINDOW_TITLE;
           return `${identity} — ${activity}`;
@@ -2915,38 +2910,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // SPEC-3038 US-3: Close Guard — every window close (titlebar x and
       // tab x) confirms through one modal regardless of agent state
       // (user-confirmed decision, 2026-06-10).
-      // SPEC-2356 Anshin Addendum (FR-042): STOP ALL halts every live agent
-      // runtime, leaving windows in Agents. Count the live agent windows so
-      // the confirm is specific, and no-op when nothing is running.
-      function countRunningAgentWindows() {
-        let count = 0;
-        for (const [windowId, element] of windowMap.entries()) {
-          if (!element) continue;
-          const windowData = workspaceWindowById(windowId);
-          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
-          const runtimeState = runtimeStateForWindow(windowData);
-          if (!STOPPED_RUNTIME_STATES.has(runtimeState)) {
-            count += 1;
-          }
-        }
-        return count;
-      }
-
-      function requestStopAllWindows() {
-        const running = countRunningAgentWindows();
-        if (running === 0) {
-          return;
-        }
-        const plural = running === 1 ? "agent" : "agents";
-        if (
-          window.confirm(
-            `Stop all ${running} running ${plural}? Their windows and output stay available in Agents; you can restart each one in place.`,
-          )
-        ) {
-          send({ kind: "stop_all_windows" });
-        }
-      }
-
       let lastTitlebarClick = null;
       const TITLEBAR_DOUBLE_CLICK_MS = 300;
 
@@ -3896,24 +3859,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         activeProjectTab,
         getActiveWorkProjection: () => activeWorkProjection,
         projectWindowContextById,
-      });
-
-      recoveryCenterController = createRecoveryCenterController({
-        document,
-        modalEl: document.getElementById("recovery-center-modal"),
-        dialogEl: document.querySelector("#recovery-center-modal > .modal-shell"),
-        send,
-        focusBoardEntry,
-      });
-
-      const recoveryCenterStateModel = createUiStateStore(null);
-      recoveryCenterStateModel.subscribe(state => state, response => {
-        if (response) recoveryCenterController?.handleState(response);
-      });
-
-      const recoveryCenterBoardModel = createUiStateStore(null);
-      recoveryCenterBoardModel.subscribe(state => state, response => {
-        if (response) recoveryCenterController?.handleBoardEntry(response);
       });
 
       function openIssueLaunchWizard(windowId, issueNumber) {
@@ -4934,23 +4879,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
-      const workspaceProjectionPruneModel = createUiStateStore(null);
-      function renderWorkspaceProjectionPruneFeedback(feedback) {
-        if (!feedback) return;
-        if (feedback.kind === "workspace_projection_prune_error") {
-          window.alert(`Work Projection Prune error: ${feedback.message}`);
-          return;
-        }
-        const modeLabel = feedback.mode === "dry_run" ? "dry-run" : "applied";
-        window.alert(
-          `Work Projection Prune (${modeLabel})\n` +
-            `  archived: ${feedback.archived}\n` +
-            `  deleted: ${feedback.deleted}\n` +
-            `  skipped: ${feedback.skipped}`,
-        );
-      }
-      workspaceProjectionPruneModel.subscribe(feedback => feedback, renderWorkspaceProjectionPruneFeedback);
-
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
@@ -5251,16 +5179,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             workspaceStateModel.update(() => ({ workspace: event.workspace }));
             break;
           }
-          case "workspace_projection_prune_result": {
-            workspaceProjectionPruneModel.update(() => ({
-              kind: event.kind, mode: event.mode, archived: event.archived,
-              deleted: event.deleted, skipped: event.skipped,
-            }));
-            break;
-          }
-          case "workspace_projection_prune_error":
-            workspaceProjectionPruneModel.update(() => ({ kind: event.kind, message: event.message }));
-            break;
           case "ui_trace_saved":
           case "ui_trace_error":
             applyUiTraceReceiveEvent(event);
@@ -5448,12 +5366,6 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           case "log_entries":
           case "log_entry_appended":
             applyBoardLogsReceiveEvent(event);
-            break;
-          case "recovery_center_state":
-            recoveryCenterStateModel.update(() => ({ ...event }));
-            break;
-          case "recovery_center_board_entry":
-            recoveryCenterBoardModel.update(() => ({ ...event }));
             break;
           case "project_board_config":
             // SPEC-2963 FR-030: per-project Board routing → Board window chip.
@@ -6354,14 +6266,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             focusOrSpawnPreset("issue");
             send({ kind: "open_issue_monitor" });
             return;
-          case "open-recovery-center":
-            recoveryCenterController?.open();
-            return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");
-            return;
-          case "stop-all-windows":
-            requestStopAllWindows();
             return;
           case "toggle-notifications":
             notificationCenter.toggle();

@@ -190,6 +190,7 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
         window_id,
         desired_restore_on_startup,
         exit_receipt,
+        false,
         |_| Ok(true),
     )
 }
@@ -204,6 +205,7 @@ pub(crate) fn finalize_exact_close_if(
     window_id: &str,
     desired_restore_on_startup: Option<bool>,
     exit_receipt: Option<&gwt_agent::SessionExitReceipt>,
+    settled_auto_close: bool,
     can_close: impl FnOnce(&gwt_agent::SessionRuntimeState) -> std::io::Result<bool>,
 ) -> std::io::Result<Option<()>> {
     let proof = gwt_agent::ManualLaunchRuntimeProof {
@@ -242,6 +244,9 @@ pub(crate) fn finalize_exact_close_if(
                 return Err(std::io::Error::other(
                     "captured runtime process identity changed before close",
                 ));
+            }
+            if settled_auto_close && child_running {
+                pty.record_finalizer_stop();
             }
             if !kill_and_reap(pty, window_id)? {
                 return Err(std::io::Error::other(

@@ -926,6 +926,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
             archive_comments: optional_u64_vec(params, "archive_comments")?,
+            wrap_body: optional_bool(params, "wrap_body")?.unwrap_or(false),
         }),
         "issue.cache.repair" => CliCommand::Issue(IssueCommand::CacheRepair {
             number: required_u64(params, "number")?,
@@ -2648,9 +2649,15 @@ fn required_nonempty_workspace_reopen_string(
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     reject_unknown_params(
         params,
-        &["workspace", "all", "limit", "unresolved"],
+        &["workspace", "all", "limit", "unresolved", "unread"],
         "board.show",
     )?;
+    if optional_bool(params, "unread")?.unwrap_or(false) {
+        reject_unknown_params(params, &["unread", "limit"], "board.show unread")?;
+        return Ok(CliCommand::Board(BoardCommand::ShowUnread {
+            limit: optional_usize(params, "limit")?.unwrap_or(20),
+        }));
+    }
     Ok(CliCommand::Board(BoardCommand::Show {
         json: true,
         workspace: optional_string(params, "workspace")?,
@@ -8138,8 +8145,23 @@ mod tests {
                 "issue.spec.repair",
                 json!({"number": 3590, "archive_comments": [5565328835u64]})
             ),
-            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments })
+            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments, wrap_body: false })
                 if archive_comments == vec![5565328835]
+        ));
+    }
+
+    #[test]
+    fn issue_spec_repair_accepts_wrap_body() {
+        assert!(matches!(
+            ok(
+                "issue.spec.repair",
+                json!({"number": 7691, "wrap_body": true})
+            ),
+            CliCommand::Issue(IssueCommand::SpecRepair {
+                number: 7691,
+                wrap_body: true,
+                ..
+            })
         ));
     }
 

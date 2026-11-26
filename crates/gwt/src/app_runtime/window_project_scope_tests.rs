@@ -1,5 +1,5 @@
 #[test]
-fn project_window_list_and_stop_all_do_not_cross_project_owners() {
+fn project_window_list_and_stop_do_not_cross_project_owners() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     for name in ["a", "b"] {
@@ -63,7 +63,9 @@ fn project_window_list_and_stop_all_do_not_cross_project_owners() {
     runtime.handle_frontend_event_for_project(
         &a,
         "client-a".to_string(),
-        FrontendEvent::StopAllWindows {},
+        FrontendEvent::StopWindow {
+            id: a_window.clone(),
+        },
     );
     drain_browser_owner_input(&mut runtime);
     assert!(owner_fixture_block_on(a_owner.probe(&a_pane.id, a_pane.incarnation)).is_err());

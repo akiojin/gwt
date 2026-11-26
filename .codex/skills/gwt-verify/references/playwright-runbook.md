@@ -80,7 +80,7 @@ For other UI runner pairings the same pattern applies:
 
 | Invocation | Behavior |
 |---|---|
-| Default (no `--headed`) | Run headless. Same conditions as CI. |
+| Default (no `--headed`) | Run headless. For protected gwt PRs, the separate WebView CI job runs headed. |
 | `--headed` (passed to `gwt-verify`) | Run headed. The runner must surface the application URL / window so the user can also inspect the running app. Used only when the caller passed `--headed` to `gwt-verify`. |
 | Update-baseline invocation (e.g. `playwright test --update-snapshots`, `cypress test --update`) | **Not** part of `gwt-verify`. The caller must run baseline updates explicitly as a separate manual step, with intent, and commit the new baselines for PR review. |
 

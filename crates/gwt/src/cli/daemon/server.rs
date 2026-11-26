@@ -2111,6 +2111,7 @@ fn spawn_issue_monitor_worker(
             tokio::time::interval(Duration::from_secs(monitor.claim_heartbeat_interval_secs()));
         claim_heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut capacity_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut launch_stall = crate::issue_monitor::IssueMonitorLaunchStallTracker::default();
         let mut revision = 0_u64;
         let mut scan_requested = false;
         // Issue #6877 AC-2: timers, automatic retries and successful current
@@ -2938,6 +2939,12 @@ fn spawn_issue_monitor_worker(
                         admission_requested |= in_flight_scan.as_ref().is_some_and(|scan| scan.watchdog_fired);
                     }
                     effect_execution_requested = !monitor.pending_effects().is_empty();
+                    // Issue #7922 AC-1: a sustained empty queue recovers
+                    // itself with the fresh scan and admission a ScanNow runs.
+                    if log_issue_monitor_launch_stall(&mut launch_stall, &monitor) {
+                        scan_requested = true;
+                        admission_requested = true;
+                    }
                     if in_flight_scan.is_some() {
                         // Re-project the canonical state while the scan is
                         // blocked so current-time stalled status remains
@@ -10315,6 +10322,39 @@ fn publish_issue_monitor_daemon_payloads(
             },
         );
     }
+}
+
+/// Issue #7922: leave a timestamped record of why launchable backlog is not
+/// launching while a slot is free, so a stall can be diagnosed afterwards.
+/// Returns whether the stall asks for a fresh scan and admission (AC-1).
+fn log_issue_monitor_launch_stall(
+    tracker: &mut crate::issue_monitor::IssueMonitorLaunchStallTracker,
+    monitor: &crate::IssueMonitorState,
+) -> bool {
+    use crate::issue_monitor::IssueMonitorLaunchStallEvent as Event;
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+    let event = tracker.observe(monitor, &now);
+    let rescan = event.as_ref().is_some_and(Event::requests_rescan);
+    match event {
+        Some(Event::Started { reason, detail }) => {
+            tracing::warn!(?reason, %detail, "Issues launch stalled with launchable backlog");
+        }
+        Some(Event::Sustained {
+            reason,
+            since,
+            detail,
+        }) => {
+            tracing::warn!(?reason, %since, %detail, "Issues launch stall persists");
+        }
+        Some(Event::Ended { reason, since }) => {
+            tracing::info!(?reason, %since, "Issues launch stall ended");
+        }
+        None => {}
+    }
+    if rescan {
+        tracing::warn!("Issues launch stall: requesting a fresh scan and admission");
+    }
+    rescan
 }
 
 fn issue_monitor_gui_connected(hub: &BroadcastHub) -> bool {
@@ -20024,6 +20064,7 @@ exit 0
                         hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                             pr_number: pr,
                             lifecycle: "IN-PROGRESS".into(),
+                            auto_merge_enabled: None,
                         }),
                     },
                 );

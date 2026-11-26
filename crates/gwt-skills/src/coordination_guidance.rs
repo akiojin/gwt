@@ -520,8 +520,11 @@ a missing, pending, or legacy deferred field is not such a request. Manual
 launches still require an explicit delivery request to drive to merge.
 
 Automated test / headed E2E / CI failures, known blockers, and all other Ready
-Gate conditions still require repair. For UI work, use the project's isolated
-headed E2E setup and record `Agent Visual Check: pass` separately from the user
+Gate conditions still require repair. When the project has a supported
+protected CI headed path, follow the gwt-verify Agent Visual Check runbook and
+review the exact-head artifacts before its required check can pass. For local
+headed UI verification, use the project's isolated setup and record
+`Agent Visual Check: pass` separately from the user
 result (`n/a (no UI surface)` otherwise). Select Playwright commands already in
 `verify.run`'s `params.commands` with `params.headed_e2e_commands`; the same fresh
 record must contain actual passing headed Chromium results for dark and light
@@ -602,8 +605,10 @@ headed/nextest/admission evidence. Run outstanding Light commands first,
 preserve Heavy commands' original relative order, and keep artifact restoration last.
 A timeout in the first remaining command's admission writes no replacement
 record and preserves any predecessor; a later timeout retains incomplete results.
-The full registered matrix and required headed Chromium evidence in dark/light
-must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
+The full registered local matrix must pass before `Overall: PASS` or Ready.
+Local UI verification includes the required headed Chromium evidence in
+dark/light. Protected CI may collect that evidence after Ready; its exact-head
+check must pass before merge.
 
 ### Process ownership
 

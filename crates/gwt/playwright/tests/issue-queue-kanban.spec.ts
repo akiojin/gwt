@@ -31,6 +31,7 @@ test.beforeEach(async ({ page }, info) => {
     includeAgent: info.title.startsWith("AC-M1/M2:") || info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
     includeTheme: info.title.startsWith("Issue #7645"),
+    holdMonitorStatus: info.title.startsWith("Issue #7988"),
   });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
@@ -52,8 +53,17 @@ test.describe("Issues touch navigation", () => {
   test("Issues mode and preview tabs are 44px tap targets on a phone", async ({ page }, info) => {
     const root = page.locator(".issue-bridge-root");
     const detail = root.locator(".knowledge-detail-pane");
+    // The async detail reply can replace the preview tabs. Select and measure
+    // in a single browser task so the measurements refer to the current DOM.
+    const controlSizes = () => page.evaluate(() =>
+      Array.from(document.querySelectorAll(".issue-bridge-root .knowledge-state-filter button"))
+        .filter(node => node.checkVisibility())
+        .map(node => {
+          const { width, height, left, right } = node.getBoundingClientRect();
+          return { label: node.textContent, width, height, left, right };
+        }));
     const controls = root.locator(".knowledge-state-filter button:visible");
-    const heights = () => controls.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+    const heights = async () => (await controlSizes()).map(size => size.height);
     await row(page, 1).locator(".knowledge-row-select").click();
     await expect(detail).toContainText("Description for #1");
     await expect(controls).toHaveCount(5);
@@ -76,10 +86,8 @@ test.describe("Issues touch navigation", () => {
       expect(actions.y, "toolbar actions do not cover the mode tabs").toBeGreaterThanOrEqual(main.y + main.height);
       expect(await root.locator(".issue-filter-hint").evaluate(node => node.scrollWidth <= node.clientWidth),
         "the existing view hint fits its column").toBe(true);
-      const sizes = await controls.evaluateAll(nodes => nodes.map(node => {
-        const rect = node.getBoundingClientRect();
-        return { label: node.textContent, width: rect.width, height: rect.height, left: rect.left, right: rect.right };
-      }));
+      const sizes = await controlSizes();
+      expect(sizes).toHaveLength(5);
       for (const size of sizes) {
         expect(size.width, `${size.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
         expect(size.height, `${size.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
@@ -1973,6 +1981,7 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   const controls = page.getByRole("group", {name:"Issues controls",exact:true});
   const toggle=controls.getByRole("switch",{name:"Auto-refill",exact:true});
   await confirm(page,[3,4],{terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:3});
+  await expect(toggle).toHaveAttribute("aria-disabled","false");
   await expect(toggle).toHaveAttribute("aria-checked","false");
   await expect(toggle).toContainText("Off");
   await toggle.click();
@@ -1991,6 +2000,23 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect.poll(async()=>(await messages(page)).at(-1)).toEqual({kind:"set_issue_monitor_auto_refill",enabled:true,limit:5});
   await confirm(page,[3,4],{terminal_queue_auto_refill_limit:5});
   await expect(issues.getByLabel("Refill limit",{exact:true})).toHaveValue("5");
+});
+
+test("Issue #7988: Issues switches send nothing until the first status confirms their values", async ({ page }) => {
+  const controls = page.getByRole("group", {name:"Issues controls",exact:true});
+  const refill = controls.getByRole("switch",{name:"Auto-refill",exact:true});
+  const autonomous = controls.getByRole("switch",{name:"Autonomous mode",exact:true});
+  const sent = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
+    ["set_issue_monitor_auto_refill", "set_issue_monitor_autonomous_mode"].includes(message.kind)));
+  await expect(refill).toHaveAttribute("aria-disabled","true");
+  await expect(autonomous).toHaveAttribute("aria-disabled","true");
+  await refill.dispatchEvent("click");
+  await autonomous.dispatchEvent("click");
+  expect(await sent()).toEqual([]);
+  await page.evaluate(() => (window as any).__queueStatus({terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:0}));
+  await expect(refill).toHaveAttribute("aria-disabled","false");
+  await refill.click();
+  await expect.poll(sent).toEqual([{kind:"set_issue_monitor_auto_refill",enabled:true,limit:0}]);
 });
 
 test("Issue #7813: empty Queued column names the Auto-refill hold", async ({ page }) => {
@@ -2054,9 +2080,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false, includeTheme = false } = {}) {
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false, includeTheme = false, holdMonitorStatus = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme, holdMonitorStatus})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -2183,7 +2209,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
             profiles:[{agent_member_id:"queue-member",agent_id:"codex",model:"gpt-6-sol",prefer_for:[]}],usage_threshold_percent:80});
         }
         else if(message.kind==="list_issue_monitor") {
-          this.emit({kind:"issue_monitor_status",status});
+          if (!holdMonitorStatus) this.emit({kind:"issue_monitor_status",status});
           if (inboxFirst) this.emit({kind:"issue_monitor_inbox",items:entries.map(issue=>({issue,
             state:issue.number===5?"launched":issue.number===6?"released":"queued"}))});
         }
@@ -2219,5 +2245,5 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme});
+  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme, holdMonitorStatus});
 }

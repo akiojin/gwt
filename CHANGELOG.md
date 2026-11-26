@@ -1,6 +1,76 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.176.0] - 2026-11-26
+
+### Bug Fixes
+
+- **capacity:** GUI CPU の一時的な急上昇で Agent 枠が揺れないよう平滑化する
+- **issue-monitor:** 空き枠があるのに起動が止まった状態を理由付きでログに残す
+- **pr:** Require an explicit supersession declaration
+- **gui:** パレット撤去後に残った Recovery Center・全停止・projection prune の内部経路を撤去する
+- **migration:** 移行中の fetch で自動 maintenance を起動せず worktree add との競合を防ぐ
+- **test:** Decouple explicit quit checks from runner timing
+- **issue-monitor:** Queue 0 が続く起動停滞を Monitor 自身の再スキャンで回復する
+- **execution:** 認証済み Host gateway がある Docker Session で workspace.update を適用可能と診断する
+- **board:** Bound PM unread reads by the explicit cursor
+- **spec:** 見出しの無い gwt-spec Issue を spec 区画に包む修復を追加する
+- **pm:** 状況の質問には同じターンで取り直した実測で答える規則を追加する
+- **ci:** Headed 証跡をテーマと確認対象の試行で照合する
+- **ci:** Headed の画像と必要な操作 trace を保持する
+- **verify:** CI への headed 証跡委譲と回帰検証を整える
+- **skills:** CI 委譲時もローカル検証の PASS 条件を明記する
+- **ci:** Headed WebView のフォーカスを単一 worker に割り当てる
+- **monitor:** Codex の sandbox 起動失敗を即時に再試行へ回す
+- **issue-monitor:** Issue.monitor.status を registry 競合下でも 1 秒以内に返す
+
+### Documentation
+
+- **verify:** CI に移した headed 証跡の必須条件を明記する
+- **verify:** CI の記入例と証跡欄の定義を区別する
+
+### Features
+
+- **verify:** WebView の headed 証跡を必須 CI に移す
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7922 の Work イベントを記録する
+- **work:** Issue #7922 の Work イベントを記録する
+- **work:** Issue #7922 の Work イベントを記録する
+
+### Testing
+
+- **gui:** UI trace の開発者診断経路と撤去したコマンドが何も送らないことを headed E2E で固定する
+- **playwright:** Native attention の Issues 回帰を CI で実行する
+- **ci:** WebView の契約テストを headed ステップに合わせる
+- **issue-monitor:** #7851 回帰テストの壁時計依存を test hygiene 契約に合わせる
+
+## [9.175.1] - 2026-11-25
+
+### Bug Fixes
+
+- **issue-monitor:** 配信後に残り AC が verification のみになった Issue を確認待ちにする
+- **ci:** Restore frontend naming and roster checks
+- **review:** SPEC の slice PR を slice 節の Acceptance で独立レビューする
+- **pm:** Deliver multiline messages and diagnose recovery refusals
+- **feedback:** LSUIElement バンドル内の gwtd でも native 同意画面を開けるようにする
+
+### Documentation
+
+- **readme:** Align navigation with the task-centered GUI
+- **readme:** 新GUIの画面構成と用語集をREADMEに追加する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #6071 の Work イベントを保存する
+- **work:** Issue #7936 の Work 記録を追加
+
+### Testing
+
+- **ci:** 回答送信の再検証を定期窓集計から切り離す
+- **ci:** Windows feedback 契約の固定テスト数を 41 件に更新する
+
 ## [9.175.0] - 2026-11-25
 
 ### Bug Fixes

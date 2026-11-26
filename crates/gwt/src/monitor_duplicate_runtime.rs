@@ -830,6 +830,7 @@ fn reclaim_closed_idle_runtimes(
                 &registration.window_id,
                 Some(false),
                 None,
+                true, // settled automatic close
                 |runtime| {
                     // An accepted prompt invalidates the Stop receipt, even
                     // before its first hook publishes Running.
@@ -1826,6 +1827,7 @@ mod stop_tests {
                 .unwrap());
             let after = status();
             assert_eq!(after["occupied_slot_count"], 0, "{after}");
+            assert!(entry.handle.stopped_by_finalizer());
             assert_eq!(
                 after["session_row_mismatch"]["working_without_active_row"],
                 serde_json::json!([]),
@@ -2117,6 +2119,10 @@ mod stop_tests {
             assert!(
                 entry.handle.try_wait().unwrap().is_some(),
                 "stop left its leader alive"
+            );
+            assert!(
+                !entry.handle.stopped_by_finalizer(),
+                "operator Stop must leave the diagnostic pane available"
             );
             assert!(
                 !is_process_alive(*child_pid),

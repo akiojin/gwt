@@ -544,6 +544,50 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     assert!(pane.pty.try_wait().unwrap().is_some());
 }
 
+fn seed_monitor_predecessor_work(
+    fixture: &MonitorRelaunchFixture,
+    canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
+) {
+    use gwt::project_runtime::workspace::{
+        apply_workspace_launch_for_current_work, WorkspaceLaunchTransition,
+    };
+
+    let predecessor = ActiveAgentSession {
+        session_id: fixture.source_session_id.clone(),
+        branch_name: "work/issue-3165".into(),
+        worktree_path: fixture.worktree.clone(),
+        agent_project_root: fixture.worktree.display().to_string(),
+        ..sample_active_agent_session("tab-1", "predecessor-window")
+    };
+    // The fixture already settled the predecessor ECR. Seed the Start
+    // event representing the Work that existed before its settlement.
+    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+        &fixture.project_root,
+        &fixture.worktree,
+        |projection, work_items, _| {
+            let events = apply_workspace_launch_for_current_work(
+                &fixture.project_root,
+                projection,
+                work_items,
+                &predecessor,
+                WorkspaceLaunchTransition {
+                    work_id: None,
+                    base_branch: Some("origin/develop"),
+                    linked_issue_number: canonical_owner.map(|owner| owner.number),
+                    canonical_owner,
+                    resume_context: None,
+                    kind: WorkspaceLaunchProjectionKind::StartWork,
+                    live_session_ids: &HashSet::from([fixture.source_session_id.clone()]),
+                    now: gwt_core::timestamp::UtcTimestamp::now(),
+                },
+                false,
+            )?;
+            Ok(((), events))
+        },
+    )
+    .expect("seed predecessor Work");
+}
+
 #[test]
 fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
     let _env_lock = env_test_lock()
@@ -584,24 +628,7 @@ fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
             )],
         );
         if let Some(work_owner) = work_owner {
-            let predecessor = ActiveAgentSession {
-                session_id: fixture.source_session_id.clone(),
-                branch_name: "work/issue-3165".into(),
-                worktree_path: fixture.worktree.clone(),
-                agent_project_root: fixture.worktree.display().to_string(),
-                ..sample_active_agent_session("tab-1", "predecessor-window")
-            };
-            save_workspace_launch_projection(
-                &fixture.project_root,
-                &predecessor,
-                Some("origin/develop"),
-                Some(fixture.execution_owner.number),
-                Some(fixture.execution_owner),
-                None,
-                WorkspaceLaunchProjectionKind::StartWork,
-                Some(&HashSet::from([fixture.source_session_id.clone()])),
-            )
-            .unwrap();
+            seed_monitor_predecessor_work(&fixture, Some(fixture.execution_owner));
             gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
                 &fixture.project_root,
                 &fixture.worktree,
@@ -994,25 +1021,8 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         .sessions_dir
         .join(format!("{}.toml", fixture.source_session_id));
     let source_bytes = fs::read(&source_path).expect("predecessor Session bytes");
-    let predecessor_active = ActiveAgentSession {
-        session_id: fixture.source_session_id.clone(),
-        branch_name: "work/issue-3165".to_string(),
-        worktree_path: fixture.worktree.clone(),
-        agent_project_root: fixture.worktree.display().to_string(),
-        ..sample_active_agent_session("tab-1", "predecessor-window")
-    };
     let historical_owner = (case != "4777-ownerless-root").then_some(fixture.execution_owner);
-    save_workspace_launch_projection(
-        &fixture.project_root,
-        &predecessor_active,
-        Some("origin/develop"),
-        historical_owner.map(|owner| owner.number),
-        historical_owner,
-        None,
-        WorkspaceLaunchProjectionKind::StartWork,
-        Some(&HashSet::from([fixture.source_session_id.clone()])),
-    )
-    .expect("publish predecessor Work");
+    seed_monitor_predecessor_work(&fixture, historical_owner);
     let mut predecessor_id =
         gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
             &fixture.project_root,

@@ -127,6 +127,11 @@ test("operation failure preserves runtime state while a true PTY error still ren
   await expect(agentWindow.locator(".status-chip")).not.toHaveClass(/\berror\b/);
   await expect(page.locator(".toast-alerts__item").filter({ hasText: "Agent error" })).toHaveCount(0);
   await testInfo.attach("operation-failure", { body: await page.screenshot({ path: testInfo.outputPath("operation-failure.png") }), contentType: "image/png" });
+  await inject({ kind: "terminal_status", id: "agent-1", status: "stopped", detail: null });
+  await expect(agentWindow.locator(".status-label")).toHaveText("Stopped");
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: "Agent error" })).toHaveCount(0);
+  await testInfo.attach("stopped", { body: await page.screenshot({ path: testInfo.outputPath("stopped.png") }), contentType: "image/png" });
+  await inject({ kind: "terminal_status", id: "agent-1", status: "running", detail: null });
   const error = events.find((event: any) => event.kind === "terminal_status" && event.status === "error");
   expect(error).toBeTruthy();
   await inject({ ...error, id: "agent-1" });

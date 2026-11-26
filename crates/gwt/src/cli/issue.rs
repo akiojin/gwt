@@ -838,15 +838,16 @@ pub(crate) fn merge_board_escalations_into_needs_human(
     let closed_issue_numbers = projected_issue_numbers
         .into_iter()
         .filter(|issue_number| {
-            let Some(entry) = cache.load_entry(IssueNumber(*issue_number)) else {
+            // Issue #7851: state and revision only; loading every comment of
+            // every projected Issue dominated the status read.
+            let Some(meta) = cache.load_meta(IssueNumber(*issue_number)) else {
                 return false;
             };
-            if entry.snapshot.state != IssueState::Closed {
+            if meta.state != "closed" {
                 return false;
             }
             let cached_closed_at =
-                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&entry.snapshot.updated_at.0)
-                    .ok();
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&meta.updated_at).ok();
             let newer_live_open = status.inbox.iter().any(|item| {
                 if item.issue_number != *issue_number
                     || item.github_state != crate::IssueMonitorIssueState::Open
@@ -1103,7 +1104,7 @@ fn run_monitor_status<E: CliEnv>(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .filter_map(|number| {
-            let diagnosis = crate::cli::execution_state::diagnose_owner(
+            let diagnosis = crate::cli::execution_state::diagnose_owner_without_settlement_recheck(
                 &project_root,
                 crate::cli::execution_state::ExecutionOwnerKey {
                     kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
@@ -1139,7 +1140,13 @@ fn run_monitor_status<E: CliEnv>(
             .and_then(|delay| {
                 gwt_core::timestamp::shift_rfc3339(&drain.since, time::Duration::seconds(delay))
             });
+        let waiting_for = crate::update_drain::drain_waiting_for(
+            &drain.blocking,
+            wait.as_ref().map(|wait| wait.reason.as_str()),
+            drain.reason == crate::IssueMonitorUpdateDrainReason::Manual,
+        );
         output["update_drain_evaluation"] = serde_json::json!({
+            "waiting_for": waiting_for,
             "observed_at": wait.as_ref().map(|wait| &wait.observed_at),
             "next_evaluation_at": wait.as_ref().and_then(|wait| wait.next_evaluation_at.as_ref()),
             "notify_at": notify_at,
@@ -1319,11 +1326,31 @@ fn session_row_mismatch(
             }));
         }
     }
+    // Issue #7630 AC-5: name the Sessions an automatic restore brought back,
+    // and whether an inbox row still tracks them. A restored Session with no
+    // row has nobody looking after it. Informational: it does not change
+    // `consistent`, because the resident PM is restored without an Issue too.
+    let automatic_restore_sessions = sessions
+        .iter()
+        .filter(|session| session.launch_origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore)
+        .map(|session| {
+            serde_json::json!({
+                "session_id": session.session_id,
+                "issue_number": session.issue_number,
+                "worktree_path": session.worktree_path,
+                "launch_origin": session.launch_origin,
+                "has_inbox_row": session.issue_number.is_some_and(|issue| {
+                    inbox.iter().any(|row| row.issue_number == issue)
+                }),
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "consistent": working_without_active_row.is_empty()
             && active_row_without_session.is_empty(),
         "working_without_active_row": working_without_active_row,
         "active_row_without_session": active_row_without_session,
+        "automatic_restore_sessions": automatic_restore_sessions,
     })
 }
 
@@ -8701,6 +8728,33 @@ mod tests {
         output
     }
 
+    /// Issue #7630 AC-5: a Session brought back by an automatic restore is
+    /// named as such in `issue.monitor.status`, next to whether an inbox row
+    /// still tracks it, so the PM no longer cross-checks `pane.list` by hand.
+    #[test]
+    fn automatic_restore_sessions_are_listed_with_their_inbox_row() {
+        let inbox = vec![mismatch_row(4777, crate::MonitorInboxState::Launched, None)];
+        let mut tracked = mismatch_session(Some(4777));
+        tracked.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        let mut rowless = mismatch_session(Some(695));
+        rowless.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        let launched = mismatch_session(Some(1));
+
+        let output = mismatch_status(&inbox, &[tracked, rowless, launched]);
+        let restored = output["session_row_mismatch"]["automatic_restore_sessions"]
+            .as_array()
+            .expect("array")
+            .clone();
+
+        assert_eq!(restored.len(), 2, "{restored:?}");
+        assert_eq!(restored[0]["issue_number"], 4777);
+        assert_eq!(restored[0]["launch_origin"], "automatic_restore");
+        assert_eq!(restored[0]["has_inbox_row"], true);
+        assert_eq!(restored[1]["issue_number"], 695);
+        assert_eq!(restored[1]["has_inbox_row"], false);
+        assert_eq!(restored[1]["session_id"], "session-695");
+    }
+
     /// The symptom a user reported: the card leaves Active while the agent is
     /// still working, because the row stopped saying `launched`.
     #[test]
@@ -11729,6 +11783,59 @@ mod tests {
                 .issue_number,
             42
         );
+    }
+
+    /// Issue #7851: status must fall back to a stable read when every
+    /// optimistic attempt straddles an actual registry commit.
+    #[test]
+    fn issue_7851_monitor_status_uses_stable_reads_under_registry_churn() {
+        use std::{cell::Cell, rc::Rc};
+
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = gwt_core::paths::gwt_home().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["agent_roster"] = serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811", "agent_id":"codex",
+            "name":"Cedar", "enabled":true, "created_at":"2026-10-01T00:00:00Z"
+        }]});
+        let raw = serde_json::to_string_pretty(&prefs).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        std::fs::write(path.with_extension("committed.json"), &raw).unwrap();
+        crate::agent_registry::ensure_active_for_project(&repo).unwrap();
+
+        let commits = Rc::new(Cell::new(0));
+        let observed = commits.clone();
+        crate::agent_registry::set_unlocked_read_observer_for_test(Some(Rc::new(move || {
+            let count = observed.get();
+            // One optimistic attempt each for the status snapshot, saved
+            // configuration and host drain lookup in this single-project home.
+            assert!(count < 3, "status retried an optimistic registry read");
+            crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+                prefs.priority_launch_now = prefs.priority_launch_now.is_none().then_some(7851);
+                Ok(())
+            })
+            .unwrap();
+            observed.set(count + 1);
+        })));
+
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        // The isolated registry has no competing lock holder. Keep injected
+        // commit I/O from consuming the status reader's operation deadline.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(
+            gwt_core::operation_deadline::now(),
+        );
+        let result = run_monitor_status(&env, None, &mut out);
+        crate::agent_registry::set_unlocked_read_observer_for_test(None);
+
+        result.expect("status answers under registry churn");
+        assert_eq!(commits.get(), 3, "each optimistic read crossed a commit");
+        let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(status.get("host_update_drain_error").is_none(), "{status}");
     }
 
     /// Issue #5062 AC-4: an update drain refuses every new launch, so
@@ -15240,6 +15347,7 @@ mod tests {
                     "consistent": true,
                     "working_without_active_row": [],
                     "active_row_without_session": [],
+                    "automatic_restore_sessions": [],
                 },
                 "max_active": 3,
                 "max_active_agents_scope": "machine",

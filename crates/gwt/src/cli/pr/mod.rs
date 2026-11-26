@@ -327,12 +327,81 @@ fn user_verification_rejection(body: &str) -> Option<&'static str> {
         .then_some("PR handoff refused: a recorded user verification failure is unresolved. Repair the reported behavior and update the verification result before retrying.")
 }
 
+const CI_HEADED_EVIDENCE: &str = "Headed Evidence: CI";
+const CI_HEADED_REVIEW_PENDING: &str = "pending (ci headed)";
+const WEBVIEW_CHECK: &str = "Test (Frontend + WebView E2E)";
+const GITHUB_ACTIONS_APP_ID: i64 = 15368;
+
+pub(super) fn uses_ci_headed_evidence(body: &str) -> bool {
+    body.lines().any(|line| line == CI_HEADED_EVIDENCE)
+}
+
+fn protected_webview_check(policy: &serde_json::Value) -> bool {
+    policy["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|check| {
+            check["context"] == WEBVIEW_CHECK
+                && check["app_id"].as_i64() == Some(GITHUB_ACTIONS_APP_ID)
+        })
+    })
+}
+
+/// A new PR is needed to trigger its own CI evidence. Delegate only when the
+/// already-published, required workflow is also present in the candidate.
+fn delegate_ci_headed<E: CliEnv>(
+    env: &mut E,
+    worktree: &std::path::Path,
+    base: &str,
+) -> Result<(), String> {
+    let git = |args: &[&str]| {
+        gwt_core::process::hidden_command("git")
+            .current_dir(worktree)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| output.stdout)
+    };
+    let published = git(&[
+        "show",
+        "refs/remotes/origin/develop:.github/workflows/test.yml",
+    ]);
+    let candidate = git(&["show", "HEAD:.github/workflows/test.yml"]);
+    if base != "develop"
+        || !matches!(env.github_repository(), Ok((owner, repo)) if owner == "akiojin" && repo == "gwt")
+        || published != candidate
+        || !published.is_some_and(|contents| {
+            String::from_utf8_lossy(&contents).contains("id: headed-webview-evidence")
+        })
+    {
+        return Err("CI headed delivery requires the published gwt WebView workflow on develop. Use explicit local headed verification when the workflow is unavailable or changed.".into());
+    }
+    let policy = env.required_status_checks(base).map_err(|error| {
+        format!("Cannot read develop protection for CI headed delivery: {error}")
+    })?;
+    if !protected_webview_check(&policy) {
+        return Err(format!(
+            "CI headed delivery requires the GitHub Actions check `{WEBVIEW_CHECK}` on develop."
+        ));
+    }
+    Ok(())
+}
+
 /// #4326: measured UI verification permits Ready independently of human review.
 pub(super) fn ready_verification(
     worktree: &std::path::Path,
     session_id: Option<&str>,
     body: &str,
     is_pr_ready: bool,
+) -> Result<Option<crate::cli::verification_record::VerificationRunRecord>, String> {
+    ready_verification_with_ci(worktree, session_id, body, is_pr_ready, false)
+}
+
+fn ready_verification_with_ci(
+    worktree: &std::path::Path,
+    session_id: Option<&str>,
+    body: &str,
+    is_pr_ready: bool,
+    ci_headed_delegated: bool,
 ) -> Result<Option<crate::cli::verification_record::VerificationRunRecord>, String> {
     use crate::cli::verification_record as verification;
     if let Some(refusal) = user_verification_rejection(body) {
@@ -359,9 +428,10 @@ pub(super) fn ready_verification(
         .map_err(|error| format!("PR handoff refused: verification plan is unreadable: {error}"))?;
     // Explicit command plans have no surfaces. Reclassify the current change
     // instead of treating an empty declaration as proof that UI is absent.
-    let declared_ui = plan
-        .as_ref()
-        .is_some_and(|plan| plan.surfaces.iter().any(|surface| surface == "frontend"))
+    let declared_ui = ci_headed_delegated
+        || plan
+            .as_ref()
+            .is_some_and(|plan| plan.surfaces.iter().any(|surface| surface == "frontend"))
         || visual_result
             .as_deref()
             .is_some_and(|result| result == "pass" || result.starts_with("fail"));
@@ -377,7 +447,11 @@ pub(super) fn ready_verification(
     } else {
         "PR handoff refused: autonomous Ready requires fresh passing verification. Register the complete matrix with verify.plan, then execute it with verify.run."
     };
-    if ui_surface && visual_result.as_deref() != Some("pass") {
+    let visual_required_locally = ui_surface && !ci_headed_delegated;
+    if ci_headed_delegated && visual_result.as_deref() != Some(CI_HEADED_REVIEW_PENDING) {
+        return Err("CI headed delivery requires `Agent Visual Check: pending (CI headed)` before the PR's evidence is generated.".into());
+    }
+    if visual_required_locally && visual_result.as_deref() != Some("pass") {
         return Err(recovery.to_string());
     }
     let completed_evidence = crate::cli::execution_state::load(worktree)
@@ -419,7 +493,7 @@ pub(super) fn ready_verification(
             })?
             .ok_or_else(|| recovery.to_string())?
     };
-    if ui_surface && !record.headed_e2e_passed() {
+    if visual_required_locally && !record.headed_e2e_passed() {
         return Err(recovery.to_string());
     }
     if completed_evidence.is_none() {
@@ -584,7 +658,26 @@ pub(super) fn run_with_data<E: CliEnv>(
                 _ => None,
             };
             let body = mutation_body.as_deref().expect("Ready handoff body");
-            match ready_verification(&worktree, session_id.as_deref(), body, target_pr.is_some()) {
+            let ci_headed_delegated = uses_ci_headed_evidence(body);
+            if ci_headed_delegated {
+                let policy = match &cmd {
+                    PrCommand::Create { base, .. } | PrCommand::CreateBody { base, .. } => {
+                        delegate_ci_headed(env, &worktree, base)
+                    }
+                    _ => Err("CI headed delegation applies to new Ready PRs. Existing Drafts require explicit local headed verification.".into()),
+                };
+                if let Err(refusal) = policy {
+                    out.push_str(&format!("PR handoff refused: {refusal}\n"));
+                    return Ok(2);
+                }
+            }
+            match ready_verification_with_ci(
+                &worktree,
+                session_id.as_deref(),
+                body,
+                target_pr.is_some(),
+                ci_headed_delegated,
+            ) {
                 Ok(Some(record)) => {
                     verification_guard = Some(VerificationMutationGuard {
                         session_id: record.session_id.clone(),
@@ -5830,6 +5923,18 @@ fn main() -> ExitCode {
     }
 
     #[test]
+    fn ci_headed_requires_the_actions_app_and_exact_required_context() {
+        let policy =
+            |name, app_id| serde_json::json!({"checks": [{"context": name, "app_id": app_id}]});
+        assert!(protected_webview_check(&policy(WEBVIEW_CHECK, 15368)));
+        assert!(!protected_webview_check(&policy(WEBVIEW_CHECK, 0)));
+        assert!(!protected_webview_check(&policy("Build", 15368)));
+        assert!(!protected_webview_check(&serde_json::json!({
+            "contexts": [WEBVIEW_CHECK]
+        })));
+    }
+
+    #[test]
     fn autonomous_ready_requires_measured_headed_evidence() {
         let _lock = crate::env_test_lock()
             .lock()
@@ -5892,6 +5997,15 @@ fn main() -> ExitCode {
         let (mut record, _) =
             verification::run_verification(repo.path(), session_id, &["git --version".to_string()])
                 .unwrap();
+        let delegated = "Headed Evidence: CI\nAgent Visual Check: pending (CI headed)\n";
+        assert!(ready_verification(repo.path(), Some(session_id), delegated, false).is_err());
+        assert_eq!(
+            ready_verification_with_ci(repo.path(), Some(session_id), delegated, false, true)
+                .unwrap()
+                .unwrap()
+                .record_id,
+            record.record_id
+        );
         // The command fixture stands in for the reporter-tested browser
         // result. The Ready boundary must reject every non-passing shape.
         for (dark, light, failed, expected) in [

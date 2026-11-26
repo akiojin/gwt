@@ -1408,7 +1408,7 @@ mod submit_split_tests {
         let repo = home.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
-        let body = "protected body";
+        let body = "protected body\n\nsecond paragraph\n";
         let prompt = pm_registry::protected_pm_delivery_prompt(operation_id, body).unwrap();
         let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
         pm_registry::prepare_pm_delivery_receipt(
@@ -1442,9 +1442,12 @@ mod submit_split_tests {
                 }
             } else {
                 body_writes.set(body_writes.get() + 1);
-                composer
-                    .borrow_mut()
-                    .push_str(std::str::from_utf8(bytes).unwrap());
+                let pasted = std::str::from_utf8(bytes)
+                    .unwrap()
+                    .strip_prefix("\x1b[200~")
+                    .and_then(|text| text.strip_suffix("\x1b[201~"))
+                    .expect("the complete multiline body is one bracketed paste");
+                composer.borrow_mut().push_str(pasted);
             }
             Ok(())
         };
@@ -1458,7 +1461,7 @@ mod submit_split_tests {
             )
         };
         let first =
-            drive_verified_pane_submit(&prompt, false, 2, &mut receive, |_| {}, verified).unwrap();
+            drive_verified_pane_submit(&prompt, true, 2, &mut receive, |_| {}, verified).unwrap();
         assert!(matches!(
             first,
             VerifiedPaneSubmitOutcome::Unverified { .. }

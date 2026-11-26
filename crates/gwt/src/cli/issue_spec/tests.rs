@@ -331,7 +331,7 @@ fn parse_supports_list_create_pull_repair_and_edit_modes() {
     let refs = args.iter().collect::<Vec<_>>();
     assert!(matches!(
         parse(&refs),
-        Ok(IssueCommand::SpecRepair { number, archive_comments })
+        Ok(IssueCommand::SpecRepair { number, archive_comments, .. })
             if number == 77 && archive_comments.is_empty()
     ));
 
@@ -518,6 +518,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
             IssueCommand::SpecRepair {
                 number: 42,
                 archive_comments: Vec::new(),
+                wrap_body: false,
             },
             &mut out
         )
@@ -546,6 +547,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
             IssueCommand::SpecRepair {
                 number: 42,
                 archive_comments: vec![orphan.id.0],
+                wrap_body: false,
             },
             &mut out
         )

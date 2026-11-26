@@ -247,6 +247,7 @@ impl RestoreRefusal {
             "needs_human" => Self::MonitorHold("needs_human"),
             "failure_hold" => Self::MonitorHold("failure_hold"),
             "launch_revoked" => Self::MonitorHold("launch_revoked"),
+            "no_monitor_row" => Self::MonitorHold("no_monitor_row"),
             "execution_blocked" => Self::MonitorHold("execution_blocked"),
             "session_unreadable" => Self::TerminalFactsUnreadable("session_unreadable"),
             "monitor_unreadable" => Self::TerminalFactsUnreadable("monitor_unreadable"),

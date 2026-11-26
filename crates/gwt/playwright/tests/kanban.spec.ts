@@ -619,13 +619,13 @@ test.describe("Issue Bridge load recovery", () => {
           if (onMessage) socket.removeEventListener("message", onMessage);
         }
       };
-      // Native attention is measured with browser-check's live asset server.
-      // Self-contained runs retain the original CSS-hidden coverage.
-      for (const nativeHidden of testInfo.project.use.headless === false && liveBase ? [false, true] : [false]) {
+      // Headed runs also measure native page attention. Headless runs still
+      // cover the CSS-hidden surface using the same backend fixture.
+      for (const nativeHidden of testInfo.project.use.headless === false ? [false, true] : [false]) {
         const local = nativeHidden
           ? await withNativeHiddenPage(playwright.chromium, testInfo, async nativePage => {
             await installIssueBridgeBackend(nativePage, { includeRelatedWork: true, theme });
-            await nativePage.goto(new URL("/p/0123456789abcdef", liveBase).href);
+            await nativePage.goto(liveBase ? new URL("/p/0123456789abcdef", liveBase).href : APP_URL);
             await expect.poll(() => nativePage.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
             await expect.poll(() => nativePage.evaluate(() =>
               document.querySelectorAll(".surface-knowledge .knowledge-row").length)).toBe(5);
@@ -1619,10 +1619,10 @@ test.describe("Issue Related Work Resume", () => {
       const processed = page.waitForEvent("dialog");
       await page.evaluate(events => {
         for (const event of events) window.__issueBridgeFixtureSocket.emit(event);
-        window.__issueBridgeFixtureSocket.emit({ kind: "workspace_projection_prune_error", message: "Resume list processed" });
+        window.__issueBridgeFixtureSocket.emit({ kind: "ui_trace_error", message: "Resume list processed" });
       }, events);
       const dialog = await processed;
-      expect(dialog.message()).toBe("Work Projection Prune error: Resume list processed");
+      expect(dialog.message()).toBe("UI trace error: Resume list processed");
       await dialog.dismiss();
     };
     await emitAndFlush([{ ...list, workspace_id: "stale-workspace" }, { ...list, operation_id: "stale-operation" }]);
@@ -1709,11 +1709,11 @@ test.describe("Issue Related Work Resume", () => {
         // Both kinds retain FIFO order through the socket dispatcher. Seeing
         // this later dialog proves the outcome ran before negative assertions.
         window.__issueBridgeFixtureSocket.emit({
-          kind: "workspace_projection_prune_error", message: "Resume outcome processed",
+          kind: "ui_trace_error", message: "Resume outcome processed",
         });
       }, { kind, operationId, message });
       const dialog = await processed;
-      expect(dialog.message()).toBe("Work Projection Prune error: Resume outcome processed");
+      expect(dialog.message()).toBe("UI trace error: Resume outcome processed");
       await dialog.dismiss();
     };
     await emitOutcome("workspace_resume_agent_error", `${first.operation_id}-stale`,

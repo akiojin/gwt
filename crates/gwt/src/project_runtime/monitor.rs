@@ -1361,6 +1361,9 @@ pub(crate) fn startup_hook_failure_line(screen: &str) -> Option<&str> {
 
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
+    if let Some(detail) = super::runtime_events::codex_windows_sandbox_startup_error(screen) {
+        return detail;
+    }
     // Issue #7465: gwt observes the initial prompt only through its managed
     // hooks, so a failing hook would otherwise end in the 180s timeout.
     if let Some(line) = startup_hook_failure_line(screen) {
