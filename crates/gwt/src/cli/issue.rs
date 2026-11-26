@@ -11778,11 +11778,10 @@ mod tests {
         let observed = commits.clone();
         crate::agent_registry::set_unlocked_read_observer_for_test(Some(std::rc::Rc::new(
             move || {
+                // The writer runs until the status read finishes and never
+                // waits on this thread's lock-free attempt, so a commit comes.
                 let start = observed.load(Ordering::SeqCst);
-                let waited = std::time::Instant::now();
-                while observed.load(Ordering::SeqCst) == start
-                    && waited.elapsed() < std::time::Duration::from_secs(2)
-                {
+                while observed.load(Ordering::SeqCst) == start {
                     std::thread::yield_now();
                 }
             },
@@ -11801,8 +11800,10 @@ mod tests {
         assert!(commits.load(Ordering::SeqCst) > 0, "the writer committed");
         let status: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(status.get("host_update_drain_error").is_none(), "{status}");
+        // test-hygiene: allow-wall-clock-deadline Issue #7851 AC-2 makes one second the contract under test
+        let within_contract = elapsed < std::time::Duration::from_secs(1);
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
+            within_contract,
             "issue.monitor.status took {elapsed:?} under registry churn"
         );
     }
