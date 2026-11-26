@@ -9109,6 +9109,29 @@ mod tests {
                 Some("recovery_exhausted")
             );
             assert!(diagnosis.available_recoveries.is_empty(), "{diagnosis:?}");
+            // Issue #7630 AC-1: no recovery the gate admits remains, so the
+            // diagnosis carries what a PM needs to take over without asking
+            // the agent again: owner, Session, both generations, and why each
+            // probed recovery (workspace.update included) was refused.
+            let exhausted = diagnosis
+                .warnings
+                .iter()
+                .find(|warning| warning.starts_with("recovery_exhausted:"))
+                .expect("recovery_exhausted warning");
+            let generation = diagnosis.generation_id.clone().expect("ECR generation");
+            for required in [
+                "pm_handoff:",
+                "owner=issue #2359",
+                &format!("session={}", session.id),
+                &format!("execution_generation={generation}"),
+                "session_generation=stale-generation",
+                "workspace.update=",
+            ] {
+                assert!(
+                    exhausted.contains(required),
+                    "missing {required}: {exhausted}"
+                );
+            }
 
             let observations =
                 crate::issue_monitor_worker::read_execution_observations(repo, &[2359]);

@@ -1198,7 +1198,7 @@ export function createKnowledgeKanbanSurface({
           maxActive: count(status.max_active_agents ?? 1) };
       }
 
-      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, inboxObserved: false, counts: issueMonitorCounts(),
+      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, inboxObserved: false, statusObserved: false, counts: issueMonitorCounts(),
         humanAttention: { count: null, summary: "", byIssue: {} },
         steeringAttention: { count: null, summary: "", byIssue: {} },
         reviewAttention: { count: null, summary: "", byIssue: {} },
@@ -1524,6 +1524,9 @@ export function createKnowledgeKanbanSurface({
         // names the setting and whose aria-checked + state word carry the
         // current value. It renders only what the server status says — the
         // click handler never writes a local optimistic value.
+        // Issue #7988: before the first status arrives the Off/0 shown here are
+        // placeholders, so the switches stay disabled and send nothing.
+        const statusObserved = issueMonitorModel.read().statusObserved;
         for (const [action, setting] of [["monitor-autonomous", "autonomous_mode"],
           ["monitor-auto-refill", "terminal_queue_auto_refill"]]) {
           const toggle = element.querySelector(`[data-action="${action}"]`);
@@ -1531,6 +1534,7 @@ export function createKnowledgeKanbanSurface({
           const enabled = Boolean(issueMonitorModel.read().status[setting]);
           toggle.setAttribute("aria-checked", enabled ? "true" : "false");
           toggle.dataset.enabled = enabled ? "true" : "false";
+          toggle.setAttribute("aria-disabled", statusObserved ? "false" : "true");
           const stateWord = toggle.querySelector(".knowledge-monitor-switch__state");
           if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
@@ -1664,7 +1668,7 @@ export function createKnowledgeKanbanSurface({
             update_drain: nextStatus?.update_drain ?? null,
             autonomous_issues: Array.isArray(nextStatus?.autonomous_issues) ? nextStatus.autonomous_issues : [],
           };
-          return withMonitorAttention({ ...model, status, counts: issueMonitorCounts(status) });
+          return withMonitorAttention({ ...model, status, statusObserved: true, counts: issueMonitorCounts(status) });
         });
       }
 
@@ -1865,15 +1869,18 @@ export function createKnowledgeKanbanSurface({
         bar
           .querySelector('[data-action="monitor-auto-refill"]')
           ?.addEventListener("click", () => {
+            const { status, statusObserved } = issueMonitorModel.read();
+            if (!statusObserved) return;
             send({
               kind: "set_issue_monitor_auto_refill",
-              enabled: !Boolean(issueMonitorModel.read().status.terminal_queue_auto_refill),
-              limit: issueMonitorModel.read().status.terminal_queue_auto_refill_limit ?? 0,
+              enabled: !Boolean(status.terminal_queue_auto_refill),
+              limit: status.terminal_queue_auto_refill_limit ?? 0,
             });
           });
         bar
           .querySelector('[data-action="monitor-autonomous"]')
           ?.addEventListener("click", () => {
+            if (!issueMonitorModel.read().statusObserved) return;
             send({
               kind: "set_issue_monitor_autonomous_mode",
               enabled: !Boolean(issueMonitorModel.read().status.autonomous_mode),
