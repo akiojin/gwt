@@ -14951,6 +14951,96 @@ fn default_integration_test_builds_a_guarded_binary() {
     }
 
     #[test]
+    fn session_launch_after_completed_execution_preserves_work_event_settlement() {
+        use crate::project_runtime::launch_payload::{ActiveAgentSession, WorkspaceResumeContext};
+        use crate::project_runtime::workspace::{
+            save_resumed_workspace_projection, save_start_work_workspace_projection,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let previous_session = "session-before-completion";
+        initialize_generation_scoped_execution(&fixture.repo, previous_session);
+        seed_canonical_work(&fixture, previous_session, true);
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): deliver terminal Work");
+        fixture.push();
+        assert!(matches!(
+            execution_state::settle(
+                &fixture.repo,
+                previous_session,
+                execution_state::ExecutionSettlement::Completed,
+            )
+            .unwrap(),
+            execution_state::SettleResult::Settled(_)
+        ));
+        let receipt =
+            save_work_event_settlement_record(&fixture.repo, previous_session, false).unwrap();
+        assert!(receipt.status.is_settled());
+
+        let mut session = ActiveAgentSession {
+            window_id: "window-start".into(),
+            session_id: "session-after-start".into(),
+            agent_id: "codex".into(),
+            branch_name: "main".into(),
+            display_name: "Codex".into(),
+            worktree_path: fixture.repo.clone(),
+            agent_project_root: fixture.repo.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab".into(),
+        };
+        save_start_work_workspace_projection(
+            &fixture.repo,
+            &session,
+            "origin/main",
+            Some(owner.number),
+            Some(owner),
+            None,
+            None,
+        )
+        .unwrap();
+        session.window_id = "window-resume".into();
+        session.session_id = "session-after-resume".into();
+        save_resumed_workspace_projection(
+            &fixture.repo,
+            &session,
+            None,
+            Some(owner.number),
+            Some(owner),
+            &WorkspaceResumeContext {
+                title: None,
+                owner: None,
+                summary: None,
+                next_action: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let refreshed =
+            save_work_event_settlement_record(&fixture.repo, previous_session, false).unwrap();
+        assert!(refreshed.status.is_settled(), "{:?}", refreshed.status);
+        let diagnosis = execution_state::diagnose(&fixture.repo, None);
+        assert_eq!(diagnosis.settlement_severity, "clear");
+        assert!(diagnosis.settlement_dirty_paths.is_empty());
+        assert_eq!(work_event_settlement_refusal(&fixture.repo), None);
+        assert!(canonical_work_for_worktree_is_terminal(&fixture.repo));
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        for session_id in ["session-after-start", "session-after-resume"] {
+            assert!(projection
+                .unassigned_agents()
+                .any(|agent| agent.session_id == session_id));
+        }
+    }
+
+    #[test]
     fn generation_scoped_work_settlement_rejects_predecessor_receipt() {
         let _env_lock = crate::env_test_lock()
             .lock()
