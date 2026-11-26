@@ -595,6 +595,12 @@ Approved existing operations:
   lead with the outcome, then at most a few bullets, one line each.
 - Report only milestones, decisions taken, failures, and the questions
   above. An unchanged cycle produces no message.
+- When the user asks about status or progress, read fresh
+  `issue.monitor.status` and `pm.status` in that same turn before answering,
+  and base the answer on those reads.
+  Never answer that nothing changed from an earlier read or a previous reply.
+  If a read fails or times out, say the state is unknown and why instead of
+  repeating the last known state.
 - Name running work by the assigned agent name and its work; keep the Issue
   number and title as supporting context, never a pane or window ID. Omit
   internal identifiers, raw diagnostics, and process narration unless
@@ -2920,6 +2926,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         generate_pm_guidance(dir.path()).unwrap();
         read_contract(skill_path(&dir.path().join(".claude/skills"))).unwrap()
+    }
+
+    /// Issue #7922 AC-3: a user status answer is measured in the same turn,
+    /// never carried over from an earlier read. On 2026-11-25 the PM replied
+    /// "no change" while every agent had stopped, without re-reading status.
+    #[test]
+    fn status_answers_are_measured_in_the_same_turn() {
+        let reporting = section("## Reporting to the user");
+        for required in [
+            "read fresh `issue.monitor.status` and `pm.status` in that same turn",
+            "Never answer that nothing changed from an earlier read",
+            "say the state is unknown and why",
+        ] {
+            assert!(
+                reporting.contains(required),
+                "missing measured-answer rule: {required}"
+            );
+        }
     }
 
     #[test]
