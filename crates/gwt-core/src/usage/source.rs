@@ -56,24 +56,35 @@ pub type UsagePoll<'a> = Pin<Box<dyn Future<Output = ProviderUsage> + Send + 'a>
 /// Reads the default account usage of one provider. A read that fails is
 /// reported as a degraded row ([`ProviderUsage::degraded`]), never as an
 /// error. The registry still isolates a source that panics.
-pub trait UsageSource: Send {
+///
+/// `C` is the poll context the caller owns. It carries the per-poll inputs and
+/// any state the caller shares between sources (caches, cadence), so a source
+/// itself may stay stateless.
+pub trait UsageSource<C = UsageContext>: Send {
     fn descriptor(&self) -> &UsageSourceDescriptor;
-    fn poll<'a>(&'a mut self, ctx: &'a UsageContext) -> UsagePoll<'a>;
+    fn poll<'a>(&'a mut self, ctx: &'a mut C) -> UsagePoll<'a>;
 }
 
 /// Ordered set of usage sources, one per provider.
-#[derive(Default)]
-pub struct UsageSourceRegistry {
-    sources: Vec<Box<dyn UsageSource>>,
+pub struct UsageSourceRegistry<C = UsageContext> {
+    sources: Vec<Box<dyn UsageSource<C>>>,
 }
 
-impl UsageSourceRegistry {
+impl<C> Default for UsageSourceRegistry<C> {
+    fn default() -> Self {
+        Self {
+            sources: Vec::new(),
+        }
+    }
+}
+
+impl<C> UsageSourceRegistry<C> {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Register a source. Registration order is enumeration order.
-    pub fn register(&mut self, source: Box<dyn UsageSource>) -> &mut Self {
+    pub fn register(&mut self, source: Box<dyn UsageSource<C>>) -> &mut Self {
         self.sources.push(source);
         self
     }
@@ -89,10 +100,12 @@ impl UsageSourceRegistry {
     /// Poll every source in registration order. Always returns exactly one
     /// row per source, keyed by the source's descriptor; a source that panics
     /// yields an `Unavailable` row and the remaining sources are still polled.
-    pub async fn poll_all(&mut self, ctx: &UsageContext) -> Vec<ProviderUsage> {
+    /// After a panic the context keeps whatever the panicking source left in it.
+    pub async fn poll_all(&mut self, ctx: &mut C) -> Vec<ProviderUsage> {
         let mut rows = Vec::with_capacity(self.sources.len());
         for source in &mut self.sources {
             let provider = source.descriptor().provider;
+            let ctx = &mut *ctx;
             let polled = match catch_unwind(AssertUnwindSafe(move || {
                 let source = source;
                 source.poll(ctx)
@@ -134,12 +147,12 @@ impl UnknownUsageSource {
     }
 }
 
-impl UsageSource for UnknownUsageSource {
+impl<C> UsageSource<C> for UnknownUsageSource {
     fn descriptor(&self) -> &UsageSourceDescriptor {
         &self.descriptor
     }
 
-    fn poll<'a>(&'a mut self, _ctx: &'a UsageContext) -> UsagePoll<'a> {
+    fn poll<'a>(&'a mut self, _ctx: &'a mut C) -> UsagePoll<'a> {
         let provider = self.descriptor.provider;
         Box::pin(async move {
             ProviderUsage::degraded(
@@ -200,7 +213,7 @@ mod tests {
             &self.descriptor
         }
 
-        fn poll<'a>(&'a mut self, ctx: &'a UsageContext) -> UsagePoll<'a> {
+        fn poll<'a>(&'a mut self, ctx: &'a mut UsageContext) -> UsagePoll<'a> {
             Box::pin(async move {
                 let mut row = ProviderUsage::degraded(UsageProvider::Copilot, UsageState::Ok);
                 row.windows = vec![UsageWindow::new(WindowKind::FiveHour, 40.0, None)];
@@ -219,7 +232,7 @@ mod tests {
             &self.descriptor
         }
 
-        fn poll<'a>(&'a mut self, _ctx: &'a UsageContext) -> UsagePoll<'a> {
+        fn poll<'a>(&'a mut self, _ctx: &'a mut UsageContext) -> UsagePoll<'a> {
             Box::pin(async move { panic!("usage reader exploded") })
         }
     }
@@ -250,7 +263,7 @@ mod tests {
             ]
         );
 
-        let rows = registry.poll_all(&ctx()).await;
+        let rows = registry.poll_all(&mut ctx()).await;
         let providers: Vec<_> = rows.iter().map(|row| row.provider).collect();
         assert_eq!(
             providers,
@@ -270,7 +283,7 @@ mod tests {
             }))
             .register(fixed(UsageProvider::ClaudeCode, "Claude Code", "CC"));
 
-        let rows = registry.poll_all(&ctx()).await;
+        let rows = registry.poll_all(&mut ctx()).await;
 
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].state, UsageState::Ok);
@@ -300,7 +313,7 @@ mod tests {
             registry.descriptors()[0].acquisition,
             UsageAcquisition::None
         );
-        let rows = registry.poll_all(&ctx()).await;
+        let rows = registry.poll_all(&mut ctx()).await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, UsageProvider::Antigravity);
         assert!(
@@ -310,6 +323,51 @@ mod tests {
         );
         assert!(rows[0].windows.is_empty());
         assert!(!rows[0].limit_reached);
+    }
+
+    /// Counts how many sources ran before it, through the shared context.
+    struct CountingSource {
+        descriptor: UsageSourceDescriptor,
+    }
+
+    impl UsageSource<u32> for CountingSource {
+        fn descriptor(&self) -> &UsageSourceDescriptor {
+            &self.descriptor
+        }
+
+        fn poll<'a>(&'a mut self, ctx: &'a mut u32) -> UsagePoll<'a> {
+            Box::pin(async move {
+                *ctx += 1;
+                let mut row = ProviderUsage::degraded(self.descriptor.provider, UsageState::Ok);
+                row.account_label = Some(ctx.to_string());
+                row
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sources_share_the_callers_mutable_poll_context() {
+        let mut registry = UsageSourceRegistry::<u32>::new();
+        for (provider, label) in [
+            (UsageProvider::Codex, "CX"),
+            (UsageProvider::ClaudeCode, "CC"),
+        ] {
+            registry.register(Box::new(CountingSource {
+                descriptor: descriptor(provider, label, label),
+            }));
+        }
+        registry.register(Box::new(UnknownUsageSource::new(
+            UsageProvider::Copilot,
+            "GitHub Copilot",
+            "GH",
+        )));
+
+        let mut polls = 0;
+        let rows = registry.poll_all(&mut polls).await;
+
+        assert_eq!(polls, 2);
+        let labels: Vec<_> = rows.iter().map(|row| row.account_label.clone()).collect();
+        assert_eq!(labels, vec![Some("1".into()), Some("2".into()), None]);
     }
 
     #[test]

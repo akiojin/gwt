@@ -37,6 +37,9 @@ use crate::embedded_server::ClientHub;
 use crate::OutboundEvent;
 use gwt::BackendEvent;
 
+#[path = "usage_sources.rs"]
+mod sources;
+
 /// Base polling cadence. Codex (local) refreshes every tick; Claude is further
 /// gated by [`should_fetch_claude`].
 const TICK_SECS: u64 = 30;
@@ -481,10 +484,14 @@ impl Poller {
             &crate::session_ledger_cache::SessionLedgerCache::new()
                 .load_shared(&gwt_core::paths::gwt_sessions_dir()),
         );
-        let mut accounts = vec![
-            self.codex_account(&config, now),
-            self.claude_account(&config, now, force).await,
-        ];
+        let mut accounts = sources::default_account_sources()
+            .poll_all(&mut sources::PollContext {
+                poller: self,
+                config: &config,
+                now,
+                force,
+            })
+            .await;
         for account in &mut accounts {
             account.pool_account_id = Some(default_account_id(&store, account.provider));
         }
