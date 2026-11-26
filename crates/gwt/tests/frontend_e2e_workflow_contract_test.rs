@@ -158,9 +158,9 @@ fn the_frontend_job_runs_the_embedded_e2e_suite() {
     let step = frontend_step(HEADED_WEBVIEW_STEP);
     assert!(
         step.contains("xvfb-run -a bash scripts/run-visual-tests.sh")
-            && step.contains("--workers=2 --retries=0 --headed")
+            && step.contains("--workers=1 --retries=0 --headed")
             && step.contains("headed_e2e_reporter.cjs"),
-        "the frontend job must measure the whole embedded suite with two headed Chromium workers"
+        "the frontend job must give the whole headed suite exclusive use of the display"
     );
 }
 

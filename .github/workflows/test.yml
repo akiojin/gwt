@@ -1431,6 +1431,8 @@ jobs:
         id: headed-webview-evidence
         # Keep Git/Rust-based regressions on the hosted runner. Only browser
         # specs need this image's baked-in browsers and OS dependencies.
+        # One browser worker owns the display so a second Chromium window
+        # cannot interrupt native focus or commit a pending IME composition.
         run: |
           version="$(tr -d '[:space:]' < scripts/playwright-version.txt)"
           evidence=crates/gwt/playwright/test-results/ci-headed
@@ -1442,7 +1444,7 @@ jobs:
             --env GWT_HEADED_E2E_REPORT="/workspace/$evidence/report.json" \
             "mcr.microsoft.com/playwright:v${version}-noble" \
             xvfb-run -a bash scripts/run-visual-tests.sh \
-              --workers=2 --retries=0 --headed \
+              --workers=1 --retries=0 --headed \
               --output="/workspace/$evidence/browser" \
               --reporter=line,/workspace/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs
           node -e 'const a = require("node:assert/strict"); const r = require(process.argv[1]); a.equal(r.status, "passed"); a.equal(r.failed, 0); a.ok(r.chromium_dark_passed > 0); a.ok(r.chromium_light_passed > 0);' "$GITHUB_WORKSPACE/$evidence/report.json"
