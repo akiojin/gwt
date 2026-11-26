@@ -1148,6 +1148,7 @@ jobs:
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_record::tests::windows_verify_run_launches_bare_npm_global_pnpm -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_lease:: -- --test-threads=1
         timeout-minutes: 15
       - name: Run Windows verification driver pinning contracts

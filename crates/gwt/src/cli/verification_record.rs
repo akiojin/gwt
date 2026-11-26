@@ -4089,6 +4089,25 @@ fn execute_command_with_artifact_guard_cancellable(
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
             }
+            if cfg!(windows) && args[0].eq_ignore_ascii_case("pnpm") {
+                // CreateProcess does not find npm's pnpm.cmd from the bare
+                // name. Resolve it with the same PATH and PATHEXT as the child.
+                let request = process.get_envs().fold(
+                    gwt_core::process::ProcessPlanRequest::new(process.get_program())
+                        .args(process.get_args())
+                        .current_dir(worktree),
+                    |request, (key, value)| match value {
+                        Some(value) => request.env(key, value),
+                        None => request.env_remove(key),
+                    },
+                );
+                process = match gwt_core::process::resolved_command(request) {
+                    Ok(process) => process,
+                    Err(error) => {
+                        return spawn_failure_result(output_worktree, command, &error.to_string());
+                    }
+                };
+            }
             execute_inherited_command_cancellable(
                 &mut process,
                 temp.path(),
@@ -8720,6 +8739,47 @@ pub(crate) mod tests {
         assert!(
             transcript.contains("verify env probe <probe@example.com>"),
             "leading assignments must reach the child process: {transcript}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verify_run_launches_bare_npm_global_pnpm() {
+        let project = tempfile::tempdir().unwrap();
+        let global_bin = project.path().join("npm global");
+        let package_bin = global_bin.join("node_modules/pnpm/bin");
+        fs::create_dir_all(&package_bin).unwrap();
+        fs::write(
+            global_bin.join("pnpm.cmd"),
+            "@echo off\r\nnode \"%dp0%\\node_modules\\pnpm\\bin\\pnpm.cjs\" %*\r\n",
+        )
+        .unwrap();
+        fs::write(
+            package_bin.join("pnpm.cjs"),
+            "console.log(JSON.stringify(process.argv.slice(2)));",
+        )
+        .unwrap();
+        let node = which::which("node.exe").expect("the Windows CI runner provides Node.js");
+        let path = std::env::join_paths([global_bin.as_path(), node.parent().unwrap()]).unwrap();
+        let command = format!(
+            "PATH=\"{}\" PATHEXT=.CMD;.EXE pnpm --filter \"@example/test app\" check:api",
+            path.to_string_lossy()
+        );
+
+        let (code, _, output, _) = execute_command_with_isolation(
+            project.path(),
+            &command,
+            true,
+            None,
+            &VerificationHost::Inherit,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0, "{output}");
+        assert!(
+            output.contains(r#"["--filter","@example/test app","check:api"]"#),
+            "{output}"
         );
     }
 
