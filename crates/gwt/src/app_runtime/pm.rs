@@ -647,6 +647,12 @@ impl AppRuntime {
         window_id: &str,
         detail: &str,
     ) -> bool {
+        // Issue #7696: the launch has ended. Its Error window may stay open,
+        // but it must not read as a PM launch still in flight, or the retry
+        // below defers itself on every tick until a human closes that window.
+        if let Some(state) = self.project_state_mut(context) {
+            state.pending_pm_launches.remove(window_id);
+        }
         // Issue #7664: right after an update the machine Agent capacity
         // observation is briefly unavailable. That refusal clears by itself,
         // so retry the PM on the scheduled tick instead of giving up.
