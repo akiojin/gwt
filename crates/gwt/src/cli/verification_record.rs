@@ -4037,7 +4037,7 @@ fn execute_command_with_artifact_guard_cancellable(
     let temporary_base = crate::cli::verification_lease::command_temporary_base(worktree, command)?;
     fs::create_dir_all(&temporary_base).map_err(|error| error.to_string())?;
     let temp = tempfile::Builder::new()
-        .prefix("gwt-verify-")
+        .prefix(gwt_config::home::VERIFICATION_COMMAND_TEMP_PREFIX)
         .tempdir_in(temporary_base)
         .map_err(|error| error.to_string())?;
     let result = match host {
