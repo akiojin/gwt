@@ -495,6 +495,14 @@ impl Poller {
         for account in &mut accounts {
             account.pool_account_id = Some(default_account_id(&store, account.provider));
         }
+        let providers = providers
+            .into_iter()
+            .map(|mut descriptor| {
+                descriptor.default_account_id =
+                    Some(default_account_id(&store, descriptor.provider));
+                descriptor
+            })
+            .collect();
         accounts.extend(self.pool_accounts(&config, &store, now, force).await);
         gwt_core::usage::account_limits::attach_account_limits(
             &mut accounts,
@@ -1400,10 +1408,19 @@ mod tests {
             gwt_agent::builtin_agent_descriptors().len()
         );
         assert!(first.sessions.is_empty());
-        assert_eq!(
-            first.providers,
-            sources::default_account_sources().descriptors()
-        );
+        // SPEC #7347 S4: each listed provider names its default account, so
+        // the frontend needs no provider → account table.
+        let defaults: Vec<_> = first
+            .providers
+            .iter()
+            .map(|p| (p.provider, p.default_account_id.clone()))
+            .collect();
+        let expected: Vec<_> = sources::default_account_sources()
+            .descriptors()
+            .into_iter()
+            .map(|p| (p.provider, Some(p.provider.agent_command().to_string())))
+            .collect();
+        assert_eq!(defaults, expected);
         let row = |provider| {
             first
                 .accounts

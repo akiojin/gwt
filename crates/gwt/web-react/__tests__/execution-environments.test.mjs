@@ -6,7 +6,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import "../__tests__/jsx-loader.mjs";
 import { ExecutionEnvironments } from "../src/surfaces/ExecutionEnvironments.jsx";
-import { accountPools, accountRows, environmentRows } from "../../web/execution-environments.js";
+import { accountPools, accountRows, environmentRows, providerRows } from "../../web/execution-environments.js";
 import { createUiStateStore } from "../../web/ui-state-store.js";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -32,6 +32,19 @@ const codex = (extra = {}) => ({
   windows: [{ kind: "weekly", used_percent: 90, resets_at: RESET }],
   ...extra,
 });
+// SPEC #7347: the backend's provider list, sent with every usage snapshot.
+const descriptor = (provider, display_name, short_label, default_account_id) =>
+  ({ provider, display_name, short_label, acquisition: "none", default_account_id });
+const PROVIDERS = [
+  descriptor("claude_code", "Claude Code", "CC", "claude"),
+  descriptor("codex", "Codex", "CX", "codex"),
+  descriptor("grok_build", "Grok Build", "GB", "grok"),
+  descriptor("antigravity", "Antigravity CLI", "AG", "agy"),
+  descriptor("opencode", "OpenCode", "OC", "opencode"),
+  descriptor("openclaw", "OpenClaw", "OW", "openclaw"),
+  descriptor("hermes", "Hermes Agent", "HA", "hermes"),
+  descriptor("copilot", "GitHub Copilot", "GH", "gh"),
+];
 const agents = [
   { id: "claude", name: "Claude Code", installed: true, installed_version: "2.1.3", update_available: false },
   { id: "codex", name: "Codex", installed: true, installed_version: "0.164.0", update_available: true },
@@ -67,9 +80,10 @@ const definitionsOf = (...environments) => ({
 });
 const DEFAULT_DEFINITIONS = definitionsOf(definition("claude"), definition("codex"));
 
-async function mount(snapshot, {
+async function mount(reported, {
   view = { name: "environments", key: null }, loaded = true, definitions = DEFAULT_DEFINITIONS, extra = {},
 } = {}) {
+  const snapshot = { providers: PROVIDERS, ...reported };
   const { document, window } = parseHTML("<!doctype html><html><body></body></html>");
   globalThis.document = document;
   globalThis.window = window;
@@ -79,6 +93,7 @@ async function mount(snapshot, {
   const state = () => ({
     loaded, accounts: accountRows(snapshot), pools: accountPools(loaded ? definitions : null, accountRows(snapshot)),
     environments: environmentRows(loaded ? definitions : null, snapshot, agents),
+    providerUsage: providerRows(snapshot),
     definitions: loaded ? definitions : null,
     registeredAccounts: definitions.accounts, viaOptions: definitions.via_options, error: null, saving: false, saved: false, ...extra,
   });
@@ -449,4 +464,26 @@ test("a refused request is shown where it was made", async () => {
     view: { name: "edit", key: "claude" }, extra: { error: "This execution environment no longer exists." },
   });
   assert.equal(document.querySelector('[role="alert"]').textContent, "This execution environment no longer exists.");
+});
+
+// SPEC #7347 AC-1 / AC-2: Accounts lists every provider with a label, its
+// default account's usage, or n/a with the reason as a tooltip.
+test("Accounts lists every provider and marks unreadable usage as n/a", async () => {
+  const grok = { provider: "grok_build", pool_account_id: "grok",
+    state: { kind: "unknown", reason: "no official usage source" }, windows: [], limit_reached: false };
+  const { document } = await mount({ accounts: [claude({ pool_account_id: "claude" }), codex({ pool_account_id: "codex" }), grok] },
+    { view: { name: "accounts", key: null } });
+  const section = document.querySelector("[aria-label='Usage by provider']");
+  assert.ok(section, "the provider list is on Accounts");
+  const items = [...section.querySelectorAll("[data-provider]")];
+  assert.deepEqual(items.map(item => item.dataset.provider), PROVIDERS.map(p => p.provider));
+  const item = provider => items.find(row => row.dataset.provider === provider);
+  assert.match(item("claude_code").textContent, /CC.*Claude Code.*58% used/);
+  assert.equal(item("codex").dataset.severity, "warning");
+  for (const provider of ["grok_build", "opencode", "copilot"]) {
+    assert.match(item(provider).textContent, /n\/a/, provider);
+    assert.match(item(provider).getAttribute("title"), /limits are unknown/, provider);
+    assert.equal(item(provider).dataset.na, "true");
+  }
+  assert.equal(item("claude_code").getAttribute("title"), null);
 });

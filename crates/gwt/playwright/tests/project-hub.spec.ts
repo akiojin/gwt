@@ -687,7 +687,10 @@ test.describe("shared header and footer", () => {
             via_tool: "codex", via_tool_name: "Codex", runtime: {}, tool_installed: true, projects: [] }],
           via_options: [],
         } });
-        (window as any).__gwtHubReply({ kind: "provider_usage", accounts: [{ provider: "codex", plan: "pro",
+        // SPEC #7347: the backend lists each provider with its default account.
+        (window as any).__gwtHubReply({ kind: "provider_usage",
+          providers: [{ provider: "codex", display_name: "Codex", short_label: "CX", acquisition: "cli_output", default_account_id: "codex" }],
+          accounts: [{ provider: "codex", plan: "pro",
           windows: [{ kind: "weekly", used_percent: 42, resets_at: "2030-01-06T03:04:05Z" }], state: { kind: "ok" } }],
           sessions: [], consumption: [] });
       };
