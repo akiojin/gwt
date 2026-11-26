@@ -1920,6 +1920,12 @@ body {
   cursor: pointer;
 }
 
+/* Issue #7988: the value is unknown until the first Issues status arrives. */
+.knowledge-monitor-switch[aria-disabled="true"] {
+  color: var(--color-text-disabled);
+  cursor: progress;
+}
+
 .knowledge-monitor-switch:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
