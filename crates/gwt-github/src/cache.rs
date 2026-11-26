@@ -779,6 +779,13 @@ impl Cache {
         Ok(())
     }
 
+    /// Load only an Issue's cached metadata (state, labels, `updated_at`)
+    /// without opening its body or comments. `None` if absent or unreadable.
+    pub fn load_meta(&self, number: IssueNumber) -> Option<CacheMeta> {
+        let bytes = read_payload(&self.issue_dir(number).join("meta.json")).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
     /// Load a full cache entry by issue number. Returns `None` if the issue
     /// is not present in the cache.
     pub fn load_entry(&self, number: IssueNumber) -> Option<CacheEntry> {
