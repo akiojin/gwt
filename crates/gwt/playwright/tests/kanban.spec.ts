@@ -619,13 +619,13 @@ test.describe("Issue Bridge load recovery", () => {
           if (onMessage) socket.removeEventListener("message", onMessage);
         }
       };
-      // Native attention is measured with browser-check's live asset server.
-      // Self-contained runs retain the original CSS-hidden coverage.
-      for (const nativeHidden of testInfo.project.use.headless === false && liveBase ? [false, true] : [false]) {
+      // Headed runs also measure native page attention. Headless runs still
+      // cover the CSS-hidden surface using the same backend fixture.
+      for (const nativeHidden of testInfo.project.use.headless === false ? [false, true] : [false]) {
         const local = nativeHidden
           ? await withNativeHiddenPage(playwright.chromium, testInfo, async nativePage => {
             await installIssueBridgeBackend(nativePage, { includeRelatedWork: true, theme });
-            await nativePage.goto(new URL("/p/0123456789abcdef", liveBase).href);
+            await nativePage.goto(liveBase ? new URL("/p/0123456789abcdef", liveBase).href : APP_URL);
             await expect.poll(() => nativePage.evaluate(() => document.documentElement.dataset.theme)).toBe(theme);
             await expect.poll(() => nativePage.evaluate(() =>
               document.querySelectorAll(".surface-knowledge .knowledge-row").length)).toBe(5);

@@ -1391,8 +1391,11 @@ jobs:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-frontend
       cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
-    if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -1424,19 +1427,70 @@ jobs:
       # Embedded-frontend specs stub WebSocket + serve crates/gwt/web via
       # page.route, so they run without a live gwt. live-gwt specs self-skip
       # when GWT_PLAYWRIGHT_BASE_URL is unset.
-      - name: Run WebView E2E (embedded Playwright specs)
+      - name: Measure headed WebView E2E
+        id: headed-webview-evidence
         # Keep Git/Rust-based regressions on the hosted runner. Only browser
         # specs need this image's baked-in browsers and OS dependencies.
+        # One browser worker owns the display so a second Chromium window
+        # cannot interrupt native focus or commit a pending IME composition.
         run: |
           version="$(tr -d '[:space:]' < scripts/playwright-version.txt)"
-          docker run --rm --ipc=host \
+          evidence=crates/gwt/playwright/test-results/ci-headed
+          mkdir -p "$evidence"
+          docker run --rm --init --ipc=host \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
             --workdir /workspace --env CI=true \
+            --env GWT_CI_HEADED_EVIDENCE=1 \
+            --env GWT_HEADED_E2E_REPORT="/workspace/$evidence/report.json" \
             "mcr.microsoft.com/playwright:v${version}-noble" \
-            bash scripts/run-visual-tests.sh --workers=2
+            xvfb-run -a bash scripts/run-visual-tests.sh \
+              --workers=1 --retries=0 --headed \
+              --output="/workspace/$evidence/browser" \
+              --reporter=line,/workspace/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs
+          node -e 'const a = require("node:assert/strict"); const r = require(process.argv[1]); a.equal(r.status, "passed"); a.equal(r.failed, 0); a.ok(r.chromium_dark_passed > 0); a.ok(r.chromium_light_passed > 0);' "$GITHUB_WORKSPACE/$evidence/report.json"
+          for theme in dark light; do
+            test -n "$(find "$evidence/browser" -path "*-chromium-$theme/*.png" -print -quit)"
+            test -n "$(find "$evidence/browser" -path "*-chromium-$theme/trace.zip" -print -quit)"
+          done
         # The full serial suite measured 14.7m before image/bootstrap overhead.
-        # Retain all cases and retries with finite execution headroom.
-        timeout-minutes: 25
+        # Retain all cases with finite execution headroom.
+        timeout-minutes: 35
+      - name: Retain headed WebView evidence
+        if: ${{ !cancelled() && steps.headed-webview-evidence.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: webview-headed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: crates/gwt/playwright/test-results/ci-headed/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      # The protected job stays pending while the producing agent inspects its
+      # own PR's artifact. Bind the acknowledgement to this attempt and head.
+      - name: Require delegated WebView visual review
+        if: >-
+          ${{ github.event_name == 'pull_request' &&
+          contains(github.event.pull_request.body, 'Headed Evidence: CI') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          grep -Fxq 'Headed Evidence: CI' <<<"${PR_BODY//$'\r'/}" || exit 0
+          expected="Agent Visual Check: pass (headed CI $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT, $PR_HEAD)"
+          echo "Review the WebView evidence artifact, then record: $expected"
+          for attempt in {1..48}; do
+            if gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --slurp \
+              | jq -e --arg author "$PR_AUTHOR" --arg expected "$expected" \
+                'any(.[][]; .user.login == $author and (.body | split("\n") | map(rtrimstr("\r")) | index($expected) != null))' >/dev/null; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::No visual review found for this PR head and CI attempt."
+          exit 1
+        timeout-minutes: 13
 
   report-post-merge-failure:
     needs: [source-sync, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
