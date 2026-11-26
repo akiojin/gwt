@@ -11641,6 +11641,18 @@ impl OwnerState {
             return;
         };
         runtime.exit_drained = true;
+        if result.is_ok() && runtime.pty.stopped_by_finalizer() {
+            // The finalizer owns this stop. The natural-exit policy can infer
+            // a provider failure from old screen text and notify Issues again.
+            runtime.pty_status = WindowProcessStatus::Stopped;
+            runtime.hook_status = None;
+            runtime.policy = Default::default();
+            runtime.detail = None;
+            let runtime = self.runtimes.remove(&id).expect("exact stopped runtime");
+            let (reply, _) = oneshot::channel();
+            self.start_close(id, runtime, CloseCause::NaturalExit, reply);
+            return;
+        }
         let error = result.err().or_else(|| runtime.worker_error.take());
         if error.is_some() {
             runtime.policy.recoverable_error = true;
@@ -16284,15 +16296,20 @@ mod tests {
 
     #[tokio::test]
     async fn natural_exit_commits_session_receipt_and_stopped_state_before_terminal_projection() {
-        check_exit_after_reader_drain(false).await;
+        check_exit_after_reader_drain(false, false).await;
     }
 
     #[tokio::test]
     async fn reader_failure_before_clean_exit_retains_diagnostics_after_drain() {
-        check_exit_after_reader_drain(true).await;
+        check_exit_after_reader_drain(true, false).await;
     }
 
-    async fn check_exit_after_reader_drain(reader_error: bool) {
+    #[tokio::test]
+    async fn finalizer_killed_pty_is_published_as_stopped() {
+        check_exit_after_reader_drain(false, true).await;
+    }
+
+    async fn check_exit_after_reader_drain(reader_error: bool, finalized: bool) {
         let root = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let sessions = gwt_core::paths::gwt_sessions_dir();
@@ -16353,8 +16370,14 @@ mod tests {
                 false,
             );
         }
+        if finalized {
+            assert!(
+                crate::session_finalizer::kill_and_reap(&state.runtimes["pane"].pty, "pane")
+                    .unwrap()
+            );
+        }
         let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
-        if !reader_error {
+        if !reader_error && !finalized {
             handle
                 .request(request(OwnerCommand::Input {
                     id: "pane".into(),
@@ -16405,10 +16428,7 @@ mod tests {
         let child_gone = !crate::process::is_process_alive(child_pid);
         handle.shutdown().await;
         actor.join().unwrap();
-        assert!(
-            terminal.is_ok(),
-            "the actual owned PTY must report its exact exit"
-        );
+        assert_eq!(terminal.unwrap(), WindowProcessStatus::Stopped);
         assert_eq!(
             observed.status,
             gwt_agent::AgentStatus::Stopped,
@@ -16416,7 +16436,7 @@ mod tests {
         );
         assert_eq!(
             observed.last_exit_code,
-            Some(0),
+            Some(u32::from(finalized)),
             "Session must retain the physical exit receipt"
         );
         assert!(

@@ -112,6 +112,7 @@ pub fn kill_and_reap(pty: &PtyHandle, window_id: &str) -> std::io::Result<bool> 
         "starting detached PTY teardown stage"
     );
     let kill_started = Instant::now();
+    pty.record_finalizer_stop();
     let kill_result = pty.terminate_and_wait_for_tree(Duration::from_secs(2));
     let tree_exited = matches!(&kill_result, Ok(true));
     let kill_elapsed_ms = u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
