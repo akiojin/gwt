@@ -2287,6 +2287,7 @@ fn load_open_pr_launch_observations(
                 Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                     pr_number: *number,
                     lifecycle: "UNDETERMINED".into(),
+                    auto_merge_enabled: None,
                 })
             });
         }
@@ -2327,6 +2328,7 @@ fn collect_open_pr_launch_observations(
                     hold = Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                         pr_number: *number,
                         lifecycle: pr.lifecycle.clone(),
+                        auto_merge_enabled: Some(pr.auto_merge_enabled),
                     })
                 }
                 Ok(_) => {} // Closed or merged: release this PR's hold.
@@ -3748,7 +3750,12 @@ fn read_open_pr_inventory(
         .filter(|issue_number| {
             monitor
                 .autonomous_record(**issue_number)
-                .is_some_and(|record| record.phase == crate::AutonomousPhase::Implementing)
+                .is_some_and(|record| {
+                    matches!(
+                        record.phase,
+                        crate::AutonomousPhase::Idle | crate::AutonomousPhase::Implementing
+                    )
+                })
         })
         .count();
     if implementing == 0 {
@@ -3873,7 +3880,7 @@ fn advance_one_autonomous_issue(
         return Ok(());
     };
     match record.phase {
-        crate::AutonomousPhase::Implementing => {
+        crate::AutonomousPhase::Idle | crate::AutonomousPhase::Implementing => {
             let Some(branch) = monitor
                 .inbox_item(issue_number)
                 .and_then(|item| item.launch_plan.as_ref())
@@ -3884,7 +3891,12 @@ fn advance_one_autonomous_issue(
             // Issue #3963 AC-2/AC-3: resolved from the scan's one inventory. No
             // inventory (the readback degraded) and no row (no open PR) both
             // leave the phase where the last successful readback put it.
-            if let Some(pr) = open_prs.and_then(|index| index.get(&branch).copied()) {
+            let pr = open_prs
+                .and_then(|index| index.get(&branch).copied())
+                .filter(|pr| {
+                    record.phase != crate::AutonomousPhase::Idle || record.pr_number == Some(*pr)
+                });
+            if let Some(pr) = pr {
                 // Issue #4117 AC-1/AC-2: admission before the readbacks. A PR
                 // whose review window is already live, or a full `max_active`,
                 // keeps the record Implementing so the next scan retries; the
@@ -5694,6 +5706,7 @@ pub(crate) mod tests {
                 hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                     pr_number: 8,
                     lifecycle: "IN-PROGRESS".into(),
+                    auto_merge_enabled: None,
                 }),
             },
         );
@@ -5806,6 +5819,7 @@ pub(crate) mod tests {
                 Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                     pr_number: 7,
                     lifecycle: "IN-PROGRESS".into(),
+                    auto_merge_enabled: None,
                 }),
             )]),
             open_pr_observed_at: Some("2026-10-21T00:00:00Z".into()),

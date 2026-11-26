@@ -52,8 +52,17 @@ test.describe("Issues touch navigation", () => {
   test("Issues mode and preview tabs are 44px tap targets on a phone", async ({ page }, info) => {
     const root = page.locator(".issue-bridge-root");
     const detail = root.locator(".knowledge-detail-pane");
+    // The async detail reply can replace the preview tabs. Select and measure
+    // in a single browser task so the measurements refer to the current DOM.
+    const controlSizes = () => page.evaluate(() =>
+      Array.from(document.querySelectorAll(".issue-bridge-root .knowledge-state-filter button"))
+        .filter(node => node.checkVisibility())
+        .map(node => {
+          const { width, height, left, right } = node.getBoundingClientRect();
+          return { label: node.textContent, width, height, left, right };
+        }));
     const controls = root.locator(".knowledge-state-filter button:visible");
-    const heights = () => controls.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+    const heights = async () => (await controlSizes()).map(size => size.height);
     await row(page, 1).locator(".knowledge-row-select").click();
     await expect(detail).toContainText("Description for #1");
     await expect(controls).toHaveCount(5);
@@ -76,10 +85,8 @@ test.describe("Issues touch navigation", () => {
       expect(actions.y, "toolbar actions do not cover the mode tabs").toBeGreaterThanOrEqual(main.y + main.height);
       expect(await root.locator(".issue-filter-hint").evaluate(node => node.scrollWidth <= node.clientWidth),
         "the existing view hint fits its column").toBe(true);
-      const sizes = await controls.evaluateAll(nodes => nodes.map(node => {
-        const rect = node.getBoundingClientRect();
-        return { label: node.textContent, width: rect.width, height: rect.height, left: rect.left, right: rect.right };
-      }));
+      const sizes = await controlSizes();
+      expect(sizes).toHaveLength(5);
       for (const size of sizes) {
         expect(size.width, `${size.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
         expect(size.height, `${size.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
