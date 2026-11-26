@@ -2754,6 +2754,11 @@ JSON
   markers from complete or incomplete orphan groups. Indexed comments are
   refused. Retrying the same IDs skips comments already archived.
   Run `issue.spec.lint` again to confirm index health.
+  A hand-written gwt-spec Issue without the `gwt-spec` header and sections
+  index refuses section edits. Pass `wrap_body` to the repair operation
+  (for example, `{"number":1784,"wrap_body":true}`) to wrap the existing body,
+  unchanged, as the `spec` section; the readback must match before the
+  structure is kept. Then save `plan` / `tasks` with `issue.spec.edit`.
 
 ```bash
 gwtd <<'JSON'

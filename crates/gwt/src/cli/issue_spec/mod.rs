@@ -205,6 +205,7 @@ pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
         return Ok(IssueCommand::SpecRepair {
             number,
             archive_comments: Vec::new(),
+            wrap_body: false,
         });
     }
 
@@ -462,6 +463,7 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::SpecRepair {
             number,
             archive_comments,
+            wrap_body,
         } => {
             let cache = Cache::new(env.cache_root());
             let ops = SpecOps::new(
@@ -470,9 +472,20 @@ pub(super) fn run<E: CliEnv>(
                 },
                 cache,
             );
+            let wrapped = if wrap_body {
+                Some(ops.wrap_unstructured_body(IssueNumber(number))?)
+            } else {
+                None
+            };
             let repaired = ops.repair_sections(IssueNumber(number))?;
             let archived = ops.archive_orphan_comments(IssueNumber(number), &archive_comments)?;
-            if repaired.is_empty() && archived.is_empty() {
+            if let Some(receipt) = &wrapped {
+                out.push_str(&format!(
+                    "wrapped the body of Issue #{number} as the spec section ({} bytes, sha256 {}, {}); plan / tasks can now be saved with issue.spec.edit\n",
+                    receipt.bytes, receipt.sha256, receipt.location
+                ));
+            }
+            if wrapped.is_none() && repaired.is_empty() && archived.is_empty() {
                 out.push_str(&format!(
                     "refreshed cache for Issue #{number}; no artifact needed repair\n"
                 ));
