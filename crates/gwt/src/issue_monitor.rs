@@ -23478,7 +23478,51 @@ impl IssueMonitorState {
                 }
             }
         }
-        if retryable || triage_refusal {
+        self.settle_launch_failed_at(issue_number, message, retryable || triage_refusal, now);
+        true
+    }
+
+    /// Issue #7274: settle a launch failure for the exact delivery that no
+    /// materializer claimed. A claimed delivery keeps its owner-tuple
+    /// authority in [`Self::record_launch_failed_delivery_at`]; this never
+    /// consumes it.
+    pub(crate) fn record_unclaimed_launch_failed_delivery_at(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        message: impl Into<String>,
+        retryable: bool,
+        now: &str,
+    ) -> bool {
+        let PendingLaunchDeliveryMatch::Matched(index) =
+            self.match_pending_launch_delivery(issue_number, delivery_id)
+        else {
+            return false;
+        };
+        let delivery = &self.pending_launch_deliveries[index];
+        if delivery.materializer_id.is_some()
+            || delivery.materializer_pid.is_some()
+            || delivery.materializer_window_id.is_some()
+            || delivery.materialized_window_id.is_some()
+            || delivery.workspace_durable_window_id.is_some()
+        {
+            return false;
+        }
+        self.pending_launch_deliveries.remove(index);
+        let message = message.into();
+        let retryable = retryable || is_source_triage_refusal(issue_number, &message);
+        self.settle_launch_failed_at(issue_number, message, retryable, now);
+        true
+    }
+
+    fn settle_launch_failed_at(
+        &mut self,
+        issue_number: u64,
+        message: String,
+        retryable: bool,
+        now: &str,
+    ) {
+        if retryable {
             self.record_launch_failed_at(issue_number, message, now);
         } else {
             self.release_confirmed_claim_for_issue(issue_number);
@@ -23494,7 +23538,6 @@ impl IssueMonitorState {
                 MonitorInboxState::LaunchFailed,
             );
         }
-        true
     }
 
     pub fn record_agent_window_failed(

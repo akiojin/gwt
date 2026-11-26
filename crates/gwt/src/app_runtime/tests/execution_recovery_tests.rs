@@ -1775,6 +1775,87 @@ fn startup_retries_aborted_fresh_execution_candidate_cleanup() {
     executor.block_on(owner.shutdown());
 }
 
+/// Issue #7274 AC-2: a Prepared fresh launch retained across a Host restart
+/// (not the pre-Session Manual cancellation) is reconciled only through its
+/// exact receipt identity; another project's identical shape is untouched.
+#[test]
+fn startup_reconciles_retained_prepared_fresh_launch_by_exact_identity_only() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-retained-prepared");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    assert!(candidate_path.exists());
+    let foreign_repo = temp.path().join("foreign-prepared-project");
+    fs::create_dir_all(&foreign_repo).expect("foreign project");
+    init_repo_with_initial_commit(&foreign_repo);
+    let foreign = pending_fresh_execution_fixture_in_worktree(
+        temp.path(),
+        "foreign-retained-prepared",
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        false,
+        foreign_repo.clone(),
+        2359,
+    );
+    let foreign_path = foreign
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", foreign.candidate_session_id));
+    let foreign_before = fs::read(&foreign_path).expect("foreign candidate bytes");
+    let foreign_authority =
+        snapshot_optional_files(&current_generation_authority_artifacts(&foreign_repo));
+    let attempt = |repo: &Path, owner, operation_id: &str| {
+        gwt::cli::execution_state::continuation_attempt_for_operation(repo, owner, operation_id)
+            .expect("read attempt")
+            .expect("attempt")
+            .status
+    };
+    assert_eq!(
+        attempt(&fixture.repo, fixture.owner, &fixture.operation_id),
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+
+    reconcile_fixture_launches(&mut fixture.runtime, &fixture.repo);
+
+    assert!(
+        !candidate_path.exists(),
+        "the exact retained Prepared candidate Session is reconciled"
+    );
+    assert!(!durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    )
+    .unwrap());
+    assert_eq!(
+        attempt(&fixture.repo, fixture.owner, &fixture.operation_id),
+        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read preserved predecessor"),
+        Some(fixture.predecessor_binding.clone()),
+    );
+    assert_eq!(
+        fs::read(&foreign_path).expect("foreign Session retained"),
+        foreign_before
+    );
+    assert!(durable_launch_recovery_exists(
+        &foreign.runtime.sessions_dir,
+        &foreign.candidate_session_id
+    )
+    .unwrap());
+    assert_optional_files_unchanged(&foreign_authority);
+    assert_eq!(
+        attempt(&foreign_repo, foreign.owner, &foreign.operation_id),
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+}
+
 #[test]
 fn startup_retains_aborted_cleanup_after_io_failure_and_retries_successfully() {
     let _env_guard = env_test_lock()
