@@ -1023,6 +1023,8 @@ pub struct IssueMonitorMaxActiveChange {
 pub struct IssueMonitorOpenPrHold {
     pub pr_number: u64,
     pub lifecycle: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_merge_enabled: Option<bool>,
 }
 
 /// A successful per-Issue observation, including an explicit release of a hold.
@@ -16915,6 +16917,7 @@ impl IssueMonitorState {
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
                             reasons.extend(self.claim_candidate_exclusions(item.issue.number));
                             reasons.extend(self.claim_project_policy_hold(item.issue.number));
+                            reasons.extend(self.orphaned_delivery_reason(item.issue.number));
                             // Issue #7266 AC-2 / AC-3: only the Issue whose own
                             // floor holds it reads `retry_backoff`, with when it lifts.
                             if !self.retry_ready_for_saved_profile(item.issue.number, now)
@@ -18880,13 +18883,14 @@ impl IssueMonitorState {
         }
     }
 
-    /// SPEC #3200: autonomous issues currently in flight (phase Implementing /
-    /// Reviewing / Delivering) — the set the daemon orchestration loop advances
-    /// each tick. Terminal/Idle phases are excluded.
+    /// SPEC #3200: autonomous work the daemon advances each tick, including
+    /// a queued review retry whose implementation binding has been released.
     pub fn autonomous_in_flight_issues(&self) -> Vec<u64> {
         self.autonomous_records
             .values()
-            .filter(|record| Self::is_in_flight_phase(record.phase))
+            .filter(|record| {
+                Self::is_in_flight_phase(record.phase) || self.has_queued_review_retry(record)
+            })
             .filter(|record| record.pending_cancelled_claim_phase().is_none())
             .filter(|record| {
                 self.review_dispatch_exclusion_reason(record.issue_number)
@@ -18894,6 +18898,49 @@ impl IssueMonitorState {
             })
             .map(|record| record.issue_number)
             .collect()
+    }
+
+    fn has_queued_review_retry(&self, record: &AutonomousIssueRecord) -> bool {
+        let number = record.issue_number;
+        record.phase == AutonomousPhase::Idle
+            && record.review_passed.is_none()
+            && (record.reviewed_sha.is_some()
+                || record
+                    .review_attempts
+                    .as_ref()
+                    .is_some_and(|attempts| !attempts.verdict_failed))
+            && self
+                .open_pr_observations
+                .get(&number)
+                .and_then(|observation| observation.hold.as_ref())
+                .is_some_and(|hold| record.pr_number == Some(hold.pr_number))
+            && self.terminal_queue_contains(number)
+            && self.inbox_item(number).is_some_and(|item| {
+                item.state == MonitorInboxState::Queued
+                    && item.issue.state == IssueMonitorIssueState::Open
+                    && self.is_autonomous_two_stage_candidate(&item.issue)
+            })
+    }
+
+    fn orphaned_delivery_reason(&self, number: u64) -> Option<String> {
+        let hold = self.open_pr_observations.get(&number)?.hold.as_ref()?;
+        (hold.lifecycle == "MERGE-CANDIDATE"
+            && hold.auto_merge_enabled == Some(false)
+            && !self.active_launches.contains(&number)
+            && !self.process_held_issues.contains(&number)
+            && !self.has_observed_monitor_runtime(number)
+            && !self.review_windows.contains_key(&number)
+            && !self.monitor_canvas_windows().any(|window| {
+                window.review_dispatch
+                    && window.issue_number == Some(number)
+                    && idle_window_is_alive(window.status)
+            }))
+        .then(|| {
+            format!(
+                "PM attention required for PR #{} (auto-merge off, delivery owner absent)",
+                hold.pr_number
+            )
+        })
     }
 
     fn is_in_flight_phase(phase: AutonomousPhase) -> bool {
@@ -51666,6 +51713,7 @@ mod tests {
                     Some(IssueMonitorOpenPrHold {
                         pr_number: 7,
                         lifecycle: lifecycle.into(),
+                        auto_merge_enabled: None,
                     }),
                 )]),
                 now,
@@ -51723,10 +51771,71 @@ mod tests {
     }
 
     #[test]
+    fn issue_7971_binding_dead_retries_the_same_pr_without_an_implementation_slot() {
+        let candidate = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: delivery\n");
+        let mut monitor = autonomous_state();
+        let failed_at = "2026-06-26T00:01:00Z";
+        let retry_at = "2026-06-26T00:02:00Z";
+        scan_queued_candidates(&mut monitor, &[candidate], failed_at);
+        monitor.begin_review(42, 7, "sha-7");
+        monitor.record_review_failure(42, "binding_dead: review window disappeared", failed_at);
+        monitor.requeue_released_launch(42, "acknowledged window is missing", failed_at);
+        monitor.reconcile_open_pr_holds(
+            &BTreeMap::from([(
+                42,
+                Some(IssueMonitorOpenPrHold {
+                    pr_number: 7,
+                    lifecycle: "MERGE-CANDIDATE".into(),
+                    auto_merge_enabled: None,
+                }),
+            )]),
+            failed_at,
+        );
+
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.open_pr_launch_held(42));
+        assert_eq!(monitor.autonomous_in_flight_issues(), vec![42]);
+        assert!(monitor
+            .review_dispatch_hold(42, 7, Some("sha-7"), failed_at)
+            .is_some());
+        monitor
+            .dispatch_review(review_dispatch_for(42, 7), retry_at)
+            .unwrap();
+        let windows = monitor.review_windows();
+        assert_eq!((windows[0].pr_number, windows[0].attempt), (7, 2));
+        assert_eq!(monitor.attempt_count(42), 0);
+    }
+
+    #[test]
+    fn issue_7971_status_names_unarmed_merge_candidate_with_no_owner() {
+        let mut monitor = autonomous_state();
+        let now = "2026-06-26T00:01:00Z";
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        let hold = serde_json::from_value(serde_json::json!({
+            "pr_number": 7, "lifecycle": "MERGE-CANDIDATE", "auto_merge_enabled": false
+        }))
+        .unwrap();
+        monitor.reconcile_open_pr_holds(&BTreeMap::from([(42, Some(hold))]), now);
+
+        let reason = monitor
+            .agent_status_at(now)
+            .inbox
+            .remove(0)
+            .exclusion_reason
+            .unwrap();
+        assert!(
+            reason.contains("PR #7") && reason.contains("PM attention"),
+            "{reason}"
+        );
+        assert!(monitor.open_pr_launch_held(42));
+    }
+
+    #[test]
     fn issue_4157_equal_timestamp_release_cannot_override_a_hold_in_either_order() {
         let hold = Some(IssueMonitorOpenPrHold {
             pr_number: 7,
             lifecycle: "MERGE-CANDIDATE".into(),
+            auto_merge_enabled: None,
         });
         for observations in [[hold.clone(), None], [None, hold.clone()]] {
             let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
@@ -51750,6 +51859,7 @@ mod tests {
             Some(IssueMonitorOpenPrHold {
                 pr_number: 7,
                 lifecycle: "MERGE-CANDIDATE".into(),
+                auto_merge_enabled: None,
             }),
         )]);
         monitor.reconcile_open_pr_holds(&hold, "2026-06-26T00:01:00Z");
@@ -51821,6 +51931,7 @@ mod tests {
                 Some(IssueMonitorOpenPrHold {
                     pr_number: 7,
                     lifecycle: "MERGE-CANDIDATE".into(),
+                    auto_merge_enabled: None,
                 }),
             )]),
             "2026-06-26T00:01:00Z",
@@ -51890,6 +52001,7 @@ mod tests {
                     Some(IssueMonitorOpenPrHold {
                         pr_number: number + 100,
                         lifecycle: "IN-PROGRESS".into(),
+                        auto_merge_enabled: None,
                     }),
                 )
             })
@@ -53070,6 +53182,7 @@ mod tests {
                 Some(IssueMonitorOpenPrHold {
                     pr_number: 7,
                     lifecycle: "MERGE-CANDIDATE".into(),
+                    auto_merge_enabled: None,
                 }),
             )]),
             now,

@@ -305,6 +305,7 @@ mod tests {
                 hold: Some(IssueMonitorOpenPrHold {
                     pr_number: 99,
                     lifecycle: "open".into(),
+                    auto_merge_enabled: None,
                 }),
             },
         );
