@@ -5226,6 +5226,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               accounts: event.accounts || [],
               sessions: (event.sessions || []).filter(session => session.active !== false),
               consumption: event.consumption || [],
+              providers: event.providers || [],
             });
             break;
           case "runtime_health":

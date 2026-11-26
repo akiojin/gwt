@@ -156,6 +156,26 @@ test.describe("Execution environments", () => {
     expect(overflow, "no horizontal page overflow").toBe(false);
     await page.screenshot({ path: info.outputPath("account-pools.png"), fullPage: true });
 
+    // SPEC #7347 AC-1 / AC-2 / AC-7: every built-in provider is listed with
+    // its label; unreadable usage is n/a with the reason as its tooltip.
+    const listed = surface(page).getByRole("region", { name: "Usage by provider" }).locator("[data-provider]");
+    await expect(listed).toHaveCount(8);
+    await expect(listed.locator(".exec-env__provider-name")).toHaveText([
+      "Claude Code", "Codex", "Grok Build", "Antigravity CLI", "OpenCode", "OpenClaw", "Hermes Agent", "GitHub Copilot",
+    ]);
+    await expect(surface(page).locator('.exec-env__provider[data-provider="codex"]')).toContainText("CX");
+    await expect(surface(page).locator('.exec-env__provider[data-provider="codex"]')).toContainText("29% used");
+    const opencode = surface(page).locator('.exec-env__provider[data-provider="opencode"]');
+    await expect(opencode).toContainText("n/a");
+    await expect(opencode).toHaveAttribute("title", /no way to read OpenCode usage; its limits are unknown/);
+    for (const item of await listed.all()) {
+      const box = await item.boundingBox();
+      const area = await surface(page).boundingBox();
+      expect(box && area && box.x + box.width <= area.x + area.width + 1, "provider rows stay inside the screen").toBe(true);
+    }
+    await surface(page).getByRole("region", { name: "Usage by provider" })
+      .screenshot({ path: info.outputPath("usage-by-provider.png") });
+
     await surface(page).getByRole("button", { name: "Details for the Claude Code 2 account" }).click();
     await expect(surface(page).getByRole("heading", { level: 1, name: "Claude Code 2 account" })).toBeFocused();
     await expect(surface(page).locator('.op-usage-card[data-provider="claude_code"] .op-usage-win')).toContainText(/5-hour\s*100%/);
@@ -479,8 +499,22 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
         recent_projects: [],
       },
     };
+    // SPEC #7347: the backend lists every built-in provider with each
+    // usage snapshot; names, labels and default accounts come from here.
+    const providers = [
+      ["claude_code", "Claude Code", "CC", "api", "claude"],
+      ["codex", "Codex", "CX", "cli_output", "codex"],
+      ["grok_build", "Grok Build", "GB", "none", "grok"],
+      ["antigravity", "Antigravity CLI", "AG", "none", "agy"],
+      ["opencode", "OpenCode", "OC", "none", "opencode"],
+      ["openclaw", "OpenClaw", "OW", "none", "openclaw"],
+      ["hermes", "Hermes Agent", "HA", "none", "hermes"],
+      ["copilot", "GitHub Copilot", "GH", "none", "gh"],
+    ].map(([provider, display_name, short_label, acquisition, default_account_id]) =>
+      ({ provider, display_name, short_label, acquisition, default_account_id }));
     const usageSnapshot = {
       kind: "provider_usage",
+      providers,
       accounts: [
         {
           provider: "codex",
@@ -725,6 +759,7 @@ async function installProviderUsageBackend(page: any, withSettings = false, with
     (window as any).__emitProviderUsage = (accounts: unknown[], sessions: unknown[] = []) => {
       socketRef?.emit({
         kind: "provider_usage",
+        providers,
         accounts,
         sessions,
         consumption: [],

@@ -15,14 +15,14 @@
 //   window title the user knows it by (Issue #3862). Returning a falsy
 //   value falls back to a shortened session id.
 import { createUiStateStore } from "./ui-state-store.js";
-import { USAGE_PROVIDER_NAME, usagePoolAccountId } from "./execution-environments.js";
+import { usagePoolAccountId } from "./execution-environments.js";
 
 export function createProviderUsageSurface({
   renderWorkspaceWindows,
   sessionLabel = () => null,
 }) {
       // ---- Provider usage & rate limits (SPEC-2970) ----
-      const emptyUsage = { accounts: [], sessions: [], consumption: [] };
+      const emptyUsage = { accounts: [], sessions: [], consumption: [], providers: [] };
       // Null means no snapshot has arrived; eager subscriptions must not call
       // late-bound Workspace dependencies while app.js constructs its surfaces.
       const usageModel = createUiStateStore(null);
@@ -110,9 +110,20 @@ export function createProviderUsageSurface({
         return String(n);
       }
 
+      // SPEC #7347 FR-004: names, labels and default accounts come from the
+      // backend's provider list, never from a table keyed by provider name.
+      function providerDescriptor(provider, snapshot = latestProviderUsage()) {
+        return (snapshot?.providers || []).find(item => item?.provider === provider) || null;
+      }
+
+      function isDefaultAccount(item, snapshot) {
+        return !item.pool_account_id ||
+          item.pool_account_id === providerDescriptor(item.provider, snapshot)?.default_account_id;
+      }
+
       function applyProviderUsageUi(snapshot) {
-        const account = (snapshot?.accounts || []).find(item => item.provider === "codex" &&
-          (!item.pool_account_id || item.pool_account_id === "codex"));
+        // The default account's credit balance (only Codex reports credits).
+        const account = (snapshot?.accounts || []).find(item => item.credits && isDefaultAccount(item, snapshot));
         const balance = account?.credits?.balance;
         const timestamp = Date.parse(account?.fetched_at);
         if (!account?.account_id || !["ok", "stale"].includes(account.state?.kind) ||
@@ -430,10 +441,11 @@ export function createProviderUsageSurface({
         head.className = "op-usage-card__head";
         const icon = document.createElement("span");
         icon.className = "op-usage-card__icon";
-        icon.textContent = account.provider === "claude_code" ? "◇" : "⬡";
+        const descriptor = providerDescriptor(account.provider);
+        icon.textContent = descriptor?.short_label || "⬡";
         const name = document.createElement("span");
         name.className = "op-usage-card__name";
-        name.textContent = USAGE_PROVIDER_NAME[account.provider] || account.provider;
+        name.textContent = descriptor?.display_name || account.provider;
         head.appendChild(icon);
         head.appendChild(name);
         if (account.plan) {
@@ -442,7 +454,7 @@ export function createProviderUsageSurface({
           plan.textContent = account.plan;
           head.appendChild(plan);
         }
-        const credits = account.provider === "codex" ? account.credits : null;
+        const credits = account.credits || null;
         const creditStateReadable = ["ok", "stale"].includes(account.state?.kind);
         const full = creditStateReadable && (account.windows || []).some(w =>
           ["five_hour", "weekly"].includes(w.kind) && Number(w.used_percent) >= 100);
@@ -468,8 +480,8 @@ export function createProviderUsageSurface({
           const wins = document.createElement("div");
           wins.className = "op-usage-wins";
           for (const w of windows) {
-            const modelWindow = account.provider === "claude_code" &&
-              (w.kind === "fable_weekly" || w.kind === "opus_weekly");
+            // A model-specific sub-limit does not mark the shared quota full.
+            const modelWindow = w.kind === "fable_weekly" || w.kind === "opus_weekly";
             wins.appendChild(buildUsageWindowRow(w, !modelWindow && displayLimit));
           }
           card.appendChild(wins);
@@ -484,7 +496,7 @@ export function createProviderUsageSurface({
           }
         }
 
-        if (account.provider === "claude_code" && account.extra_usage?.is_enabled === true) {
+        if (account.extra_usage?.is_enabled === true) {
           card.appendChild(buildUsageCreditsRow(account.extra_usage));
         }
         if (credits && creditStateReadable) {
@@ -520,10 +532,11 @@ export function createProviderUsageSurface({
       // Issue #7648 — draw one account's usage card into the Execution
       // environments account detail, the single surface for usage and limits.
       function renderAccountUsage(container, provider, poolAccountId = null) {
-        const account = (latestProviderUsage().accounts || []).find(item =>
-          item.provider === provider && (poolAccountId == null || usagePoolAccountId(item) === poolAccountId));
-        const defaultAccountId = { codex: "codex", claude_code: "claude" }[provider];
-        const includeProviderRollups = !poolAccountId || poolAccountId === defaultAccountId;
+        const snapshot = latestProviderUsage();
+        const account = (snapshot.accounts || []).find(item => item.provider === provider &&
+          (poolAccountId == null || usagePoolAccountId(item, snapshot.providers) === poolAccountId));
+        const includeProviderRollups = !poolAccountId ||
+          poolAccountId === providerDescriptor(provider, snapshot)?.default_account_id;
         container.replaceChildren(...(account ? [buildUsageProviderCard(account, includeProviderRollups)] : []));
       }
 

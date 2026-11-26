@@ -100,6 +100,7 @@ pub(super) fn default_account_sources<'p>() -> UsageSourceRegistry<PollContext<'
             display_name: agent.display_name.to_string(),
             short_label: label.to_string(),
             acquisition,
+            default_account_id: None,
         };
         let source: Box<dyn UsageSource<PollContext<'p>>> = match provider {
             UsageProvider::Codex => {
