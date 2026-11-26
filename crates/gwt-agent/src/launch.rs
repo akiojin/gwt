@@ -1524,7 +1524,10 @@ impl AgentLaunchBuilder {
 
         if let Some(ref model) = self.model {
             args.push("--model".to_string());
-            args.push(model.clone());
+            args.push(crate::antigravity_models::antigravity_model_arg(
+                model,
+                self.reasoning_level.as_deref(),
+            ));
         }
 
         if self.skip_permissions {
@@ -2357,17 +2360,19 @@ mod tests {
     fn build_antigravity_maps_model_skip_permissions_and_resume_id() {
         let agent_id = crate::types::resolve_agent_id("agy").expect("Antigravity must resolve");
         let config = AgentLaunchBuilder::new(agent_id)
-            .model("gemini-3.5-pro")
+            .model("Gemini 3.1 Pro")
+            .reasoning_level("low")
             .skip_permissions(true)
             .session_mode(SessionMode::Resume)
             .resume_session_id("conversation-123")
             .build();
 
         assert_eq!(config.command, "agy");
+        // Issue #7778: agy takes the `agy models` label, reasoning included.
         assert!(config
             .args
             .windows(2)
-            .any(|pair| pair[0] == "--model" && pair[1] == "gemini-3.5-pro"));
+            .any(|pair| pair[0] == "--model" && pair[1] == "Gemini 3.1 Pro (Low)"));
         assert!(config
             .args
             .contains(&"--dangerously-skip-permissions".to_string()));

@@ -5733,6 +5733,12 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
             gwt::issue_monitor_prefs_path_for_repo_path(&project),
             gwt::agent_registry::path(),
         ]);
+        // Issue #7667: the owner's Monitor census worker republishes
+        // `monitor_runtime_counts` into issue-monitor.json on its 5s wake once
+        // the retired source's tree exit is confirmed. That write is unrelated
+        // to the stale callbacks under test, so hold the worker between
+        // completed passes until the invariance assertions are done.
+        let census_pause = owner_fixture_block_on(owner.pause_runtime_reconciliation()).unwrap();
         let saved_files = snapshot_optional_files(&paths);
         let saved_work = tracked_workspace_work_store_snapshot(&project);
         let saved_rows = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap()
@@ -5938,6 +5944,8 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
                 "stale callbacks must not publish successor output, status, hooks or retirement"
             );
         }
+        // The successor's own hook and close below may publish the census.
+        drop(census_pause);
         #[cfg(unix)]
         {
             successor.pty.write_input(b"GWT_CLI_CURRENT\r").unwrap();

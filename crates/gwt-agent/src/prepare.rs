@@ -892,6 +892,16 @@ where
             report.version_output.as_deref().unwrap_or("unknown"),
         ));
     }
+    if config.agent_id == AgentId::Antigravity {
+        if let Some(error) = config.model.as_deref().and_then(|model| {
+            crate::antigravity_models::antigravity_model_launch_error(
+                model,
+                report.version_output.as_deref(),
+            )
+        }) {
+            return Err(error);
+        }
+    }
     config.command = direct_command.expect("successful probe has a resolved command");
     config.tool_version = report.version_output.clone();
     Ok(report)
@@ -3975,6 +3985,26 @@ fi
             .contains("2.1.153"));
         assert_eq!(config.command, original.command);
         assert_eq!(config.tool_version, original.tool_version);
+    }
+
+    #[test]
+    fn antigravity_model_rejects_a_runner_without_the_model_flag() {
+        // Issue #7778: agy < 1.0.5 has no `--model`; fail before launch.
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        config.agent_id = AgentId::Antigravity;
+        config.command = "/usr/local/bin/agy".into();
+        config.model = Some("Gemini 3.1 Pro".into());
+        let result =
+            resolve_host_runner_health_checked_with_probe(&mut config, |_, _, _, _, _, _| {
+                HostRunnerProbeOutcome {
+                    stdout: "1.0.0".into(),
+                    ..HostRunnerProbeOutcome::success()
+                }
+            });
+        assert!(result
+            .expect_err("agy 1.0.0 cannot select a model")
+            .contains("1.0.5"));
     }
 
     fn cache_probe_call<'a>(

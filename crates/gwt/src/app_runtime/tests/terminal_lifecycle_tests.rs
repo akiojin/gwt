@@ -4915,6 +4915,7 @@ fn issue6096_target_prefs_churn_is_settled_by_the_admission_decision() {
             hold: Some(gwt::issue_monitor::IssueMonitorOpenPrHold {
                 pr_number: 99,
                 lifecycle: "open".to_string(),
+                auto_merge_enabled: None,
             }),
         },
     );
