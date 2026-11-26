@@ -46,7 +46,8 @@ test.describe("Update drain CTA", () => {
     await expect(cta).toContainText("Update v9.106.0 pending");
     await expect(page.locator("#update-modal")).toHaveCount(0);
     await inject({ kind: "update_auto_apply", version: "9.106.0", phase: "scheduled", grace_secs: 60 });
-    await expect(cta).toHaveText("Update v9.106.0 applies in 60 s — click to cancel");
+    await expect(cta).toHaveText(/Update v9\.106\.0 applies in \d+ s/);
+    await expect(page.getByRole("button", { name: "Cancel automatic update" })).toBeVisible();
     await expect(page.locator("#update-modal")).toHaveCount(0);
     expect(errors).toEqual([]);
   });
@@ -177,10 +178,7 @@ test.describe("Update drain CTA", () => {
     expect(pageErrors).toEqual([]);
   });
 
-  // Issue #3906 AC-7 / #4076 AC-5: the backend's `update_auto_apply` phases
-  // turn the CTA into the cancel control for the grace, withdraw it, and
-  // announce the apply. The click during the grace sends the cancel request.
-  test("update_auto_apply phases drive the CTA and clicking during the grace cancels", async ({
+  test("update_auto_apply phases drive the CTA and the cancel button sends the request", async ({
     page,
   }) => {
     const consoleErrors: string[] = [];
@@ -222,11 +220,12 @@ test.describe("Update drain CTA", () => {
     await inject({ kind: "update_auto_apply", version: "9.99.0", phase: "scheduled", grace_secs: 60 });
     await expect(cta).toHaveAttribute("data-status", "scheduled");
     await expect(cta).toHaveClass(/is-scheduled/);
-    await expect(cta).toHaveText("Update v9.99.0 applies in 60 s — click to cancel");
-    await expect(cta).toBeEnabled();
+    await expect(cta).toHaveText(/Update v9\.99\.0 applies in \d+ s/);
+    const cancel = page.getByRole("button", { name: "Cancel automatic update" });
+    await expect(cancel).toBeEnabled();
     await expect(page.locator("#update-modal")).toHaveCount(0);
 
-    await cta.click();
+    await cancel.click();
     await expect(cta).toHaveText("Cancelling automatic update…");
     // The Hub socket may still be opening; observe its queued send flushing.
     await expect.poll(() => page.evaluate(() => (window as any).__gwtSentKinds as string[]))

@@ -243,7 +243,7 @@ body::after {
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
-.update-cta:hover {
+.update-cta:hover:not(.is-scheduled, :disabled) {
   background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
 }
 
@@ -294,11 +294,22 @@ body::after {
   cursor: default;
 }
 
-/* Issue #3906 AC-7: the apply is scheduled; the CTA is the cancel control. */
 .update-cta.is-scheduled {
   border-color: var(--color-state-needs-input);
   color: var(--color-state-needs-input);
-  cursor: pointer;
+  cursor: default;
+}
+
+.update-cta__cancel {
+  flex: 0 0 auto;
+  max-width: 50%;
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.update-cta__cancel:disabled {
+  color: var(--color-text-muted);
+  cursor: progress;
 }
 
 .update-cta:focus-visible,
