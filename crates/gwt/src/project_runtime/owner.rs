@@ -11191,18 +11191,43 @@ impl OwnerState {
                 .ok()
                 .map(|pane| pane.screen().contents())
         });
-        // Issue #7465: a failed managed hook hides every startup signal, so
-        // report it now instead of at the 180s deadline. Only the original
-        // deadline is pulled in; the 60s post-report watch is left alone.
-        if let Some(agent) = runtime.agent.as_mut() {
-            if agent.monitor_startup_at.is_some_and(|at| {
-                at > monotonic_now + std::time::Duration::from_secs(60)
-                    && screen
-                        .as_deref()
-                        .and_then(super::monitor::startup_hook_failure_line)
-                        .is_some()
-            }) {
+        // A failed managed hook (#7465) or Codex sandbox bootstrap (#7814)
+        // can prevent the initial prompt from ever starting. Pull in the
+        // original deadline once, leaving the 60s post-report watch alone.
+        if let Some(agent) = runtime.agent.as_mut().filter(|agent| {
+            agent
+                .monitor_startup_at
+                .is_some_and(|at| at > monotonic_now + std::time::Duration::from_secs(60))
+        }) {
+            let screen = screen.as_deref().unwrap_or_default();
+            let sandbox_failure =
+                super::runtime_events::codex_windows_sandbox_startup_error(screen);
+            if sandbox_failure.is_some()
+                || super::monitor::startup_hook_failure_line(screen).is_some()
+            {
                 agent.monitor_startup_at = Some(monotonic_now);
+            }
+            if let Some(detail) = sandbox_failure {
+                let target = gwt_core::error_ledger::ErrorTarget {
+                    window_id: Some(id.to_string()),
+                    session_id: Some(agent.active.session_id.clone()),
+                    project_root: Some(self.root.display().to_string()),
+                    issue: agent
+                        .feedback
+                        .as_ref()
+                        .and_then(|feedback| feedback.issue_monitor_launch_binding_issue_number()),
+                };
+                self.input_jobs += 1;
+                let sender = self.sender.clone();
+                spawn_owner_worker(move || {
+                    crate::error_report::report_error(
+                        gwt_core::error_ledger::ErrorKind::LaunchFailure,
+                        detail,
+                        target,
+                    );
+                    let _ =
+                        sender.send(OwnerMessage::MonitorNotificationFinished { result: Ok(()) });
+                });
             }
         }
         let approval_settle_due = runtime
