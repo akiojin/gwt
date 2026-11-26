@@ -229,7 +229,16 @@ for (const width of [1440, 390]) {
 
     for (let attempt = 0; attempt < 4 && (await entry(2999).count()) === 0; attempt++) {
       const last = await messages.last().textContent();
-      await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await log.evaluate(async node => {
+        // Landing at the bottom after an anchor adjustment can make a direct
+        // scroll to the same offset a no-op. Cross the paging threshold anew.
+        const bottom = node.scrollHeight - node.clientHeight;
+        if (bottom - node.scrollTop <= 16) {
+          node.scrollTop = bottom - 64;
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        }
+        node.scrollTop = node.scrollHeight;
+      });
       await expect(messages.last()).not.toHaveText(last!);
     }
     await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
