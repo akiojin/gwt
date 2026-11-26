@@ -14306,6 +14306,7 @@ impl AppRuntime {
                                 &prefs,
                                 window.session_id.as_deref(),
                                 window.runtime_started_at_ms,
+                                gwt::pm_activity::pm_wake_stalled(&tab.project_root),
                             )
                         })
                         .unwrap_or(gwt::pm_activity::PmActivity::Starting)
@@ -17975,6 +17976,7 @@ impl AppRuntime {
                     prefs,
                     snapshot.session_id.as_deref(),
                     Some(snapshot.started_at_ms),
+                    gwt::pm_activity::pm_wake_stalled(&context.project_root),
                 )
             });
             let connection_id = self
