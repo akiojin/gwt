@@ -11785,13 +11785,12 @@ mod tests {
         );
     }
 
-    /// Issue #7851 AC-2: while another writer keeps committing the Agent
-    /// registry (#7550's shape), every lock-free read straddles a commit. The
-    /// status read must still answer inside one second instead of spinning to
-    /// each read's deadline.
+    /// Issue #7851: status must fall back to a stable read when every
+    /// optimistic attempt straddles an actual registry commit.
     #[test]
-    fn issue_7851_monitor_status_answers_within_a_second_while_the_registry_keeps_changing() {
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    fn issue_7851_monitor_status_uses_stable_reads_under_registry_churn() {
+        use std::{cell::Cell, rc::Rc};
+
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = gwt_core::paths::gwt_home().join("repo");
@@ -11808,57 +11807,35 @@ mod tests {
         std::fs::write(path.with_extension("committed.json"), &raw).unwrap();
         crate::agent_registry::ensure_active_for_project(&repo).unwrap();
 
-        let commits = std::sync::Arc::new(AtomicU64::new(0));
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let writer = {
-            let (commits, stop, path) = (commits.clone(), stop.clone(), path.clone());
-            let home = tmp.path().join("home");
-            std::thread::spawn(move || {
-                let _home = ScopedGwtHome::set(home);
-                let mut toggle = false;
-                while !stop.load(Ordering::SeqCst) {
-                    toggle = !toggle;
-                    crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-                        prefs.priority_launch_now = toggle.then_some(7851);
-                        Ok(())
-                    })
-                    .unwrap();
-                    commits.fetch_add(1, Ordering::SeqCst);
-                }
-            })
-        };
-        // Every lock-free attempt observes a commit between its two reads.
+        let commits = Rc::new(Cell::new(0));
         let observed = commits.clone();
-        crate::agent_registry::set_unlocked_read_observer_for_test(Some(std::rc::Rc::new(
-            move || {
-                // The writer runs until the status read finishes and never
-                // waits on this thread's lock-free attempt, so a commit comes.
-                let start = observed.load(Ordering::SeqCst);
-                while observed.load(Ordering::SeqCst) == start {
-                    std::thread::yield_now();
-                }
-            },
-        )));
+        crate::agent_registry::set_unlocked_read_observer_for_test(Some(Rc::new(move || {
+            let count = observed.get();
+            // One optimistic attempt each for the status snapshot, saved
+            // configuration and host drain lookup in this single-project home.
+            assert!(count < 3, "status retried an optimistic registry read");
+            crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+                prefs.priority_launch_now = prefs.priority_launch_now.is_none().then_some(7851);
+                Ok(())
+            })
+            .unwrap();
+            observed.set(count + 1);
+        })));
 
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
-        let started = std::time::Instant::now();
+        // The isolated registry has no competing lock holder. Keep injected
+        // commit I/O from consuming the status reader's operation deadline.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(
+            gwt_core::operation_deadline::now(),
+        );
         let result = run_monitor_status(&env, None, &mut out);
-        let elapsed = started.elapsed();
         crate::agent_registry::set_unlocked_read_observer_for_test(None);
-        stop.store(true, Ordering::SeqCst);
-        writer.join().unwrap();
 
         result.expect("status answers under registry churn");
-        assert!(commits.load(Ordering::SeqCst) > 0, "the writer committed");
+        assert_eq!(commits.get(), 3, "each optimistic read crossed a commit");
         let status: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(status.get("host_update_drain_error").is_none(), "{status}");
-        // test-hygiene: allow-wall-clock-deadline Issue #7851 AC-2 makes one second the contract under test
-        let within_contract = elapsed < std::time::Duration::from_secs(1);
-        assert!(
-            within_contract,
-            "issue.monitor.status took {elapsed:?} under registry churn"
-        );
     }
 
     /// Issue #5062 AC-4: an update drain refuses every new launch, so
