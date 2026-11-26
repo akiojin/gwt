@@ -1706,34 +1706,33 @@ impl AppRuntime {
         ) {
             Ok(decision) => decision,
             Err(PmPeriodicWakeSkip::NotOwed) => {
-                self.clear_pm_periodic_wake_stall(project_root);
-                return Vec::new();
+                return self.clear_pm_periodic_wake_stall(project_root);
             }
             Err(skip) => {
-                if let Some(reason) = skip.stall_reason() {
-                    self.note_pm_periodic_wake_stall(project_root, reason, None, now);
-                }
-                return Vec::new();
+                return skip
+                    .stall_reason()
+                    .map(|reason| self.note_pm_periodic_wake_stall(project_root, reason, None, now))
+                    .unwrap_or_default();
             }
         };
         match self.write_pm_wake_prompt(&decision) {
-            Ok(PmWakeWrite::Queued) => {}
+            Ok(PmWakeWrite::Queued) => Vec::new(),
             Ok(PmWakeWrite::Discarded) => {
-                self.note_pm_periodic_wake_stall(project_root, "delivery_discarded", None, now);
+                self.note_pm_periodic_wake_stall(project_root, "delivery_discarded", None, now)
             }
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake re-armed the resident PM from the scheduled snapshot"
                 );
-                self.clear_pm_periodic_wake_stall(project_root);
+                self.clear_pm_periodic_wake_stall(project_root)
             }
             Ok(PmWakeWrite::Deferred | PmWakeWrite::Unconfirmed) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake deferred until the PM composer is empty"
                 );
-                self.note_pm_periodic_wake_stall(project_root, "delivery_deferred", None, now);
+                self.note_pm_periodic_wake_stall(project_root, "delivery_deferred", None, now)
             }
             Err(error) => {
                 tracing::warn!(
@@ -1741,10 +1740,9 @@ impl AppRuntime {
                     window_id = %decision.window_id,
                     "PM periodic wake prompt injection failed"
                 );
-                self.note_pm_periodic_wake_stall(project_root, "delivery_failed", None, now);
+                self.note_pm_periodic_wake_stall(project_root, "delivery_failed", None, now)
             }
         }
-        Vec::new()
     }
 
     /// Issue #7694 AC-3/AC-4: one more tick did not reach the live PM. The
@@ -1756,9 +1754,9 @@ impl AppRuntime {
         reason: &'static str,
         detail: Option<&str>,
         now: &str,
-    ) {
+    ) -> Vec<OutboundEvent> {
         let Some(state) = self.project_state_for_root_mut(project_root) else {
-            return;
+            return Vec::new();
         };
         let stall = state
             .pm_agent_idle_wakes
@@ -1774,14 +1772,14 @@ impl AppRuntime {
             stall.detail = Some(detail.to_string());
         }
         if stall.reported {
-            return;
+            return Vec::new();
         }
         let interval_secs =
             pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(project_root))
                 .map(|prefs| prefs.settings.loop_interval_secs_clamped())
                 .unwrap_or(pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS);
         if !pm_registry::pm_wake_stall_is_reportable(&stall.since, now, interval_secs) {
-            return;
+            return Vec::new();
         }
         stall.reported = true;
         let record = pm_registry::PmWakeStall {
@@ -1805,20 +1803,36 @@ impl AppRuntime {
         ) {
             tracing::warn!(%error, "PM periodic wake stall record could not be saved");
         }
+        // Issue #7922 AC-4: the PM title reads this record; re-project it now.
+        self.pm_title_refresh_events(project_root)
+    }
+
+    /// Issue #7922 AC-4: re-project the workspace so the PM title follows a
+    /// wake stall being recorded or cleared.
+    fn pm_title_refresh_events(&self, project_root: &Path) -> Vec<OutboundEvent> {
+        self.project_context_for_root(project_root)
+            .map(|context| vec![self.workspace_state_broadcast(&context)])
+            .unwrap_or_default()
     }
 
     /// A wake reached the PM, or none is owed: the run of missed ticks is over.
-    fn clear_pm_periodic_wake_stall(&mut self, project_root: &Path) {
+    fn clear_pm_periodic_wake_stall(&mut self, project_root: &Path) -> Vec<OutboundEvent> {
         // Unconditional: a record left by an earlier process has no in-memory
         // counterpart here and would otherwise outlive the stall it describes.
-        pm_registry::clear_pm_wake_stall(&pm_registry::pm_wake_stall_path_for_repo_path(
-            project_root,
-        ));
+        let stall_path = pm_registry::pm_wake_stall_path_for_repo_path(project_root);
+        let recorded = pm_registry::load_pm_wake_stall(&stall_path).is_some();
+        pm_registry::clear_pm_wake_stall(&stall_path);
+        // Issue #7922 AC-4: a cleared record changes the PM title.
+        let refresh = if recorded {
+            self.pm_title_refresh_events(project_root)
+        } else {
+            Vec::new()
+        };
         let Some(stall) = self
             .project_state_for_root_mut(project_root)
             .and_then(|state| state.pm_agent_idle_wakes.periodic_stall.take())
         else {
-            return;
+            return refresh;
         };
         if stall.reported {
             tracing::info!(
@@ -1828,6 +1842,7 @@ impl AppRuntime {
                 "PM periodic wake stall ended"
             );
         }
+        refresh
     }
 
     #[cfg(test)]
@@ -2146,7 +2161,21 @@ impl AppRuntime {
         Ok(PmWakeWrite::Queued)
     }
 
-    pub(crate) fn pm_wake_delivery_complete(&mut self, mut delivery: PmWakeDelivery) {
+    /// Returns the PM title refresh a wake stall change needs (Issue #7922 AC-4).
+    pub(crate) fn pm_wake_delivery_complete(
+        &mut self,
+        delivery: PmWakeDelivery,
+    ) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        self.apply_pm_wake_delivery(delivery, &mut events);
+        events
+    }
+
+    fn apply_pm_wake_delivery(
+        &mut self,
+        mut delivery: PmWakeDelivery,
+        events: &mut Vec<OutboundEvent>,
+    ) {
         if !self.project_context_is_current(&delivery.context) {
             return;
         }
@@ -2190,7 +2219,9 @@ impl AppRuntime {
         // Issue #7694: the owner's verdict is the other half of a missed tick.
         let project_root = delivery.decision.project_root.clone();
         match &delivery.result {
-            Ok(PmWakeWrite::Injected) => self.clear_pm_periodic_wake_stall(&project_root),
+            Ok(PmWakeWrite::Injected) => {
+                events.extend(self.clear_pm_periodic_wake_stall(&project_root));
+            }
             Ok(PmWakeWrite::Queued) => {}
             outcome => {
                 let reason = match outcome {
@@ -2203,12 +2234,12 @@ impl AppRuntime {
                     Err(error) => Some(error.clone()),
                     _ => delivery.detail.clone(),
                 };
-                self.note_pm_periodic_wake_stall(
+                events.extend(self.note_pm_periodic_wake_stall(
                     &project_root,
                     reason,
                     detail.as_deref(),
                     &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
-                );
+                ));
             }
         }
         if matches!(

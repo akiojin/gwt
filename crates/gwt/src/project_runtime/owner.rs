@@ -9756,6 +9756,7 @@ impl OwnerState {
                         &prefs,
                         wire.session_id.as_deref(),
                         wire.runtime_started_at_ms,
+                        crate::pm_activity::pm_wake_stalled(&self.root),
                     )
                 })
                 .unwrap_or(crate::pm_activity::PmActivity::Starting)
