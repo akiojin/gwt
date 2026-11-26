@@ -4868,6 +4868,22 @@ pub enum IssueMonitorLaunchStallEvent {
     },
 }
 
+impl IssueMonitorLaunchStallEvent {
+    /// Issue #7922 AC-1: an empty queue that outlived the report interval is
+    /// recovered by the Monitor itself with a fresh scan and admission, the
+    /// same work a PM `ScanNow` requests. Other gates are not lifted by a
+    /// rescan, and a stall just observed may still clear on the next scan.
+    pub fn requests_rescan(&self) -> bool {
+        matches!(
+            self,
+            Self::Sustained {
+                reason: IssueMonitorStallReason::QueueEmpty,
+                ..
+            }
+        )
+    }
+}
+
 /// Issue #7922: remembers the current launch stall across observations so a
 /// stall is reported when it starts, every report interval while it lasts,
 /// and when it ends. Held by the daemon loop, not by the persisted state.
@@ -35172,6 +35188,32 @@ mod tests {
                 since: t0.to_string(),
             })
         );
+    }
+
+    /// Issue #7922 AC-1: an empty queue that persists past the report interval
+    /// with launchable backlog and a free slot asks the daemon for a fresh
+    /// scan and admission on its own, without waiting for a PM turn. A stall
+    /// just observed, a gate a rescan cannot lift, and an end do not.
+    #[test]
+    fn only_a_sustained_empty_queue_requests_a_fresh_rescan() {
+        use IssueMonitorStallReason as Reason;
+        let sustained = |reason| IssueMonitorLaunchStallEvent::Sustained {
+            reason,
+            since: "2026-11-24T11:30:00Z".to_string(),
+            detail: String::new(),
+        };
+        assert!(sustained(Reason::QueueEmpty).requests_rescan());
+        assert!(!sustained(Reason::GuiDisconnected).requests_rescan());
+        assert!(!IssueMonitorLaunchStallEvent::Started {
+            reason: Reason::QueueEmpty,
+            detail: String::new(),
+        }
+        .requests_rescan());
+        assert!(!IssueMonitorLaunchStallEvent::Ended {
+            reason: Reason::QueueEmpty,
+            since: "2026-11-24T11:30:00Z".to_string(),
+        }
+        .requests_rescan());
     }
 
     /// Issue #7922: no backlog to launch, or every slot in use, is not a stall.
