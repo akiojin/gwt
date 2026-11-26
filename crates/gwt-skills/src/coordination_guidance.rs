@@ -605,9 +605,10 @@ headed/nextest/admission evidence. Run outstanding Light commands first,
 preserve Heavy commands' original relative order, and keep artifact restoration last.
 A timeout in the first remaining command's admission writes no replacement
 record and preserves any predecessor; a later timeout retains incomplete results.
-The full registered local matrix must pass. Local UI verification includes
-the required headed Chromium evidence in dark/light. Protected CI may collect
-that evidence after Ready; its exact-head check must pass before merge.
+The full registered local matrix must pass before `Overall: PASS` or Ready.
+Local UI verification includes the required headed Chromium evidence in
+dark/light. Protected CI may collect that evidence after Ready; its exact-head
+check must pass before merge.
 
 ### Process ownership
 
