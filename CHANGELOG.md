@@ -1,6 +1,42 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.178.0] - 2026-11-27
+
+### Bug Fixes
+
+- **feedback:** Auto 送信の GitHub 認証拒否を auth_rejected として区別する
+- **verify:** Resolve bare pnpm on Windows
+- **runtime:** 未 claim の Monitor 起動失敗を durable に確定して slot を解放する
+- **update:** Show a dedicated auto-apply cancel button and countdown
+- **update:** Verify downloaded release asset checksums
+- **feedback:** Auto 送信の discovery で受けた 401 も auth_rejected にする
+- **test:** Wait for successor startup output before invariance baseline
+- **update:** 適用失敗を CTA 状態によらず通知センターと Settings status に残す
+- **update:** Settle installer and headless CLI apply results
+- **update:** Keep the payload while the CLI helper is running
+- **update:** Cancel active update downloads
+- **update:** Discard release lookups completed after cancel
+- **update:** Render download status through the shared model
+- **update:** Include cancel failures in update notifications
+- **update:** Add notify_on_gui_startup to settings status test fixture
+
+### Features
+
+- **gui:** List provider usage from the backend's provider list
+
+### Testing
+
+- **ci:** Pin the Windows pnpm verification regression
+- **gui:** Send the provider list in the Hub usage fixture
+- **update:** 適用失敗の通知センター・Settings status 表示を headed E2E で固定
+- **update:** Isolate cancel fixtures and synchronize on events
+- **update:** Mock both websocket scopes in the cancel browser test
+
+### Ci
+
+- Windows feedback ownership の固定件数を新テストに合わせて 42 件にする
+
 ## [9.177.0] - 2026-11-26
 
 ### Bug Fixes
