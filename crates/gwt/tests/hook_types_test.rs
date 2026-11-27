@@ -166,3 +166,143 @@ fn hook_kind_from_name_rejects_unknown_names() {
     assert_eq!(HookKind::from_name("block-git"), None);
     assert_eq!(HookKind::from_name("unknown-hook"), None);
 }
+
+/// Real captures from macOS arm64. The fixture path records the exact provider
+/// version. The Grok Build 1.0.41 captures are from the Issue #4771 comment
+/// (5884553029), recorded while investigating Issue #4768.
+#[test]
+fn issue_4771_real_hook_payloads_pass_the_parser_entry() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hook_payloads");
+    for (provider, version, events) in [
+        (
+            "claude",
+            "2.1.332",
+            &[
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+            ][..],
+        ),
+        (
+            "codex",
+            "0.172.0",
+            &[
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+            ][..],
+        ),
+        (
+            "grok-build",
+            "1.0.41",
+            &["SessionStart", "PreToolUse", "PostToolUse"][..],
+        ),
+    ] {
+        for event_name in events {
+            let path = root
+                .join(provider)
+                .join(version)
+                .join(format!("{event_name}.json"));
+            let label = format!("{provider}/{version}/{event_name}");
+            let raw = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{label}: {err}"));
+            let parsed = HookEvent::read_from_str(&raw)
+                .unwrap_or_else(|err| panic!("{label}: {err}"))
+                .unwrap_or_else(|| panic!("{label}: empty payload"));
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+            assert_eq!(
+                value["hook_event_name"].as_str(),
+                Some(*event_name),
+                "{label}"
+            );
+            assert_eq!(parsed.cwd.as_deref(), value["cwd"].as_str(), "{label}");
+            assert_fixture_scrubbed(&label, &value);
+        }
+    }
+}
+
+fn assert_fixture_scrubbed(label: &str, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(value) => {
+            assert!(
+                ![
+                    "/Users/",
+                    "/home/",
+                    "/private/",
+                    "/tmp/",
+                    "%2FUsers",
+                    ":\\",
+                    "Bearer ",
+                    "sk-",
+                    "xai-",
+                    "ghp_",
+                    "github_pat_"
+                ]
+                .iter()
+                .any(|marker| value.contains(marker)),
+                "{label}: fixture contains a path or credential marker"
+            );
+            assert!(
+                !value.starts_with('/') || value.starts_with("/redacted/"),
+                "{label}: absolute path outside /redacted/"
+            );
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                assert_fixture_scrubbed(label, item);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(
+                    key.as_str(),
+                    "session_id"
+                        | "sessionId"
+                        | "prompt_id"
+                        | "promptId"
+                        | "turn_id"
+                        | "tool_use_id"
+                        | "toolUseId"
+                ) {
+                    assert!(
+                        value
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("00000000-0000-0000-0000-")),
+                        "{label}: unredacted {key}"
+                    );
+                }
+                assert_fixture_scrubbed(label, value);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn issue_4771_invalid_hook_payloads_fail_closed() {
+    for (name, raw, expected) in [
+        (
+            "wrong type",
+            include_str!("fixtures/hook_payload_rejections/wrong_type.json"),
+            "invalid type",
+        ),
+        (
+            "duplicate key",
+            include_str!("fixtures/hook_payload_rejections/duplicate_key.json"),
+            "duplicate field `session_id`",
+        ),
+        (
+            "duplicate camelCase key",
+            include_str!("fixtures/hook_payload_rejections/duplicate_camel_case_key.json"),
+            "duplicate field `sessionId`",
+        ),
+    ] {
+        let error = HookEvent::read_from_str(raw).expect_err(name).to_string();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
+}

@@ -1,0 +1,15 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "transcript_path": "/redacted/capture.jsonl",
+  "cwd": "/redacted/scratch",
+  "prompt_id": "00000000-0000-0000-0000-000000000002",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "The only line in `probe.txt` is:\n\n```\nfixture capture probe\n```",
+  "background_tasks": [],
+  "session_crons": []
+}

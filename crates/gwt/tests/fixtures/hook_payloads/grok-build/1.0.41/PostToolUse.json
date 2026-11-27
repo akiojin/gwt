@@ -1,0 +1,68 @@
+{
+  "hookEventName": "post_tool_use",
+  "sessionId": "00000000-0000-0000-0000-000000000007",
+  "cwd": "/redacted/grok-capture",
+  "workspaceRoot": "/redacted/grok-capture/",
+  "timestamp": "2026-09-29T05:00:23.284320+00:00",
+  "transcriptPath": "/redacted/updates.jsonl",
+  "permissionMode": "bypassPermissions",
+  "toolName": "run_terminal_command",
+  "toolUseId": "00000000-0000-0000-0000-000000000008",
+  "toolInput": {
+    "command": "echo hi",
+    "description": "Print hi to the terminal"
+  },
+  "toolResult": {
+    "type": "Bash",
+    "output": [
+      104,
+      105,
+      10
+    ],
+    "output_for_prompt": "exit: 0\nhi\n",
+    "exit_code": 0,
+    "command": "echo hi",
+    "truncated": false,
+    "signal": null,
+    "timed_out": false,
+    "description": "Print hi to the terminal",
+    "current_dir": "/redacted/grok-capture",
+    "output_file": "/redacted/capture.log",
+    "total_bytes": 3,
+    "was_bare_echo": true
+  },
+  "toolInputTruncated": false,
+  "toolResultTruncated": false,
+  "durationMs": 104,
+  "isBackgrounded": false,
+  "hook_event_name": "PostToolUse",
+  "session_id": "00000000-0000-0000-0000-000000000007",
+  "transcript_path": "/redacted/updates.jsonl",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "run_terminal_command",
+  "tool_input": {
+    "command": "echo hi",
+    "description": "Print hi to the terminal"
+  },
+  "tool_response": {
+    "type": "Bash",
+    "output": [
+      104,
+      105,
+      10
+    ],
+    "output_for_prompt": "exit: 0\nhi\n",
+    "exit_code": 0,
+    "command": "echo hi",
+    "truncated": false,
+    "signal": null,
+    "timed_out": false,
+    "description": "Print hi to the terminal",
+    "current_dir": "/redacted/grok-capture",
+    "output_file": "/redacted/capture.log",
+    "total_bytes": 3,
+    "was_bare_echo": true
+  },
+  "tool_use_id": "00000000-0000-0000-0000-000000000008",
+  "duration_ms": 104
+}

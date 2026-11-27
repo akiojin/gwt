@@ -1,0 +1,27 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "transcript_path": "/redacted/capture.jsonl",
+  "cwd": "/redacted/scratch",
+  "prompt_id": "00000000-0000-0000-0000-000000000002",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/redacted/probe.txt"
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "/redacted/probe.txt",
+      "content": "fixture capture probe\n",
+      "numLines": 2,
+      "startLine": 1,
+      "totalLines": 2
+    }
+  },
+  "tool_use_id": "00000000-0000-0000-0000-000000000003",
+  "duration_ms": 9
+}
