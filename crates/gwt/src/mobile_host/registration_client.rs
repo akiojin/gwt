@@ -29,8 +29,12 @@
 //! that reconnect an approved device (naming the unverified device ID): the
 //! client binds each to that device on the ledger, so only it may be
 //! challenged there, and reports it, or closes a connection naming a device
-//! this Host does not hold approved and unexpired. With the opaque signals
-//! each connection relays and its close, these become [`ConnectionEvent`]s.
+//! this Host does not hold approved and unexpired. With the signals each
+//! connection relays and its close, these become [`ConnectionEvent`]s. Each
+//! signal must follow the Host wire ([`super::signal`]) on its claimed or
+//! reconnected connection: a signal on any other connection, or the first
+//! that breaks the wire, closes that connection unreported, and later signals
+//! of a rejected connection are dropped.
 //! A caller that stopped receiving is ignored, but a full event channel ends
 //! the registration (`EventBacklog`) rather than lose a connection's state.
 //! Signals may use only half the channel: a signal beyond that is dropped and
@@ -50,6 +54,7 @@
 //! for a token, which backpressures the caller's bounded channel.
 
 use super::credential::LoadedHostCredential;
+use super::signal::{BrowserSignal, SignalError, SignalSequence};
 use crate::mobile_connection::{AuthorizationError, IssuedInvite, MobileAuthorization};
 use base64::Engine as _;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -57,6 +62,7 @@ use rustls::pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
+    collections::HashMap,
     sync::{Arc, RwLock, RwLockWriteGuard},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -117,9 +123,10 @@ pub enum ConnectionEvent {
         connection_id: Uuid,
         device_id: Uuid,
     },
+    /// A signal that followed the Host wire on this connection.
     Signal {
         connection_id: Uuid,
-        payload: String,
+        signal: BrowserSignal,
     },
     Closed {
         connection_id: Uuid,
@@ -426,6 +433,8 @@ async fn register_and_renew(
     let mut signals_open = true;
     // The one unanswered invite: its nonce and the caller's reply.
     let mut pending: Option<(Uuid, oneshot::Sender<InviteOutcome>)> = None;
+    // The signal state of each claimed or reconnected connection until its close.
+    let mut sequences: HashMap<Uuid, SignalSequence> = HashMap::new();
     loop {
         tokio::select! {
             _ = stopped(&mut stop) => {
@@ -493,10 +502,13 @@ async fn register_and_renew(
                     // Only an invite this Host issued binds to the connection.
                     let claimed = write(authority)?.claim_invite(digest, connection_id, wall()?);
                     match claimed {
-                        Ok(()) => report(
-                            &events,
-                            ConnectionEvent::Claimed { connection_id, invite: digest },
-                        )?,
+                        Ok(()) => {
+                            sequences.insert(connection_id, SignalSequence::default());
+                            report(
+                                &events,
+                                ConnectionEvent::Claimed { connection_id, invite: digest },
+                            )?
+                        }
                         Err(AuthorizationError::UnknownRequest
                             | AuthorizationError::Expired
                             | AuthorizationError::WrongPeer) => {
@@ -518,10 +530,13 @@ async fn register_and_renew(
                         wall()?,
                     );
                     match bound {
-                        Ok(()) => report(
-                            &events,
-                            ConnectionEvent::Reconnect { connection_id, device_id },
-                        )?,
+                        Ok(()) => {
+                            sequences.insert(connection_id, SignalSequence::default());
+                            report(
+                                &events,
+                                ConnectionEvent::Reconnect { connection_id, device_id },
+                            )?
+                        }
                         Err(AuthorizationError::Disabled
                             | AuthorizationError::UnknownDevice
                             | AuthorizationError::Revoked
@@ -537,19 +552,38 @@ async fn register_and_renew(
                 CoordinatorMessage::ConnectionSignal { generation: scoped, connection_id, payload }
                     if scoped == generation =>
                 {
-                    // Half the channel stays free for claimed/closed events: a
-                    // browser outpacing the caller loses only its own connection.
-                    if events.capacity() > events.max_capacity() / 2 {
-                        report(&events, ConnectionEvent::Signal { connection_id, payload })?;
-                    } else {
-                        budget.spend(Instant::now());
-                        send_close(&mut socket, generation, connection_id).await?;
+                    let accepted = match sequences.get_mut(&connection_id) {
+                        Some(sequence) => {
+                            let accepted = sequence.accept(&payload);
+                            // Half the channel stays free for claimed/closed
+                            // events: a browser outpacing the caller loses only
+                            // its own connection.
+                            if accepted.is_ok() && events.capacity() <= events.max_capacity() / 2 {
+                                sequence.reject();
+                                Err(SignalError::Invalid)
+                            } else {
+                                accepted
+                            }
+                        }
+                        None => Err(SignalError::Invalid),
+                    };
+                    match accepted {
+                        Ok(signal) => {
+                            report(&events, ConnectionEvent::Signal { connection_id, signal })?
+                        }
+                        // Already closed: drop what was in flight.
+                        Err(SignalError::Rejected) => {}
+                        Err(_) => {
+                            budget.spend(Instant::now());
+                            send_close(&mut socket, generation, connection_id).await?;
+                        }
                     }
                 }
                 CoordinatorMessage::ConnectionClosed { generation: scoped, connection_id }
                     if scoped == generation =>
                 {
                     write(authority)?.close_pairing_connection(connection_id);
+                    sequences.remove(&connection_id);
                     report(&events, ConnectionEvent::Closed { connection_id })?;
                 }
                 CoordinatorMessage::RateLimited { generation: scoped } if scoped == generation => {
