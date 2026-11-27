@@ -32,8 +32,9 @@
 //! this Host does not hold approved and unexpired. With the signals each
 //! connection relays and its close, these become [`ConnectionEvent`]s. Each
 //! signal must follow the Host wire ([`super::signal`]) on its claimed or
-//! reconnected connection, and only a claimed connection may pair there: a
-//! signal on any other connection, or the first
+//! reconnected connection, where only a claimed connection may pair and only
+//! a reconnected one may prove its device key: a signal on any other
+//! connection, or the first
 //! that breaks the wire, closes that connection unreported, and later signals
 //! of a rejected connection are dropped.
 //! A caller that stopped receiving is ignored, but a full event channel ends
@@ -553,7 +554,8 @@ async fn register_and_renew(
                     );
                     match bound {
                         Ok(()) => {
-                            sequences.insert(connection_id, SignalSequence::default());
+                            // Only a reconnected device's connection proves its key.
+                            sequences.insert(connection_id, SignalSequence::reconnected());
                             report(
                                 &events,
                                 ConnectionEvent::Reconnect { connection_id, device_id },
