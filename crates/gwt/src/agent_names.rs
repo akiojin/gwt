@@ -1647,11 +1647,18 @@ fn reserve_project_member_inner(
             .and_then(|number| prefs.saved_switch_resume(number))
             .zip(delivery_id)
         {
+            if prefs.agent_roster.as_ref().map(|roster| roster.revision) != dead.roster_revision {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Saved Work roster changed during admission; retry with current roster",
+                ));
+            }
             let confirmed_delivery = prefs.pending_launch_deliveries.iter().any(|pending| {
                 Some(pending.issue_number) == issue_number
                     && pending.delivery_id == delivery_id
                     && pending.agent_member_id.as_deref() == Some(&intent.request.member_id)
                     && pending.materializer_id.is_some()
+                    && pending.materializer_pid.is_some_and(|pid| pid != 0)
                     && prefs.claim_identities.iter().any(|claim| {
                         claim.issue_number == pending.issue_number
                             && claim.claim_id == pending.claim_id
@@ -1659,7 +1666,6 @@ fn reserve_project_member_inner(
                     })
             });
             if !prefs.enabled || prefs.launch_auto || !confirmed_delivery
-                || prefs.agent_roster.as_ref().map(|roster| roster.revision) != dead.roster_revision
                 || intent.source.assignment.host_id != host
                 || !intent.runtime_exit_confirmed
                 || intent.checkpoint.is_none()
@@ -2301,7 +2307,9 @@ pub(crate) fn release_reaped_project_member(
             };
             if let Some(intent) = prefs.agent_switch_intents.values().find(|intent| {
                 intent.has_admission_pin()
-                    && !intent.runtime_exit_confirmed
+                    && (!intent.runtime_exit_confirmed
+                        || (intent.request.disposition == AgentSwitchDisposition::SaveAndReturn
+                            && !intent.accepts_runtime_exit_receipt()))
                     && member.assignment.as_ref() == Some(&intent.source.assignment)
             }) {
                 if captured_assignment.is_some()

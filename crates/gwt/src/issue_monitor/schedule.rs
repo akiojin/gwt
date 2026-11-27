@@ -758,6 +758,13 @@ impl IssueMonitorState {
         }
     }
 
+    fn agent_has_other_pending_claim(&self, number: u64, member_id: &str) -> bool {
+        self.pending_effects.iter().any(|effect| {
+            matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                if *issue_number != number && self.scheduled_agent_member_id(*issue_number) == Some(member_id))
+        })
+    }
+
     pub fn agent_schedule_launch_exclusion(&self, number: u64) -> Option<String> {
         if self
             .agent_roster
@@ -816,6 +823,7 @@ impl IssueMonitorState {
                 && member_available
                 && !fixed_assignment
                 && !reserved_elsewhere
+                && !self.agent_has_other_pending_claim(number, member_id)
                 && !self.agent_schedule_ineligible.contains_key(member_id)
                 && !self
                     .prefs()
@@ -881,15 +889,32 @@ impl IssueMonitorState {
                 return Some(format!("scheduled_member_unavailable: {reason}{own}; read issue.monitor.schedule.read and reassign to a matching selected member"));
             }
         }
-        let available = tool_matches && member.is_some_and(|member| member.implementation_eligible() && match &member.assignment {
-            None => true,
-            Some(assignment) => assignment.issue_number == Some(number)
-                && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))
-                && (assignment.host_id.is_empty() || assignment.host_id == host)
-                && assignment.delivery_id.as_ref().is_some_and(|id| self.pending_launch_deliveries.iter().any(|delivery| delivery.issue_number == number && delivery.delivery_id == *id && delivery.agent_member_id.as_deref() == Some(member.agent_member_id.as_str()))),
-        })
-            && !self.pending_launch_deliveries.iter().any(|delivery| delivery.issue_number != number && delivery.agent_member_id.as_deref() == Some(id))
-            && !self.pending_effects.iter().any(|effect| matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim {issue_number, ..} if *issue_number != number && self.scheduled_agent_member_id(*issue_number) == Some(id)));
+        let available = tool_matches
+            && member.is_some_and(|member| {
+                member.implementation_eligible()
+                    && match &member.assignment {
+                        None => true,
+                        Some(assignment) => {
+                            assignment.issue_number == Some(number)
+                                && assignment.project_key.as_deref().is_none_or(|key| {
+                                    self.agent_registry_project_key.as_deref() == Some(key)
+                                })
+                                && (assignment.host_id.is_empty() || assignment.host_id == host)
+                                && assignment.delivery_id.as_ref().is_some_and(|id| {
+                                    self.pending_launch_deliveries.iter().any(|delivery| {
+                                        delivery.issue_number == number
+                                            && delivery.delivery_id == *id
+                                            && delivery.agent_member_id.as_deref()
+                                                == Some(member.agent_member_id.as_str())
+                                    })
+                                })
+                        }
+                    }
+            })
+            && !self.pending_launch_deliveries.iter().any(|delivery| {
+                delivery.issue_number != number && delivery.agent_member_id.as_deref() == Some(id)
+            })
+            && !self.agent_has_other_pending_claim(number, id);
         let current = member
             .map(|member| {
                 format!(

@@ -2588,6 +2588,11 @@ pub struct IssueMonitorLaunchClaimInput {
     pub snapshot_tabs: std::collections::BTreeSet<String>,
 }
 
+struct IssueMonitorClaimSources {
+    issues: Vec<crate::IssueMonitorIssue>,
+    saved_operation: Option<String>,
+}
+
 impl IssueMonitorLaunchClaimInput {
     pub fn claim(
         &self,
@@ -2661,14 +2666,21 @@ impl IssueMonitorLaunchClaimInput {
                 "launch delivery capacity read failed: {error}"
             ))
         })?;
-        if self.matches_durable_claim(&prefs)
-            && self.preflight_claim(
+        if self.matches_durable_claim(&prefs) {
+            let sources = self.claim_sources(&prefs)?;
+            if self.preflight_claim(
                 prefs,
                 crate::process::host_process_start_time(self.materializer_pid),
-            )
-        {
-            phase.finish();
-            return Ok(true);
+                &sources,
+            ) {
+                phase.finish();
+                return Ok(true);
+            }
+            if sources.saved_operation.is_some() {
+                return Err(self.saved_dependency_hold(
+                    "current dependency evidence does not allow materialization",
+                ));
+            }
         }
         let result = self.claim_from_worker();
         if result.is_ok() {
@@ -2715,22 +2727,26 @@ impl IssueMonitorLaunchClaimInput {
         prefs: crate::IssueMonitorPrefs,
         host_started_at: Option<u64>,
     ) -> bool {
-        self.preflight_claim(prefs, host_started_at)
+        self.claim_sources(&prefs)
+            .is_ok_and(|sources| self.preflight_claim(prefs, host_started_at, &sources))
     }
 
     fn preflight_claim(
         &self,
         prefs: crate::IssueMonitorPrefs,
         host_started_at: Option<u64>,
+        sources: &IssueMonitorClaimSources,
     ) -> bool {
-        let (sources, saved_switch) = self.claim_sources(&prefs);
+        if !self.claim_sources_current(sources) {
+            return false;
+        }
         let mut preflight =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         crate::issue_monitor_worker::bind_issue_monitor_source_repository(
             &mut preflight,
             &self.project_root,
         );
-        self.observe_claim_sources(&mut preflight, sources, saved_switch);
+        self.observe_claim_sources(&mut preflight, sources);
         self.observe_windows(&mut preflight, host_started_at);
         preflight.claim_launch_delivery(
             self.issue_number,
@@ -2745,45 +2761,83 @@ impl IssueMonitorLaunchClaimInput {
     fn claim_sources(
         &self,
         prefs: &crate::IssueMonitorPrefs,
-    ) -> (Vec<crate::IssueMonitorIssue>, bool) {
-        let saved_switch = prefs.saved_switch_resume(self.issue_number).is_some();
-        let Some(cache_root) =
-            crate::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
-        else {
-            return (Vec::new(), saved_switch);
-        };
-        let sources = if saved_switch {
-            crate::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates_with_roots(
-                &cache_root,
+    ) -> Result<
+        IssueMonitorClaimSources,
+        crate::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
+        if let Some(intent) = prefs.saved_switch_resume(self.issue_number) {
+            // Capture current GitHub rows before entering any prefs transaction.
+            let issues = crate::issue_monitor_worker::refresh_issue_monitor_dependency_candidates(
+                &self.project_root,
                 monitor_dependency_roots(prefs, self.issue_number),
-                |_| Ok(()),
             )
-            .unwrap_or_default()
-        } else {
-            crate::issue_monitor_worker::load_cached_issue_monitor_candidate(
-                &cache_root,
-                self.issue_number,
-            )
+            .map_err(|error| self.saved_dependency_hold(&error))?;
+            return Ok(IssueMonitorClaimSources {
+                issues,
+                saved_operation: Some(intent.request.operation_id.clone()),
+            });
+        }
+        let issues = crate::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
+            .and_then(|cache_root| {
+                crate::issue_monitor_worker::load_cached_issue_monitor_candidate(
+                    &cache_root,
+                    self.issue_number,
+                )
+            })
             .into_iter()
-            .collect()
-        };
-        (sources, saved_switch)
+            .collect();
+        Ok(IssueMonitorClaimSources {
+            issues,
+            saved_operation: None,
+        })
+    }
+
+    fn saved_dependency_hold(
+        &self,
+        detail: &str,
+    ) -> crate::runtime_daemon_events::IssueMonitorControlPublishError {
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::Busy(format!(
+            "{}{}: {detail}",
+            crate::issue_monitor::MONITOR_SPAWN_HOLD_PREFIX,
+            self.issue_number,
+        ))
+    }
+
+    fn claim_sources_current(&self, sources: &IssueMonitorClaimSources) -> bool {
+        use crate::issue_monitor::IssueMonitorDependencyObservation;
+        if sources.saved_operation.is_none() {
+            return true;
+        }
+        crate::issue_cache::issue_cache_root_for_repo_path(&self.project_root).is_some_and(
+            |cache_root| {
+                sources.issues.iter().all(|issue| {
+                    crate::issue_monitor_worker::load_cached_issue_monitor_candidate(
+                        &cache_root,
+                        issue.number,
+                    )
+                    .is_some_and(|latest| {
+                        IssueMonitorDependencyObservation::new(&latest, None).source_hash
+                            == IssueMonitorDependencyObservation::new(issue, None).source_hash
+                    })
+                })
+            },
+        )
     }
 
     fn observe_claim_sources(
         &self,
         monitor: &mut crate::IssueMonitorState,
-        sources: Vec<crate::IssueMonitorIssue>,
-        saved_switch: bool,
+        sources: &IssueMonitorClaimSources,
     ) {
-        if saved_switch {
-            monitor.observe_dependency_candidates(&sources);
+        if sources.saved_operation.is_some() {
+            monitor.observe_dependency_candidates(&sources.issues);
         }
         if let Some(issue) = sources
-            .into_iter()
+            .issues
+            .iter()
             .find(|issue| issue.number == self.issue_number)
         {
-            monitor.record_candidate(issue);
+            monitor.record_candidate(issue.clone());
         }
     }
 
@@ -2822,7 +2876,13 @@ impl IssueMonitorLaunchClaimInput {
                 "launch delivery capacity read failed: {error}"
             ))
         })?;
-        if !self.preflight_claim(prefs, host_started_at) {
+        let sources = self.claim_sources(&prefs)?;
+        if !self.preflight_claim(prefs, host_started_at, &sources) {
+            if sources.saved_operation.is_some() {
+                return Err(self.saved_dependency_hold(
+                    "current dependency evidence does not allow materialization",
+                ));
+            }
             return Ok(false);
         }
         // The daemon must judge this claim against the same current canvas.
@@ -2834,6 +2894,11 @@ impl IssueMonitorLaunchClaimInput {
                 Err(error) if error.allows_local_fallback() => {}
                 Err(error) => return Err(error),
             }
+        }
+        if !self.claim_sources_current(&sources) {
+            return Err(
+                self.saved_dependency_hold("dependency evidence changed before materialization")
+            );
         }
         let publication = publish_claim(serde_json::json!({
             "claim_launch_delivery": {
@@ -2874,12 +2939,26 @@ impl IssueMonitorLaunchClaimInput {
                         format!("launch delivery capacity read failed: {error}"),
                     )
                 })?;
-                let (sources, saved_switch) = self.claim_sources(&prefs);
+                if sources.saved_operation.as_deref()
+                    != prefs
+                        .saved_switch_resume(issue_number)
+                        .map(|intent| intent.request.operation_id.as_str())
+                {
+                    return Ok(false);
+                }
                 commit_local_issue_monitor_control_with_timeout(
                     project_root,
                     self.fallback_timeout,
                     |monitor| {
-                        self.observe_claim_sources(monitor, sources, saved_switch);
+                        if sources.saved_operation.as_deref()
+                            != monitor
+                                .saved_switch_resume(issue_number)
+                                .map(|intent| intent.request.operation_id.as_str())
+                            || !self.claim_sources_current(&sources)
+                        {
+                            return false;
+                        }
+                        self.observe_claim_sources(monitor, &sources);
                         self.observe_windows(monitor, host_started_at);
                         monitor.claim_launch_delivery(
                             issue_number,
@@ -2891,10 +2970,16 @@ impl IssueMonitorLaunchClaimInput {
                         )
                     },
                 )
-                .map(|(monitor, accepted)| {
-                    accepted
+                .and_then(|(monitor, accepted)| {
+                    let owns_delivery = accepted
                         && monitor.pending_launch_delivery_id(issue_number).as_deref()
-                            == Some(delivery_id)
+                            == Some(delivery_id);
+                    if !owns_delivery && sources.saved_operation.is_some() {
+                        return Err(self.saved_dependency_hold(
+                            "dependency evidence or saved delivery changed before materialization",
+                        ));
+                    }
+                    Ok(owns_delivery)
                 })
             }
             Err(crate::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {

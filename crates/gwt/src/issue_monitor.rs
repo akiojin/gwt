@@ -15778,7 +15778,7 @@ impl IssueMonitorState {
             })
     }
 
-    fn saved_switch_resume(&self, number: u64) -> Option<&AgentSwitchIntent> {
+    pub(crate) fn saved_switch_resume(&self, number: u64) -> Option<&AgentSwitchIntent> {
         saved_switch_resume(&self.agent_switch_intents, number)
     }
 
@@ -46397,6 +46397,59 @@ mod tests {
         blocker.updated_at = Some("2026-11-27T03:00:00Z".into());
         monitor.observe_dependency_candidate(&blocker);
         assert!(monitor.launch_dependency_exclusion(42).is_none());
+    }
+
+    #[test]
+    fn returned_work_waits_for_the_saved_members_other_pending_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut intent = returned_work_intent();
+        intent.source_agent_id = Some("codex".into());
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor
+            .agent_switch_intents
+            .insert(intent.request.operation_id.clone(), intent);
+        monitor.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "revision": 1,
+                "members": [{"agent_member_id": "member", "name": "Member",
+                    "agent_id": "codex", "created_at": "2026-11-27T00:00:00Z"}]
+            }))
+            .unwrap(),
+        );
+        monitor.launch_profiles = vec![serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "agent_member_id": "member"
+        }))
+        .unwrap()];
+        monitor
+            .agent_issue_schedule
+            .reservations
+            .push(AgentIssueReservation {
+                host_id: crate::process::current_hostname(),
+                agent_member_id: "member".into(),
+                issue_number: 43,
+                reason: AgentScheduleReason::QueueOrder,
+            });
+        assert!(monitor.agent_schedule_launch_exclusion(42).is_none());
+        monitor
+            .pending_effects
+            .push(PendingIssueMonitorEffect::prepared(
+                "claim-43",
+                0,
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 43,
+                    claim_id: "claim-43".into(),
+                    owner: "host/session".into(),
+                    heartbeat_at: "2026-11-27T00:00:00Z".into(),
+                    expires_at: "2026-11-27T01:00:00Z".into(),
+                    launched_work_id: None,
+                },
+            ));
+        assert!(monitor.agent_schedule_launch_exclusion(42).is_some());
     }
 
     #[test]
