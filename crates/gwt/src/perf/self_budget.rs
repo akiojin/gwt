@@ -137,6 +137,7 @@ mod tests {
         let mut governor = SelfBudgetGovernor::with_window(1.0, window());
 
         // 5% of the window spent collecting: five times the 1% budget.
+        // test-hygiene: allow-short-duration synthetic CPU cost fed to the governor; nothing waits on it
         governor.observe_cost(Duration::from_millis(50), window());
 
         assert_eq!(governor.sampling_divisor(), 2);
@@ -159,11 +160,14 @@ mod tests {
     #[test]
     fn returning_under_budget_restores_the_full_sampling_rate() {
         let mut governor = SelfBudgetGovernor::with_window(1.0, window());
+        // test-hygiene: allow-short-duration synthetic CPU cost fed to the governor; nothing waits on it
         governor.observe_cost(Duration::from_millis(50), window());
+        // test-hygiene: allow-short-duration synthetic CPU cost fed to the governor; nothing waits on it
         governor.observe_cost(Duration::from_millis(50), window());
         assert_eq!(governor.sampling_divisor(), 4);
 
         for _ in 0..2 {
+            // test-hygiene: allow-short-duration synthetic CPU cost fed to the governor; nothing waits on it
             governor.observe_cost(Duration::from_micros(10), window());
         }
 
@@ -185,6 +189,7 @@ mod tests {
         for malformed in [0.0, -5.0, f64::NAN] {
             let mut governor = SelfBudgetGovernor::with_window(malformed, window());
             // 0.4% of the window is inside the 1% default and outside a 0% limit.
+            // test-hygiene: allow-short-duration synthetic CPU cost fed to the governor; nothing waits on it
             governor.observe_cost(Duration::from_micros(4_000), window());
             assert_eq!(
                 governor.sampling_divisor(),

@@ -29,8 +29,6 @@ short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_trace_and_failure_
 short-wall-clock|crates/gwt-agent/src/prepare.rs|windows_runner_probe_job_kills_dead_root_pipe_descendant_before_marker
 short-wall-clock|crates/gwt-agent/src/session.rs|hook_metadata_backfills_project_state_root_without_overwriting_authority
 short-wall-clock|crates/gwt-agent/src/session.rs|session_lease_contention_returns_retryable_timeout_then_succeeds
-short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_fits_a_prompt_sized_budget
-short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_starts_small_and_grows
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_deferred_claimant_keeps_its_place_and_the_queue_shows_it
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|lease_extension_pushes_the_expiry_out
@@ -143,16 +141,7 @@ short-wall-clock|crates/gwt/src/main.rs|frontend_timing_warns_for_receive_latenc
 short-wall-clock|crates/gwt/src/main.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/main.rs|wait_for_recorded_event
 short-wall-clock|crates/gwt/src/perf/global.rs|a_phase_clock_records_each_mark_as_the_span_since_the_previous_mark
-short-wall-clock|crates/gwt/src/perf/global.rs|a_route_measurement_lands_in_the_daily_perf_log
-short-wall-clock|crates/gwt/src/perf/global.rs|an_operation_measurement_records_its_read_or_mutation_role
 short-wall-clock|crates/gwt/src/perf/global.rs|collection_stays_inside_its_own_cpu_budget_over_a_burst
-short-wall-clock|crates/gwt/src/perf/global.rs|configured_budget_overrides_reach_the_recorded_violation
-short-wall-clock|crates/gwt/src/perf/global.rs|the_append_only_sink_never_establishes_the_perf_log
-short-wall-clock|crates/gwt/src/perf/global.rs|the_append_only_sink_records_into_an_established_perf_log
-short-wall-clock|crates/gwt/src/perf/global.rs|the_kill_switch_stops_collection_without_creating_the_log_directory
-short-wall-clock|crates/gwt/src/perf/self_budget.rs|a_malformed_limit_falls_back_to_the_fr_009_default
-short-wall-clock|crates/gwt/src/perf/self_budget.rs|exceeding_the_cpu_share_thins_sampling
-short-wall-clock|crates/gwt/src/perf/self_budget.rs|returning_under_budget_restores_the_full_sampling_rate
 short-wall-clock|crates/gwt/src/perf/store.rs|a_briefly_held_detector_still_evaluates_the_sample
 short-wall-clock|crates/gwt/src/project_index_bootstrap.rs|duplicate_full_status_refresh_requests_collapse_without_queued_second_probe
 short-wall-clock|crates/gwt/src/project_index_bootstrap.rs|failed_background_bootstrap_reports_error_and_releases_in_flight_slot
