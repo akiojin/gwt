@@ -10,6 +10,7 @@ This skill is a **mandatory preflight step** before:
 - any visible workflow that must decide an existing SPEC/Issue owner
 
 Establish sufficient duplicate/owner coverage before creating a new SPEC or Issue. Query variations help when terminology or ownership is uncertain; reuse current evidence when it already answers the question.
+Direct `issue.view` reads are appropriate for a known candidate; semantic discovery is for finding candidates you do not already know.
 
 ### General use cases
 

@@ -1,6 +1,6 @@
 ---
 name: gwt-search
-description: Use when searching gwt evidence or selecting a SPEC or Issue owner.
+description: Use when searching gwt evidence or selecting a SPEC or Issue owner. Scopes are `specs` (SPEC Issues), `issues` (plain Issues), `files` (project source), `files_docs` (project docs), `memory` (work-notes lessons).
 ---
 
 ## When to use

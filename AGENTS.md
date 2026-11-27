@@ -229,7 +229,7 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- SPEC 登録は **`gwt-register-issue` の design-required 登録モード**で行う。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。`gwt-register-spec` は 1 release cycle の alias として残す。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
+- SPEC 登録は **`gwt-register-issue` の design-required 登録モード**で行う。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。`gwt-register-spec` は `gwt-register-issue` へ転送する alias として残す。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
 - GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（design-required 登録 validation が強制する 8 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
@@ -275,7 +275,7 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
 - 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は JSON operation `memory.add` でマシンローカルの work-notes memory に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。legacy lessons alias も同じ work-notes memory に追記される。
-- 同種の作業を始める前に work-notes memory を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search` の JSON payload `scopes:["memory"]` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
+- 同種の作業を始める前に work-notes memory を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search` の JSON payload `scopes:["memory"]` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
 

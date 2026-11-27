@@ -1777,8 +1777,8 @@ mod tests {
     #[test]
     fn managed_stop_chain_does_not_register_short_lived_skill_handlers() {
         // Regression guard for FR-014s: gwt-register-issue / gwt-fix-issue /
-        // gwt-issue-search / gwt-search must never have a Stop-check handler
-        // registered. We assert those hook names are not emitted anywhere.
+        // gwt-search (including the retired Issue-search entrypoint) must never
+        // have a Stop-check handler registered. We assert those hook names are not emitted anywhere.
         let dir = tempfile::tempdir().unwrap();
         generate_settings_local(dir.path()).unwrap();
         let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
