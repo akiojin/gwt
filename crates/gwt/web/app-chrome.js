@@ -125,9 +125,12 @@ function chromeView(state, handlers) {
 
 // Issue #7646 AC-6 (A-26, items 44 and 100): the PM a project page names in
 // its footer and its settings. The ledger's designation for this project
-// decides it, so a reassignment shows at once; the running PM window names
-// it only until the ledger has loaded.
+// decides it, so a reassignment shows at once. Issue #8012: the running PM
+// window's name can be a catalog name the ledger does not use, so the PM
+// stays unnamed until the ledger has loaded; a loaded ledger without a
+// designation falls back to the running window.
 export function projectPm(roster, pmWindow) {
+  if (roster?.revision == null) return { name: "", avatar: null };
   const designated = (roster?.members || []).find(member => member.pm_project_key && member.pm_project_key === roster.project_key);
   if (designated) return { name: String(designated.name || "").trim(), avatar: designated.avatar };
   const name = String(pmWindow?.agent_name || "").trim();

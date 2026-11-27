@@ -37,22 +37,33 @@ test.describe("Agent title role and worktree badges", () => {
     await page.getByRole("button", { name: "Open PM terminal" }).click();
     const pane = page.locator('.workspace-window[data-id="agent-1"]');
     const title = pane.locator(".title-text");
-    await expect(title).toHaveText("Project Manager · Maple — Starting");
+    // Issue #8012: until the ledger loads, neither the header nor the pane
+    // paints the PM window's catalog name; the ledger's PM then names both.
+    const headerPm = page.locator('[data-destination="pm"] .app-head__label');
+    const footerPm = page.locator("#app-foot-pm .app-foot__pm");
+    await expect(title).toHaveText("Project Manager — Starting");
+    await expect(headerPm).toHaveText("PM");
+    await expect(footerPm).toHaveText("PM: —");
+    await page.screenshot({ path: info.outputPath("pm-title-before-ledger.png") });
+    await page.evaluate(() => (window as any).__releaseRoster());
+    await expect(title).toHaveText("Project Manager · Ozawa — Starting");
+    await expect(headerPm).toHaveText("Ozawa");
+    await expect(footerPm).toHaveText("PM: Ozawa");
     await expect(pane.locator(".window-role-badge")).toHaveText("PM");
     await page.evaluate(() => (window as any).__injectPmTitle("driving_pr", "running"));
-    await expect(title).toHaveText("Project Manager · Maple — Driving PRs");
+    await expect(title).toHaveText("Project Manager · Ozawa — Driving PRs");
     await page.evaluate(() => (window as any).__injectPmTitle("driving_pr", "error"));
-    await expect(title).toHaveText("Project Manager · Maple — Driving PRs");
-    await expect(title).toHaveAttribute("title", "Project Manager · Maple — Driving PRs");
+    await expect(title).toHaveText("Project Manager · Ozawa — Driving PRs");
+    await expect(title).toHaveAttribute("title", "Project Manager · Ozawa — Driving PRs");
     await page.evaluate(() => (window as any).__injectPmTitle("reconciling", "idle"));
-    await expect(title).toHaveText("Project Manager · Maple — Reconciling");
+    await expect(title).toHaveText("Project Manager · Ozawa — Reconciling");
     // Issue #7922 AC-4: a recorded wake stall replaces the last operation.
     await page.evaluate(() => (window as any).__injectPmTitle("stalled", "waiting"));
-    await expect(title).toHaveText("Project Manager · Maple — Not receiving wakes");
+    await expect(title).toHaveText("Project Manager · Ozawa — Not receiving wakes");
     await page.screenshot({ path: info.outputPath("pm-stalled-title.png") });
     // A restored runtime has no activity wire value until its own operation.
     await page.evaluate(() => (window as any).__injectPmTitle(null, "idle"));
-    await expect(title).toHaveText("Project Manager · Maple — Starting");
+    await expect(title).toHaveText("Project Manager · Ozawa — Starting");
     await page.screenshot({ path: info.outputPath("pm-operation-title.png") });
   });
 
@@ -286,6 +297,22 @@ async function installAgentTitleBadgeBackend(
       windows: windows.map((windowData) => ({ ...windowData })),
     };
 
+    // The ledger designates a PM whose name differs from the PM window's.
+    const projectKey = location.pathname.split("/").filter(Boolean).at(-1);
+    const rosterReply = request_id => ({ kind: "agent_roster", request_id, roster: {
+      project_key: projectKey, revision: 1, revision_decimal: "1", capacity: 1, recommended_capacity: 1,
+      past_contributors: [], past_complete: true, by_session: {}, error: null,
+      members: [{ agent_member_id: "pm-member", agent_id: "claude", name: "Ozawa", enabled: true, pm_eligible: true,
+        pm_project_key: projectKey, created_at: "2026-11-01T00:00:00Z", assignment: null, provider: "claude",
+        model: null, active_assignments: [], saved_manual_profile: null, saved_manual_revision: null, history: [],
+        issue_count: 0, landed_count: null, active_seconds: null, tokens: null }] } });
+    let rosterReleased = false;
+    const heldRosterRequests = [];
+    (window as any).__releaseRoster = () => {
+      rosterReleased = true;
+      for (const { socket, request_id } of heldRosterRequests.splice(0)) socket.emit(rosterReply(request_id));
+    };
+
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -319,6 +346,10 @@ async function installAgentTitleBadgeBackend(
         }
         if (msg.kind === "list_windows") {
           this.emit(windowListState);
+        }
+        if (msg.kind === "agent_roster" && pmScenario) {
+          if (rosterReleased) this.emit(rosterReply(msg.request_id));
+          else heldRosterRequests.push({ socket: this, request_id: msg.request_id });
         }
         if (msg.kind === "load_board") {
           const post = { id: "named-post", author_kind: "agent", author: "Codex",

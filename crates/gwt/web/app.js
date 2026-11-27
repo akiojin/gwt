@@ -1738,7 +1738,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (windowData?.is_pm) {
           // Issue #3823: only the registered PM's typed operation activity
           // can change its title. Worker purpose, reports and chat stay out.
-          const name = String(windowData?.agent_name || "").trim();
+          // Issue #8012: the PM's name is the ledger's, as in the header.
+          const name = projectPm(rosterModel.read(), windowData).name;
           const activity = {
             __proto__: null,
             starting: "Starting",
@@ -5878,8 +5879,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       rosterModel.subscribe(state => state.revision, syncAppChromePm);
       issueMonitorModel.subscribe(model => model.pmDecisionAttention.count, syncAppChromePm);
       let renderedRosterNames = null;
-      rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
-        [member.member_id, member.name, member.assignment?.session_id])), names => {
+      rosterModel.subscribeFrame(state => JSON.stringify([state.revision === null, ...state.members.map(member =>
+        [member.member_id, member.name, member.assignment?.session_id, member.pm_project_key])]), names => {
         if (renderedRosterNames !== null) renderWorkspace(activeWorkspace());
         renderedRosterNames = names;
       });
