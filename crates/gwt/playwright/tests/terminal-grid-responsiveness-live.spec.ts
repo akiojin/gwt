@@ -1,7 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 import { openWorks } from "./_helpers/works-entry";
 
 test.describe("terminal-grid responsiveness (#5117)", () => {
@@ -10,6 +11,92 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
   test.skip(!base || !home, "requires an isolated browser-check checkout and fresh HOME");
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("Issue #8043: Hub-opened Shell accepts input and resize after the owner attach grace", async ({ page }, info) => {
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const fixture = await realpath(await mkdtemp(join(home!, "shell-8043-")));
+      const source = join(fixture, "source");
+      const root = join(fixture, "project");
+      const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GWT_")));
+      Object.assign(env, { HOME: home!, USERPROFILE: home!, GIT_CONFIG_NOSYSTEM: "1" });
+      execFileSync("git", ["init", "-q", source], { env });
+      execFileSync("git", ["-C", source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--allow-empty", "-qm", "Shell fixture"], { env });
+      execFileSync("git", ["-C", source, "worktree", "add", "--detach", "-q", root], { env });
+      const checkout = process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!;
+      const gwtd = join(checkout, "target", "debug", process.platform === "win32" ? "gwtd.exe" : "gwtd");
+      const status = JSON.parse(execFileSync(gwtd, { cwd: root, env, encoding: "utf8", input: JSON.stringify({
+        schema_version: 1, operation: "issue.monitor.status", params: {},
+      }) + "\n" }));
+      const key: string = status.project_store?.hash;
+      expect(key, "canonical fixture project key").toMatch(/^[a-f0-9]{16}$/);
+      const projectState = join(home!, ".gwt", "projects", key, "project-state");
+      await mkdir(projectState, { recursive: true });
+      await writeFile(join(projectState, "pm.json"), '{"settings":{"auto_start":false}}');
+      await writeFile(join(projectState, "issue-monitor.json"), '{"enabled":false,"max_active_agents":1,"priority_order":[]}');
+
+      const errors: string[] = [];
+      const deliveryErrors: string[] = [];
+      const outputs = new Map<string, string>();
+      const created: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "terminal_output") outputs.set(event.id,
+          (outputs.get(event.id) ?? "") + Buffer.from(event.data_base64, "base64").toString("utf8"));
+        if (event.kind === "window_command_error" && created.includes(event.id)) deliveryErrors.push(event.message);
+      }));
+      await readLiveHubCatalog(page, base!, {
+        send: { kind: "reopen_recent_project", path: root },
+        until: (catalog, expected) => catalog.projects.some(project => project.project_key === expected), arg: key,
+      });
+      try {
+        await page.bringToFront();
+        await gotoLiveGwt(page, base!, { projectKey: key, enableTestBridge: true });
+        await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.endsWith("light") ? "light" : "dark");
+        const readiness = await page.waitForFunction(() => (window as any).__gwtPlaywrightMessages
+          .find(({ payload }: any) => payload.kind === "migration_detected" ||
+            (payload.kind === "project_owner_health" && payload.health.state === "healthy"))?.payload.kind,
+        undefined, { timeout: 30_000 }).then(value => value.jsonValue()).catch(() => "owner readiness timed out");
+        expect(readiness, "GUI presence was not confirmed. Open an admitted linked worktree and wait for a Healthy project owner before creating the Shell.")
+          .toBe("project_owner_health");
+        await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages
+          .findLast(({ payload }: any) => payload.kind === "project_execution_status")?.payload.status.view_state))
+          .toBe("open");
+        const owner = await readShellOwner(home!, key);
+        const id = await createShell(page, created);
+        // A temporary Shell launch connection can start a GUI-managed owner.
+        // Keep the project view attached past its 15 s grace to prove residency.
+        await new Promise(resolve => setTimeout(resolve, 16_000));
+        expect(await readShellOwner(home!, key)).toEqual(owner);
+
+        const grid = () => page.evaluate(id => {
+          const { cols, rows } = window.__gwtTerminalTestApi.metrics(id);
+          return { cols, rows };
+        }, id);
+        const before = await grid();
+        await page.setViewportSize({ width: 1050, height: 700 });
+        await expect.poll(grid).not.toEqual(before);
+        const { cols, rows } = await grid();
+        await expectPtyGrid(page, outputs, id, "HUB_8043", cols, rows);
+        expect(deliveryErrors, "Shell input and resize delivery errors").toEqual([]);
+        expect(errors, "console and page errors").toEqual([]);
+        await info.attach("shell-owner-8043", {
+          body: JSON.stringify({ ...owner, minimum_grace_observation_ms: 16_000, cols, rows, deliveryErrors, errors }),
+          contentType: "application/json",
+        });
+      } finally {
+        for (const id of created) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect.poll(async () => (await projectWindows(page)).some(window => window.id === id)).toBe(false);
+        }
+        await readLiveHubCatalog(page, base!, {
+          send: { kind: "preview_close_project", project_key: key, project_wide: true },
+        });
+      }
+    });
+  });
 
   test("output advances without animation frames in an unfocused terminal window", async ({ page }, info) => {
     await withLiveGwtBackendLock(base!, info, async () => {
@@ -520,6 +607,29 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
     });
   });
 });
+
+async function readShellOwner(home: string, key: string) {
+  const directory = join(home, ".gwt", "projects", key, "runtime", "daemon");
+  for (const name of await readdir(directory)) {
+    if (!name.endsWith(".json")) continue;
+    const endpoint = JSON.parse(await readFile(join(directory, name), "utf8"));
+    if (endpoint.scope?.repo_hash !== key || !endpoint.project_transport_url) continue;
+    const transport = new URL("/private/project/command", endpoint.project_transport_url);
+    expect(transport.origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    const response = await fetch(transport, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(5_000),
+      headers: { Authorization: `Bearer ${endpoint.auth_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_key: key, command: { type: "health" } }),
+    });
+    expect(response.ok, "the active project owner reports authenticated health").toBe(true);
+    const health = await response.json();
+    expect(health).toMatchObject({ project_key: key, pid: endpoint.pid, startup_intent: "gui_managed" });
+    expect(health.gui_presence_count, "the owner registered GUI presence").toBeGreaterThan(0);
+    expect(health.host_instance_id).toBeTruthy();
+    return { pid: health.pid, host_instance_id: health.host_instance_id };
+  }
+  throw new Error("GUI presence was not confirmed because the fixture has no project owner endpoint.");
+}
 
 async function projectWindows(page: Page): Promise<Array<{ id: string; preset: string; z_index?: number }>> {
   return page.evaluate(() => {
