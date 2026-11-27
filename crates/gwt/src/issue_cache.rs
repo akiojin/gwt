@@ -5,13 +5,13 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
 use gwt_core::{
     github_budget::{BudgetLedger, ThrottlePolicy},
     github_quota::GitHubQuota,
     paths::gwt_cache_dir,
     process_console::{capture_gh_blocking, SpawnOptions},
     repo_hash::{compute_repo_hash, RepoHash},
+    timestamp::UtcTimestamp,
 };
 use gwt_github::{
     cache::write_atomic,
@@ -268,6 +268,16 @@ pub fn issue_is_open_in_cache(cache_root: &Path, issue_number: u64) -> Option<bo
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ISSUE_SOURCE_FINGERPRINT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_issue_source_fingerprint_scans() -> usize {
+    ISSUE_SOURCE_FINGERPRINT_SCANS.with(|scans| scans.replace(0))
+}
+
 pub fn issue_cache_source_fingerprint(
     cache_root: &Path,
 ) -> Result<Option<IssueCacheSourceFingerprint>, String> {
@@ -275,6 +285,8 @@ pub fn issue_cache_source_fingerprint(
         return Ok(None);
     }
 
+    #[cfg(test)]
+    ISSUE_SOURCE_FINGERPRINT_SCANS.with(|scans| scans.set(scans.get() + 1));
     let mut docs = Vec::new();
     let entries = fs::read_dir(cache_root).map_err(|err| err.to_string())?;
     for entry in entries.flatten() {
@@ -550,9 +562,9 @@ fn sync_issue_cache_from_remote_with_page_cache(
             .map_err(|error| error.to_string())?;
         let cached = cache.load_entry(listed_snapshot.number);
         if cached.as_ref().is_some_and(|entry| {
-            DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+            UtcTimestamp::parse_from_rfc3339(&entry.snapshot.updated_at.0)
                 .ok()
-                .zip(DateTime::parse_from_rfc3339(&listed_snapshot.updated_at.0).ok())
+                .zip(UtcTimestamp::parse_from_rfc3339(&listed_snapshot.updated_at.0).ok())
                 .is_some_and(|(cached, listed)| cached > listed)
         }) {
             continue;
@@ -564,7 +576,9 @@ fn sync_issue_cache_from_remote_with_page_cache(
             }) {
                 continue;
             }
-            if let Some(delay) = ledger.burst_wait(GitHubQuota::GraphQl, &policy, Utc::now()) {
+            if let Some(delay) =
+                ledger.burst_wait(GitHubQuota::GraphQl, &policy, UtcTimestamp::now())
+            {
                 if gwt_core::operation_deadline::ensure_remaining("issue cache pacing")
                     .map_err(|error| error.to_string())?
                     .is_some_and(|deadline| {
@@ -690,6 +704,37 @@ fn gh_repo_cwd(repo_path: &Path) -> PathBuf {
         .unwrap_or_else(|| repo_path.to_path_buf())
 }
 
+/// Whether the indexed Issue source contains any document, without reading body payloads.
+/// Match the fingerprint reader's admission rules so a UUID cannot bypass its empty-source guard.
+pub(crate) fn issue_cache_has_source_documents(cache_root: &Path) -> Result<bool, String> {
+    if !cache_root.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(cache_root)
+        .map_err(|error| error.to_string())?
+        .flatten()
+    {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.parse::<u64>().is_ok())
+        {
+            continue;
+        }
+        let meta = entry.path().join("meta.json");
+        if meta.is_file()
+            && fs::read(meta)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn issue_cache_has_entries(cache_root: &Path) -> bool {
     let Ok(entries) = fs::read_dir(cache_root) else {
         return false;
@@ -737,13 +782,13 @@ fn read_issue_cache_refresh_meta(cache_root: &Path) -> Option<IssueCacheRefreshM
 
 #[cfg(test)]
 fn write_issue_cache_refresh_meta(cache_root: &Path, ttl: Duration) -> Result<(), String> {
-    write_issue_cache_refresh_meta_at(cache_root, ttl, Utc::now())
+    write_issue_cache_refresh_meta_at(cache_root, ttl, gwt_core::timestamp::UtcTimestamp::now())
 }
 
 fn write_issue_cache_refresh_meta_at(
     cache_root: &Path,
     ttl: Duration,
-    fetched_at: DateTime<Utc>,
+    fetched_at: UtcTimestamp,
 ) -> Result<(), String> {
     fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
     let ttl_minutes = std::cmp::max(1, ttl.as_secs() / 60);
@@ -756,7 +801,7 @@ fn write_issue_cache_refresh_meta_at(
 }
 
 fn issue_cache_refresh_is_stale(cache_root: &Path, ttl: Duration) -> bool {
-    issue_cache_refresh_status(cache_root, ttl, Utc::now()).stale
+    issue_cache_refresh_status(cache_root, ttl, gwt_core::timestamp::UtcTimestamp::now()).stale
 }
 
 /// Issue #4087 AC-1: the full-refresh cadence of `cache_root` at `now`. The
@@ -765,21 +810,17 @@ fn issue_cache_refresh_is_stale(cache_root: &Path, ttl: Duration) -> bool {
 pub fn issue_cache_refresh_status(
     cache_root: &Path,
     ttl: Duration,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> IssueCacheRefreshStatus {
     let ttl_minutes = std::cmp::max(1, ttl.as_secs() / 60);
     let meta = read_issue_cache_refresh_meta(cache_root);
     let last_full_refresh = meta.as_ref().map(|meta| meta.last_full_refresh.clone());
     let deadline = meta
         .as_ref()
-        .and_then(|meta| DateTime::parse_from_rfc3339(&meta.last_full_refresh).ok())
-        .map(|last| {
-            last.with_timezone(&Utc)
-                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::zero())
-        });
+        .and_then(|meta| UtcTimestamp::parse_from_rfc3339(&meta.last_full_refresh).ok())
+        .map(|last| last + time::Duration::try_from(ttl).unwrap_or(time::Duration::ZERO));
     let stale_by_secs = deadline.and_then(|deadline| {
-        now.signed_duration_since(deadline)
-            .to_std()
+        Duration::try_from(now.signed_duration_since(deadline))
             .ok()
             .map(|overrun| overrun.as_secs())
     });
@@ -859,7 +900,7 @@ fn run_gh_issue_command_with_gate(
     }
     gwt_core::operation_deadline::ensure_remaining(label)
         .map_err(|error| format!("{label}: {error}"))?;
-    let now = chrono::Utc::now();
+    let now = UtcTimestamp::now();
     // Issue #3928 AC-1: the window another process persisted suppresses this
     // read too, so a restarted GUI cannot re-fire the resync into it.
     let ledger = BudgetLedger::global();
@@ -923,7 +964,7 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
     let payload = output.success().then_some(output.stdout)?;
     // Issue #3891: share the fresh primary window with every other process.
     if let Some(snapshot) =
-        gwt_core::github_budget::parse_rate_limit_probe_all(&payload, chrono::Utc::now())
+        gwt_core::github_budget::parse_rate_limit_probe_all(&payload, UtcTimestamp::now())
     {
         gwt_core::github_budget::BudgetLedger::global().record_probe(&snapshot);
     }
@@ -936,8 +977,8 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
 fn fetch_issue_list_snapshots(
     repo_path: &Path,
     page_cache: Option<&Path>,
-) -> Result<(Vec<IssueSnapshot>, DateTime<Utc>), String> {
-    let mut oldest_page = Utc::now();
+) -> Result<(Vec<IssueSnapshot>, UtcTimestamp), String> {
+    let mut oldest_page = gwt_core::timestamp::UtcTimestamp::now();
     let pages = gwt_git::gh_rest::read_pages_with(
         "repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc",
         |path| {
@@ -949,7 +990,7 @@ fn fetch_issue_list_snapshots(
             let (fetched_at, stdout) = gwt_git::gh_rest::cached_list_response_at_with(
                 cache_dir,
                 path,
-                Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
                 ISSUE_CACHE_TTL.as_secs() as i64,
                 fetch,
             )?;
@@ -1010,6 +1051,73 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
     )?;
 
     parse_issue_snapshot(&stdout, number)
+}
+
+/// Read only the Issue fields needed for launch admission. Unlike cache
+/// ingestion, an absent or unrecognized state is insufficient to confirm Open.
+pub(crate) fn fetch_issue_state_for_launch(
+    repo_path: &Path,
+    number: u64,
+) -> Result<(IssueState, String), String> {
+    fn parse(response: &str) -> Result<(IssueState, String), String> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct IssueRevision {
+            state: String,
+            updated_at: String,
+        }
+        let revision: IssueRevision = serde_json::from_str(response).map_err(|e| e.to_string())?;
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&revision.updated_at)
+            .map_err(|error| error.to_string())?;
+        let state = match revision.state.as_str() {
+            "OPEN" => IssueState::Open,
+            "CLOSED" => IssueState::Closed,
+            _ => return Err("unexpected GitHub Issue state".into()),
+        };
+        Ok((state, revision.updated_at))
+    }
+
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    if let Some(response) = gwt_core::test_support::gwt_home_override().and_then(|_| {
+        std::fs::read_to_string(issue_launch_readback_fixture_path(repo_path, number)).ok()
+    }) {
+        return parse(&response);
+    }
+
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + Duration::from_secs(5),
+    );
+    let (owner, repo) = crate::issue_monitor_worker::github_remote_owner_and_repo(repo_path)
+        .map_err(|error| error.to_string())?;
+    let response = run_gh_issue_command(
+        repo_path,
+        &[
+            "issue",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &format!("{owner}/{repo}"),
+            "--json",
+            "state,updatedAt",
+        ],
+        "gh issue launch state",
+    )?;
+    parse(&response)
+}
+
+/// Give owner fixtures a live readback independent of their cached Issue.
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[doc(hidden)]
+pub fn set_issue_launch_readback_fixture(root: &Path, number: u64, response: &str) {
+    let path = issue_launch_readback_fixture_path(root, number);
+    std::fs::create_dir_all(path.parent().expect("fixture parent")).unwrap();
+    std::fs::write(path, response).unwrap();
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+fn issue_launch_readback_fixture_path(root: &Path, number: u64) -> PathBuf {
+    crate::issue_monitor_prefs_path_for_repo_path(root)
+        .with_file_name(format!("fixture-issue-{number}-readback.json"))
 }
 
 fn parse_issue_state(value: Option<&str>) -> IssueState {
@@ -1508,7 +1616,7 @@ echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-1
                 .count(),
             2
         );
-        let snapshot = BudgetLedger::global().snapshot(Utc::now());
+        let snapshot = BudgetLedger::global().snapshot(UtcTimestamp::now());
         let sources = &snapshot.local["core"].points_last_hour_by_source;
         for (caller, expected) in [("issue-cache.refresh", 2), ("issue-cache.queued-issues", 4)] {
             assert_eq!(
@@ -2038,8 +2146,26 @@ exit 1\n",
             "fresh refresh metadata should suppress stale refresh",
         );
 
+        take_issue_source_fingerprint_scans();
+        let outcome = sync_issue_cache_from_remote_if_stale_with_fingerprint(
+            temp.path(),
+            &cache_root,
+            Duration::from_secs(60),
+        )
+        .expect("public fingerprint outcome remains available");
+        assert!(!outcome.refreshed && !outcome.source_changed);
+        assert_eq!(outcome.before, outcome.after);
+        assert_eq!(outcome.after.unwrap().document_count, 0);
+        assert_eq!(
+            take_issue_source_fingerprint_scans(),
+            2,
+            "explicit public fingerprint callers still receive complete before/after snapshots"
+        );
+
         let stale_meta = IssueCacheRefreshMeta {
-            last_full_refresh: (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339(),
+            last_full_refresh: (gwt_core::timestamp::UtcTimestamp::now()
+                - time::Duration::minutes(30))
+            .to_rfc3339(),
             ttl_minutes: 15,
         };
         let bytes = serde_json::to_vec_pretty(&stale_meta).expect("serialize stale meta");
@@ -2058,7 +2184,7 @@ exit 1\n",
         let temp = tempdir().expect("tempdir");
         let cache_root = temp.path().join("cache");
         fs::create_dir_all(cache_root.join("7")).expect("create issue cache entry");
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
 
         let missing = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, now);
         assert!(
@@ -2070,7 +2196,7 @@ exit 1\n",
         assert_eq!(missing.ttl_minutes, 15);
 
         let stale_meta = IssueCacheRefreshMeta {
-            last_full_refresh: (now - chrono::Duration::minutes(65)).to_rfc3339(),
+            last_full_refresh: (now - time::Duration::minutes(65)).to_rfc3339(),
             ttl_minutes: 15,
         };
         let bytes = serde_json::to_vec_pretty(&stale_meta).expect("serialize stale meta");
@@ -2085,7 +2211,11 @@ exit 1\n",
         assert_eq!(stale.stale_by_secs, Some(50 * 60));
 
         write_issue_cache_refresh_meta(&cache_root, ISSUE_CACHE_TTL).expect("write fresh meta");
-        let fresh = issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now());
+        let fresh = issue_cache_refresh_status(
+            &cache_root,
+            ISSUE_CACHE_TTL,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         assert!(!fresh.stale);
         assert_eq!(fresh.stale_by_secs, None);
         assert!(fresh.last_full_refresh.is_some());
@@ -2200,7 +2330,7 @@ exit 1\n",
             resource: "graphql".to_string(),
             limit: 5000,
             remaining: 0,
-            reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            reset_at: (gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(300)),
         });
         gate
     }
@@ -2252,7 +2382,7 @@ exit 1\n",
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
         let repo_path = temp.path().join("repo");
         fs::create_dir_all(&repo_path).expect("create repo path");
-        let reset_at = chrono::Utc::now() + chrono::Duration::seconds(420);
+        let reset_at = gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(420);
         let fake_gh = repo_path.join("gh");
         fs::write(
             &fake_gh,
@@ -2297,10 +2427,7 @@ exit 1
         );
         // AC-2: the probed reset window, not a guess.
         assert!(
-            error.contains(&format!(
-                "reset_at={}",
-                reset_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-            )),
+            error.contains(&format!("reset_at={}", reset_at.to_rfc3339_seconds())),
             "{error}"
         );
         // The original GitHub wording survives for humans.
@@ -2309,7 +2436,7 @@ exit 1
         assert!(gate
             .active_block(
                 gwt_core::github_quota::GitHubQuota::GraphQl,
-                chrono::Utc::now()
+                UtcTimestamp::now()
             )
             .is_some());
     }
@@ -2402,12 +2529,12 @@ exit 1
             .collect()
     }
 
-    fn secondary_refusal(now: chrono::DateTime<chrono::Utc>) -> RateLimitBlock {
+    fn secondary_refusal(now: UtcTimestamp) -> RateLimitBlock {
         RateLimitBlock {
             resource: "graphql".to_string(),
             limit: 0,
             remaining: 0,
-            reset_at: now + chrono::Duration::seconds(60),
+            reset_at: (now + time::Duration::seconds(60)),
         }
     }
 
@@ -2514,7 +2641,14 @@ esac
         assert_eq!(outside_general.snapshot.updated_at.0, UPDATED_V1);
         assert_eq!(outside_general.snapshot.state, IssueState::Open);
         assert_eq!(cache.list_entries().unwrap().len(), 4);
-        assert!(!issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now()).stale);
+        assert!(
+            !issue_cache_refresh_status(
+                &cache_root,
+                ISSUE_CACHE_TTL,
+                gwt_core::timestamp::UtcTimestamp::now()
+            )
+            .stale
+        );
     }
 
     #[test]
@@ -2606,7 +2740,7 @@ esac
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
         let ledger = BudgetLedger::global();
         for _ in 0..ThrottlePolicy::default().burst_calls_per_minute {
-            ledger.record_spawn(GitHubQuota::GraphQl, Utc::now());
+            ledger.record_spawn(GitHubQuota::GraphQl, UtcTimestamp::now());
         }
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + Duration::from_secs(10),
@@ -2687,7 +2821,14 @@ esac
             .expect_err("an expired scan must not publish a generation");
         assert!(error.contains("deadline expired"), "{error}");
         assert_eq!(fs::read_to_string(meta).unwrap(), old);
-        assert!(issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now()).stale);
+        assert!(
+            issue_cache_refresh_status(
+                &cache_root,
+                ISSUE_CACHE_TTL,
+                gwt_core::timestamp::UtcTimestamp::now()
+            )
+            .stale
+        );
         assert!(
             !issue_cache_has_entries(&cache_root),
             "no partial enumeration was published"
@@ -2809,7 +2950,7 @@ esac
         // burst on the shared ledger.
         let ledger = BudgetLedger::global();
         let policy = ThrottlePolicy::default();
-        let now = chrono::Utc::now();
+        let now = UtcTimestamp::now();
         for _ in 0..policy.burst_calls_per_minute {
             ledger.record_spawn(GitHubQuota::GraphQl, now);
         }
@@ -2877,7 +3018,7 @@ esac
         let fake_gh = write_fake_gh(temp.path(), &log);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
         let ledger = BudgetLedger::global();
-        let now = chrono::Utc::now();
+        let now = UtcTimestamp::now();
         for _ in 0..ThrottlePolicy::current().burst_calls_per_minute {
             ledger.record_spawn(GitHubQuota::GraphQl, now);
         }
@@ -2908,7 +3049,7 @@ esac
         let _sandbox = ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         BudgetLedger::global().record_block(&secondary_refusal(now), now);
 
         // A fresh process: nothing in the in-memory gate.

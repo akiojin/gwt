@@ -4,10 +4,12 @@ pub mod agent_capacity;
 pub mod agent_maintenance;
 pub mod agent_names;
 pub(crate) mod agent_project_state;
+pub mod agent_registry;
 pub mod agent_registry_import;
 pub mod agent_resource_policy;
 pub mod docker_launch;
 pub mod launch_runtime;
+pub mod owner_recovery;
 pub mod pane_runtime;
 pub mod session_finalizer;
 pub mod session_launch;
@@ -26,6 +28,8 @@ pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
 pub use cli::issue::validate_monitor_profiles_set;
+pub mod account_homes;
+mod account_switch;
 pub mod custom_agents_dispatch;
 pub mod custom_agents_service;
 pub mod daemon_publisher;
@@ -35,6 +39,8 @@ pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod disk_space;
 pub mod error_report;
+pub mod execution_environments;
+pub mod first_run_setup;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_resources;
@@ -68,11 +74,13 @@ pub mod native_notifications;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
+pub mod pm_activity;
 pub mod pm_conversation;
 pub mod pm_current;
 pub mod pm_planning;
 pub mod pm_policy;
 pub mod pm_registry;
+pub mod pm_report_board;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
@@ -82,6 +90,7 @@ pub mod project_open_control;
 pub mod project_runtime;
 pub mod project_store_maintenance;
 pub mod project_transport;
+pub mod project_work_events;
 pub mod protocol;
 pub mod provider_reset;
 pub mod pty_start_gate;
@@ -93,9 +102,11 @@ pub mod spec_tasks;
 pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
+pub mod themes;
 pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
+pub mod user_hooks;
 pub mod web_protocol_enums;
 pub mod window_registry;
 pub mod window_state;
@@ -119,9 +130,11 @@ pub(crate) fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
 #[doc(hidden)]
 pub use agent_project_state::{
     adopt_authenticated_execution, apply_authenticated_work_terminalization,
-    apply_authenticated_workspace_update,
+    apply_authenticated_workspace_close_proof_repair, apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
-    apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
+    apply_bound_authenticated_work_terminalization,
+    apply_bound_authenticated_workspace_close_proof_repair,
+    apply_bound_authenticated_workspace_reopen, apply_bound_authenticated_workspace_update,
     apply_bound_authenticated_workspace_update_with_operation_id,
     continuation_requires_new_session, continue_authenticated_execution,
     describe_authenticated_host_contract, observe_agent_runtime,
@@ -134,11 +147,14 @@ pub use agent_project_state::{
     AgentExecutionContinuationRequest, AgentHostContractReceipt, AgentHostContractRequest,
     AgentRuntimeObservation, AgentWorkMaterializationProbeReceipt,
     AgentWorkMaterializationProbeRequest, AgentWorkTerminalKind, AgentWorkTerminalizationOutcome,
-    AgentWorkTerminalizationReceipt, AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError,
+    AgentWorkTerminalizationReceipt, AgentWorkTerminalizationRequest,
+    AgentWorkspaceCloseProofRepairReceipt, AgentWorkspaceCloseProofRepairRequest,
+    AgentWorkspaceReopenReceipt, AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError,
     AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt,
     AgentWorkspaceUpdateRequest, AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
     AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
-    AGENT_HOST_CONTRACT_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+    AGENT_HOST_CONTRACT_SCHEMA_VERSION, AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+    AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
     AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
     EXECUTION_GENERATION_CONTRACT_VERSION,
 };
@@ -190,8 +206,8 @@ pub use issue_monitor::{
     mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,
     mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
-    pending_autonomous_handoff_resumption_from_prefs, persist_issue_monitor_authority_fence,
-    persist_legacy_issue_monitor_shutdown_revoke_fence,
+    normalize_project_execution_environments, pending_autonomous_handoff_resumption_from_prefs,
+    persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
     prepare_autonomous_handoff_delivery_from_prefs,
     preserve_answered_handoff_resume_strategy_from_prefs,
     record_autonomous_handoff_delivery_failure_from_prefs, record_autonomous_question_handoff,
@@ -229,27 +245,29 @@ pub use issue_monitor::{
     IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
     IssueReadinessFailure, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
     MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
-    UPDATE_DRAIN_RELEASE_OPERATION,
+    PendingIssueMonitorEffect, ProjectExecutionEnvironment, AUTONOMOUS_WAIT_MAX_SECS,
+    IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    STRANDED_LAUNCHED_ROW_GRACE_SECS, UPDATE_DRAIN_RELEASE_OPERATION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
-    search_knowledge_bridge, search_knowledge_bridge_outcome, update_knowledge_phase,
-    KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
-    KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
+    search_knowledge_bridge, search_knowledge_bridge_outcome, set_knowledge_autonomous_target,
+    update_knowledge_phase, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
+    KnowledgeKind, KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
     KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry, KnowledgeWorkRefView,
 };
 pub use launch_wizard::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, has_gwt_spec_label,
     knowledge_launch_target_branch_name, load_agent_options, AgentOption, AgentSetupAffordance,
     AgentSetupKind, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
-    LaunchWizardAgentSetupView, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardAgentSetupView, LaunchWizardAssigneeCandidate, LaunchWizardAssigneeView,
+    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardExecutionEnvironmentView,
     LaunchWizardHolderDecisionView, LaunchWizardHydration, LaunchWizardIssueMonitorPoolImpactView,
-    LaunchWizardIssueMonitorPoolSetView, LaunchWizardIssueMonitorPoolView, LaunchWizardLaunchPath,
-    LaunchWizardLaunchRequest, LaunchWizardLiveSessionView, LaunchWizardMode,
-    LaunchWizardOptionView, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles,
-    LaunchWizardProgressStepView, LaunchWizardQuickStartView, LaunchWizardStartMethodKind,
+    LaunchWizardIssueMonitorPoolSetView, LaunchWizardIssueMonitorPoolView,
+    LaunchWizardIssuePlanView, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
+    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
+    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardProgressStepView,
+    LaunchWizardQuickStartView, LaunchWizardSkippedEnvironmentView, LaunchWizardStartMethodKind,
     LaunchWizardStartMethodView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
     LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
     ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
@@ -283,17 +301,17 @@ pub use protocol::{
     ActiveWorkProjectionView, ActiveWorkspaceWorkView, AgentAssignmentHistoryView,
     AgentPastContributorView, AgentRosterMemberView, AgentRosterView, AgentWorkFactsView,
     AppStateView, AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
-    ContinueWorkOutcomeKind, CustomAgentErrorCode, FileAttachment, FocusCycleDirection,
-    FrontendEvent, GitHubRepositorySearchResultView, HubProjectView, HubStateView,
-    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
-    LocalAgentActivityAgentView, LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
+    ContinueWorkOutcomeKind, CustomAgentErrorCode, DecisionCountView, FileAttachment,
+    FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
+    HomeProjectConversationView, HubProjectView, HubStateView, IndexSearchMatchMode,
+    IndexSearchResult, IndexSearchScope, IndexSearchTarget, LocalAgentActivityAgentView,
+    LocalAgentActivityView, LogScopeSelection, ManagedHookHealthView,
     ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
-    PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus,
-    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
-    WorkspaceExecutionContainerView, WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView,
-    WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceStateNoticeKind,
-    WorkspaceStateNoticeView, WorkspaceView,
+    PmAgentOption, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectAutonomyView,
+    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
+    WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
+    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
+    WorkspaceResumeSource, WorkspaceStateNoticeKind, WorkspaceStateNoticeView, WorkspaceView,
 };
 pub use window_registry::WindowRegistry;

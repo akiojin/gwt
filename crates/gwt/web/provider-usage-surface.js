@@ -1,12 +1,12 @@
 // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface (SPEC-2970)
 // extracted from app.js. Owns the latest provider usage snapshot, the
-// usage formatter/render helpers, the consolidated status-strip hover
-// popover (window.__gwtShowUsageHover / window.__gwtHideUsageHover), and
-// the Settings "Usage & Limits" panel. The WS protocol remains owned by
-// app.js; presentation follow-ups stay within this extracted surface.
+// usage formatter/render helpers, and the per-account usage card. Issue
+// #7648: the card is shown only on the Execution environments screen's
+// account detail; the status-strip cell and its hover popover are gone and
+// the Settings "Usage & Limits" panel is a link to Accounts. The WS protocol
+// remains owned by app.js.
 //
 // deps:
-// - send(message): forward a frontend event over the WebSocket bridge.
 // - renderWorkspaceWindows(): re-render the Workspace Overview (Kanban)
 //   Work surface after a usage snapshot lands. Late-bound: app.js
 //   constructs that surface after this factory runs, so the dep closes
@@ -15,21 +15,21 @@
 //   window title the user knows it by (Issue #3862). Returning a falsy
 //   value falls back to a shortened session id.
 import { createUiStateStore } from "./ui-state-store.js";
+import { usagePoolAccountId } from "./execution-environments.js";
 
 export function createProviderUsageSurface({
-  send,
   renderWorkspaceWindows,
   sessionLabel = () => null,
 }) {
       // ---- Provider usage & rate limits (SPEC-2970) ----
-      const emptyUsage = { accounts: [], sessions: [], consumption: [] };
+      const emptyUsage = { accounts: [], sessions: [], consumption: [], providers: [] };
       // Null means no snapshot has arrived; eager subscriptions must not call
       // late-bound Workspace dependencies while app.js constructs its surfaces.
       const usageModel = createUiStateStore(null);
       const latestProviderUsage = () => usageModel.read() || emptyUsage;
-      const usagePanelSubscriptions = new Map();
+      let codexCreditObservation = null;
+      let codexCreditRate = null;
 
-      const USAGE_PROVIDER_NAME = { codex: "Codex", claude_code: "Claude Code" };
       const USAGE_WINDOW_LABEL = {
         five_hour: "5-hour",
         weekly: "Weekly",
@@ -88,11 +88,13 @@ export function createProviderUsageSurface({
         if (!state) return "";
         switch (state.kind) {
           case "disabled":
-            return "Enable in Settings";
+            return "Usage collection is off";
           case "no_data":
             return "No data yet";
           case "unavailable":
             return state.reason ? `Unavailable — ${state.reason}` : "Unavailable";
+          case "unknown":
+            return state.reason ? `Usage unknown (${state.reason})` : "Usage unknown";
           case "stale":
             return `stale ${Math.round((state.age_secs || 0) / 60)}m`;
           default:
@@ -108,7 +110,36 @@ export function createProviderUsageSurface({
         return String(n);
       }
 
+      // SPEC #7347 FR-004: names, labels and default accounts come from the
+      // backend's provider list, never from a table keyed by provider name.
+      function providerDescriptor(provider, snapshot = latestProviderUsage()) {
+        return (snapshot?.providers || []).find(item => item?.provider === provider) || null;
+      }
+
+      function isDefaultAccount(item, snapshot) {
+        return !item.pool_account_id ||
+          item.pool_account_id === providerDescriptor(item.provider, snapshot)?.default_account_id;
+      }
+
       function applyProviderUsageUi(snapshot) {
+        // The default account's credit balance (only Codex reports credits).
+        const account = (snapshot?.accounts || []).find(item => item.credits && isDefaultAccount(item, snapshot));
+        const balance = account?.credits?.balance;
+        const timestamp = Date.parse(account?.fetched_at);
+        if (!account?.account_id || !["ok", "stale"].includes(account.state?.kind) ||
+            !Number.isFinite(timestamp) || !Number.isFinite(balance) || balance < 0 ||
+            account.credits.unlimited) {
+          codexCreditObservation = null;
+          codexCreditRate = null;
+        } else {
+          const previous = codexCreditObservation;
+          const sameAccount = previous?.accountId === account.account_id;
+          if (!sameAccount || timestamp !== previous.timestamp || balance !== previous.balance) {
+            codexCreditRate = sameAccount && timestamp > previous.timestamp && balance <= previous.balance
+              ? (previous.balance - balance) * 3600000 / (timestamp - previous.timestamp) : null;
+            codexCreditObservation = { accountId: account.account_id, timestamp, balance };
+          }
+        }
         usageModel.update(() => snapshot || emptyUsage);
       }
 
@@ -186,15 +217,19 @@ export function createProviderUsageSurface({
         const lbl = document.createElement("span");
         lbl.className = "op-usage-win__lbl";
         applyUsageWindowLabel(lbl, w);
-        const bar = buildUsageBar(w.used_percent, limitReached);
-        bar.classList.add("op-usage-win__bar");
+        const raw = w.used_percent;
+        const number = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "")
+          ? Number(raw) : NaN;
+        const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : null;
         const pct = document.createElement("span");
         pct.className = "op-usage-win__pct";
-        pct.textContent = `${Math.round(w.used_percent)}%`;
+        pct.textContent = percent == null ? "—" : `${Math.round(percent)}%`;
         const reset = document.createElement("span");
         reset.className = "op-usage-win__reset";
         reset.textContent = w.resets_at ? `↻ ${usageFmtResetShort(w.resets_at)}` : "";
         row.appendChild(lbl);
+        const bar = percent == null ? document.createElement("span") : buildUsageBar(percent, limitReached);
+        bar.classList.add("op-usage-win__bar");
         row.appendChild(bar);
         row.appendChild(pct);
         row.appendChild(reset);
@@ -256,7 +291,7 @@ export function createProviderUsageSurface({
       }
 
       // ---- Per-session tokens / context (Issue #3862) ----
-      // The popover is the one usage surface, so per-session data must be
+      // The account card is the one usage surface, so per-session data must be
       // readable here too. The list is bounded: the earlier unbounded table
       // grew to hundreds of rows and was removed, so each provider shows at
       // most USAGE_SESSION_ROWS_MAX rows (context-hungriest first) plus a
@@ -397,7 +432,7 @@ export function createProviderUsageSurface({
       // degraded reason) + consumption grid + 7-day sparkline + bounded session
       // list. Grouping all of one provider's data together is the key
       // readability win.
-      function buildUsageProviderCard(account) {
+      function buildUsageProviderCard(account, includeProviderRollups) {
         const card = document.createElement("div");
         card.className = "op-usage-card";
         card.dataset.provider = account.provider;
@@ -406,10 +441,11 @@ export function createProviderUsageSurface({
         head.className = "op-usage-card__head";
         const icon = document.createElement("span");
         icon.className = "op-usage-card__icon";
-        icon.textContent = account.provider === "claude_code" ? "◇" : "⬡";
+        const descriptor = providerDescriptor(account.provider);
+        icon.textContent = descriptor?.short_label || "⬡";
         const name = document.createElement("span");
         name.className = "op-usage-card__name";
-        name.textContent = USAGE_PROVIDER_NAME[account.provider] || account.provider;
+        name.textContent = descriptor?.display_name || account.provider;
         head.appendChild(icon);
         head.appendChild(name);
         if (account.plan) {
@@ -418,10 +454,16 @@ export function createProviderUsageSurface({
           plan.textContent = account.plan;
           head.appendChild(plan);
         }
-        if (account.limit_reached) {
+        const credits = account.credits || null;
+        const creditStateReadable = ["ok", "stale"].includes(account.state?.kind);
+        const full = creditStateReadable && (account.windows || []).some(w =>
+          ["five_hour", "weekly"].includes(w.kind) && Number(w.used_percent) >= 100);
+        const usingCredits = full && credits?.has_credits === true;
+        const displayLimit = !usingCredits && (account.limit_reached || (full && credits?.has_credits === false));
+        if (displayLimit || usingCredits) {
           const limit = document.createElement("span");
-          limit.className = "op-usage-card__limit";
-          limit.textContent = "Limit reached";
+          limit.className = usingCredits ? "op-usage-card__plan" : "op-usage-card__limit";
+          limit.textContent = usingCredits ? "Using credits" : "Limit reached";
           head.appendChild(limit);
         }
         card.appendChild(head);
@@ -438,38 +480,40 @@ export function createProviderUsageSurface({
           const wins = document.createElement("div");
           wins.className = "op-usage-wins";
           for (const w of windows) {
-            wins.appendChild(buildUsageWindowRow(w, account.limit_reached));
+            // A model-specific sub-limit does not mark the shared quota full.
+            const modelWindow = w.kind === "fable_weekly" || w.kind === "opus_weekly";
+            wins.appendChild(buildUsageWindowRow(w, !modelWindow && displayLimit));
           }
           card.appendChild(wins);
-        } else {
+        }
+        {
           const reason = usageStateReason(account.state);
           if (reason) {
-            const isDisabled = (account.state && account.state.kind) === "disabled";
-            const r = document.createElement(isDisabled ? "button" : "div");
+            const r = document.createElement("div");
             r.className = "op-usage-card__reason";
             r.textContent = reason;
-            if (isDisabled) {
-              r.type = "button";
-              r.classList.add("op-usage-card__reason--action");
-              r.addEventListener("click", (e) => {
-                e.stopPropagation();
-                if (typeof window.__gwtHideUsageHover === "function") {
-                  window.__gwtHideUsageHover();
-                }
-                document.dispatchEvent(
-                  new CustomEvent("settings:open", { detail: { target: "usage" } }),
-                );
-              });
-            }
             card.appendChild(r);
           }
         }
 
-        if (account.provider === "claude_code" && account.extra_usage?.is_enabled === true) {
+        if (account.extra_usage?.is_enabled === true) {
           card.appendChild(buildUsageCreditsRow(account.extra_usage));
         }
+        if (credits && creditStateReadable) {
+          const row = document.createElement("div");
+          row.className = "op-usage-card__account";
+          row.dataset.codexCredits = "true";
+          const amount = credits.unlimited ? "unlimited"
+            : Number.isFinite(credits.balance) && credits.balance >= 0
+              ? `${credits.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits` : "— credits";
+          row.textContent = `Balance: ${amount}`;
+          if (includeProviderRollups && Number.isFinite(codexCreditRate)) {
+            row.textContent += ` · ${codexCreditRate.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits/hour (observed)`;
+          }
+          card.appendChild(row);
+        }
 
-        const pc = usageConsumptionFor(account.provider);
+        const pc = includeProviderRollups ? usageConsumptionFor(account.provider) : null;
         if (pc) {
           const cwrap = document.createElement("div");
           cwrap.className = "op-usage-card__cons";
@@ -480,211 +524,45 @@ export function createProviderUsageSurface({
           card.appendChild(cwrap);
         }
 
-        const sessions = buildUsageSessionsSection(account.provider);
+        const sessions = includeProviderRollups ? buildUsageSessionsSection(account.provider) : null;
         if (sessions) card.appendChild(sessions);
         return card;
       }
 
-      // SPEC-2970 — the full usage detail as provider cards, appended to a
-      // container. The hover popover is the single surface for all usage info
-      // (the click-open modal was removed per UX feedback). Per-session
-      // tokens / context live inside each provider card as a bounded list
-      // (Issue #3862) — the earlier unbounded table was removed because it
-      // grew to hundreds of rows.
-      function buildUsageFullSections(container) {
-        for (const account of latestProviderUsage().accounts || []) {
-          container.appendChild(buildUsageProviderCard(account));
-        }
+      // Issue #7648 — draw one account's usage card into the Execution
+      // environments account detail, the single surface for usage and limits.
+      function renderAccountUsage(container, provider, poolAccountId = null) {
+        const snapshot = latestProviderUsage();
+        const account = (snapshot.accounts || []).find(item => item.provider === provider &&
+          (poolAccountId == null || usagePoolAccountId(item, snapshot.providers) === poolAccountId));
+        const includeProviderRollups = !poolAccountId ||
+          poolAccountId === providerDescriptor(provider, snapshot)?.default_account_id;
+        container.replaceChildren(...(account ? [buildUsageProviderCard(account, includeProviderRollups)] : []));
       }
 
-      // ---- Consolidated usage hover popover (SPEC-2970 UX) ----
-      // Hovering the status-bar USAGE cell shows EVERYTHING at once (both
-      // providers' windows with bars + full consumption with charts +
-      // sessions). The click-open modal was removed per UX feedback — the hover
-      // popover is the single surface. Move the cursor into it to scroll/read.
-      let usageHoverEl = null;
-      let usageHoverHideTimer = null;
-      let usageHoverAnchor = null;
-
-      function buildUsageHoverBody() {
-        const wrap = document.createElement("div");
-        wrap.className = "op-usage-hover__body";
-        const head = document.createElement("div");
-        head.className = "op-usage-hover__head";
-        head.textContent = "Usage & Limits";
-        wrap.appendChild(head);
-        buildUsageFullSections(wrap);
-        return wrap;
-      }
-
-      function positionUsageHover() {
-        if (!usageHoverEl || !usageHoverAnchor) return;
-        const r = usageHoverAnchor.getBoundingClientRect();
-        const w = usageHoverEl.offsetWidth;
-        const left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
-        usageHoverEl.style.left = `${left}px`;
-        usageHoverEl.style.bottom = `${Math.max(8, window.innerHeight - r.top + 6)}px`;
-      }
-
-      function cancelUsageHoverHide() {
-        if (usageHoverHideTimer) {
-          clearTimeout(usageHoverHideTimer);
-          usageHoverHideTimer = null;
-        }
-      }
-
-      function refreshUsageHoverIfOpen() {
-        if (!usageHoverEl || usageHoverEl.hidden) return;
-        const restoreKeyboardFocus = usageHoverEl.contains(document.activeElement);
-        while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
-        usageHoverEl.appendChild(buildUsageHoverBody());
-        positionUsageHover();
-        if (restoreKeyboardFocus) {
-          requestAnimationFrame(() => usageHoverEl?.focus());
-        }
-      }
-
-      window.__gwtShowUsageHover = (anchor) => {
-        cancelUsageHoverHide();
-        if (usageHoverAnchor && usageHoverAnchor !== anchor) {
-          usageHoverAnchor.setAttribute("aria-expanded", "false");
-        }
-        usageHoverAnchor = anchor || usageHoverAnchor;
-        if (!usageHoverEl) {
-          usageHoverEl = document.createElement("div");
-          usageHoverEl.className = "op-usage-hover";
-          usageHoverEl.id = "provider-usage-popover";
-          usageHoverEl.setAttribute("role", "region");
-          usageHoverEl.setAttribute("aria-label", "Usage & Limits");
-          usageHoverEl.setAttribute("tabindex", "0");
-          usageHoverEl.addEventListener("mouseenter", cancelUsageHoverHide);
-          usageHoverEl.addEventListener("mouseleave", () => window.__gwtHideUsageHover());
-          usageHoverEl.addEventListener("focusin", cancelUsageHoverHide);
-          usageHoverEl.addEventListener("focusout", (event) => {
-            if (
-              usageHoverEl?.contains(event.relatedTarget) ||
-              event.relatedTarget === usageHoverAnchor
-            ) {
-              return;
-            }
-            window.__gwtHideUsageHover();
-          });
-          usageHoverEl.addEventListener("keydown", (event) => {
-            if (event.key !== "Escape") return;
-            event.preventDefault();
-            const anchor = usageHoverAnchor;
-            anchor?.focus();
-            window.__gwtHideUsageHover({ immediate: true });
-          });
-          document.body.appendChild(usageHoverEl);
-        }
-        while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
-        usageHoverEl.appendChild(buildUsageHoverBody());
-        usageHoverEl.hidden = false;
-        usageHoverAnchor?.setAttribute("aria-expanded", "true");
-        usageHoverEl.style.visibility = "hidden";
-        requestAnimationFrame(() => {
-          positionUsageHover();
-          if (usageHoverEl) usageHoverEl.style.visibility = "visible";
-        });
-      };
-
-      window.__gwtUsageHoverContains = (node) => Boolean(node && usageHoverEl?.contains(node));
-      window.__gwtFocusUsageHover = () => usageHoverEl?.focus();
-      window.__gwtHideUsageHover = (options = {}) => {
-        cancelUsageHoverHide();
-        if (options.immediate) {
-          if (usageHoverEl) usageHoverEl.hidden = true;
-          usageHoverAnchor?.setAttribute("aria-expanded", "false");
-          usageHoverAnchor = null;
-          return;
-        }
-        usageHoverHideTimer = setTimeout(() => {
-          if (usageHoverEl) usageHoverEl.hidden = true;
-          usageHoverAnchor?.setAttribute("aria-expanded", "false");
-          usageHoverHideTimer = null;
-        }, 180);
-      };
-
-      // SPEC-2970 FR-009/FR-013 — Settings "Usage & Limits" panel: Claude
-      // account usage is opt-in (Keychain + network); Codex is local + auto.
+      // Issue #7648 — Settings keeps only the way to Accounts; usage, reset
+      // times and limits are not repeated here.
       function renderUsagePanel(panel) {
-        usagePanelSubscriptions.get(panel)?.();
-        usagePanelSubscriptions.delete(panel);
-        while (panel.firstChild) panel.removeChild(panel.firstChild);
         const section = document.createElement("div");
         section.className = "settings-section";
-
         const heading = document.createElement("h3");
-        heading.textContent = "Provider Usage & Limits";
-        section.appendChild(heading);
-
-        const codexNote = document.createElement("p");
-        codexNote.className = "settings-hint";
-        codexNote.textContent =
-          "Codex usage is read from local session files automatically.";
-        section.appendChild(codexNote);
-
-        const label = document.createElement("label");
-        label.className = "settings-toggle";
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.addEventListener("change", () => {
-          try {
-            send({
-              kind: "set_claude_account_usage_enabled",
-              enabled: checkbox.checked,
-            });
-          } catch {
-            /* no-op */
-          }
+        heading.textContent = "Usage & Limits";
+        const hint = document.createElement("p");
+        hint.className = "settings-hint";
+        hint.textContent = "Provider usage, reset times and limits are shown once per account, in Accounts.";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "wizard-button";
+        open.textContent = "Open Accounts";
+        open.addEventListener("click", () => {
+          document.dispatchEvent(new CustomEvent("environments:open", { detail: { view: "accounts" } }));
         });
-        const span = document.createElement("span");
-        span.textContent = "Show Claude Code account usage (5-hour / weekly)";
-        label.appendChild(checkbox);
-        label.appendChild(span);
-        section.appendChild(label);
-
-        const consent = document.createElement("p");
-        consent.className = "settings-hint";
-        consent.textContent =
-          "Off by default (opt-in). When enabled, Claude account usage reads your OAuth token from the Keychain / credentials file and requests usage from the Anthropic API (polled at most once every 3 minutes). While disabled, no Keychain read or network request happens. Per-session token usage is read locally and is not affected by this setting.";
-        section.appendChild(consent);
-
-        panel.appendChild(section);
-        let initialRender = true;
-        let unsubscribe;
-        unsubscribe = usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
-          if (!initialRender && !checkbox.isConnected) {
-            unsubscribe?.();
-            usagePanelSubscriptions.delete(panel);
-            return;
-          }
-          initialRender = false;
-          const account = (snapshot?.accounts || []).find((a) => a.provider === "claude_code");
-          checkbox.checked = !!(account?.state && account.state.kind !== "disabled");
-        });
-        usagePanelSubscriptions.set(panel, unsubscribe);
+        section.append(heading, hint, open);
+        panel.replaceChildren(section);
       }
 
       // These views live for the factory's lifetime, like its window hover
       // hooks. The receive API updates data without choosing which view renders.
-      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
-        if (!snapshot) return;
-        try {
-          window.__operatorShell?.applyProviderUsage?.(snapshot);
-        } catch (e) {
-          console.warn("usage pill update failed", e);
-        }
-      });
-      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
-        if (!snapshot) return;
-        try {
-          refreshUsageHoverIfOpen();
-        } catch {
-          /* no-op */
-        }
-      });
       usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
         if (!snapshot) return;
         // Empty sessions must clear stale token/context values in Workspace.
@@ -697,7 +575,9 @@ export function createProviderUsageSurface({
 
       return {
         applyProviderUsageUi,
+        renderAccountUsage,
         renderUsagePanel,
         usageForSession,
+        usageModel,
       };
 }

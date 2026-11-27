@@ -17,6 +17,9 @@ pub(crate) struct ProjectViewState {
     last_open_receipt: Option<ActualViewReceipt>,
     close_intents: BTreeMap<String, AcceptedCloseIntent>,
     pub(super) deferred_restores: Vec<PreparedProjectWindowRestore>,
+    /// Issue #7665: Monitor launches this policy withheld. They resume when a
+    /// view registers instead of leaving their claim `launching` windowless.
+    pub(super) withheld_monitor_launches: Vec<DeferredIssueMonitorLaunch>,
     pub(super) previews: HashMap<String, ClosePreview>,
 }
 
@@ -147,7 +150,7 @@ impl AppRuntime {
         }
         let receipt = ActualViewReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: chrono::Utc::now(),
+            accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
             admitted_policy_revision: policy.as_ref().map_or(0, |policy| policy.revision),
         };
         let state = self.project_state_mut(context).expect("current project");
@@ -184,6 +187,23 @@ impl AppRuntime {
         );
         let mut events = self.restore_prepared_open_project_windows(&context.tab_id, restores);
         events.extend(self.startup_auto_resume_ready_events());
+        let withheld = std::mem::take(
+            &mut self
+                .project_state_mut(context)
+                .expect("current project")
+                .project_views
+                .withheld_monitor_launches,
+        );
+        for launch in withheld {
+            // The normal entry re-checks admission and the delivery's currency.
+            events.extend(self.auto_launch_issue_monitor_delivery_events_for_project(
+                &launch.project_root,
+                launch.issue_number,
+                launch.linked_issue_kind,
+                launch.delivery_id,
+                launch.launch_session_strategy,
+            ));
+        }
         // Issue #5379: while the worker evaluates queued restores, the PM
         // ensure waits for the drain's tail so a restored PM Session is seen
         // as live by the singleton gate before a fresh PM is spawned.
@@ -267,7 +287,7 @@ impl AppRuntime {
                 .collect::<BTreeMap<_, _>>(),
             last_open_receipt: state.project_views.last_open_receipt.clone(),
             close_intents: state.project_views.close_intents.clone(),
-            observed_at: chrono::Utc::now(),
+            observed_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         let result =
             gwt::project_execution_policy::write_observation(&context.project_root, &observation)

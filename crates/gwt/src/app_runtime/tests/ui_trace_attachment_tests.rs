@@ -271,7 +271,7 @@ fn app_runtime_board_milestone_from_unassigned_origin_does_not_create_workspace_
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -327,8 +327,8 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let old_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-    let current_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let old_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(2);
+    let current_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(1);
     let current_worktree = repo.join("feature-current");
     fs::create_dir_all(&current_worktree).expect("create current Work worktree");
     let stale = gwt_core::workspace_projection::WorkspaceAgentSummary {
@@ -444,10 +444,10 @@ fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work_or_agent
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let stale_agent_at = chrono::Utc::now() - chrono::Duration::minutes(4);
-    let assigned_agent_at = chrono::Utc::now() - chrono::Duration::minutes(3);
-    let replayed_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-    let current_work_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let stale_agent_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(4);
+    let assigned_agent_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(3);
+    let replayed_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(2);
+    let current_work_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(1);
     let assigned = gwt_core::workspace_projection::WorkspaceAgentSummary {
         session_id: "session-duplicate-assigned".to_string(),
         window_id: None,
@@ -624,7 +624,7 @@ fn app_runtime_active_work_projection_prioritizes_handoff_agents() {
     };
 
     let mut projection = WorkspaceProjection::default_for_project("/repo");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     projection.agents.push(WorkspaceAgentSummary {
         session_id: "session-active".to_string(),
         window_id: Some("tab-1::agent-active".to_string()),
@@ -1298,6 +1298,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 attempts: 1,
                 non_agent_attempts: 0,
                 acceptance_snapshot: None,
+                review_criteria: None,
                 retry_not_before: None,
                 retry_hold_reason: None,
                 retry_hold_provider: None,
@@ -1313,6 +1314,8 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                merged_evidence_reviews: Vec::new(),
+                gate_hold: None,
                 cancelled_claim_phase: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
@@ -1720,10 +1723,10 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
             );
             assert_eq!(fs::read(&candidate_path).unwrap(), replacement);
             assert!(pane.pty.tree_exit_confirmed());
-            assert!(durable_launch_recovery_exists(
-                &sessions,
-                &fresh.pending.binding.session_id
-            ));
+            assert!(
+                durable_launch_recovery_exists(&sessions, &fresh.pending.binding.session_id)
+                    .unwrap()
+            );
             assert_eq!(
                 gwt::cli::execution_state::continuation_attempt_for_operation(
                     &fresh.repo,
@@ -1768,8 +1771,7 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
                     .unwrap()
                     .agent_roster
                     .unwrap();
-                assert!(roster.members.iter().any(|member| member.enabled
-                    && member.assignment.is_none() && member.agent_id.as_deref() == Some("fixture")),
+                assert!(roster.members.iter().any(|member| member.assignment.is_none() && member.agent_id.as_deref() == Some("fixture")),
                     "a real idle fixture-tool member must be available before testing the Prepared refusal");
                 let choice = gwt::project_runtime::launch_payload::ManualSuccessorChoice {
                     operation_id: format!("second-monitor-{index}"),
@@ -1807,7 +1809,8 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
                 assert!(durable_launch_recovery_exists(
                     &sessions,
                     &fresh.pending.binding.session_id
-                ));
+                )
+                .unwrap());
                 assert_eq!(
                     gwt::cli::execution_state::continuation_attempt_for_operation(
                         &fresh.repo,

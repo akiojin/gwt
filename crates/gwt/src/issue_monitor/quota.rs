@@ -44,7 +44,7 @@ mod tests {
 
     fn after(base: &str, secs: i64) -> String {
         format_rfc3339_utc(
-            parse_rfc3339_utc(base).expect("fixture instant") + chrono::Duration::seconds(secs),
+            parse_rfc3339_utc(base).expect("fixture instant") + time::Duration::seconds(secs),
         )
     }
 
@@ -58,6 +58,8 @@ mod tests {
             session_mode: Default::default(),
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
+            runtime_inherit: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -471,10 +473,13 @@ mod tests {
         let fetched_at = parse_rfc3339_utc(FIRST_FAILURE_AT).expect("fixture instant");
         let exhausted = gwt_core::usage::ProviderUsage {
             provider: gwt_core::usage::UsageProvider::Codex,
+            pool_account_id: None,
+            last_limit: None,
             account_id: Some("acct".to_string()),
             account_label: None,
             plan: None,
             extra_usage: None,
+            credits: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 gwt_core::usage::WindowKind::Weekly,
                 100.0,

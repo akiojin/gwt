@@ -1,5 +1,7 @@
 //! Work launch publication and successor transitions owned by project runtimes.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use crate as gwt;
 use crate::launch_runtime::intake_hook_config_is_disposable;
 use crate::launch_runtime::same_worktree_path;
@@ -7,6 +9,128 @@ use crate::worktree_form::is_ephemeral_worktree_path;
 use std::path::Path;
 
 use super::launch_payload::{ActiveAgentSession, WorkspaceResumeContext};
+
+/// Identify the finalizer whose bounded launch publication wait expired.
+pub fn workspace_finalizer_timeout_operation_id(message: &str) -> Option<&str> {
+    let (operation_id, _) = message
+        .strip_prefix("workspace finalizer ")?
+        .split_once(" timed out after ")?;
+    (!operation_id.is_empty() && !operation_id.chars().any(char::is_whitespace))
+        .then_some(operation_id)
+}
+
+// These callers run after releasing launch admission and Session leases. Keep
+// retries here: core transactions must return immediately on inverse lock paths.
+fn retry_workspace_launch_publication<T>(
+    mut publish: impl FnMut() -> gwt_core::error::Result<T>,
+) -> Result<T, String> {
+    use gwt_core::error::GwtError;
+    use gwt_core::operation_deadline::{current, now, ScopedOperationDeadline};
+    use std::time::Duration;
+
+    let started = now();
+    let _budget = ScopedOperationDeadline::enter(started + Duration::from_secs(120));
+    let deadline = current().expect("launch publication deadline is scoped");
+    let mut waiting = false;
+    loop {
+        match publish() {
+            Ok(value) => return Ok(value),
+            Err(GwtError::WorkspaceOperationInFlight { operation_id }) => {
+                if !waiting {
+                    tracing::info!(%operation_id, "launch Work publication waiting for live workspace finalizer");
+                    waiting = true;
+                }
+                let observed = now();
+                if observed < deadline {
+                    std::thread::sleep(
+                        Duration::from_millis(100)
+                            .min(deadline.saturating_duration_since(observed)),
+                    );
+                }
+                let observed = now();
+                if observed >= deadline {
+                    let elapsed_ms = observed.saturating_duration_since(started).as_millis();
+                    return Err(format!(
+                        "workspace finalizer {operation_id} timed out after {elapsed_ms}ms while publishing launch Work; live external commit did not finish before operation deadline"
+                    ));
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod launch_publication_tests {
+    use super::*;
+    use gwt_core::error::GwtError;
+    use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn launch_publication_retries_only_inflight_before_succeeding() {
+        let mut attempts = 0;
+        let result = retry_workspace_launch_publication(|| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(GwtError::WorkspaceOperationInFlight {
+                    operation_id: "fresh-launch-live".into(),
+                })
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result, Ok(42));
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn launch_publication_timeout_names_operation_and_preserves_other_failures() {
+        let start = Instant::now();
+        let _clock = ScopedOperationClock::set(start);
+        let _deadline = ScopedOperationDeadline::enter(start + Duration::from_secs(120));
+        let mut elapsed_clock = None;
+        let mut attempts = 0;
+        let result = retry_workspace_launch_publication::<()>(|| {
+            attempts += 1;
+            elapsed_clock = Some(ScopedOperationClock::set(start + Duration::from_secs(120)));
+            Err(GwtError::WorkspaceOperationInFlight {
+                operation_id: "fresh-launch-stuck".into(),
+            })
+        });
+        let error = result.unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error, "workspace finalizer fresh-launch-stuck timed out after 120000ms while publishing launch Work; live external commit did not finish before operation deadline");
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id(&error),
+            Some("fresh-launch-stuck")
+        );
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id("ordinary failure"),
+            None
+        );
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id(
+                "workspace finalizer  timed out after 120000ms"
+            ),
+            None
+        );
+        assert_eq!(
+            workspace_finalizer_timeout_operation_id(
+                "workspace finalizer two operations timed out after 120000ms"
+            ),
+            None
+        );
+        drop(elapsed_clock);
+        let mut attempts = 0;
+        let result = retry_workspace_launch_publication::<()>(|| {
+            attempts += 1;
+            Err(GwtError::Other("state is malformed".into()))
+        });
+        assert_eq!(attempts, 1);
+        assert_eq!(result, Err("state is malformed".into()));
+    }
+}
 
 /// SPEC-2359 US-80 (FR-427): register a Start-Work Shell as a first-class Work
 /// in the persisted projection so it appears in the Active Work / Workspace
@@ -23,7 +147,7 @@ pub fn save_shell_work_projection(
     branch: Option<String>,
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now();
+    let now = UtcTimestamp::now();
     gwt_core::workspace_projection::mutate_workspace_projection(project_root, |projection| {
         projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
         let summary = gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
@@ -42,7 +166,7 @@ pub fn save_shell_work_projection(
 
 pub fn active_agent_summary_from_session(
     session: &ActiveAgentSession,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
     gwt_core::workspace_projection::WorkspaceAgentSummary {
         session_id: session.session_id.clone(),
@@ -73,7 +197,7 @@ pub fn non_empty_workspace_text(value: Option<&str>) -> Option<String> {
 
 fn unassigned_agent_summary_from_session(
     session: &ActiveAgentSession,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
     let mut summary = active_agent_summary_from_session(session, updated_at);
     summary.affiliation_status =
@@ -99,7 +223,7 @@ pub struct WorkspaceLaunchTransition<'a> {
     pub resume_context: Option<&'a WorkspaceResumeContext>,
     pub kind: WorkspaceLaunchProjectionKind,
     pub live_session_ids: &'a std::collections::HashSet<String>,
-    pub now: chrono::DateTime<chrono::Utc>,
+    pub now: UtcTimestamp,
 }
 
 impl WorkspaceLaunchTransition<'_> {
@@ -111,22 +235,20 @@ impl WorkspaceLaunchTransition<'_> {
                     .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
             })
             .or_else(|| {
-                self.linked_issue_number
-                    .map(|number| format!("Issue #{number}"))
+                self.linked_issue_number.map(|number| {
+                    crate::cli::execution_state::ExecutionOwnerKey {
+                        kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                        number,
+                    }
+                    .canonical_work_owner_label()
+                })
             })
     }
 }
 
 /// Canonical Work owner label for a trusted execution owner key.
 pub fn workspace_owner_label(owner: crate::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        crate::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        crate::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
+    owner.canonical_work_owner_label()
 }
 
 impl WorkspaceLaunchProjectionKind {
@@ -158,47 +280,61 @@ pub fn save_workspace_launch_projection(
     launch_kind: WorkspaceLaunchProjectionKind,
     live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now();
-    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
-        project_root,
-        &session.worktree_path,
-        |projection, work_items, _work_items_persisted| {
-            // A worker's launch-time snapshot cannot prove another concurrent
-            // launch is dead. Keep all persisted agents until the GUI requests
-            // a projection refresh with its current live-session registry.
-            let preserved_sessions;
-            let live_session_ids = match live_session_ids {
-                Some(live) => live,
-                None => {
-                    preserved_sessions = projection
-                        .agents
-                        .iter()
-                        .map(|agent| agent.session_id.clone())
-                        .collect();
-                    &preserved_sessions
+    retry_workspace_launch_publication(|| {
+        gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+            project_root,
+            &session.worktree_path,
+            |projection, work_items, _work_items_persisted| {
+                let now = UtcTimestamp::now();
+                // A worker's launch-time snapshot cannot prove another concurrent
+                // launch is dead. Keep all persisted agents until the GUI requests
+                // a projection refresh with its current live-session registry.
+                let preserved_sessions;
+                let live_session_ids = match live_session_ids {
+                    Some(live) => live,
+                    None => {
+                        preserved_sessions = projection
+                            .agents
+                            .iter()
+                            .map(|agent| agent.session_id.clone())
+                            .collect();
+                        &preserved_sessions
+                    }
+                };
+                // A regular launch on a completed execution can register its
+                // Session locally, but only fresh execution activation may
+                // start a successor Work lifetime and publish its events.
+                if crate::cli::execution_state::is_completed(&session.worktree_path) {
+                    projection.retain_live_agents_keep_shells(
+                        live_session_ids.iter().map(String::as_str),
+                        now,
+                    );
+                    projection
+                        .register_unassigned_agent(active_agent_summary_from_session(session, now));
+                    projection.updated_at = now;
+                    return Ok(((), Vec::new()));
                 }
-            };
-            let work_events = apply_workspace_launch_for_current_work(
-                project_root,
-                projection,
-                work_items,
-                session,
-                WorkspaceLaunchTransition {
-                    work_id: None,
-                    base_branch,
-                    linked_issue_number,
-                    canonical_owner,
-                    resume_context: workspace_resume_context,
-                    kind: launch_kind,
-                    live_session_ids,
-                    now,
-                },
-                false,
-            )?;
-            Ok(((), work_events))
-        },
-    )
-    .map_err(|error| error.to_string())
+                let work_events = apply_workspace_launch_for_current_work(
+                    project_root,
+                    projection,
+                    work_items,
+                    session,
+                    WorkspaceLaunchTransition {
+                        work_id: None,
+                        base_branch,
+                        linked_issue_number,
+                        canonical_owner,
+                        resume_context: workspace_resume_context,
+                        kind: launch_kind,
+                        live_session_ids,
+                        now,
+                    },
+                    false,
+                )?;
+                Ok(((), work_events))
+            },
+        )
+    })
 }
 
 /// Select the Work lifetime before attaching a new Session, under the same
@@ -349,7 +485,7 @@ pub fn apply_workspace_launch_for_current_work(
                             continue;
                         }
                         return Err(gwt_core::error::GwtError::Other(format!(
-                        "cannot launch successor of Work {}: successor {successor_id} has invalid lineage; the registered PM can use workspace.close with work_id {successor_id}, close_kind superseded, then issue.monitor.requeue", current.id)));
+                        "cannot launch successor of Work {}: successor {successor_id} has invalid lineage; the registered PM can use workspace.close with work_id {successor_id}, close_kind superseded, then issue.monitor.requeue (issue.monitor.launch_now when requeue answers not_held)", current.id)));
                     }
                 }
                 predecessor_id = Some(current.id.clone());
@@ -387,13 +523,13 @@ pub fn invalid_successor_supersession_event(
     container: gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
     authority: SuccessorSupersessionAuthority<'_>,
     live_session_ids: &std::collections::HashSet<String>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: UtcTimestamp,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
     use gwt_core::workspace_projection::{
         can_upgrade_work_owner, canonical_work_id, successor_work_id, WorkEvent, WorkEventKind,
     };
     let recovery = format!(
-        "the registered PM can use workspace.close with work_id {}, close_kind superseded, then issue.monitor.requeue",
+        "the registered PM can use workspace.close with work_id {}, close_kind superseded, then issue.monitor.requeue (issue.monitor.launch_now when requeue answers not_held)",
         occupied.id
     );
     let refuse = |reason: &str| {
@@ -489,7 +625,7 @@ pub fn invalid_successor_supersession_event(
         .max()
         .expect("occupied Work timestamp");
     let after_history = latest
-        .checked_add_signed(chrono::Duration::nanoseconds(1))
+        .checked_add(time::Duration::nanoseconds(1))
         .ok_or_else(|| refuse("history timestamp has no safe successor instant"))?;
     let mut event = WorkEvent::new(WorkEventKind::Discard, &occupied.id, now.max(after_history));
     event.id = format!("superseded-{}", occupied.id);
@@ -531,7 +667,7 @@ pub fn validate_superseded_member_runtimes(
     for session_id in members {
         let refuse = || {
             gwt_core::GwtError::Other(format!(
-            "invalid successor member {session_id} has live or unprovable runtime; the registered PM can use pane.close, then workspace.close with close_kind superseded and issue.monitor.requeue"
+            "invalid successor member {session_id} has live or unprovable runtime; the registered PM can use pane.close, then workspace.close with close_kind superseded and issue.monitor.requeue (issue.monitor.launch_now when requeue answers not_held)"
         ))
         };
         if gwt_agent::validate_session_id_path_component(session_id).is_err() {
@@ -635,7 +771,7 @@ fn workspace_work_event_from_launch_projection(
     projection: &gwt_core::workspace_projection::WorkspaceProjection,
     session: &ActiveAgentSession,
     kind: gwt_core::workspace_projection::WorkEventKind,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> gwt_core::workspace_projection::WorkEvent {
     let mut event =
         gwt_core::workspace_projection::WorkEvent::new(kind, projection.id.clone(), updated_at);
@@ -673,17 +809,19 @@ pub fn save_start_work_workspace_projection(
     live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
     if workspace_resume_context.is_none() && linked_issue_number.is_none() {
-        let now = chrono::Utc::now();
-        return gwt_core::workspace_projection::mutate_workspace_projection(
-            project_root,
-            |projection| {
-                projection
-                    .register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
-                projection.updated_at = now;
-                Ok(())
-            },
-        )
-        .map_err(|error| error.to_string());
+        return retry_workspace_launch_publication(|| {
+            gwt_core::workspace_projection::mutate_workspace_projection(
+                project_root,
+                |projection| {
+                    let now = UtcTimestamp::now();
+                    projection.register_unassigned_agent(unassigned_agent_summary_from_session(
+                        session, now,
+                    ));
+                    projection.updated_at = now;
+                    Ok(())
+                },
+            )
+        });
     }
     save_workspace_launch_projection(
         project_root,
@@ -793,7 +931,7 @@ pub fn finalize_ephemeral_worktree_for_project(
 pub fn paused_work_record_task(
     project_root: &Path,
     session: &ActiveAgentSession,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> Option<Box<dyn FnOnce() + Send + 'static>> {
     let session_id = session.session_id.trim();
     if session_id.is_empty() {

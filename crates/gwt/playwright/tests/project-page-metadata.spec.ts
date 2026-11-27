@@ -2,6 +2,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
 import { APP_URL, HUB_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 async function installMetadataBackend(page: Page) {
   await page.addInitScript(() => {
@@ -68,7 +69,7 @@ test("aggregate updates hidden project title/favicon, focus acknowledges unread,
   await installEmbeddedRoutes(page);
   await installMetadataBackend(page);
   await page.goto(APP_URL);
-  await expect(page).toHaveTitle("Alpha — RUN 0 · BLOCK 0 — gwt");
+  await expect(page).toHaveTitle("Alpha — 0 running · 0 blocked — gwt");
   const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const hub = await context.newPage();
@@ -86,7 +87,7 @@ test("aggregate updates hidden project title/favicon, focus acknowledges unread,
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await page.evaluate(() => (window as any).__metadataBackend.update({ running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 5 }));
-  await expect(page).toHaveTitle("● Alpha — RUN 2 · BLOCK 1 — gwt");
+  await expect(page).toHaveTitle("● Alpha — 2 running · 1 blocked — gwt");
   const icon = page.locator('link[rel="icon"]');
   await expect(icon).toHaveAttribute("data-state", "error");
   await expect(icon).toHaveAttribute("data-unread", "true");
@@ -94,7 +95,7 @@ test("aggregate updates hidden project title/favicon, focus acknowledges unread,
     const svg = decodeURIComponent(document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href);
     return svg.includes(getComputedStyle(document.documentElement).getPropertyValue("--color-state-blocked").trim());
   })).toBe(true);
-  await expect(hub).toHaveTitle("gwt — Hub");
+  await expect(hub).toHaveTitle("gwt — Home");
   await expect(hub.locator('link[rel="icon"]')).toHaveAttribute("href", "data:,");
   expect(await page.evaluate(() => (window as any).__metadataSent.filter((event: any) => event.kind === "project_aggregate_ack"))).toEqual([]);
   await page.bringToFront();
@@ -102,11 +103,11 @@ test("aggregate updates hidden project title/favicon, focus acknowledges unread,
     (window as any).__metadataAttention = { focused: true, visible: true };
     window.dispatchEvent(new Event("focus"));
   });
-  await expect(page).toHaveTitle("Alpha — RUN 2 · BLOCK 1 — gwt");
+  await expect(page).toHaveTitle("Alpha — 2 running · 1 blocked — gwt");
   await expect(icon).toHaveAttribute("data-unread", "false");
   await page.evaluate(() => (window as any).__metadataBackend.update({ running_count: 1, block_count: 0, error_count: 0, unread: false, revision: 7 }));
   await expect(icon).toHaveAttribute("data-state", "running");
-  await expect(page).toHaveTitle("Alpha — RUN 1 · BLOCK 0 — gwt");
+  await expect(page).toHaveTitle("Alpha — 1 running · 0 blocked — gwt");
   expect(await page.evaluate(() => (window as any).__metadataPermissionRequests)).toBe(0);
   await page.evaluate(() => { window.requestAnimationFrame = (window as any).__metadataRestoreRaf; });
   await page.screenshot({ path: testInfo.outputPath(`metadata-${theme}.png`) });
@@ -129,11 +130,11 @@ test("live server projects the seeded agent aggregate and keeps Hub metadata fix
   await gotoLiveGwt(page, base!, { projectKey: process.env.GWT_PLAYWRIGHT_PROJECT_KEY || "99a8660247f5bc49" });
   await expect.poll(() => aggregates.length).toBeGreaterThan(0);
   expect(aggregates.at(-1)).toMatchObject({ running_count: 0, block_count: 1 });
-  await expect(page).toHaveTitle("Issue 4540 Check — RUN 0 · BLOCK 1 — gwt");
+  await expect(page).toHaveTitle("Issue 4540 Check — 0 running · 1 blocked — gwt");
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute("data-state", "blocked");
   await page.screenshot({ path: testInfo.outputPath("live-project-metadata.png") });
   await gotoLiveGwt(page, base!, { hub: true });
-  await expect(page).toHaveTitle("gwt — Hub");
+  await expect(page).toHaveTitle("gwt — Home");
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute("href", "data:,");
   expect(errors).toEqual([]);
 });
@@ -194,18 +195,41 @@ test("live shared metadata renders one accepted revision in title, favicon, and 
   });
   expect(burst.unchanged).toBe(true);
   expect(burst.renders).toEqual({ title: 1, icon: 1 });
-  expect(burst.title).toMatch(/^● .* — RUN 50 · BLOCK 1 — gwt$/);
+  expect(burst.title).toMatch(/^● .* — 50 running · 1 blocked — gwt$/);
   expect(burst.state).toBe("error");
   expect(burst.unread).toBe("true");
   await testInfo.attach("metadata-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
   await page.evaluate(() => {
+    (window as any).__metadataFocused = true;
+    const mutations = { title: 0, icon: 0 };
+    const title = new MutationObserver(records => { mutations.title += records.length; });
+    const icon = new MutationObserver(records => { mutations.icon += records.length; });
+    title.observe(document.querySelector("title")!, { childList: true });
+    icon.observe(document.querySelector('link[rel="icon"]')!, { attributes: true, attributeFilter: ["href"] });
+    (window as any).__metadataMutations = mutations;
+    (window as any).__metadataObservers = [title, icon];
+  });
+  const update = (aggregate: object) => transport!.send(JSON.stringify({ kind: "project_agent_aggregate", aggregate }));
+  update({ running_count: 50, block_count: 1, idle_count: 7, error_count: 3, unread: true, revision: 51 });
+  await expect.poll(() => acknowledgements.at(-1)?.revision).toBe(51);
+  await expect(page.locator("#op-strip-idle")).toHaveText("7");
+  const unchangedMetadata = await page.evaluate(async () => {
+    // Other views may render the new idle/error counts; metadata stays still.
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    (window as any).__metadataObservers.forEach((observer: MutationObserver) => observer.disconnect());
+    (window as any).__metadataFocused = false;
+    return (window as any).__metadataMutations;
+  });
+  expect(unchangedMetadata).toEqual({ title: 0, icon: 0 });
+  await testInfo.attach("metadata-unchanged-presentation", { body: JSON.stringify(unchangedMetadata), contentType: "application/json" });
+  acknowledgements.splice(0);
+  await page.evaluate(() => {
     (window as any).__metadataRestoreRaf = window.requestAnimationFrame;
     window.requestAnimationFrame = () => 0;
   });
-  const update = (aggregate: object) => transport!.send(JSON.stringify({ kind: "project_agent_aggregate", aggregate }));
   const fallbackStarted = Date.now();
-  update({ running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 51 });
-  await expect(page).toHaveTitle(/^● .* — RUN 2 · BLOCK 1 — gwt$/, { timeout: 1000 });
+  update({ running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 52 });
+  await expect(page).toHaveTitle(/^● .* — 2 running · 1 blocked — gwt$/, { timeout: 1000 });
   expect(Date.now() - fallbackStarted).toBeLessThan(1000);
   const icon = page.locator('link[rel="icon"]');
   await expect(icon).toHaveAttribute("data-state", "error");
@@ -216,15 +240,37 @@ test("live shared metadata renders one accepted revision in title, favicon, and 
     (window as any).__metadataFocused = true;
     window.dispatchEvent(new Event("focus"));
   });
-  await expect.poll(() => acknowledgements.at(-1)?.revision).toBe(51);
-  await expect(page).toHaveTitle(/^● .* — RUN 2 · BLOCK 1 — gwt$/);
+  await expect.poll(() => acknowledgements.at(-1)?.revision).toBe(52);
+  await expect(page).toHaveTitle(/^● .* — 2 running · 1 blocked — gwt$/);
   await expect(icon).toHaveAttribute("data-state", "error");
-  update({ running_count: 1, block_count: 0, error_count: 0, unread: false, revision: 52 });
-  await expect(page).toHaveTitle(/ — RUN 1 · BLOCK 0 — gwt$/);
+  update({ running_count: 1, block_count: 0, error_count: 0, unread: false, revision: 53 });
+  await expect(page).toHaveTitle(/ — 1 running · 0 blocked — gwt$/);
   await expect(page).not.toHaveTitle(/^●/);
   await expect(icon).toHaveAttribute("data-state", "running");
   await expect(icon).toHaveAttribute("data-unread", "false");
   await page.evaluate(() => { window.requestAnimationFrame = (window as any).__metadataRestoreRaf; });
   await page.screenshot({ path: testInfo.outputPath(`shared-metadata-${theme}.png`) });
+  expect(errors).toEqual([]);
+});
+
+test("SPEC #5016 AC-HS2: live title, status strip and Works heading render one server aggregate", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated checkout server");
+  const errors = collectErrors(page);
+  await gotoLiveGwt(page, base!, { suppressProjectSurfaces: true });
+  await openLiveGwtProject(page, process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd());
+  const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
+  await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  // The seeded stopped PM pane is the only agent: the server aggregate is RUN 0 / BLOCK 1.
+  await expect(page).toHaveTitle(/— 0 running · 1 blocked — gwt$/);
+  await openWorks(page);
+  const heading = page.locator(".works-surface:not(.works-surface--preview) .works-counts");
+  for (const [strip, works, value] of [["running", "running", "0"], ["waiting", "block", "1"], ["idle", "idle", "0"], ["error", "error", "0"]]) {
+    await expect(page.locator(`#op-strip-${strip}`)).toHaveText(value);
+    await expect(heading.locator(`[data-count="${works}"]`)).toHaveText(value);
+  }
+  await expect(page.locator(".op-status-strip__cell--waiting .op-status-strip__label")).toHaveText("BLOCK");
+  await page.screenshot({ path: testInfo.outputPath(`live-hs2-${theme}.png`) });
   expect(errors).toEqual([]);
 });

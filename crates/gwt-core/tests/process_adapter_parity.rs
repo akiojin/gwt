@@ -79,3 +79,87 @@ fn std_adapter_executes_cmd_shim_metacharacters_as_literal_arguments() {
         "{output:?}"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn cmd_path_spellings_execute_the_same_file_through_both_adapters() {
+    use gwt_core::paths::normalize_windows_child_process_path;
+    use std::fs;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ordinary = normalize_windows_child_process_path(temp.path());
+    let shim = ordinary.join("fake claude.cmd");
+    let unicode_shim = ordinary.join("実行.cmd");
+    fs::write(
+        &shim,
+        "@echo off\r\necho GWT_FIXTURE:cmd-path-parity\r\necho GWT_ARG:%~1\r\n",
+    )
+    .expect("write cmd fixture");
+    fs::hard_link(&shim, &unicode_shim).expect("same fixture with a Unicode name");
+    let verbatim_shim = fs::canonicalize(&shim).expect("verbatim fixture path");
+    let verbatim_dir = fs::canonicalize(&ordinary).expect("verbatim directory");
+    let comspec = std::env::var_os("ComSpec").expect("Windows ComSpec");
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for (name, command, path, cwd) in [
+        ("bare", Path::new("fake claude"), &ordinary, &ordinary),
+        ("absolute", shim.as_path(), &ordinary, &ordinary),
+        ("unicode", unicode_shim.as_path(), &ordinary, &ordinary),
+        ("verbatim cwd", shim.as_path(), &ordinary, &verbatim_dir),
+        (
+            "verbatim command",
+            verbatim_shim.as_path(),
+            &ordinary,
+            &ordinary,
+        ),
+        (
+            "verbatim PATH",
+            Path::new("fake claude"),
+            &verbatim_dir,
+            &ordinary,
+        ),
+    ] {
+        let selected = if command == Path::new("fake claude") {
+            path.join("fake claude.cmd")
+        } else {
+            command.to_path_buf()
+        };
+        let expected = if name == "unicode" {
+            &unicode_shim
+        } else {
+            &shim
+        };
+        assert_eq!(
+            fs::canonicalize(selected).unwrap(),
+            fs::canonicalize(expected).unwrap(),
+            "{name}"
+        );
+        let request = ProcessPlanRequest::new(command)
+            .arg("--version")
+            .current_dir(cwd)
+            .inherit_env(false)
+            .env("PATH", path)
+            .env("PATHEXT", ".CMD")
+            .env("ComSpec", &comspec);
+        let std_output = resolved_command(request.clone())
+            .expect("resolve std command")
+            .output()
+            .expect("spawn std command");
+        let tokio_output = runtime.block_on(async {
+            resolved_tokio_command(request)
+                .expect("resolve tokio command")
+                .output()
+                .await
+                .expect("spawn tokio command")
+        });
+        for output in [std_output, tokio_output] {
+            assert!(output.status.success(), "{name}: {output:?}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("GWT_ARG:--version"), "{name}: {stdout}");
+            assert!(
+                stdout.contains("GWT_FIXTURE:cmd-path-parity"),
+                "{name}: {stdout}"
+            );
+        }
+    }
+}

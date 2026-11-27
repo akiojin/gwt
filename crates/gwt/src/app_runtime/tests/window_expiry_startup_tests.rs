@@ -1,5 +1,52 @@
 use super::*;
 
+#[test]
+fn issue_7015_synchronous_restore_refusal_retires_starting_placeholder() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let mut tab = restore_fixture_tab("tab-1", &repo, &[("agent-1".into(), "source".into())]);
+    let mut saved = tab.workspace.persisted().clone();
+    let mut shell = sample_window("shell-1", WindowPreset::Shell, WindowProcessStatus::Running);
+    shell.agent_id = None;
+    shell.session_id = Some("source".into());
+    saved.windows.insert(0, shell);
+    tab.workspace = WindowRegistry::from_persisted(saved);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    runtime.set_window_status("tab-1", "agent-1", WindowProcessStatus::Starting);
+    save_restore_fixture_session(&runtime.sessions_dir, "source", &repo, Some("native"), None);
+    let session = gwt_agent::Session::load(&runtime.sessions_dir.join("source.toml")).unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let events = runtime.spawn_prepared_restored_agent_session(
+        "tab-1",
+        session,
+        None,
+        super::super::startup::RestoreOrigin::Automatic,
+    );
+    assert_eq!(
+        runtime.window_status("tab-1::shell-1"),
+        Some(WindowProcessStatus::Running),
+        "a non-agent row sharing the source session is not the restore target"
+    );
+    assert_eq!(
+        runtime.window_status("tab-1::agent-1"),
+        Some(WindowProcessStatus::Error)
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(runtime.restore_launch_windows.is_empty());
+    assert!(runtime.pending_launch_completions.is_empty());
+}
+
 /// Issue #3923 AC-2: a hold records what it was formed from — the matched
 /// screen text and the poller reading — so a false hold can be diagnosed
 /// instead of guessed at.
@@ -271,7 +318,7 @@ fn closed_completed_idle_pane_releases_capacity_with_bookkeeping_warning() {
 fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     use crate::app_runtime::terminal_convergence::{
         observe_terminal_windows_in_background, RestoreAdmission, TerminalCloseEligibility,
-        TerminalCloseReason, TerminalWindowSnapshot,
+        TerminalCloseReason,
     };
     use gwt::cli::{
         execution_state as execution,
@@ -360,14 +407,12 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     state.project_owner_identity = Some(identity.clone());
     let idle = owner_runtime_status_event(&owner, &physical, "Idle", "Stop");
     runtime.handle_project_owner_event(&context, 1, &identity, idle);
-    if bookkeeping_warning {
-        // The authenticated owner hook above updates its live projection;
-        // the provider's CLI hook also persists that Stop in Session metadata.
-        physical.with_agent_environment(|| {
-            gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
-                .expect("actual provider Stop metadata");
-        });
-    }
+    // The authenticated owner hook above updates its live projection;
+    // the provider's CLI hook also persists that Stop in Session metadata.
+    physical.with_agent_environment(|| {
+        gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
+            .expect("actual provider Stop metadata");
+    });
     let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
     let session = gwt_agent::Session::load(&session_path).expect("load actual bound holder");
     assert!(session.restore_window_on_startup);
@@ -495,7 +540,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     } else {
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
-            window_id: window_id.clone(),
+            window_id: owner_id.clone(),
         }]
     };
     prefs.closure_records = if bookkeeping_warning {
@@ -537,7 +582,10 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     };
     if bookkeeping_warning {
         let snapshot = runtime
-            .issue_monitor_window_snapshot_for_tab_cached("tab-1", &chrono::Utc::now().to_rfc3339())
+            .issue_monitor_window_snapshot_for_tab_cached(
+                "tab-1",
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+            )
             .unwrap();
         assert_eq!(snapshot.windows.len(), 1);
         assert_eq!(
@@ -560,7 +608,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         TerminalCloseReason::SettledExecution
     };
     assert_eq!(
-        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        runtime.restore_work_terminality(&session, &repo, Some(&owner_id)),
         RestoreAdmission::RefuseTerminal(reason)
     );
     let generation = runtime
@@ -571,27 +619,28 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         .copied()
         .expect("actual GUI window generation");
     let mut observations = Vec::new();
+    assert_ne!(
+        window_id, owner_id,
+        "the GUI alias differs from its owner pane"
+    );
+    let snapshots = runtime.terminal_window_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].window_id, window_id);
+    assert_eq!(snapshots[0].lifecycle_generation, Some(generation));
     let settlement_trace = capture_tracing_events(|| {
         observations = observe_terminal_windows_in_background(
             &runtime.sessions_dir,
-            vec![TerminalWindowSnapshot {
-                window_id: window_id.clone(),
-                session_id: session_id.to_string(),
-                project_root: repo.clone(),
-                worktree_path: repo.clone(),
-                window_status: WindowProcessStatus::Idle,
-                lifecycle_generation: Some(generation),
-            }],
+            snapshots,
             Duration::from_secs(5),
         );
     });
     assert_eq!(
         observations[0].eligibility,
         TerminalCloseEligibility::Eligible(reason),
-        "terminal settlement trace: {settlement_trace:?}"
+        "terminal delivery settlement trace: {settlement_trace:?}"
     );
     assert_eq!(
-        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        runtime.restore_work_terminality(&session, &repo, Some(&owner_id)),
         RestoreAdmission::RefuseTerminal(reason)
     );
     assert!(gwt::load_issue_monitor_prefs(&prefs_path)
@@ -691,7 +740,10 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         let accounting =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), closed_prefs);
         let snapshot = runtime
-            .issue_monitor_window_snapshot_for_tab_cached("tab-1", &chrono::Utc::now().to_rfc3339())
+            .issue_monitor_window_snapshot_for_tab_cached(
+                "tab-1",
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+            )
             .unwrap();
         assert!(snapshot.windows.is_empty());
         assert_eq!(accounting.agent_status().occupied_slot_count, Some(0));
@@ -819,6 +871,7 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
 
     let snapshot = |window_id: &str, session_id: &str| TerminalWindowSnapshot {
         window_id: window_id.to_string(),
+        monitor_window_id: window_id.to_string(),
         session_id: session_id.to_string(),
         project_root: repo.clone(),
         worktree_path: repo.clone(),
@@ -1133,7 +1186,7 @@ fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is
             "legacy Monitor restore",
             &["bug"],
             "legacy owner",
-            &Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         ))
         .unwrap();
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start_with_monitor(&repo)).unwrap();
@@ -1606,6 +1659,39 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
         "notice names the expected version and the failure: {}",
         toasts[0].1
     );
+}
+
+#[test]
+fn bootstrap_reports_a_failed_update_already_settled_by_the_cli() {
+    let home = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(home.path().join("gwt-home"));
+    let (_, mut runtime) = update_resume_fixture(home.path(), "work/update-cli-failure");
+    let marker = gwt_core::update::UpdateResumeMarker {
+        from_version: env!("CARGO_PKG_VERSION").into(),
+        to_version: "9.999.0".into(),
+        started_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+        restart_args: vec!["update".into()],
+        projects: Vec::new(),
+        attempt: 1,
+        helper_pid: None,
+    };
+    gwt_core::update::persist_update_resume_marker(&marker).unwrap();
+    let cli_result = gwt_core::update::settle_cli_update_resume_marker(
+        env!("CARGO_PKG_VERSION"),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    )
+    .unwrap()
+    .result;
+    assert!(gwt_core::update::load_update_resume_marker().is_none());
+
+    runtime.bootstrap();
+    let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(toasts[0].0, "error");
+    assert_eq!(toasts[0].1, cli_result.notice());
+    assert!(toasts[0].1.contains("open Release Notes and retry"));
+    assert!(gwt_core::update::take_cli_update_resume_notice().is_none());
 }
 
 // Issue #4075 AC-1: startup writes the managed key into the profile-derived

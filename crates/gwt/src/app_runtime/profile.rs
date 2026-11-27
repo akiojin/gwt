@@ -39,6 +39,17 @@ pub(super) struct ProfileSaveRequest {
 }
 
 impl AppRuntime {
+    pub(super) fn project_environment_set_events(
+        &self,
+        client_id: &str,
+        root: &std::path::Path,
+        change: Option<Option<String>>,
+    ) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::reply(
+            client_id,
+            profile_dispatch::project_environment_set(root, change),
+        )]
+    }
     pub(crate) fn load_profile_events(&mut self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
         if let Err(message) = self.resolve_profile_window_context(id) {
             return vec![OutboundEvent::reply(

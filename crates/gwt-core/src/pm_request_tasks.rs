@@ -1,6 +1,6 @@
 //! Durable request tracking, separate from instruction and execution authority.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -140,7 +140,7 @@ pub struct Receipt {
     pub request_digest: String,
     pub revision: u64,
     pub actor: Actor,
-    pub at: DateTime<Utc>,
+    pub at: UtcTimestamp,
     pub reason: String,
     pub source_id: Option<String>,
     pub tasks: Vec<Task>,
@@ -381,7 +381,7 @@ impl TaskStore {
                 request_digest: digest,
                 revision: state.revision,
                 actor: actor.clone(),
-                at: Utc::now(),
+                at: UtcTimestamp::now(),
                 reason: request.reason.clone(),
                 source_id,
                 tasks: state

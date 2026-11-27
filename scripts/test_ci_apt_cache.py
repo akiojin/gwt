@@ -1,6 +1,7 @@
 """Issue #6080: complete GTK caches avoid apt network access on warm runners."""
 
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -41,10 +42,10 @@ class AptCacheTests(unittest.TestCase):
                         GWT_APT_LOCK_PROBE="false",
                         GWT_APT_RETRY_DELAY="0", GWT_MOCK_TRACE=(self.root / "trace").as_posix())
 
-    def install(self, *packages, **env):
+    def install(self, *packages, timeout=30, **env):
         return subprocess.run([BASH, (ROOT / "scripts/ci-apt.sh").as_posix(), "gtk-deps", *packages],
                               env=dict(self.env, **env), text=True, encoding="utf-8",
-                              capture_output=True, timeout=30)
+                              capture_output=True, timeout=timeout)
 
     def test_complete_cache_restores_without_update_or_download(self):
         cold = self.install()
@@ -121,6 +122,119 @@ class AptCacheTests(unittest.TestCase):
         self.assertIn("https://example.org/packages stable main", legacy.read_text())
         # The injected apt process must see the prepared sources on its first call.
         self.assertIn("source-mirror=ubuntu-https", result.stdout)
+
+    # Issue #7081: `apt-get update` exits 0 when every InRelease fetch fails on
+    # DNS, so the failure used to surface only as "Unable to locate package".
+    def dns_outage(self, down):
+        self.apt.write_text(
+            '#!/usr/bin/env bash\n'
+            'echo "$*" >> "$GWT_MOCK_TRACE"\n'
+            'if [[ "$*" == *update* ]]; then\n'
+            '  for host in archive.ubuntu.com azure.archive.ubuntu.com; do\n'
+            '    if grep -qr "://$host/" "$GWT_APT_ETC_DIR"/sources.list* && [[ " ' + down + ' " == *" $host "* ]]; then\n'
+            '      printf "Err:1 https://%s/ubuntu resolute InRelease\\n  %s\\n" "$host" "${GWT_MOCK_REASON:-Could not resolve $host}"\n'
+            '      echo "W: Some index files failed to download."\n'
+            '      exit 0\n'
+            '    fi\n'
+            '  done\n'
+            'fi\n'
+            'if [[ "$*" == *install* && "$*" != *--no-download* ]]; then\n'
+            '  if grep -qr "://archive.ubuntu.com/" "$GWT_APT_ETC_DIR"/sources.list* && [[ " ' + down + ' " == *" archive.ubuntu.com "* ]]; then\n'
+            '    echo "E: Unable to locate package libgtk-3-dev"; exit 100\n'
+            '  fi\n'
+            'fi\n'
+            'exit 0\n', encoding="utf-8", newline="\n",
+        )
+        (self.root / "apt/sources.list").write_text(
+            "deb http://archive.ubuntu.com/ubuntu resolute main\n"
+            "deb http://security.ubuntu.com/ubuntu resolute-security main\n")
+
+    def outage_install(self, **env):
+        return self.install(GITHUB_ACTIONS="true", GITHUB_STEP_SUMMARY="", timeout=120,
+                            GWT_APT_OFFLINE_CACHE="0", **env)
+
+    def test_unresolvable_archive_fails_over_to_the_runner_mirror(self):
+        self.dns_outage("archive.ubuntu.com")
+        result = self.outage_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("status=mirror-unreachable", result.stdout)
+        self.assertIn("mirror-switch", result.stdout)
+        sources = (self.root / "apt/sources.list").read_text()
+        self.assertIn("http://azure.archive.ubuntu.com/ubuntu resolute main", sources)
+        self.assertIn("http://azure.archive.ubuntu.com/ubuntu resolute-security main", sources)
+        calls = (self.root / "trace").read_text().splitlines()
+        self.assertEqual(sum(" update" in f" {c}" for c in calls), 2, calls)
+
+    def test_all_mirrors_down_backs_off_and_reports_an_external_cause(self):
+        self.dns_outage("archive.ubuntu.com azure.archive.ubuntu.com")
+        result = self.outage_install(GWT_APT_RETRY_DELAY="1", GWT_APT_TOTAL_DEADLINE="40")
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        waits = [int(w) for w in re.findall(r"backoff=(\d+)s", output)]
+        self.assertGreaterEqual(len(waits), 2, output)
+        self.assertEqual(waits, [2 ** n for n in range(len(waits))], output)
+        self.assertIn("mirror unreachable (external cause", output)
+        self.assertIn("ミラー到達不能（外部要因）", output)
+        self.assertNotIn("install", (self.root / "trace").read_text())
+
+    def test_all_mirrors_down_installs_the_newest_cached_archives(self):
+        self.dns_outage("archive.ubuntu.com azure.archive.ubuntu.com")
+        for name in ("foo_1.0_amd64.deb", "foo_1.10_amd64.deb", "bar_2_amd64.deb"):
+            (self.root / "archives" / name).write_text("archive")
+        result = self.outage_install(GWT_APT_TOTAL_DEADLINE="30")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cache-replay", result.stdout)
+        install = [c for c in (self.root / "trace").read_text().splitlines() if "install" in c]
+        self.assertEqual(len(install), 1, install)
+        self.assertIn("--no-download", install[0])
+        self.assertIn("foo_1.10_amd64.deb", install[0])
+        self.assertIn("bar_2_amd64.deb", install[0])
+        self.assertNotIn("foo_1.0_amd64.deb", install[0])
+
+    # Issue #7717: reasons from run 44518013157. apt prints the host on the Err
+    # line and the reason on the next one, so neither matched the #7081 regex.
+    SERVER_FD = ("Could not wait for server fd - select (11: Resource temporarily "
+                 "unavailable) [IP: 91.189.91.83 443]")
+    TLS_RESET = ("SSL connection failed: error:00000000:lib(0)::reason(0) / "
+                 "Connection reset by peer [IP: 91.189.92.24 443]")
+
+    def assert_in_order(self, output, *markers):
+        positions = [output.find(m) for m in markers]
+        self.assertNotIn(-1, positions, output)
+        self.assertEqual(positions, sorted(positions), output)
+
+    def test_server_fd_wait_failure_fails_over_to_the_runner_mirror(self):
+        self.dns_outage("archive.ubuntu.com")
+        result = self.outage_install(GWT_MOCK_REASON=self.SERVER_FD)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_in_order(result.stdout, "status=mirror-unreachable",
+                             "mirror-switch to=http://azure.archive.ubuntu.com/ubuntu")
+        self.assertNotIn("Unable to locate package", result.stdout)
+
+    def test_tls_reset_on_every_mirror_replays_the_cache(self):
+        self.dns_outage("archive.ubuntu.com azure.archive.ubuntu.com")
+        (self.root / "archives/foo_1_amd64.deb").write_text("archive")
+        result = self.outage_install(GWT_MOCK_REASON=self.TLS_RESET, GWT_APT_TOTAL_DEADLINE="30")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_in_order(result.stdout, "mirror-switch", "cache-replay")
+        self.assertNotIn("backoff=", result.stdout)
+
+    def test_tls_reset_without_a_cache_backs_off_instead_of_giving_up(self):
+        self.dns_outage("archive.ubuntu.com azure.archive.ubuntu.com")
+        result = self.outage_install(GWT_MOCK_REASON=self.TLS_RESET,
+                                     GWT_APT_RETRY_DELAY="1", GWT_APT_TOTAL_DEADLINE="10")
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assert_in_order(output, "mirror-switch", "backoff=1s", "backoff=2s")
+        self.assertIn("mirror unreachable (external cause", output)
+        self.assertNotIn("install", (self.root / "trace").read_text())
+
+    def test_unlocatable_packages_after_every_index_failed_is_a_mirror_outage(self):
+        self.dns_outage("archive.ubuntu.com")
+        result = self.outage_install(GWT_MOCK_REASON="Connection failed [IP: 91.189.91.83 443]")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_in_order(result.stdout, "Unable to locate package", "status=mirror-unreachable",
+                             "mirror-switch to=http://azure.archive.ubuntu.com/ubuntu")
 
     def test_local_install_preserves_the_configured_mirror(self):
         source = self.root / "apt/sources.list"

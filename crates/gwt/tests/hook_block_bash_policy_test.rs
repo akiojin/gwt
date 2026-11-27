@@ -76,6 +76,7 @@ Recommended alternatives:\n\
 - Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Branch protection toggles: JSON operation `repository.branch_protection.update` (develop/main; allow_force_pushes, required_conversation_resolution, enforce_admins, strict only)\n\
 - Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
 - Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
 - Automatic updates: JSON operation `update.settings.set`\n\
@@ -99,6 +100,7 @@ Recommended alternatives:\n\
 - Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Branch protection toggles: JSON operation `repository.branch_protection.update` (develop/main; allow_force_pushes, required_conversation_resolution, enforce_admins, strict only)\n\
 - PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
 - Actions: JSON operations `actions.rerun` and `actions.cancel`\n\
@@ -136,14 +138,26 @@ Blocked command: {command}"
         ExistingHookDecision::FileOutsideWorktreeBlock => {
             let worktree_root = root();
             Some(HookOutput::pre_tool_use_permission(
-                "🚫 File operations outside worktree are not allowed",
+                "🚫 File operations outside worktree or temporary artifacts are not allowed",
                 format!(
-                    "Worktree is designed to complete work within the launched directory. File operations outside the worktree cannot be executed.\n\n\
+                    "Use the worktree or a child of an allowed temporary directory (including the session scratchpad). Temporary roots themselves are protected.\n\n\
 Worktree root: {}\n\
 Target path: notes.tmp\n\
 Blocked command: {command}\n\n\
-Instead, use absolute paths within worktree, e.g., 'mkdir ./new-dir' or 'rm ./file.txt'",
-                    worktree_root.display()
+Allowed temporary directories: {}\n\
+Preserve a temporary log with: cp \"{}/failure.log\" \"{}/failure.saved.log\"\n\
+For artifacts elsewhere, use the tool's output option to write into the worktree or temporary scratchpad. Existing external artifacts require separately authorized access; do not bypass this guard with another syntax.",
+                    worktree_root.display(),
+                    {
+                        let mut roots = vec![std::env::temp_dir()];
+                        if let Some(path) = std::env::var_os("TMPDIR") { roots.push(path.into()); }
+                        #[cfg(unix)]
+                        roots.extend([PathBuf::from("/tmp"), PathBuf::from("/private/tmp")]);
+                        roots.into_iter().filter_map(|p| dunce::canonicalize(p).ok())
+                            .map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                    },
+                    dunce::canonicalize(std::env::temp_dir()).unwrap().display(),
+                    dunce::canonicalize(std::env::temp_dir()).unwrap().display(),
                 ),
             ))
         }
@@ -715,7 +729,12 @@ fn blocks_file_ops_outside_worktree() {
     block(&format!(
         "cp {}/foo.txt {}/foo.txt",
         root().display(),
-        outside_root().display()
+        std::env::temp_dir()
+            .ancestors()
+            .last()
+            .unwrap()
+            .join("gwt-test-outside")
+            .display()
     ));
 }
 

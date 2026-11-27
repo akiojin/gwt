@@ -141,7 +141,7 @@ pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
             provider: &provider_for_session(&context),
             context: context.clone(),
             prefs_path: &prefs_path,
-            now: &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            now: &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
             handoff_id: &new_handoff_id(&context),
         },
     ))

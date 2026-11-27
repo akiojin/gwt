@@ -131,23 +131,6 @@ impl AppRuntime {
         project_root: &Path,
         projection: &WorkspaceProjection,
     ) -> Vec<OutboundEvent> {
-        self.apply_workspace_projection_title_sync_with_mode(project_root, projection, false)
-    }
-
-    pub(crate) fn apply_workspace_projection_title_sync_cache_only(
-        &mut self,
-        project_root: &Path,
-        projection: &WorkspaceProjection,
-    ) -> Vec<OutboundEvent> {
-        self.apply_workspace_projection_title_sync_with_mode(project_root, projection, true)
-    }
-
-    fn apply_workspace_projection_title_sync_with_mode(
-        &mut self,
-        project_root: &Path,
-        projection: &WorkspaceProjection,
-        cache_only: bool,
-    ) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };
@@ -158,16 +141,7 @@ impl AppRuntime {
         if dynamic_title_changed {
             events.push(self.workspace_state_broadcast(&context));
         }
-        let projection_event = if cache_only {
-            // Cache-only callers merge the supplied snapshot into the existing
-            // view rather than rebuilding Session/WorkItems history. Watcher
-            // notifications prepare this merge on a worker (Issue #5118).
-            self.merge_workspace_projection_into_cached_active_work(project_root, projection);
-            self.cached_active_work_projection_broadcast_for_workspace_watcher(&context.tab_id)
-        } else {
-            self.active_work_projection_broadcast_for_tab(&context.tab_id)
-        };
-        if let Some(event) = projection_event {
+        if let Some(event) = self.active_work_projection_broadcast_for_tab(&context.tab_id) {
             events.push(event);
         }
         events

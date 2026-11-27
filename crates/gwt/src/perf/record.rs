@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use regex::Regex;
 use serde::Serialize;
 
@@ -83,7 +83,7 @@ pub struct PerfRecord {
     schema_version: u32,
     #[serde(rename = "type")]
     record_type: PerfRecordType,
-    pub(super) timestamp: DateTime<Utc>,
+    pub(super) timestamp: UtcTimestamp,
     stream: PerfStream,
     pub(super) target: String,
     pub(super) value: f64,
@@ -106,7 +106,7 @@ pub struct PerfRecord {
 
 impl PerfRecord {
     pub fn sample(
-        timestamp: DateTime<Utc>,
+        timestamp: UtcTimestamp,
         stream: PerfStream,
         target: impl AsRef<str>,
         value: f64,
@@ -131,7 +131,7 @@ impl PerfRecord {
     }
 
     pub fn violation(
-        timestamp: DateTime<Utc>,
+        timestamp: UtcTimestamp,
         stream: PerfStream,
         target: impl AsRef<str>,
         value: f64,
@@ -175,7 +175,7 @@ impl PerfRecord {
 
     pub fn startup(sample: super::startup::StartupSample, duration_ms: f64) -> Self {
         let mut record = Self::sample(
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
             PerfStream::Ui,
             format!("startup:{}", sample.phase.name()),
             duration_ms,
@@ -268,14 +268,13 @@ fn sanitize_perf_target(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone as _, Utc};
+
     use serde_json::json;
 
     use super::*;
 
-    fn timestamp() -> chrono::DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 8, 20, 12, 34, 56)
-            .single()
+    fn timestamp() -> gwt_core::timestamp::UtcTimestamp {
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 8, 20, 12, 34, 56)
             .expect("valid timestamp")
     }
 

@@ -1,0 +1,17 @@
+{
+  "name": "gwt-web-react",
+  "private": true,
+  "type": "module",
+  "description": "React rendering layer for the gwt GUI (SPEC #6943). Build output is committed to crates/gwt/web/react/.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "linkedom": "0.18.12"
+  }
+}

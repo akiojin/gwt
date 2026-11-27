@@ -9,16 +9,32 @@
 //! All percentages are clamped to `[0, 100]`. Reset instants are optional
 //! because upstream payloads do not always include them.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// A usage pool owner. Each variant maps to one CLI account.
+/// The provider an account's usage belongs to. A provider may have several
+/// accounts in its pool (Issue #7841); [`ProviderUsage::pool_account_id`]
+/// tells them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageProvider {
     Codex,
     ClaudeCode,
+    /// No official usage source yet: reported as [`UsageState::Unknown`].
+    GrokBuild,
+    /// No official usage source yet: reported as [`UsageState::Unknown`].
+    Copilot,
+    /// No official usage source yet: reported as [`UsageState::Unknown`].
+    Antigravity,
+    /// Only local token counts, no limits (SPEC #7347): [`UsageState::Unknown`].
+    #[serde(rename = "opencode")]
+    OpenCode,
+    /// No usage source of its own yet: reported as [`UsageState::Unknown`].
+    #[serde(rename = "openclaw")]
+    OpenClaw,
+    /// No usage source of its own yet: reported as [`UsageState::Unknown`].
+    Hermes,
 }
 
 impl UsageProvider {
@@ -27,6 +43,27 @@ impl UsageProvider {
         match self {
             UsageProvider::Codex => "codex",
             UsageProvider::ClaudeCode => "claude_code",
+            UsageProvider::GrokBuild => "grok_build",
+            UsageProvider::Copilot => "copilot",
+            UsageProvider::Antigravity => "antigravity",
+            UsageProvider::OpenCode => "opencode",
+            UsageProvider::OpenClaw => "openclaw",
+            UsageProvider::Hermes => "hermes",
+        }
+    }
+
+    /// The agent command id whose sign-in this provider's account is. The
+    /// default (adopted) account of a pool uses this as its account id.
+    pub fn agent_command(self) -> &'static str {
+        match self {
+            UsageProvider::Codex => "codex",
+            UsageProvider::ClaudeCode => "claude",
+            UsageProvider::GrokBuild => "grok",
+            UsageProvider::Copilot => "gh",
+            UsageProvider::Antigravity => "agy",
+            UsageProvider::OpenCode => "opencode",
+            UsageProvider::OpenClaw => "openclaw",
+            UsageProvider::Hermes => "hermes",
         }
     }
 }
@@ -107,7 +144,7 @@ pub fn clamp_percent(value: f32) -> f32 {
 pub struct UsageWindow {
     pub kind: WindowKind,
     pub used_percent: f32,
-    pub resets_at: Option<DateTime<Utc>>,
+    pub resets_at: Option<UtcTimestamp>,
     /// Actual window length as reported upstream, when known. Lets the UI show
     /// the real length (and label `Unknown` windows) instead of inferring it
     /// from `kind`.
@@ -117,7 +154,7 @@ pub struct UsageWindow {
 
 impl UsageWindow {
     /// Build a window, clamping `used_percent` into `[0, 100]`.
-    pub fn new(kind: WindowKind, used_percent: f32, resets_at: Option<DateTime<Utc>>) -> Self {
+    pub fn new(kind: WindowKind, used_percent: f32, resets_at: Option<UtcTimestamp>) -> Self {
         Self {
             kind,
             used_percent: clamp_percent(used_percent),
@@ -148,6 +185,9 @@ pub enum UsageState {
     Unavailable { reason: String },
     /// Data exists but is older than the freshness threshold.
     Stale { age_secs: u64 },
+    /// gwt has no official way to read this account's usage (Issue #7841).
+    /// Said outright instead of being shown as zero usage.
+    Unknown { reason: String },
 }
 
 /// Optional Claude usage credits, in the units reported by the provider.
@@ -162,10 +202,35 @@ pub struct ExtraUsage {
     pub disabled_reason: Option<String>,
 }
 
-/// Account-level usage for one provider (shared pool).
+/// Optional Codex credits, expressed in the provider's reported units.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CodexCredits {
+    pub has_credits: bool,
+    #[serde(default)]
+    pub unlimited: bool,
+    pub balance: Option<f64>,
+}
+
+/// A usage limit gwt itself saw a session hit (the provider's own notice on
+/// the agent's screen), kept per account so it stays visible even when the
+/// provider offers no usage numbers (Issue #7841).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitObservation {
+    pub detected_at: UtcTimestamp,
+    /// `None` when the notice named no reset instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<UtcTimestamp>,
+}
+
+/// Account-level usage for one account of a provider's pool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderUsage {
     pub provider: UsageProvider,
+    /// The gwt pool account this row belongs to (Issue #7841). Together with
+    /// `provider` it is the row's key. Snapshots written before accounts were
+    /// pooled have none; they describe the provider's default account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_account_id: Option<String>,
     /// Opaque, non-secret fingerprint of the locally authenticated account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
@@ -175,9 +240,14 @@ pub struct ProviderUsage {
     pub windows: Vec<UsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<ExtraUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CodexCredits>,
     pub limit_reached: bool,
     pub state: UsageState,
-    pub fetched_at: Option<DateTime<Utc>>,
+    pub fetched_at: Option<UtcTimestamp>,
+    /// The most recent limit gwt detected for this account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_limit: Option<LimitObservation>,
 }
 
 impl ProviderUsage {
@@ -185,22 +255,33 @@ impl ProviderUsage {
     pub fn degraded(provider: UsageProvider, state: UsageState) -> Self {
         Self {
             provider,
+            pool_account_id: None,
             account_id: None,
             account_label: None,
             plan: None,
             windows: Vec::new(),
             extra_usage: None,
+            credits: None,
             limit_reached: false,
             state,
             fetched_at: None,
+            last_limit: None,
         }
+    }
+
+    /// The pool account id this row describes: its own, or the provider's
+    /// default account for a row from before accounts were pooled.
+    pub fn pool_account(&self) -> &str {
+        self.pool_account_id
+            .as_deref()
+            .unwrap_or(self.provider.agent_command())
     }
 }
 
 /// One timestamped minute of a conversation's token activity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MinuteTokenBucket {
-    pub started_at: DateTime<Utc>,
+    pub started_at: UtcTimestamp,
     /// Unknown coverage is null; an observed minute without tokens is zero.
     pub tokens: Option<u64>,
 }
@@ -210,7 +291,7 @@ pub struct MinuteTokenBucket {
 pub struct SessionTelemetry {
     pub source: String,
     pub quality: String,
-    pub observed_at: Option<DateTime<Utc>>,
+    pub observed_at: Option<UtcTimestamp>,
     pub today_tokens: Option<u64>,
     /// Includes cached input for both providers. Total is input plus output.
     pub today_input_tokens: Option<u64>,
@@ -286,6 +367,10 @@ pub struct UsageSnapshot {
     pub sessions: Vec<SessionUsage>,
     #[serde(default)]
     pub consumption: Vec<super::consumption::ProviderConsumption>,
+    /// Every provider the usage source registry lists, in display order,
+    /// including those without an account row (SPEC #7347 FR-002).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<super::source::UsageSourceDescriptor>,
 }
 
 #[cfg(test)]
@@ -357,6 +442,96 @@ mod tests {
     fn provider_wire_ids_are_stable() {
         assert_eq!(UsageProvider::Codex.as_str(), "codex");
         assert_eq!(UsageProvider::ClaudeCode.as_str(), "claude_code");
+        // Issue #7841: every pooled tool has a provider of its own.
+        for (provider, wire, command) in [
+            (UsageProvider::GrokBuild, "grok_build", "grok"),
+            (UsageProvider::Copilot, "copilot", "gh"),
+            (UsageProvider::Antigravity, "antigravity", "agy"),
+            // SPEC #7347: every built-in agent has a provider row.
+            (UsageProvider::OpenCode, "opencode", "opencode"),
+            (UsageProvider::OpenClaw, "openclaw", "openclaw"),
+            (UsageProvider::Hermes, "hermes", "hermes"),
+        ] {
+            assert_eq!(provider.as_str(), wire);
+            assert_eq!(provider.agent_command(), command);
+            let json = serde_json::to_string(&provider).unwrap();
+            assert_eq!(json, format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::from_str::<UsageProvider>(&json).unwrap(),
+                provider
+            );
+        }
+    }
+
+    // Issue #7841 T-300: a provider without an official usage source says so.
+    #[test]
+    fn unknown_state_carries_its_reason() {
+        let json = serde_json::to_value(UsageState::Unknown {
+            reason: "no official usage source".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind":"unknown","reason":"no official usage source"})
+        );
+        assert_eq!(
+            serde_json::from_value::<UsageState>(json).unwrap(),
+            UsageState::Unknown {
+                reason: "no official usage source".into()
+            }
+        );
+    }
+
+    // Issue #7841 AC-4: a row is keyed by provider + pool account, and a row
+    // written before accounts were pooled is read as the default account.
+    #[test]
+    fn rows_are_keyed_by_pool_account_and_old_rows_read_as_the_default_account() {
+        let legacy: UsageSnapshot = serde_json::from_value(serde_json::json!({
+            "accounts": [
+                {"provider":"codex","plan":"pro","windows":[{"kind":"weekly","used_percent":40.0,"resets_at":null}],
+                 "limit_reached":false,"state":{"kind":"ok"},"fetched_at":null},
+                {"provider":"claude_code","plan":null,"windows":[],
+                 "limit_reached":false,"state":{"kind":"disabled"},"fetched_at":null}
+            ],
+            "sessions": []
+        }))
+        .unwrap();
+        let keys: Vec<_> = legacy
+            .accounts
+            .iter()
+            .map(|account| (account.provider, account.pool_account()))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (UsageProvider::Codex, "codex"),
+                (UsageProvider::ClaudeCode, "claude")
+            ]
+        );
+        assert!(legacy
+            .accounts
+            .iter()
+            .all(|account| account.last_limit.is_none()));
+
+        let mut pooled = ProviderUsage::degraded(
+            UsageProvider::GrokBuild,
+            UsageState::Unknown {
+                reason: "no official usage source".into(),
+            },
+        );
+        pooled.pool_account_id = Some("grok-2".into());
+        pooled.last_limit = Some(LimitObservation {
+            detected_at: "2026-11-24T01:00:00Z".parse().unwrap(),
+            resets_at: Some("2026-11-24T06:00:00Z".parse().unwrap()),
+        });
+        let json = serde_json::to_value(&pooled).unwrap();
+        assert_eq!(json["pool_account_id"], "grok-2");
+        assert_eq!(json["last_limit"]["resets_at"], "2026-11-24T06:00:00Z");
+        assert_eq!(
+            serde_json::from_value::<ProviderUsage>(json).unwrap(),
+            pooled
+        );
+        assert_eq!(pooled.pool_account(), "grok-2");
     }
 
     #[test]
@@ -398,18 +573,44 @@ mod tests {
     }
 
     #[test]
+    fn codex_credits_survive_serde_and_old_snapshots_still_load() {
+        let mut account = serde_json::json!({
+            "provider":"codex", "plan":null, "windows":[],
+            "limit_reached":false, "state":{"kind":"ok"}, "fetched_at":null
+        });
+        let legacy: ProviderUsage = serde_json::from_value(account.clone()).unwrap();
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("credits")
+            .is_none());
+        let credits = serde_json::json!({
+            "has_credits":true, "unlimited":false, "balance":37669.9
+        });
+        account["credits"] = credits.clone();
+        let parsed: ProviderUsage = serde_json::from_value(account).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap()["credits"], credits);
+    }
+
+    #[test]
     fn snapshot_roundtrips() {
         let snap = UsageSnapshot {
             accounts: vec![ProviderUsage {
                 provider: UsageProvider::Codex,
+                pool_account_id: None,
+                last_limit: None,
                 account_id: None,
                 account_label: Some("codex@example.com".into()),
                 plan: Some("pro".into()),
                 extra_usage: None,
-                windows: vec![UsageWindow::new(WindowKind::FiveHour, 12.0, None)],
+                credits: None,
+                windows: vec![UsageWindow::new(
+                    WindowKind::FiveHour,
+                    12.0,
+                    Some("2026-11-18T02:00:00.012Z".parse().unwrap()),
+                )],
                 limit_reached: false,
                 state: UsageState::Ok,
-                fetched_at: None,
+                fetched_at: Some("2026-11-17T22:30:00.123456789Z".parse().unwrap()),
             }],
             sessions: vec![SessionUsage {
                 session_id: "s1".into(),
@@ -434,11 +635,30 @@ mod tests {
                 state: UsageState::Ok,
             }],
             consumption: Vec::new(),
+            providers: vec![crate::usage::source::UsageSourceDescriptor {
+                provider: UsageProvider::OpenCode,
+                display_name: "OpenCode".into(),
+                short_label: "OC".into(),
+                acquisition: crate::usage::source::UsageAcquisition::None,
+                default_account_id: Some("opencode".into()),
+            }],
         };
         let json = serde_json::to_string(&snap).unwrap();
+        assert!(
+            json.contains(r#""providers":[{"provider":"opencode""#),
+            "{json}"
+        );
         let round: UsageSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, round);
         let mut legacy = serde_json::to_value(&snap).unwrap();
+        assert_eq!(
+            legacy["accounts"][0]["fetched_at"],
+            "2026-11-17T22:30:00.123456789Z"
+        );
+        assert_eq!(
+            legacy["accounts"][0]["windows"][0]["resets_at"],
+            "2026-11-18T02:00:00.012Z"
+        );
         let session = legacy["sessions"][0].as_object_mut().unwrap();
         for key in [
             "cache_read_tokens",
@@ -452,9 +672,14 @@ mod tests {
         ] {
             session.remove(key);
         }
+        // Snapshots from before SPEC #7347 carry no provider list.
+        legacy.as_object_mut().unwrap().remove("providers");
         assert_eq!(
             serde_json::from_value::<UsageSnapshot>(legacy).unwrap(),
-            snap
+            UsageSnapshot {
+                providers: Vec::new(),
+                ..snap
+            }
         );
     }
 }

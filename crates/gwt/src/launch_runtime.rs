@@ -27,7 +27,9 @@ fn normalize_launch_config_working_dir(config: &mut gwt_agent::LaunchConfig) {
             "GWT_PROJECT_ROOT".to_string(),
             normalized.display().to_string(),
         );
-    }
+    } // Issue #3910: intake and new-branch launches only learn their worktree
+      // here, after the argument builders ran without one.
+    config.apply_worktree_config_env();
 }
 
 fn normalize_shell_launch_config_working_dir(config: &mut ShellLaunchConfig) {
@@ -344,19 +346,6 @@ fn resolve_launch_worktree_request_locked(
         return Ok(());
     }
 
-    if !has_local_branch && !has_remote_branch {
-        manager
-            .create_remote_branch_from_base(&remote_base_ref, branch_name)
-            .map_err(|err| {
-                format!(
-                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
-                )
-            })?;
-        manager
-            .fetch_origin()
-            .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
-    }
-
     let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
         .ok_or_else(|| {
             format!("failed to resolve available worktree path for branch {branch_name}")
@@ -365,6 +354,18 @@ fn resolve_launch_worktree_request_locked(
         manager
             .create(branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
+    } else if !has_remote_branch {
+        // Issue #7670: creating the remote branch first cost 106 seconds of a
+        // 120-second launch deadline. The worktree needs only the fetched base;
+        // the remote branch is published after the launch, outside its deadline.
+        manager
+            .create_from_base_tracking_unpublished_remote(
+                &remote_base_ref,
+                branch_name,
+                &worktree_path,
+            )
+            .map_err(|err| err.to_string())?;
+        manager.publish_remote_branch_in_background(&remote_base_ref, branch_name);
     } else {
         manager
             .create_from_remote(&remote_branch_ref, branch_name, &worktree_path)
@@ -1562,7 +1563,7 @@ mod tests {
                 },
             );
             if phase == crate::AutonomousPhase::Delivering {
-                let now = chrono::Utc::now().to_rfc3339();
+                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
                 assert!(matches!(
                     monitor.declare_autonomous_wait(42, "CI", "PR merged", &now),
                     crate::AutonomousWaitOutcome::Declared { .. }
@@ -1590,6 +1591,269 @@ mod tests {
             assert_eq!(fs::read(&owner_event).unwrap(), before);
             assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
             assert!(!review_path.join(".gwt/work/events/owner.jsonl").exists());
+        }
+    }
+
+    /// Issue #3910: the worktree-local provider config env for a resolved
+    /// worktree, keyed by env name.
+    fn worktree_config_env(config: &gwt_agent::LaunchConfig) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = config
+            .env_vars
+            .iter()
+            .filter(|(key, _)| {
+                matches!(
+                    key.as_str(),
+                    "OPENCLAW_CONFIG_PATH"
+                        | "OPENCLAW_INCLUDE_ROOTS"
+                        | "OPENCODE_CONFIG_DIR"
+                        | "OPENCODE_CONFIG"
+                        | "HERMES_HOME"
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        env.sort();
+        env
+    }
+
+    fn expected_worktree_config_env(
+        agent_id: &gwt_agent::AgentId,
+        worktree: &Path,
+    ) -> Vec<(String, String)> {
+        let at = |rel: &str| worktree.join(rel).to_string_lossy().into_owned();
+        let mut env = match agent_id {
+            gwt_agent::AgentId::OpenClaw => vec![
+                (
+                    "OPENCLAW_CONFIG_PATH".to_string(),
+                    at(".gwt/openclaw/openclaw.json"),
+                ),
+                ("OPENCLAW_INCLUDE_ROOTS".to_string(), at(".gwt/openclaw")),
+            ],
+            gwt_agent::AgentId::OpenCode => vec![
+                ("OPENCODE_CONFIG_DIR".to_string(), at(".gwt/opencode")),
+                (
+                    "OPENCODE_CONFIG".to_string(),
+                    at(".gwt/opencode/skip-permissions.json"),
+                ),
+            ],
+            gwt_agent::AgentId::Hermes => vec![("HERMES_HOME".to_string(), at(".gwt/hermes"))],
+            other => panic!("no worktree config env for {other:?}"),
+        };
+        env.sort();
+        env
+    }
+
+    fn worktree_config_agents() -> [gwt_agent::AgentId; 3] {
+        [
+            gwt_agent::AgentId::OpenClaw,
+            gwt_agent::AgentId::OpenCode,
+            gwt_agent::AgentId::Hermes,
+        ]
+    }
+
+    #[test]
+    fn ephemeral_launch_applies_worktree_config_env_after_resolution() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        for agent_id in worktree_config_agents() {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+                .skip_permissions(true)
+                .ephemeral(None)
+                .build();
+            assert!(worktree_config_env(&config).is_empty());
+            resolve_launch_worktree(&repo, &mut config).expect("resolve ephemeral worktree");
+            let worktree = config.working_dir.clone().expect("ephemeral worktree");
+            assert_eq!(
+                worktree_config_env(&config),
+                expected_worktree_config_env(&agent_id, &worktree),
+                "{agent_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_branch_launch_applies_worktree_config_env_after_resolution() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        for (index, agent_id) in worktree_config_agents().into_iter().enumerate() {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+                .skip_permissions(true)
+                .branch(format!("feature/config-env-{index}"))
+                .base_branch("develop")
+                .build();
+            assert!(worktree_config_env(&config).is_empty());
+            resolve_launch_worktree(&repo, &mut config).expect("resolve new branch worktree");
+            let worktree = config.working_dir.clone().expect("new branch worktree");
+            assert!(!same_worktree_path(&worktree, &repo));
+            assert_eq!(
+                worktree_config_env(&config),
+                expected_worktree_config_env(&agent_id, &worktree),
+                "{agent_id:?}"
+            );
+        }
+    }
+
+    /// Issue #7670: creating the remote work branch took 106 seconds on a
+    /// loaded host and spent the whole launch deadline. The launch must
+    /// materialize its worktree without waiting for that push.
+    #[test]
+    fn new_work_branch_launch_does_not_wait_for_slow_remote_branch_push() {
+        // Issue #7714: the background push spawns `git` (and its hook `sh`)
+        // through the process-wide PATH. Parallel tests swap PATH under the
+        // env lock (e.g. to an empty value or a fake git), so the push must
+        // run while this test holds that lock or it can fail to publish.
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let origin = temp.path().join("origin.git");
+        let markers = temp.path().join("push-markers");
+        fs::create_dir_all(&markers).expect("marker dir");
+        // The fake slow push: git runs pre-push before contacting the remote.
+        // It holds the push until the test releases it. `finished` is written
+        // only after the release, and the release happens only after the
+        // launch returned, so the verdict is the order of events, never a
+        // wall-clock limit (Issue #7710). The ~300s self-exit writes a
+        // separate `abandoned` marker and only cleans up a hook the test
+        // could not release; the guard below releases it if the test panics.
+        let hook = repo.join(".git").join("hooks").join("pre-push");
+        fs::create_dir_all(hook.parent().unwrap()).expect("hooks dir");
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = fs::write(&self.0, "");
+            }
+        }
+        let _release_guard = ReleaseOnDrop(markers.join("release"));
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ndir='{}'\n: > \"$dir/started\"\ni=0\nwhile [ ! -f \"$dir/release\" ]; do\n  i=$((i+1))\n  if [ $i -gt 3000 ]; then : > \"$dir/abandoned\"; exit 1; fi\n  sleep 0.1\ndone\n: > \"$dir/finished\"\nexit 0\n",
+                markers.display().to_string().replace('\\', "/")
+            ),
+        )
+        .expect("write pre-push hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+        }
+        let branch = "work/issue-7670";
+        let remote_branch_exists = || {
+            gwt_core::process::hidden_command("git")
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/work/issue-7670",
+                ])
+                .current_dir(&origin)
+                .status()
+                .expect("show-ref on origin")
+                .success()
+        };
+        let git_stdout = |cwd: &Path, args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("launch must not depend on the remote branch push");
+
+        let worktree = working_dir.expect("materialized worktree");
+        assert!(
+            !markers.join("finished").exists() && !markers.join("abandoned").exists(),
+            "the launch returned only after the remote branch push ended"
+        );
+        assert!(
+            !remote_branch_exists(),
+            "the push is still held by the fake"
+        );
+        assert_eq!(git_stdout(&worktree, &["branch", "--show-current"]), branch);
+        assert_eq!(
+            git_stdout(&worktree, &["rev-parse", "HEAD"]),
+            git_stdout(&repo, &["rev-parse", "origin/develop"])
+        );
+        // The branch already targets its own remote name, so the agent's first
+        // push publishes it even if the background publication is lost.
+        assert_eq!(
+            git_stdout(&repo, &["config", "--get", "branch.work/issue-7670.remote"]),
+            "origin"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["config", "--get", "branch.work/issue-7670.merge"]),
+            "refs/heads/work/issue-7670"
+        );
+
+        fs::write(markers.join("release"), "").expect("release the push");
+        // Issue #7723: wait for this launch's own publication only. The launch
+        // registers it under the main worktree root it resolved.
+        let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main worktree root");
+        let publication =
+            gwt_git::WorktreeManager::new(main_repo).wait_for_remote_branch_publication(branch);
+        assert!(
+            publication.is_ok(),
+            "the background publication failed: {publication:?}"
+        );
+        assert!(
+            markers.join("started").exists(),
+            "the push ran after launch"
+        );
+        assert!(
+            remote_branch_exists(),
+            "the remote branch is published later"
+        );
+        assert_eq!(
+            git_stdout(
+                &worktree,
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}"
+                ]
+            ),
+            "origin/work/issue-7670"
+        );
+    }
+
+    #[test]
+    fn existing_branch_launch_keeps_worktree_config_env() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        for agent_id in worktree_config_agents() {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+                .skip_permissions(true)
+                .working_dir(&repo)
+                .branch("develop")
+                .build();
+            let built = worktree_config_env(&config);
+            assert_eq!(
+                built,
+                expected_worktree_config_env(&agent_id, config.working_dir.as_ref().unwrap()),
+                "{agent_id:?}"
+            );
+            resolve_launch_worktree(&repo, &mut config).expect("resolve existing worktree");
+            assert_eq!(worktree_config_env(&config), built, "{agent_id:?}");
         }
     }
 

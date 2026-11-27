@@ -32,18 +32,6 @@ export const UI_TRACE_EVENT = Object.freeze({
   writeOutput: "write_output",
 });
 
-const START_COMMAND = Object.freeze({
-  group: "Diagnostics",
-  id: "diagnostics-ui-trace-start",
-  label: "Start UI Trace",
-});
-
-const STOP_COMMAND = Object.freeze({
-  group: "Diagnostics",
-  id: "diagnostics-ui-trace-stop",
-  label: "Stop UI Trace",
-});
-
 export function createUiTraceSavePayload(trace) {
   return {
     kind: "save_ui_trace",
@@ -125,25 +113,9 @@ export function createUiTraceWiring({
     return payload;
   }
 
-  function registerPalette(palette) {
-    if (!palette || typeof palette.register !== "function") {
-      return false;
-    }
-    palette.register({
-      ...START_COMMAND,
-      handler: start,
-    });
-    palette.register({
-      ...STOP_COMMAND,
-      handler: stop,
-    });
-    return true;
-  }
-
   return {
     isTracing,
     receive,
-    registerPalette,
     start,
     stop,
     traceMeasure,

@@ -22,9 +22,12 @@ test("ordinary reconnect recovers Board and Logs reads without losing drafts or 
   }
   const board = page.locator('.workspace-window[data-preset="board"]').last();
   const logs = page.locator('.workspace-window[data-preset="logs"]').last();
+  await page.locator('.op-rail__surface[data-surface="board"]').click();
+  await expect(board).toBeVisible();
+  await expect(board.locator(".board-destination-text")).toHaveText("Local");
   const boardId = (await board.getAttribute("data-id"))!;
   const logsId = (await logs.getAttribute("data-id"))!;
-  await page.evaluate(({ boardId, logsId }) => {
+  await page.evaluate(({ boardId, logsId, projectRoot }) => {
     const board = document.querySelector(`.workspace-window[data-id="${boardId}"]`)!;
     const logs = document.querySelector(`.workspace-window[data-id="${logsId}"]`)!;
     const input = board.querySelector(".board-textarea") as HTMLTextAreaElement;
@@ -39,10 +42,13 @@ test("ordinary reconnect recovers Board and Logs reads without losing drafts or 
     if (!old) throw new Error("missing owning project socket");
     const send = WebSocket.prototype.send;
     const state = { old, board, logs, input, filter, held: [] as any[], recovered: [] as any[],
+      configReads: [] as any[], writes: [] as any[],
       sequence: (window as any).__gwtPlaywrightMessageSequence,
       restore() { WebSocket.prototype.send = send; } };
     WebSocket.prototype.send = function (data) {
       const request = typeof data === "string" ? JSON.parse(data) : null;
+      if (this !== old && request?.kind === "get_project_board_config") state.configReads.push(request);
+      if (request && ["post_board_entry", "update_project_board_config"].includes(request.kind)) state.writes.push(request);
       if (request && [boardId, logsId].includes(request.id)) {
         if (this === old && ["load_board", "load_logs"].includes(request.kind)) {
           state.held.push(request); return;
@@ -52,14 +58,20 @@ test("ordinary reconnect recovers Board and Logs reads without losing drafts or 
       return send.call(this, data);
     };
     (window as any).__boardLogsReconnect = state;
+    // Simulate a cached destination that changed while this client was offline.
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "project_board_config", project_root: projectRoot,
+      resolved_provider: "slack", resolved_channel: "#stale-reconnect",
+    } }));
     (board.querySelector('[data-action="refresh-board"]') as HTMLButtonElement).click();
     (logs.querySelector('[data-action="refresh-logs"]') as HTMLButtonElement).click();
-  }, { boardId, logsId });
+  }, { boardId, logsId, projectRoot: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT! });
   try {
     await expect.poll(() => page.evaluate(() => (window as any).__boardLogsReconnect.held.map((row: any) => row.kind)))
       .toEqual(["load_board", "load_logs"]);
     await expect(board.locator(".board-status")).toContainText("Loading");
     await expect(logs.locator(".logs-status")).toContainText("Loading");
+    await expect(board.locator(".board-destination-text")).toHaveText("Slack #stale-reconnect");
     await page.evaluate(() => (window as any).__boardLogsReconnect.old.close());
     await expect.poll(() => page.evaluate(() => (window as any).__boardLogsReconnect.recovered))
       .toEqual([{ kind: "load_board", id: boardId, all: false },
@@ -72,6 +84,10 @@ test("ordinary reconnect recovers Board and Logs reads without losing drafts or 
     }, { boardId, logsId })).toEqual([true, true]);
     await expect(board.locator(".board-status")).not.toContainText("Loading");
     await expect(logs.locator(".logs-status")).not.toContainText("Loading");
+    await expect.poll(() => page.evaluate(() => (window as any).__boardLogsReconnect.configReads))
+      .toEqual([{ kind: "get_project_board_config", project_root: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT! }]);
+    await expect(board.locator(".board-destination-text")).toHaveText("Local");
+    expect(await page.evaluate(() => (window as any).__boardLogsReconnect.writes)).toEqual([]);
     const controls = await page.evaluate(({ boardId, logsId }) => {
       const state = (window as any).__boardLogsReconnect;
       return { sameBoard: state.board === document.querySelector(`.workspace-window[data-id="${boardId}"]`),
@@ -83,6 +99,7 @@ test("ordinary reconnect recovers Board and Logs reads without losing drafts or 
     }, { boardId, logsId });
     expect(controls).toEqual({ sameBoard: true, sameLogs: true, sameInput: true, sameFilter: true,
       draft: "Unsent reconnect draft", selection: [2, 7], query: "retained reconnect filter", scope: "project" });
+    await expect(board).toBeVisible();
     await info.attach(`board-logs-reconnect-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
     expect(errors, "zero console/page errors").toEqual([]);
   } finally {

@@ -247,6 +247,7 @@ impl RestoreRefusal {
             "needs_human" => Self::MonitorHold("needs_human"),
             "failure_hold" => Self::MonitorHold("failure_hold"),
             "launch_revoked" => Self::MonitorHold("launch_revoked"),
+            "no_monitor_row" => Self::MonitorHold("no_monitor_row"),
             "execution_blocked" => Self::MonitorHold("execution_blocked"),
             "session_unreadable" => Self::TerminalFactsUnreadable("session_unreadable"),
             "monitor_unreadable" => Self::TerminalFactsUnreadable("monitor_unreadable"),
@@ -552,10 +553,10 @@ fn session_project_scope_hash(session: &gwt_agent::Session) -> Option<String> {
 
 fn startup_auto_resume_is_fresh(
     session: &gwt_agent::Session,
-    now: chrono::DateTime<chrono::Utc>,
+    now: gwt_core::timestamp::UtcTimestamp,
 ) -> bool {
     now.signed_duration_since(session.last_activity_at)
-        <= chrono::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
+        <= time::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
 }
 
 /// Issue #4441 (AC-4): everything the startup-restore selection predicate
@@ -800,6 +801,13 @@ impl AppRuntime {
         let _phase = gwt::perf::startup::PhaseTimer::start(
             gwt::perf::startup::StartupPhase::ProjectStateLoad,
         );
+        if let Err(error) = self.blocking_tasks.try_spawn(|| {
+            if let Err(error) = gwt::execution_environments::adopt_signed_in_accounts() {
+                tracing::warn!(%error, "Could not import signed-in execution accounts");
+            }
+        }) {
+            tracing::warn!(%error, "Execution account import could not be scheduled");
+        }
         // Issue #4378 AC-1: list each project's worktrees once. The startup
         // ingest, its reconcile and the orphan intake prune plan reuse this
         // inventory instead of listing again (one `git worktree list` is
@@ -872,7 +880,7 @@ impl AppRuntime {
         // first startup after auto-done emission lands. The scan is idempotent
         // per `work_item_id` and skips silently when journal / work_events
         // files are missing or unreadable.
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut orphan_intake_prune_plans = Vec::new();
         for tab in &self.tabs {
             let Some(context) = self.project_context_for_root(&tab.project_root) else {
@@ -960,6 +968,26 @@ impl AppRuntime {
         self.spawn_startup_generation_reaper(&startup_worktrees);
         spawn_startup_orphan_intake_prune(orphan_intake_prune_plans);
 
+        gwt::perf::startup::set_restored_window_count(
+            self.pending_startup_auto_resume_sessions.len()
+                + self
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.workspace.persisted().windows.iter())
+                    .filter(|window| should_auto_start_restored_window(window))
+                    .count(),
+        );
+        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
+        // pane once the frontend surfaces are ready (the same startup deferral
+        // rule that keeps Agent PTYs behind surface initialization).
+        // Projects opened later get it from `open_project_path_events`.
+        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        let _ = self.persist();
+    }
+
+    /// Start prepared process restores after the GUI owns its daemon subscribers.
+    /// Continue resumes here without waiting for a browser surface-ready event.
+    pub(crate) fn resume_bootstrapped_runtimes(&mut self) {
         let windows = self
             .tabs
             .iter()
@@ -973,13 +1001,6 @@ impl AppRuntime {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        gwt::perf::startup::set_restored_window_count(
-            self.pending_startup_auto_resume_sessions.len()
-                + windows
-                    .iter()
-                    .filter(|(_, window)| should_auto_start_restored_window(window))
-                    .count(),
-        );
         for (tab_id, window) in windows {
             if !should_auto_start_restored_window(&window) {
                 continue;
@@ -1000,12 +1021,6 @@ impl AppRuntime {
                 }
             }
         }
-        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
-        // pane once the frontend surfaces are ready (the same startup deferral
-        // rule that keeps Agent PTYs behind surface initialization).
-        // Projects opened later get it from `open_project_path_events`.
-        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
-        let _ = self.persist();
         if self.tabs.iter().any(|tab| {
             gwt_core::project_execution_policy::load(&tab.project_root)
                 .ok()
@@ -1031,7 +1046,7 @@ impl AppRuntime {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         let mut restored_owner_issues = std::collections::HashSet::new();
         let mut resume_tabs = HashMap::new();
@@ -1668,8 +1683,9 @@ impl AppRuntime {
         }
 
         if self.startup_auto_resume_admission_in_flight {
-            // A worker is still evaluating the queue; its verdict finishes
-            // this drain, including the one startup summary line.
+            // A newly accepted view can supersede the worker's policy facts.
+            // Retain one notification until its deferred Sessions are requeued.
+            self.startup_auto_resume_ready_pending = true;
             return events;
         }
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
@@ -1732,6 +1748,7 @@ impl AppRuntime {
         prepared: StartupAutoResumeAdmissionPrepared,
     ) -> Vec<OutboundEvent> {
         self.startup_auto_resume_admission_in_flight = false;
+        let ready_pending = std::mem::take(&mut self.startup_auto_resume_ready_pending);
         if self.agent_maintenance.busy {
             // Maintenance started while the worker ran; the deferred
             // surface-ready drain evaluates the queue again afterwards.
@@ -1740,7 +1757,11 @@ impl AppRuntime {
             self.agent_maintenance.deferred_startup_ready = true;
             return Vec::new();
         }
-        self.startup_auto_resume_admitted_events(prepared.sessions)
+        let mut events = self.startup_auto_resume_admitted_events(prepared.sessions);
+        if ready_pending && !self.pending_startup_auto_resume_sessions.is_empty() {
+            events.extend(self.startup_auto_resume_ready_events());
+        }
+        events
     }
 
     /// Spawn the admitted restores, requeue the policy-deferred ones, then run
@@ -1840,6 +1861,16 @@ impl AppRuntime {
     /// (which the resume queue may already have restarted) is seen as live by
     /// the singleton gate instead of being spawned twice.
     fn startup_pm_ensure_ready_events(&mut self) -> Vec<OutboundEvent> {
+        let mut budget = super::GuiSliceBudget::production();
+        self.startup_pm_ensure_slice(&mut budget)
+    }
+
+    /// Issue #7702: ensure one slice of queued PM tabs, then continue on the
+    /// next event-loop turn so terminal input is not stuck behind the rest.
+    pub(crate) fn startup_pm_ensure_slice(
+        &mut self,
+        budget: &mut super::GuiSliceBudget,
+    ) -> Vec<OutboundEvent> {
         if self.pending_startup_pm_tabs.is_empty() {
             return Vec::new();
         }
@@ -1849,16 +1880,32 @@ impl AppRuntime {
             "PM ensure: surfaces ready, draining queue"
         );
         let mut events = Vec::new();
+        let mut remainder = Vec::new();
+        let mut processed = false;
         for tab_id in tabs {
+            if !budget.allow_another() {
+                remainder.push(tab_id);
+                continue;
+            }
+            budget.record();
+            processed = true;
             events.extend(self.ensure_pm_agent_for_tab(
                 &tab_id,
                 crate::app_runtime::pm::PmEnsureTrigger::Automatic,
             ));
         }
-        for state in self.project_states.values() {
-            for window_id in state.pending_pm_launches.keys() {
-                gwt::perf::startup::track_new_terminal(window_id);
+        if processed {
+            for state in self.project_states.values() {
+                for window_id in state.pending_pm_launches.keys() {
+                    gwt::perf::startup::track_new_terminal(window_id);
+                }
             }
+        }
+        if !remainder.is_empty() {
+            let mut pending = std::mem::take(&mut self.pending_startup_pm_tabs);
+            remainder.append(&mut pending);
+            self.pending_startup_pm_tabs = remainder;
+            self.queue_gui_slice_continue();
         }
         events
     }
@@ -1896,7 +1943,55 @@ impl AppRuntime {
         workspace_resume_context: Option<WorkspaceResumeContext>,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
-        if self.restore_source_is_reserved(&session) {
+        let source_reserved = self.restore_source_is_reserved(&session);
+        if origin == RestoreOrigin::UserRequested {
+            let active = self
+                .active_agent_sessions
+                .values()
+                .find(|active| active.session_id == session.id);
+            let runtime = active.and_then(|active| self.runtimes.get(&active.window_id));
+            tracing::info!(target: "gwt.restart.diagnostic", stage = "restore_routing",
+                tab_id, source_session_id = %session.id, source_reserved,
+                active_window_id = ?active.map(|active| active.window_id.as_str()),
+                runtime_present = runtime.is_some(), status = ?runtime.map(|runtime| runtime.status),
+                exit_confirmed = ?runtime.map(|runtime| runtime.exit_confirmed),
+                owner_pane_id = ?runtime.map(|runtime| runtime.owner_pane_id.as_str()),
+                incarnation = ?runtime.map(|runtime| runtime.incarnation),
+                owner_pid = ?runtime.map(|runtime| runtime.owner_identity.pid),
+                owner_started_at = ?runtime.map(|runtime| runtime.owner_identity.host_started_at),
+                active_matches = self.active_agent_sessions.values().filter(|active| active.session_id == session.id).count(),
+                pending_startup_matches = self.pending_startup_auto_resume_sessions.iter().filter(|pending| pending.session.id == session.id).count(),
+                pending_source_matches = self.pending_auto_resume_sources.iter().filter(|(window, source)| self.window_lookup.contains_key(*window) && *source == &session.id).count(),
+                "saved Session restart routing");
+        }
+        // Keep the source reservation while an exact terminal restart is
+        // routed to the physical owner, which alone may retire its predecessor.
+        let retained_restart = origin == RestoreOrigin::UserRequested
+            && !self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .any(|p| p.session.id == session.id)
+            && !self
+                .pending_auto_resume_sources
+                .iter()
+                .any(|(id, source)| self.window_lookup.contains_key(id) && source == &session.id)
+            && {
+                let mut active = self
+                    .active_agent_sessions
+                    .values()
+                    .filter(|active| active.session_id == session.id);
+                active.next().is_some_and(|active| {
+                    active.tab_id == tab_id
+                        && self.runtimes.get(&active.window_id).is_some_and(|runtime| {
+                            runtime.exit_confirmed
+                                && matches!(
+                                    runtime.status,
+                                    WindowProcessStatus::Error | WindowProcessStatus::Stopped
+                                )
+                        })
+                }) && active.next().is_none()
+            };
+        if source_reserved && !retained_restart {
             return Vec::new();
         }
         let Some(context) = self.project_context(tab_id) else {
@@ -1977,6 +2072,11 @@ impl AppRuntime {
             Ok(events) => events,
             Err(error) => {
                 self.pending_auto_resume_sources.remove(&window_id);
+                self.record_restore_window_outcome(
+                    &window_id,
+                    Err(RestoreRefusal::LaunchNotStarted),
+                );
+                self.restore_launch_windows.remove(&window_id);
                 self.restore_launch_error_events(tab_id, &session, origin, error)
             }
         }
@@ -1996,11 +2096,8 @@ impl AppRuntime {
                 .windows
                 .iter()
                 .find(|window| {
-                    window.session_id.as_deref() == Some(session.id.as_str())
-                        && matches!(
-                            window.status,
-                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                        )
+                    crate::runtime_support::window_is_agent_pane(window)
+                        && window.session_id.as_deref() == Some(session.id.as_str())
                 })
                 .map(|window| window.id.clone())
         });
@@ -2349,10 +2446,17 @@ impl AppRuntime {
     /// release the projects' `update_drain` holds and queue a notice; only
     /// success bypasses the auto-resume freshness gate. Idempotent: a settled
     /// marker is gone; a failed attempt stays only in the apply result.
-    fn settle_update_resume_marker_at_bootstrap(&mut self, now: chrono::DateTime<chrono::Utc>) {
+    fn settle_update_resume_marker_at_bootstrap(&mut self, now: gwt_core::timestamp::UtcTimestamp) {
         let Some(settlement) =
             gwt_core::update::settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now)
         else {
+            if let Some(result) = gwt_core::update::take_cli_update_resume_notice() {
+                let level = match result.outcome {
+                    gwt_core::update::UpdateApplyOutcome::Success => "info",
+                    gwt_core::update::UpdateApplyOutcome::Failure => "error",
+                };
+                self.pending_update_resume_notice = Some((level.to_string(), result.notice()));
+            }
             return;
         };
         let marker_projects = settlement
@@ -2486,7 +2590,13 @@ impl AppRuntime {
     }
 
     fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
-        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id) {
+        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%session_id, error_kind = ?error.kind(), %error,
+                "excluding restored Session with unreadable launch recovery receipt");
+                true
+            })
+        {
             return None;
         }
         gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)

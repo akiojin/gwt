@@ -1339,6 +1339,12 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             "generated guidance must distinguish GitHub reads from mutations"
         );
         assert!(
+            content.contains("Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`")
+                && content.contains("Return results to the parent")
+                && content.contains("Do not commit or push"),
+            "both provider assets must keep delegated helpers out of parent delivery"
+        );
+        assert!(
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );
@@ -1426,6 +1432,35 @@ fn autonomous_investigation_continues_in_scope_root_cause_fixes() {
         assert!(ownership.contains("generated `gwt-coordination` skill's `references/board.md`"));
         assert!(ownership.contains("In-scope root-cause fixes follow that contract"));
         assert!(ownership.contains("first apply the launch-route authority below"));
+    }
+}
+
+#[test]
+fn build_complete_guidance_names_the_delivered_pr() {
+    // Issue #7338 / #6352: an owner whose head branch has 100+ PRs makes
+    // `build.complete` refuse a spec-only call as a truncated candidate list.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+
+    for provider in [".claude", ".codex"] {
+        let skills = dir.path().join(provider).join("skills");
+        for reference in [
+            "gwt-execute/references/lifecycle-recovery.md",
+            "gwt-build-spec/references/entry-lifecycle.md",
+        ] {
+            let text = fs::read_to_string(skills.join(reference)).expect("lifecycle reference");
+            let line = text
+                .lines()
+                .find(|line| line.contains("`build.complete`") && line.contains("`params.spec"))
+                .unwrap_or_else(|| panic!("{provider}/{reference}: no build.complete step"));
+            let step = &text[text.find(line).unwrap()..];
+            let step = &step[..step.find("\n- ").unwrap_or(step.len())];
+            assert!(
+                step.contains("`params.pr:<number>`"),
+                "{provider}/{reference}: build.complete step must name the delivered PR: {step}"
+            );
+        }
     }
 }
 

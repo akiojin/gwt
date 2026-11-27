@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn issue_7015_synchronous_launch_refusal_retires_starting_placeholder() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .suppress_execution_control()
+        .build();
+    assert!(runtime
+        .spawn_agent_window("tab-1", config, None)
+        .unwrap_err()
+        .contains("worker unavailable"));
+    let window = &runtime.tabs[0].workspace.persisted().windows[0];
+    assert_eq!(window.status, WindowProcessStatus::Error);
+    assert_eq!(
+        runtime.window_status(&combined_window_id("tab-1", &window.id)),
+        Some(WindowProcessStatus::Error)
+    );
+    assert!(runtime.inflight_launches.is_empty());
+    assert!(runtime.pending_launch_completions.is_empty());
+}
+
 type ActualManualHolderFixture = (
     AppRuntime,
     Arc<Mutex<Vec<UserEvent>>>,
@@ -995,6 +1023,16 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
     let completion = take_remote_owner_launch_completion(&recorded_events);
     let successor = completion.window_id.clone();
     assert!(
+        runtime
+            .capture_update_quiescence_inputs()
+            .0
+            .iter()
+            .any(|pane| {
+                pane.window_id == successor && pane.state == WindowProcessStatus::Starting
+            }),
+        "the exact retry protects its real pending launch"
+    );
+    assert!(
         completion.result.is_ok(),
         "normal GUI retry must reach the real owner: {:?}",
         completion.result.as_ref().err()
@@ -1203,6 +1241,18 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         failure = Some(runtime.handle_remote_owner_launch_complete(completion));
     });
     let failure = failure.expect("synchronous failure events");
+
+    assert!(
+        runtime
+            .pending_launch_completions
+            .values()
+            .any(|pending| { pending.current.load(Ordering::Acquire) }),
+        "exact recovery capability remains current"
+    );
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "a completed failed launch retained for retry has no process to drain"
+    );
 
     assert!(
         failure.iter().any(|event| matches!(
@@ -1824,7 +1874,7 @@ fn manual_launch_replays_existing_prepared_owner_successor_after_response_loss()
         session_binding_id: "manual-existing-prepared-binding".to_string(),
         initial_session_id: "manual-existing-prepared-candidate".to_string(),
         entrypoint: "$gwt-execute #3547".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_exact_manual_launch_successor(
         &repo,
@@ -2060,7 +2110,7 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
     fs::write(
         &cache,
         serde_json::to_vec(&serde_json::json!({
-            "checked_at": chrono::Utc::now(), "latest_version": "999.0.0",
+            "checked_at": gwt_core::timestamp::UtcTimestamp::now(), "latest_version": "999.0.0",
             "release_url": "https://example.invalid/cached-release"
         }))
         .unwrap(),
@@ -2090,7 +2140,7 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
         latest: "99.0.0".into(),
         release_url: "https://github.com/akiojin/gwt/releases/tag/v99.0.0".into(),
         asset_url: Some("https://example.invalid/gwt.dmg".into()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     let failure = gwt_core::update::UpdateApplyResult {
         outcome: gwt_core::update::UpdateApplyOutcome::Failure,
@@ -2098,8 +2148,9 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
         to_version: "9.150.0".into(),
         observed_version: "9.149.0".into(),
         attempt: 1,
-        recorded_at: chrono::Utc::now().to_rfc3339(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         message: Some("version mismatch".into()),
+        notify_on_gui_startup: false,
     };
     let completed = runtime.complete_manual_update_check(state.clone(), Some(failure.clone()));
     assert!(!runtime.update_check_in_flight);
@@ -2171,7 +2222,7 @@ fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
         &gwt::IssueMonitorPrefs {
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
                 version: "99.0.0".into(),
-                since: chrono::Utc::now().to_rfc3339(),
+                since: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
                 blocking: Vec::new(),
@@ -2190,7 +2241,7 @@ fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/gwt.tar.gz".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     };
@@ -2200,7 +2251,7 @@ fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
         latest: "100.0.0".into(),
         release_url: "https://example.invalid/release".into(),
         asset_url: Some(manifest.asset_url.clone()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     let mut old = replacement.clone();
     if let gwt_core::update::UpdateState::Available { latest, .. } = &mut old {
@@ -2283,7 +2334,7 @@ fn manual_update_check_preserves_pending_release_when_cleanup_fails() {
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/gwt.tar.gz".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     };
@@ -2293,7 +2344,7 @@ fn manual_update_check_preserves_pending_release_when_cleanup_fails() {
         latest: "99.0.0".into(),
         release_url: "https://example.invalid/release".into(),
         asset_url: Some(manifest.asset_url.clone()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     runtime.pending_update = Some(old.clone());
     let mut replacement = old.clone();
@@ -2371,7 +2422,7 @@ fn app_runtime_apply_update_uses_pending_available_update_state() {
         latest: "9.20.2".to_string(),
         release_url: "https://example.invalid/releases/v9.20.2".to_string(),
         asset_url: Some("https://example.invalid/gwt-macos-arm64.dmg".to_string()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
 
     let outbound =
@@ -2414,7 +2465,7 @@ fn app_runtime_apply_update_without_applicable_pending_update_reports_error() {
         latest: "9.20.2".to_string(),
         release_url: "https://example.invalid/releases/v9.20.2".to_string(),
         asset_url: None,
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
 
     let outbound =
@@ -3398,7 +3449,7 @@ fn owner_launch_failure_does_not_reconstruct_the_failed_delivery() {
         WindowProcessStatus::Starting,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let now = Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,

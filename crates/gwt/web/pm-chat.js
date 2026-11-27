@@ -1,5 +1,8 @@
 import { createUiStateStore } from './ui-state-store.js';
 import { renderUiContent } from './ui-content.js';
+import { createTaskHome } from './task-home.js';
+import { createTaskDecisions } from './task-decisions.js';
+import { createTaskProgress } from './task-progress.js';
 
 function reportDetailsMarkdown(structured) {
   return [structured.details, (structured.refs || []).map(ref => `- ${ref}`).join('\n')]
@@ -22,12 +25,47 @@ function reportDisplayText(report) {
   return lines.join('\n');
 }
 
+// One decision of the gwtd decision queue (Issue #7742), in the one shape
+// every surface that draws it reads: the Decide queue, this conversation and
+// the Home conversation. Options become numbered choices; a decision without
+// options keeps the free-form reply and carries its text.
+export function decisionItemFromQueue(item) {
+  return {
+    id: String(item.id),
+    question: item.question || 'Decision needed',
+    result: item.materials || null,
+    impact: item.impact ?? null,
+    owner: item.owner || (item.issue != null ? `Issue #${item.issue}` : null),
+    recommendation: item.recommendation ?? null,
+    reason: item.reason ?? null,
+    options: item.options?.length ? [...item.options] : null,
+    detailText: item.detail_text ?? null,
+    createdAt: item.created_at ?? null,
+    deferred: item.deferred_seq != null,
+  };
+}
+
+// A decision reads as a PM message: what happened, the question, the
+// recommendation with its reason, and the impact, as prose (design item 226).
+export function decisionMessageLines(item) {
+  if (item.detailText) return [item.detailText];
+  return [
+    item.result && item.result !== item.question ? item.result : null,
+    item.question,
+    item.recommendation ? `I recommend: ${item.recommendation}.${item.reason ? ` ${item.reason}` : ''}` : null,
+    item.impact,
+  ].filter(Boolean);
+}
+
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
   const model = createUiStateStore({ windows: {}, changedWindowId: null, resyncRequest: null });
   let requestSequence = 0;
+  let paneResultSequence = 0;
   const requests = new Map();
+  const validDecisions = decisions => Boolean(decisions) && Array.isArray(decisions.items)
+    && Number.isSafeInteger(decisions.waiting_count);
   const validVersion = version => version && typeof version.epoch === 'string' && version.epoch.length > 0
     && Number.isSafeInteger(version.revision) && version.revision > 0;
   function requestPmReports(windowId, resync = false) {
@@ -51,7 +89,8 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null };
+      requestTasks: null, requestTasksError: null, taskDetail: null, taskMutation: null, conversation: null, chatSend: null, paneResult: null,
+      decisions: null, decisionRequest: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -94,21 +133,217 @@ export function createPmWindowModel() {
         const taskOverview = event.current?.request_tasks;
         const taskError = taskOverview?.state === 'error' ? taskOverview.message
           : (!taskOverview ? event.error || 'Request tasks are unavailable. Reload this page to try again.' : null);
-        next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
+        // A Current-card failure fences only that card; saved reports still apply (#6950).
+        const currentFailed = Boolean(event.error || event.current_error);
+        next = { ...next, reportsVersion: event.version, error: event.error || event.current_error || null, loaded: true,
           requestTasks: taskError ? previous.requestTasks : (taskOverview || null),
           requestTasksError: taskError,
-          current: event.error ? previous.current : (event.current || null),
+          current: currentFailed ? previous.current : (event.current || null),
+          // The gwtd decision queue (Issue #7742). An unreadable queue sends
+          // none: the last applied queue stays.
+          decisions: validDecisions(event.decisions) ? event.decisions : previous.decisions,
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
             content: report.structured ? { type: 'text', body: reportDisplayText(report) }
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
             detailsContent: report.structured ? { type: 'markdown', body: reportDetailsMarkdown(report.structured),
               body_html: report.details_html || '' } : null })) };
+        if (next.taskDetail?.data && (taskError || (taskOverview?.revision > next.taskDetail.revision))) {
+          next.taskDetail = { ...next.taskDetail, stale: true };
+        }
+      } else if (event.kind === 'decision_result') {
+        // The result carries the queue as it is after the operation, so the
+        // removal or the new order shows without waiting for the next poll.
+        const request = previous?.decisionRequest;
+        if (request?.status !== 'pending' || event.request_id !== request.requestId) return state;
+        // A refusal carries the current queue too (a decision answered
+        // elsewhere first is no longer in it), so it applies either way.
+        next = { ...next,
+          decisions: validDecisions(event.decisions) ? event.decisions : previous.decisions,
+          decisionRequest: { ...request, status: event.ok ? 'ok' : 'failed',
+            error: event.ok ? null : event.error || 'The decision queue refused the request.' } };
+      } else if (event.kind === 'pm_request_task') {
+        const mutation = previous?.taskMutation;
+        const selected = previous?.taskDetail;
+        if (mutation?.status === 'pending' && event.request_id === mutation.requestId) {
+          const result = event.result;
+          const recorded = result?.state === 'ready' && result.receipt?.action === mutation.action
+            && result.receipt.operation_id === mutation.operationId
+            && Number.isSafeInteger(result.receipt.revision) && result.receipt.revision > mutation.revision;
+          if (!recorded && result?.state !== 'error') return state;
+          next = { ...next, taskMutation: { ...mutation, status: recorded ? 'recorded' : 'error',
+            error: recorded ? null : result.message || 'The task change was not confirmed. Reload details before trying again.' },
+            taskDetail: selected?.key === mutation.key ? { ...selected, stale: true } : selected };
+          return { ...state, windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
+        }
+        if (!selected || selected.status !== 'loading' || event.request_id !== selected.requestId) return state;
+        const result = event.result;
+        if (result?.state === 'detail') {
+          if (result.key !== selected.key) return state;
+          if (!Number.isSafeInteger(result.revision)
+            || result.revision < Math.max(previous.requestTasks?.revision || 0, selected.revision || 0)) {
+            next = { ...next, taskDetail: { ...selected, status: 'error', stale: true,
+              error: 'The task changed during this read. Reload details to get the current snapshot.' } };
+          } else {
+            next = { ...next, taskDetail: { ...selected, status: 'ready', stale: false,
+              revision: result.revision, data: result.detail, error: null } };
+          }
+        } else if (result?.state === 'error') {
+          next = { ...next, taskDetail: { ...selected, status: 'error', stale: Boolean(selected.data),
+            error: result.message || 'Task details could not be read. Reload details to try again.' } };
+        } else return state;
+      } else if (event.kind === 'pm_conversation') {
+        // The host already resolved the session's native record and drops reads
+        // of a replaced PM; this guard only keeps a late reply off a rebound window.
+        if (!previous || event.session_id !== previous.sessionId || !event.snapshot) return state;
+        const snapshot = event.snapshot;
+        const conversation = { availability: snapshot.availability || 'unavailable', detail: snapshot.detail || null,
+          messages: (snapshot.messages || []).map(message => ({ id: message.id, role: message.role,
+            sourceKey: message.role === 'user' && typeof message.source_key === 'string' ? message.source_key : null,
+            content: message.role === 'assistant'
+              ? { type: 'markdown', body: message.text || '', body_html: message.text_html || '' }
+              : { type: 'text', body: message.text || '' } })) };
+        if (JSON.stringify(conversation) === JSON.stringify(previous.conversation)) return state;
+        next = { ...next, conversation };
+      } else if (event.kind === 'pane_send_result') {
+        // Every result is receipted on its window: results do not always
+        // carry a correlation ID (palette / CLI sends), and the Decide
+        // surface settles the answer it sent from the window receipt. Only a
+        // result carrying the exact request ID may settle a Chat send, so
+        // palette replies and expired attempts cannot clear the composer.
+        // Session refusals omit the window, but still carry the request ID.
+        const correlatedId = Number.isSafeInteger(event.request_id)
+          ? Object.keys(state.windows).find(id => state.windows[id].chatSend?.status === 'pending'
+            && state.windows[id].chatSend.sequence === event.request_id
+            && (event.window_id == null || event.window_id === id))
+          : undefined;
+        const pendingIds = Object.keys(state.windows)
+          .filter(id => state.windows[id].chatSend?.status === 'pending');
+        const receiptId = correlatedId ?? event.window_id
+          ?? (pendingIds.length === 1 ? pendingIds[0] : undefined);
+        let next = state;
+        const receiptWindow = receiptId != null ? state.windows[receiptId] : undefined;
+        if (receiptWindow) {
+          next = { ...state, windows: { ...state.windows, [receiptId]: { ...receiptWindow,
+            paneResult: { receipt: ++paneResultSequence, ok: Boolean(event.ok),
+              error: event.ok ? null : event.error || 'The PM pane refused the message.' },
+            revision: receiptWindow.revision + 1 } }, changedWindowId: receiptId };
+        }
+        const pending = correlatedId != null ? next.windows[correlatedId] : undefined;
+        if (pending?.chatSend?.status !== 'pending') return next;
+        const chatSend = { sequence: pending.chatSend.sequence, status: event.ok ? 'sent' : 'failed',
+          error: event.ok ? null : event.error || 'The PM pane refused the message.' };
+        return { ...next, windows: { ...next.windows, [correlatedId]: { ...pending, chatSend,
+          revision: pending.revision + 1 } }, changedWindowId: correlatedId };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
       return { ...state, windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
     });
     return needsResync;
+  }
+  let chatSendSequence = 0;
+  function setChatSend(windowId, accept, chatSend) {
+    let changed = false;
+    model.update(state => {
+      const previous = state.windows[windowId];
+      if (!previous?.sessionId || !accept(previous.chatSend)) return state;
+      changed = true;
+      return { ...state, windows: { ...state.windows, [windowId]: { ...previous, chatSend,
+        revision: previous.revision + 1 } }, changedWindowId: windowId };
+    });
+    return changed;
+  }
+  // The existing pane input path pastes the body and submits it on its own.
+  function requestPmChatSend(windowId, text) {
+    const sessionId = model.read().windows[windowId]?.sessionId;
+    if (!sessionId || !String(text ?? '').trim()) return null;
+    const sequence = ++chatSendSequence;
+    if (!setChatSend(windowId, current => current?.status !== 'pending', { sequence, status: 'pending', error: null })) return null;
+    return { kind: 'pane_send_input', session_id: sessionId, text: `${text}\r`, request_id: sequence };
+  }
+  function failPendingChatSend(windowId, error, sequence = null) {
+    const current = model.read().windows[windowId]?.chatSend;
+    return setChatSend(windowId, send => send?.status === 'pending' && (sequence === null || send.sequence === sequence),
+      { sequence: current?.sequence, status: 'failed', error });
+  }
+  const markPmChatSendUnavailable = windowId => failPendingChatSend(windowId,
+    'The PM connection is not connected. Reconnect, then send again.');
+  const expirePmChatSend = (windowId, sequence = null) => failPendingChatSend(windowId,
+    'Delivery was not confirmed. Check the execution log before sending again.', sequence);
+  // Answers and deferrals go to the gwtd decision queue, never through the
+  // PM pane. One decision request is in flight per window.
+  function requestPmDecision(windowId, decisionId, action, answer) {
+    const previous = model.read().windows[windowId];
+    if (!previous?.sessionId || !decisionId || previous.decisionRequest?.status === 'pending') return null;
+    if (action === 'answer' && !String(answer ?? '').trim()) return null;
+    const requestId = ++requestSequence;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      decisionRequest: { requestId, decisionId, action, status: 'pending', error: null },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return action === 'answer'
+      ? { kind: 'answer_decision', id: windowId, request_id: requestId, decision_id: decisionId, answer: String(answer).trim() }
+      : { kind: 'defer_decision', id: windowId, request_id: requestId, decision_id: decisionId };
+  }
+  const requestPmDecisionAnswer = (windowId, decisionId, answer) => requestPmDecision(windowId, decisionId, 'answer', answer);
+  const requestPmDecisionDefer = (windowId, decisionId) => requestPmDecision(windowId, decisionId, 'defer');
+  function failPendingDecisionRequest(windowId, error, requestId = null) {
+    const previous = model.read().windows[windowId], request = previous?.decisionRequest;
+    if (request?.status !== 'pending' || (requestId !== null && requestId !== request.requestId)) return false;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      decisionRequest: { ...request, status: 'failed', error },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return true;
+  }
+  const markPmDecisionUnavailable = windowId => failPendingDecisionRequest(windowId,
+    'The connection is not available. Reconnect, then try again.');
+  const expirePmDecision = (windowId, requestId = null) => failPendingDecisionRequest(windowId,
+    'The decision queue did not confirm the request. Reload, then check the decision before trying again.', requestId);
+  function requestPmConversation(windowId) {
+    return model.read().windows[windowId]?.sessionId ? { kind: 'load_pm_conversation', id: windowId } : null;
+  }
+  function requestPmTaskDetail(windowId, key) {
+    const previous = model.read().windows[windowId];
+    if (!previous?.sessionId) return null;
+    const task = previous.requestTasks?.tasks?.find(task => task.key === key);
+    if (key !== null && !task && previous.taskDetail?.key !== key) return null;
+    const requestId = ++requestSequence;
+    const retained = previous.taskDetail?.key === key ? previous.taskDetail : null;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskDetail: key === null ? null : { key, title: task?.title || retained?.title, requestId, status: 'loading', data: retained?.data || null,
+        revision: retained?.revision ?? null, stale: Boolean(retained?.stale), error: null },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return key === null ? null : { kind: 'load_pm_request_task', id: windowId, request_id: requestId, task_key: key };
+  }
+  function markPmTaskDetailUnavailable(windowId, requestId = null) {
+    const previous = model.read().windows[windowId], selected = previous?.taskDetail;
+    if (selected?.status !== 'loading' || (requestId !== null && requestId !== selected.requestId)) return;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskDetail: { ...selected, status: 'error', stale: Boolean(selected.data),
+        error: 'The read was not confirmed. Reconnect, then reload details.' },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+  }
+  function requestPmTaskMutation(windowId, reason, action) {
+    const previous = model.read().windows[windowId], selected = previous?.taskDetail;
+    const statuses = action === 'reopen' ? ['completed'] : ['pending', 'in_progress', 'waiting', 'completed'];
+    if (!previous?.sessionId || previous.taskMutation?.status === 'pending' || selected?.status !== 'ready'
+      || selected.stale || !statuses.includes(selected.data?.status)
+      || selected.revision < (previous.requestTasks?.revision || 0) || !String(reason ?? '').trim()) return null;
+    const requestId = ++requestSequence, operationId = `task-${action}-${globalThis.crypto.randomUUID()}`;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskMutation: { action, key: selected.key, requestId, operationId, revision: selected.revision, status: 'pending', error: null },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return { kind: action === 'reopen' ? 'reopen_pm_request_task' : 'cancel_pm_request_task', id: windowId, request_id: requestId, task_key: selected.key,
+      request: { operation_id: operationId, expected_revision: selected.revision, reason, task_id: '' } };
+  }
+  function requestPmTaskCancel(windowId, reason) { return requestPmTaskMutation(windowId, reason, 'cancel'); }
+  function requestPmTaskReopen(windowId, reason) { return requestPmTaskMutation(windowId, reason, 'reopen'); }
+  function markPmTaskMutationUnavailable(windowId, requestId) {
+    const previous = model.read().windows[windowId], mutation = previous?.taskMutation;
+    if (mutation?.status !== 'pending' || mutation.requestId !== requestId) return;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskMutation: { ...mutation, status: 'error', error: 'The task change was not confirmed. Reconnect, then reload details before trying again.' },
+      taskDetail: previous.taskDetail?.key === mutation.key ? { ...previous.taskDetail, stale: true } : previous.taskDetail,
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
   }
   function removePmWindowState(windowId) {
     requests.delete(windowId);
@@ -119,18 +354,26 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, requestPmDecisionAnswer, requestPmDecisionDefer, markPmDecisionUnavailable, expirePmDecision, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility,
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onTaskReopen = () => {}, onSend = () => {}, onAnswerDecision = () => {}, onDeferDecision = () => {}, onOpenTerminal = () => false,
+  onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
   let logs = false;
-  let activeView = 'tasks';
+  let activeView = 'home';
   let includeCompleted = false;
   let tasksDigest = '';
+  let chatDigest;
+  let chatSend = null;
+  let draftSend = null;
+  let publishedWaiting;
+  let publishedReviews;
+  // SPEC #5016 HSF: the shared needs_human value the status strip reads.
+  let humanAttention = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -138,6 +381,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let scrollTop = 0;
   let followTail = true;
   const expandedReports = new Set();
+  const expandedChatGroups = new Set();
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -148,11 +392,84 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const toolbar = element('div', 'pm-chat__toolbar');
   toolbar.setAttribute('role', 'group');
   toolbar.setAttribute('aria-label', 'PM view');
+  const homeButton = element('button', '', 'Home');
+  const decideButton = element('button', '', 'Decide');
+  const progressButton = element('button', '', 'Progress');
+  const chatButton = element('button', '', 'Chat');
   const tasksButton = element('button', '', 'Tasks');
   const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
-  tasksButton.type = reportsButton.type = logButton.type = 'button';
-  toolbar.append(tasksButton, reportsButton, logButton);
+  homeButton.type = decideButton.type = progressButton.type = chatButton.type = tasksButton.type
+    = reportsButton.type = logButton.type = 'button';
+  toolbar.append(homeButton, decideButton, progressButton, chatButton, tasksButton, reportsButton, logButton);
+  // SPEC #7007: the task-centered Home island is the entry view. Its actions
+  // reuse the existing surfaces: creating a task goes through the PM chat
+  // composer (the request-task intake path), reviewing decisions opens the
+  // Decide surface, and progress opens the Progress surface.
+  const taskHome = createTaskHome({ document,
+    onCreateTask: () => { showView('chat'); draft.focus(); },
+    onReviewDecisions: () => showView('decide'),
+    onViewProgress: () => showView('progress'),
+  });
+  // SPEC #7007 T-010 / T-023, Issue #7742: waiting decisions are read from
+  // the gwtd decision queue and drawn in exactly two places — the Decide
+  // island (the queue) and the PM conversation, where each one reads as a PM
+  // message. Answers and deferrals are queue operations: gwtd delivers an
+  // answer straight to the waiting session, and the queue it returns is the
+  // only thing that retires or reorders a decision here.
+  const taskDecisions = createTaskDecisions({ document,
+    onAnswerDecision: (item, optionIndex) => answerDecision(item, optionIndex),
+    onReplyInChat: item => replyToDecision(item),
+    onDeferDecision: item => deferDecision(item),
+  });
+  // SPEC #7007 T-012: the Progress island reads the same window snapshot
+  // as Home and Decide. Its detail action reuses the existing task detail
+  // read, which renders in the Tasks view, so the view switches with it.
+  const taskProgress = createTaskProgress({ document,
+    onCreateTask: () => { showView('chat'); draft.focus(); },
+    onReviewDecision: () => showView('decide'),
+    onViewTaskDetails: key => { onTaskDetail(key); showView('tasks'); },
+    onViewAllTasks: () => showView('tasks'),
+  });
+  const chatBody = element('section', 'pm-chat__chat');
+  chatBody.setAttribute('aria-label', 'PM conversation');
+  const chatActions = element('div', 'pm-chat__toolbar');
+  const terminalButton = element('button', '', 'Open terminal in Works');
+  terminalButton.type = 'button';
+  chatActions.append(terminalButton);
+  const terminalStatus = element('p', 'pm-chat__notice pm-chat__terminal-status');
+  terminalStatus.setAttribute('role', 'status');
+  terminalStatus.hidden = true;
+  const chatNotice = element('p', 'pm-chat__notice');
+  chatNotice.setAttribute('role', 'status');
+  const chatLog = element('div', 'pm-chat__conversation');
+  chatLog.setAttribute('role', 'log');
+  chatLog.setAttribute('aria-label', 'PM conversation messages');
+  const composer = element('form', 'pm-chat__composer');
+  composer.setAttribute('aria-label', 'Message PM');
+  const draft = element('textarea', 'pm-chat__draft');
+  draft.setAttribute('aria-label', 'Message to PM');
+  draft.rows = 2;
+  draft.placeholder = 'Message PM (Enter to send, Shift+Enter for a new line)';
+  const sendButton = element('button', '', 'Send');
+  sendButton.type = 'submit';
+  const composerStatus = element('p', 'pm-chat__composer-status');
+  composerStatus.setAttribute('aria-live', 'polite');
+  // A free-form answer to one decision: while a reply target is set, the
+  // composer's next message is recorded as the answer to that decision.
+  const replyChip = element('div', 'pm-chat__reply-target');
+  replyChip.hidden = true;
+  const replyLabel = element('span', 'pm-chat__reply-target-label');
+  const cancelReply = element('button', '', 'Cancel reply');
+  cancelReply.type = 'button';
+  replyChip.append(replyLabel, cancelReply);
+  composer.append(replyChip, draft, sendButton, composerStatus);
+  // Issue #7644: says when the message a theme came from is not shown here.
+  const targetNotice = element('p', 'pm-chat__notice');
+  targetNotice.setAttribute('role', 'status');
+  targetNotice.dataset.pmMessageTargetNotice = '';
+  targetNotice.hidden = true;
+  chatBody.append(chatActions, chatNotice, targetNotice, chatLog, composer);
   const tasksBody = element('section', 'pm-chat__tasks');
   tasksBody.setAttribute('aria-label', 'Request tasks');
   const tasksHeader = element('div', 'pm-chat__history-header');
@@ -163,7 +480,53 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const tasksNotice = element('p', 'pm-chat__notice');
   tasksNotice.setAttribute('role', 'status');
   const taskList = element('div', 'pm-chat__task-list');
-  tasksBody.append(tasksHeader, tasksNotice, taskList);
+  const taskDetail = element('section', 'pm-chat__task-detail');
+  taskDetail.setAttribute('aria-label', 'Selected task details');
+  taskDetail.hidden = true;
+  const detailHeading = element('h3', '', 'Selected task details');
+  detailHeading.tabIndex = -1;
+  const detailActions = element('div', 'pm-chat__toolbar');
+  const reloadDetail = element('button', '', 'Reload details');
+  const closeDetail = element('button', '', 'Close details');
+  reloadDetail.type = closeDetail.type = 'button';
+  detailActions.append(reloadDetail, closeDetail);
+  const detailNotice = element('p', 'pm-chat__notice');
+  detailNotice.setAttribute('aria-live', 'polite');
+  const detailContent = element('div', '');
+  const mutationControls = element('div', 'pm-chat__task-cancel');
+  const mutationLabel = element('label', '', 'Reason for this task change');
+  const mutationReason = element('textarea', 'pm-chat__task-cancel-reason');
+  mutationReason.setAttribute('aria-label', 'Reason for this task change');
+  mutationReason.maxLength = 1000;
+  mutationReason.rows = 2;
+  mutationLabel.append(mutationReason);
+  const cancelTask = element('button', '', 'Cancel task');
+  const reopenTask = element('button', '', 'Reopen task');
+  cancelTask.type = reopenTask.type = 'button';
+  const mutationStatus = element('p', 'pm-chat__task-cancel-status');
+  mutationStatus.setAttribute('aria-live', 'polite');
+  mutationControls.append(element('p', 'pm-chat__task-meta', 'Changes tracking only. Reopen requests a fresh PM review. These actions do not stop agents or change Issues or pull requests.'), mutationLabel, cancelTask, reopenTask);
+  taskDetail.append(detailHeading, detailActions, detailNotice, mutationStatus, mutationControls, detailContent);
+  mutationReason.addEventListener('input', () => renderTaskMutation(latestState));
+  cancelTask.addEventListener('click', () => {
+    if (!disposed && cancelTask.getAttribute('aria-disabled') === 'false') onTaskCancel(mutationReason.value);
+  });
+  reopenTask.addEventListener('click', () => {
+    if (!disposed && !reopenTask.hidden && reopenTask.getAttribute('aria-disabled') === 'false') onTaskReopen(mutationReason.value);
+  });
+  reloadDetail.addEventListener('click', () => {
+    if (!disposed && latestState?.taskDetail && latestState.taskDetail.status !== 'loading') onTaskDetail(latestState.taskDetail.key);
+  });
+  closeDetail.addEventListener('click', () => {
+    if (disposed) return;
+    const key = latestState?.taskDetail?.key;
+    onTaskDetail(null);
+    const trigger = taskRows.get(key)?.querySelector('.pm-chat__task-detail-button');
+    (trigger && root.contains(trigger) ? trigger : completedButton).focus();
+  });
+  tasksBody.append(tasksHeader, tasksNotice, taskDetail, taskList);
+  let selectedDetailKey = null;
+  let detailData = null;
   const body = element('div', 'pm-chat__body');
   const currentCard = element('section', 'pm-chat__current');
   currentCard.setAttribute('aria-label', 'PM status');
@@ -176,7 +539,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const filter = element('label', 'pm-chat__filter', 'Report kind');
   const kindSelect = element('select', '');
   kindSelect.setAttribute('aria-label', 'Report kind');
-  const kindLabels = { all: 'All reports', qa: 'Q&A', progress: 'Progress', decision: 'Decision', blocker: 'Blocker' };
+  const kindLabels = { all: 'All reports', qa: 'Q&A', progress: 'Progress', blocker: 'Blocker' };
   for (const [kind, label] of Object.entries(kindLabels)) {
     const option = element('option', '', label);
     option.value = kind;
@@ -191,7 +554,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   transcript.setAttribute('aria-label', 'PM reports');
   historyHeader.append(element('h2', '', 'Reports'), filter);
   body.append(currentCard, historyHeader, notice, transcript);
-  root.append(toolbar, tasksBody, body);
+  const taskWorkspace = element('div', 'pm-chat__workspace');
+  taskWorkspace.append(chatBody, tasksBody);
+  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, taskProgress.element, body, taskWorkspace);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -213,30 +578,381 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     activeView = value;
     logs = value === 'log';
     body.hidden = value !== 'reports';
-    tasksBody.hidden = value !== 'tasks';
+    taskWorkspace.hidden = value !== 'tasks' && value !== 'chat';
+    tasksBody.hidden = value !== 'tasks' && value !== 'chat';
+    chatBody.hidden = value !== 'chat';
+    taskHome.element.hidden = value !== 'home';
+    taskDecisions.element.hidden = value !== 'decide';
+    taskProgress.element.hidden = value !== 'progress';
     root.classList.toggle('pm-chat--logs', logs);
+    root.classList.toggle('pm-chat--chat', value === 'chat');
+    homeButton.setAttribute('aria-pressed', String(value === 'home'));
+    decideButton.setAttribute('aria-pressed', String(value === 'decide'));
+    progressButton.setAttribute('aria-pressed', String(value === 'progress'));
+    chatButton.setAttribute('aria-pressed', String(value === 'chat'));
     tasksButton.setAttribute('aria-pressed', String(value === 'tasks'));
     reportsButton.setAttribute('aria-pressed', String(value === 'reports'));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
     if (value === 'reports') restoreScroll();
+    if (value === 'chat') {
+      chatLog.scrollTop = chatLog.scrollHeight;
+      onChatVisible();
+    }
   }
+  const showHome = () => showView('home');
+  const showDecisions = () => showView('decide');
+  const showProgress = () => showView('progress');
+  const showChat = () => showView('chat');
   const showTasks = () => showView('tasks');
   const showReports = () => showView('reports');
+  // Issue #7644: open the human message a recorded theme came from. A
+  // conversation that has not arrived yet is answered once it does.
+  let messageTarget = null;
+  function revealMessageTarget() {
+    if (messageTarget == null || latestState?.conversation?.availability !== 'ready') return;
+    const id = messageTarget;
+    messageTarget = null;
+    const bubble = [...chatLog.querySelectorAll('.pm-chat__bubble--user')]
+      .find(node => node.dataset.messageId === id);
+    targetNotice.textContent = bubble ? ''
+      : 'The message this theme came from is no longer in the conversation shown here. The theme\'s GitHub Issue keeps what was recorded.';
+    targetNotice.hidden = !targetNotice.textContent;
+    bubble?.scrollIntoView({ block: 'center' });
+    bubble?.focus({ preventScroll: true });
+  }
+  const showMessage = messageId => {
+    if (disposed) return;
+    messageTarget = String(messageId);
+    showChat();
+    revealMessageTarget();
+  };
   const showLog = () => showView('log');
+  const openTerminal = () => {
+    terminalStatus.hidden = onOpenTerminal(session) !== false;
+    terminalStatus.textContent = terminalStatus.hidden ? ''
+      : 'Terminal unavailable in Works. Wait for the current PM session to connect.';
+  };
   const filterReports = () => update(latestState);
   const filterTasks = () => {
     includeCompleted = !includeCompleted;
     completedButton.setAttribute('aria-pressed', String(includeCompleted));
     renderTasks(latestState);
   };
+  // Derive the Home island state from the same window snapshot the other
+  // views read, so every surface reports the same numbers (SPEC #7007 AC-6).
+  // Unknown stays unknown: decisions are counted only once reports have
+  // loaded. What was completed today is shown on the Themes screen, never
+  // on this entry screen (Issue 7643).
+  function renderHome(state, decisions) {
+    const overview = state?.requestTasks ?? null;
+    taskHome.receive({ overview, decisionsWaiting: decisions.waiting,
+      stale: Boolean(state?.requestTasksError) && overview !== null });
+  }
+  // Progress reads the same snapshot: the request-task overview plus the
+  // live-facts active windows. The windows stay a separate frame because
+  // no frontend join key links a window to a request task.
+  function renderProgress(state) {
+    const facts = state?.current?.facts ?? null;
+    taskProgress.receive({
+      loaded: Boolean(state?.loaded),
+      overview: state?.requestTasks ?? null,
+      error: state?.requestTasksError ?? null,
+      activeWindows: facts ? (facts.active_windows || []).map(item => ({
+        issueNumber: item.issue_number ?? null,
+        title: item.title || null,
+        lastActivityAt: item.last_activity_at ?? null,
+      })) : null,
+    });
+  }
+  function receiveHumanAttention(count) {
+    if (disposed) return;
+    humanAttention = Number.isFinite(count) ? count : null;
+    renderCurrent(latestState?.current);
+  }
+  // Decide lists the gwtd decision queue in the order the backend returns
+  // it (newest first, deferred decisions at the tail). Typed options become
+  // numbered choices; a decision without options keeps the free-form reply.
+  let pendingDecision = null;
+  let decisionSendError = null;
+  let settledDecisionRequest = 0;
+  // The composer draft that is travelling as a free-form answer.
+  let draftAnswer = null;
+  let deferFromChat = false;
+  let deferNotice = null;
+  let deferCount = 0;
+  let replyTarget = null;
+  let latestDecisions = { items: [], answered: {}, waiting: null };
+  const chatDecisionRows = new Map();
+  const decisionControls = new WeakMap();
+  function decisionItems(state) {
+    return (state?.decisions?.items || []).map(decisionItemFromQueue);
+  }
+  // The queue's own result settles an answer or a deferral exactly once.
+  function observeDecisionRequest(request, items) {
+    pendingDecision = request?.status === 'pending' ? { id: request.decisionId, action: request.action } : null;
+    if (!request || request.status === 'pending' || request.requestId === settledDecisionRequest) return null;
+    settledDecisionRequest = request.requestId;
+    const fromDraft = draftAnswer === request.decisionId;
+    draftAnswer = null;
+    // SPEC #7007 T-014 / T-016: the queue's error is internal wording that
+    // can name the decision's identifier; the surfaces say what happened and
+    // the next step instead.
+    if (request.status !== 'ok') {
+      if (!items.some(item => item.id === request.decisionId)) {
+        decisionSendError = null;
+        deferNotice = { id: null, message: request.action === 'defer'
+          ? 'This decision was already settled elsewhere. Nothing was deferred.'
+          : 'This decision was already settled elsewhere. Your answer was not recorded.' };
+        return null;
+      }
+      decisionSendError = { id: request.decisionId, message: request.action === 'defer'
+        ? 'The decision was not deferred. Reload this window, then try again.'
+        : 'The answer was not recorded. Reload this window, then try again.' };
+      return null;
+    }
+    decisionSendError = null;
+    if (request.action === 'defer') {
+      const others = items.some(item => item.id !== request.decisionId);
+      deferCount += 1;
+      deferNotice = { id: request.decisionId, message: others
+        ? 'Kept waiting and moved to the end of the queue.'
+        : 'Kept waiting. No other decision is waiting.' };
+      return others && deferFromChat ? 'focus-next' : null;
+    }
+    deferNotice = { id: null, message: 'Answer sent. The waiting session continues with it.' };
+    if (fromDraft) draft.value = '';
+    if (replyTarget === request.decisionId) replyTarget = null;
+    return null;
+  }
+  // Issue #7742 AC-4: the waiting count is the queue's own `waiting_count`,
+  // taken as-is. Home, Decide and the shared attention model all read this
+  // one value; nothing here recounts the items.
+  function deriveDecisions(state) {
+    const items = decisionItems(state);
+    const effect = observeDecisionRequest(state?.decisionRequest ?? null, items);
+    const waiting = state?.loaded && state.decisions ? state.decisions.waiting_count : null;
+    if (!items.some(item => item.id === replyTarget)) replyTarget = null;
+    latestDecisions = { items, answered: {}, waiting, effect };
+    return latestDecisions;
+  }
+  function renderDecisionSurfaces(state) {
+    const decisions = deriveDecisions(state);
+    renderHome(state, decisions);
+    renderDecisions(state, decisions);
+    renderChatDecisions(decisions);
+    renderReplyTarget(decisions);
+    publishWaitingDecisions(decisions);
+    if (decisions.effect === 'focus-next') {
+      chatDecisionRows.get(decisions.items[0]?.id)?.querySelector('button:not([disabled])')?.focus();
+    }
+    return decisions;
+  }
+  // SPEC #5016 HSK: the shared attention model gets the same waiting count
+  // that Home shows; `null` while the queue is not loaded.
+  function publishWaitingDecisions({ items, waiting }) {
+    const ids = waiting == null ? null : items.map(item => item.id);
+    const key = JSON.stringify([waiting, ids]);
+    if (key === publishedWaiting) return;
+    publishedWaiting = key;
+    onDecisionsWaiting(ids && { waiting, ids });
+  }
+  // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
+  // shared attention model; `null` when this window has not observed them.
+  function publishReviewAttention(facts) {
+    const items = Array.isArray(facts?.review_attention) ? facts.review_attention : null;
+    const key = JSON.stringify(items);
+    if (key === publishedReviews) return;
+    publishedReviews = key;
+    onReviewAttention(items);
+  }
+  function renderDecisions(state, { items, answered, waiting }) {
+    taskDecisions.receive({
+      loaded: Boolean(state?.loaded),
+      error: state?.error ?? null,
+      decisions: items,
+      waiting,
+      sending: pendingDecision != null,
+      pendingId: pendingDecision?.action === 'answer' ? pendingDecision.id : null,
+      sendError: decisionSendError,
+      answered,
+      deferNotice: deferNotice?.message ?? null,
+      deferCount,
+    });
+  }
+  // Every answer — a numbered option or a free-form reply — is one queue
+  // operation, so both surfaces settle the same decision the same way.
+  function sendDecisionAnswer(item, answerText, fromDraft = false) {
+    decisionSendError = null;
+    deferNotice = null;
+    draftAnswer = fromDraft ? item.id : null;
+    if (onAnswerDecision(item.id, answerText) === false) {
+      // The request was not issued (no session, or another one in flight):
+      // keep the decision actionable and say why on its card.
+      draftAnswer = null;
+      decisionSendError = { id: item.id,
+        message: 'The answer could not be sent. Reconnect, then try again.' };
+    }
+    renderDecisionSurfaces(latestState);
+    syncComposer();
+  }
+  function answerDecision(item, optionIndex) {
+    if (disposed || pendingDecision) return;
+    const optionText = item.options?.[optionIndex];
+    if (optionText == null) return;
+    sendDecisionAnswer(item, `${optionIndex + 1}. ${optionText}`);
+  }
+  function replyToDecision(item) {
+    if (disposed || latestState?.chatSend?.status === 'pending' || pendingDecision) return;
+    replyTarget = item.id;
+    renderReplyTarget(latestDecisions);
+    showChat();
+    draft.focus();
+  }
+  function clearReplyTarget() {
+    if (disposed) return;
+    replyTarget = null;
+    renderReplyTarget(latestDecisions);
+    draft.focus();
+  }
+  function renderReplyTarget({ items }) {
+    const target = items.find(item => item.id === replyTarget);
+    const text = target ? `Replying to: ${target.question}` : '';
+    if (replyLabel.textContent !== text) replyLabel.textContent = text;
+    replyChip.hidden = !target;
+  }
+  // Deferring is not an answer: the queue keeps the decision waiting and
+  // moves it to its tail, so the next one comes first on both surfaces.
+  function deferDecision(item, fromChat = false) {
+    if (disposed || pendingDecision) return;
+    decisionSendError = null;
+    deferNotice = null;
+    deferFromChat = fromChat;
+    if (onDeferDecision(item.id) === false) {
+      decisionSendError = { id: item.id,
+        message: 'The decision could not be deferred. Reconnect, then try again.' };
+    }
+    renderDecisionSurfaces(latestState);
+  }
+  function renderDecisionControls(controls, item, answered) {
+    const busy = pendingDecision != null;
+    const error = decisionSendError?.id === item.id ? decisionSendError.message : null;
+    // Deferral only reorders the queue; it must not rebuild a focused choice.
+    const itemDigest = JSON.stringify({ ...item, deferred: null });
+    let view = decisionControls.get(controls);
+    if (!view || view.itemDigest !== itemDigest) {
+      const status = element('p', '');
+      status.setAttribute('role', 'status');
+      status.setAttribute('tabindex', '-1');
+      const alert = element('p', 'pm-chat__decision-error');
+      alert.setAttribute('role', 'alert');
+      const retry = element('p', '', 'Choose an option to try again.');
+      const options = element('div', 'pm-chat__decision-options');
+      for (const [index, option] of (item.options || []).entries()) {
+        const button = element('button', 'pm-chat__decision-option', `${index + 1}. ${option}`);
+        button.type = 'button';
+        button.addEventListener('click', () => answerDecision(item, index));
+        options.append(button);
+      }
+      const reply = element('button', '', 'Other: write a reply');
+      reply.type = 'button';
+      reply.addEventListener('click', () => replyToDecision(item));
+      const later = element('button', '', 'Decide later');
+      later.type = 'button';
+      later.addEventListener('click', () => deferDecision(item, true));
+      options.append(reply, later);
+      controls.replaceChildren(status, alert, retry, options);
+      view = { itemDigest, status, alert, retry, options, busy: false, focusedControl: null };
+      decisionControls.set(controls, view);
+    }
+    const active = document.activeElement;
+    const ownsFocus = view.options.contains(active);
+    if (busy && !view.busy) view.focusedControl = ownsFocus ? active : null;
+    // Native disabled buttons may blur. Restore only the interaction that
+    // started here, while leaving a deliberate move to another control alone.
+    const focusStayed = ownsFocus || (view.focusedControl && (!active || active === document.body));
+    const statusText = answered ? `Answer sent: ${answered}`
+      : pendingDecision?.id === item.id && pendingDecision.action === 'answer' ? 'Sending answer…'
+        : deferNotice?.id === item.id ? deferNotice.message : '';
+    if (view.status.textContent !== statusText) view.status.textContent = statusText;
+    if (view.alert.textContent !== (error || '')) view.alert.textContent = error || '';
+    view.alert.hidden = view.retry.hidden = !error;
+    if (answered) {
+      if (view.options.parentNode === controls) {
+        view.options.remove();
+        if (focusStayed) view.status.focus({ preventScroll: true });
+      }
+      view.focusedControl = null;
+    } else {
+      if (view.options.parentNode !== controls) controls.append(view.options);
+      for (const button of view.options.children) if (button.disabled !== busy) button.disabled = busy;
+      if (!busy && view.busy) {
+        if (focusStayed) view.focusedControl?.focus({ preventScroll: true });
+        view.focusedControl = null;
+      }
+    }
+    view.busy = busy;
+  }
+  // The conversation shows each decision as a PM message: what happened,
+  // the question, the recommendation with its reason and the impact read as
+  // prose, and the choices are quick replies inside that message.
+  // Home shows the same decisions of every open project as one conversation
+  // (SPEC #7007 T-021, Issue #7639); Decide stays the queue side.
+  function decisionMessage(item) {
+    const row = element('article', 'pm-chat__bubble pm-chat__bubble--assistant pm-chat__decision');
+    row.dataset.decisionId = item.id;
+    row.setAttribute('aria-label', 'PM decision');
+    row.append(element('p', 'pm-chat__decision-meta'), element('div', 'pm-chat__decision-text'),
+      element('div', 'pm-chat__decision-controls'));
+    return row;
+  }
+  function renderChatDecisions({ items, answered }) {
+    const nodes = items.map(item => {
+      let row = chatDecisionRows.get(item.id);
+      if (!row) {
+        row = decisionMessage(item);
+        chatDecisionRows.set(item.id, row);
+      }
+      const meta = answered[item.id] ? 'Decision answered' : item.deferred ? 'Decision waiting · Deferred' : 'Decision waiting';
+      if (row.firstChild.textContent !== meta) row.firstChild.textContent = meta;
+      const lines = decisionMessageLines(item);
+      const text = row.children[1];
+      if (text.dataset.digest !== JSON.stringify(lines)) {
+        text.dataset.digest = JSON.stringify(lines);
+        text.replaceChildren(...lines.map(line => element('p', '', line)));
+      }
+      renderDecisionControls(row.lastChild, item, answered[item.id]);
+      return row;
+    });
+    for (const [id, row] of chatDecisionRows) {
+      if (nodes.includes(row)) continue;
+      row.remove();
+      chatDecisionRows.delete(id);
+    }
+    // Move only the rows that are out of place, so a focused choice stays put.
+    let cursor = [...chatLog.children].find(node => node.classList.contains('pm-chat__decision')) || null;
+    for (const node of nodes) {
+      if (node === cursor) cursor = cursor.nextSibling;
+      else chatLog.insertBefore(node, cursor);
+    }
+  }
   function renderTasks(state) {
+    renderTaskDetail(state?.taskDetail);
+    renderTaskMutation(state);
     const overview = state?.requestTasks;
     const error = state?.requestTasksError;
     const rows = overview?.state === 'ready' ? overview.tasks : [];
     const visible = rows.filter(task => includeCompleted || !['completed', 'cancelled'].includes(task.status));
-    const nextDigest = JSON.stringify([includeCompleted, rows]);
+    const sources = state?.conversation?.availability === 'ready'
+      ? state.conversation.messages.filter(message => message.role === 'user' && message.sourceKey)
+      : [];
+    const nextDigest = JSON.stringify([includeCompleted, rows, sources.map(message => [message.sourceKey, message.id])]);
     if (nextDigest !== tasksDigest) {
+      const focusedTaskControl = document.activeElement?.matches('.pm-chat__task-detail-button')
+        ? '.pm-chat__task-detail-button' : '.pm-chat__task-criteria > summary';
+      const focusedTaskKey = taskList.contains(document.activeElement)
+        && document.activeElement?.matches(focusedTaskControl)
+        ? document.activeElement.closest('.pm-chat__task')?.dataset.taskKey : null;
       tasksDigest = nextDigest;
       const parents = new Map(rows.map(task => [task.key, task.title]));
       const labels = { pending: 'Pending', in_progress: 'In progress', waiting: 'Waiting', completed: 'Completed', cancelled: 'Cancelled' };
@@ -247,17 +963,57 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
           row.dataset.taskKey = task.key;
           taskRows.set(task.key, row);
         }
-        const digest = JSON.stringify([task, parents.get(task.parent_key)]);
+        const source = sources.find(message => message.sourceKey === task.source_key);
+        const digest = JSON.stringify([task, parents.get(task.parent_key), source?.id]);
         if (row.dataset.digest !== digest) {
+          const previousCriteria = row.querySelector('.pm-chat__task-criteria');
+          const criteriaOpen = previousCriteria?.hasAttribute('open');
           row.dataset.digest = digest;
           row.classList.toggle('pm-chat__task--child', !!task.parent_key);
           const title = element('h3', '', task.title);
           const meta = element('p', 'pm-chat__task-meta', `${labels[task.status] || 'Unknown'} · ${task.assignee || 'Unassigned'}`);
           const fields = [title, meta];
+          const detail = element('button', 'pm-chat__task-detail-button', 'View task details');
+          detail.type = 'button';
+          detail.addEventListener('click', () => { if (!disposed) onTaskDetail(task.key); });
+          fields.push(detail);
+          if (task.child_progress) {
+            const { total, completed, cancelled } = task.child_progress;
+            fields.push(element('p', 'pm-chat__task-meta',
+              `Direct subtasks: ${completed} completed · ${cancelled} cancelled · ${total - completed - cancelled} unfinished (${total} total)`));
+          }
           if (task.parent_key) fields.push(element('p', 'pm-chat__task-meta', `Part of: ${parents.get(task.parent_key) || 'Parent outside this preview'}`));
           if (task.review_required) fields.push(element('p', 'pm-chat__task-review', 'PM reassessment required'));
           if (task.wait_reason) fields.push(element('p', '', `Waiting: ${task.wait_reason}`));
           if (task.next_action) fields.push(element('p', '', `Next: ${task.next_action}`));
+          if (task.criteria_preview) {
+            const preview = task.criteria_preview;
+            const criteria = element('details', 'pm-chat__task-criteria');
+            if (criteriaOpen) criteria.setAttribute('open', '');
+            const conditions = element('ol', '');
+            for (const condition of preview.completion_conditions) conditions.append(element('li', '', condition));
+            criteria.append(element('summary', '', 'Purpose and completion criteria'),
+              element('p', '', `Purpose: ${preview.purpose}`),
+              element('p', 'pm-chat__task-meta', `Preview. Showing ${preview.completion_conditions.length} of ${preview.completion_condition_total} completion criteria. Text is limited to 240 characters per item.`),
+              conditions);
+            fields.push(criteria);
+          }
+          const link = element('button', '', 'Show in conversation');
+          link.type = 'button';
+          link.disabled = !source;
+          link.addEventListener('click', () => {
+            if (disposed || latestState?.conversation?.availability !== 'ready') return;
+            const message = latestState.conversation.messages.find(message => message.role === 'user'
+              && message.sourceKey && message.sourceKey === task.source_key);
+            if (!message) return;
+            showChat();
+            const bubble = [...chatLog.querySelectorAll('.pm-chat__bubble--user')]
+              .find(node => node.dataset.messageId === message.id);
+            bubble?.scrollIntoView({ block: 'center' });
+            bubble?.focus({ preventScroll: true });
+          });
+          fields.push(link);
+          if (!source) fields.push(element('p', 'pm-chat__task-meta', 'The original message is not in the current conversation preview.'));
           row.replaceChildren(...fields);
         }
         return row;
@@ -267,6 +1023,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
       if (nodes.length !== taskList.children.length || nodes.some((node, index) => taskList.children[index] !== node)) {
         taskList.replaceChildren(...nodes);
       }
+      if (focusedTaskKey) nodes.find(node => node.dataset.taskKey === focusedTaskKey)
+        ?.querySelector(focusedTaskControl)?.focus();
       const keys = new Set(rows.map(task => task.key));
       for (const key of taskRows.keys()) if (!keys.has(key)) taskRows.delete(key);
     }
@@ -279,8 +1037,158 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
       : summary;
     if (tasksNotice.textContent !== noticeText) tasksNotice.textContent = noticeText;
   }
+  function renderTaskDetail(selected) {
+    taskDetail.hidden = !selected;
+    if (!selected) { selectedDetailKey = null; detailData = null; mutationReason.value = ''; detailContent.replaceChildren(); return; }
+    const changedKey = selected.key !== selectedDetailKey;
+    if (changedKey) mutationReason.value = '';
+    selectedDetailKey = selected.key;
+    detailHeading.textContent = selected.title || 'Selected task details';
+    // Retain keyboard focus while the read is pending.
+    reloadDetail.setAttribute('aria-disabled', String(selected.status === 'loading'));
+    detailNotice.textContent = [selected.status === 'loading' ? 'Loading task details…' : '',
+      selected.stale ? 'Showing the last confirmed detail (stale). Reload details after recovering the task store.' : '',
+      selected.error || '', selected.data ? `Selected snapshot revision ${selected.revision}. Text below is a bounded preview.` : ''].filter(Boolean).join(' ');
+    if (detailData !== selected.data) {
+      detailData = selected.data;
+      const nodes = [];
+      const text = value => value ? value.text + ([...value.text].length < value.total_chars
+        ? `\n[Showing ${[...value.text].length} of ${value.total_chars} characters]` : '') : '';
+      const paragraph = value => element('p', 'pm-chat__task-detail-text', text(value));
+      const data = selected.data;
+      if (data) {
+        nodes.push(element('h4', '', 'Original request'), data.original ? paragraph(data.original)
+          : element('p', '', 'The original request is missing from saved task data.'),
+        element('h4', '', 'Purpose'), paragraph(data.purpose));
+        const list = (title, values, total, label) => {
+          const items = element('ol', '');
+          for (const value of values) { const item = element('li', ''); item.append(paragraph(value)); items.append(item); }
+          nodes.push(element('h4', '', title), element('p', 'pm-chat__task-meta', `Showing ${values.length} of ${total} ${label}.`), items);
+        };
+        list('Completion criteria', data.completion_conditions, data.completion_condition_total, 'completion criteria');
+        list('Completion evidence', data.evidence, data.evidence_total, 'evidence references');
+        nodes.push(element('h4', '', 'Recent recorded changes'),
+          element('p', 'pm-chat__task-meta', `Showing ${data.history.length} of ${data.history_total} recorded changes, newest first. Only changes with a saved task delta are included.`));
+        for (const change of data.history) {
+          nodes.push(element('p', 'pm-chat__task-meta', `Revision ${change.revision} · ${change.action} · ${change.actor_kind} · ${text(change.actor_id)} · ${change.at}`), paragraph(change.reason));
+        }
+      }
+      detailContent.replaceChildren(...nodes);
+    }
+    if (changedKey) { taskDetail.scrollTop = 0; detailHeading.focus(); }
+  }
+  function renderTaskMutation(state) {
+    const selected = state?.taskDetail, mutation = state?.taskMutation;
+    const current = mutation?.key === selected?.key ? mutation : null;
+    const actionable = ['pending', 'in_progress', 'waiting', 'completed'].includes(selected?.data?.status);
+    const reopenable = selected?.data?.status === 'completed';
+    if ((!actionable && mutationControls.contains(document.activeElement))
+      || (!reopenable && document.activeElement === reopenTask)) reloadDetail.focus();
+    mutationControls.hidden = !actionable;
+    reopenTask.hidden = !reopenable;
+    const disabled = selected?.status !== 'ready' || selected.stale || mutation?.status === 'pending' || !mutationReason.value.trim();
+    cancelTask.setAttribute('aria-disabled', String(!actionable || disabled));
+    reopenTask.setAttribute('aria-disabled', String(!reopenable || disabled));
+    mutationReason.readOnly = mutation?.status === 'pending';
+    mutationStatus.textContent = mutation?.status === 'pending'
+      ? (current ? (mutation.action === 'reopen' ? 'Reopening task…' : 'Saving cancellation…')
+        : 'Another task change is awaiting confirmation. Reconnect and reload its details if confirmation does not arrive.')
+      : current?.status === 'recorded' ? (current.action === 'reopen' ? 'Reopen recorded. This action requests a fresh PM review.'
+        : `Cancellation recorded.${selected?.data?.status === 'cancelled' && !selected.stale ? ' This task is cancelled.' : ' Reload details to see the current state.'}`)
+      : current?.error || (selected?.data?.status === 'cancelled' ? 'This task is cancelled.' : '');
+  }
+  function renderChat(conversation) {
+    const nextDigest = JSON.stringify(conversation);
+    if (chatDigest === nextDigest) return;
+    chatDigest = nextDigest;
+    const following = chatLog.scrollHeight - chatLog.clientHeight - chatLog.scrollTop <= 32;
+    const messages = conversation?.availability === 'ready' ? conversation.messages : [];
+    const bubbleFor = message => {
+      const user = message.role === 'user';
+      const bubble = element('article', `pm-chat__bubble pm-chat__bubble--${user ? 'user' : 'assistant'}`);
+      bubble.dataset.messageId = message.id;
+      bubble.dataset.role = user ? 'user' : 'assistant';
+      bubble.setAttribute('aria-label', user ? 'You' : 'PM');
+      if (user) bubble.setAttribute('tabindex', '-1');
+      bubble.append(renderUiContent(document, message.content, 'pm-chat__text'));
+      return bubble;
+    };
+    // Within one PM turn only the latest PM message stays open; the earlier ones fold
+    // behind a disclosure keyed by the turn's first message. The open state is read from
+    // the DOM at render time because the toggle event fires asynchronously.
+    for (const group of chatLog.querySelectorAll('details.pm-chat__collapsed')) {
+      if (group.open) expandedChatGroups.add(group.dataset.groupKey); else expandedChatGroups.delete(group.dataset.groupKey);
+    }
+    const nodes = [];
+    for (let start = 0; start < messages.length;) {
+      let end = start + 1;
+      if (messages[start].role !== 'user') while (end < messages.length && messages[end].role !== 'user') end += 1;
+      const earlier = messages.slice(start, end - 1);
+      if (earlier.length) {
+        const key = earlier[0].id;
+        const group = element('details', 'pm-chat__collapsed');
+        group.dataset.groupKey = key;
+        group.open = expandedChatGroups.has(key);
+        group.append(element('summary', 'pm-chat__collapsed-summary',
+          `${earlier.length} earlier message${earlier.length === 1 ? '' : 's'}`), ...earlier.map(bubbleFor));
+        nodes.push(group);
+      }
+      nodes.push(bubbleFor(messages[end - 1]));
+      start = end;
+    }
+    // Keep the decision messages attached while replacing native messages;
+    // native order stays intact and a focused choice keeps its focus.
+    const decisionRows = new Set(chatDecisionRows.values());
+    for (const node of [...chatLog.children]) if (!decisionRows.has(node)) node.remove();
+    const firstDecision = chatLog.firstChild;
+    for (const node of nodes) chatLog.insertBefore(node, firstDecision);
+    chatNotice.textContent = !conversation ? 'Loading PM conversation…'
+      : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
+        : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
+    chatNotice.hidden = !chatNotice.textContent;
+    if (following) chatLog.scrollTop = chatLog.scrollHeight;
+    revealMessageTarget();
+  }
+  function syncComposer() {
+    // A free-form decision answer freezes the draft the same way a chat send does.
+    const pending = chatSend?.status === 'pending' || (pendingDecision != null && draftAnswer === pendingDecision.id);
+    // The sent text stays visible but frozen, so a confirmation clears only what was sent.
+    draft.readOnly = pending;
+    sendButton.disabled = pending || !draft.value.trim();
+    const replyError = decisionSendError && decisionSendError.id === replyTarget ? decisionSendError.message : null;
+    const text = pending ? 'Sending…'
+      : replyError ? `Not sent: ${String(replyError).replace(/[.\s]+$/, '')}. Your message is kept.`
+      : chatSend?.status === 'failed' ? `Not sent: ${String(chatSend.error).replace(/[.\s]+$/, '')}. Your message is kept.` : '';
+    if (composerStatus.textContent !== text) composerStatus.textContent = text;
+  }
+  function renderComposer(next) {
+    if (next?.status === 'pending' && draftSend?.sequence === null) draftSend.sequence = next.sequence;
+    // A confirmed delivery clears only the draft that was sent.
+    if (next?.status === 'sent' && chatSend?.status === 'pending' && draftSend?.sequence === next.sequence) {
+      draft.value = '';
+    }
+    if (next?.status !== 'pending') draftSend = null;
+    chatSend = next || null;
+    syncComposer();
+  }
+  function submitDraft(event) {
+    event?.preventDefault();
+    if (disposed || chatSend?.status === 'pending' || !draft.value.trim()) return;
+    const target = latestDecisions.items.find(item => item.id === replyTarget);
+    if (target) {
+      if (!pendingDecision) sendDecisionAnswer(target, draft.value.trim(), true);
+      return;
+    }
+    draftSend = { sequence: null };
+    onSend(draft.value);
+    if (draftSend?.sequence === null) draftSend = null;
+  }
+  function draftKeydown(event) {
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    submitDraft(event);
+  }
   function renderCurrent(current) {
-    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
+    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes, humanAttention] : null);
     if (currentDigest === nextDigest) return;
     currentDigest = nextDigest;
     const authored = element('section', 'pm-chat__current-authored');
@@ -343,7 +1251,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
       }
       automatic.append(element('p', '', `Active windows: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? ' (incomplete observation)' : ''}`), windows,
         element('p', '', `Queue head: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? 'Unknown' : 'None'}`),
-        element('p', '', `needs_human: ${facts.needs_human_count ?? 'Unknown'}`),
+        element('p', '', `needs_human: ${humanAttention ?? 'Unknown'}`),
         element('p', '', `Release: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? 'No active PR' : 'Unknown'}`),
         element('p', '', `Pending update: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'None' : 'Unknown'}`));
       if (facts.release_observed_at) {
@@ -359,10 +1267,17 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
+    renderDecisionSurfaces(state);
     renderTasks(state);
+    renderProgress(state);
+    renderChat(state.conversation);
+    renderComposer(state.chatSend);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
-    const reports = state.reports;
+    publishReviewAttention(state.current?.facts);
+    // Decisions are drawn only by Decide and the conversation (T-023); the
+    // gwtd decision queue is their source, not these reports (Issue #7742).
+    const reports = state.reports.filter(report => report.kind !== 'decision');
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
     if (digest !== nextDigest) {
@@ -428,10 +1343,26 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   function setSession(nextSession) {
     if (disposed || session === nextSession) return;
     session = nextSession;
+    terminalStatus.hidden = true;
+    terminalStatus.textContent = '';
     expandedReports.clear();
+    pendingDecision = null;
+    decisionSendError = null;
+    draftAnswer = null;
+    deferNotice = null;
+    replyTarget = null;
+    replyChip.hidden = true;
+    latestDecisions = { items: [], answered: {}, waiting: null };
+    chatDecisionRows.clear();
     taskRows.clear();
     taskList.replaceChildren();
     tasksDigest = '';
+    chatDigest = undefined;
+    expandedChatGroups.clear();
+    chatLog.replaceChildren();
+    draft.value = '';
+    draftSend = null;
+    renderComposer(null);
     includeCompleted = false;
     completedButton.setAttribute('aria-pressed', 'false');
     transcript.replaceChildren();
@@ -440,27 +1371,49 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     followTail = true;
     digest = '';
     currentDigest = undefined;
-    showTasks();
+    showHome();
   }
   function dispose() {
     disposed = true;
     expandedReports.clear();
     body.removeEventListener('scroll', rememberScroll);
     resizeObserver?.disconnect();
+    taskHome.dispose();
+    taskDecisions.dispose();
+    taskProgress.dispose();
+    homeButton.removeEventListener('click', showHome);
+    decideButton.removeEventListener('click', showDecisions);
+    progressButton.removeEventListener('click', showProgress);
+    chatButton.removeEventListener('click', showChat);
+    composer.removeEventListener('submit', submitDraft);
+    draft.removeEventListener('keydown', draftKeydown);
+    draft.removeEventListener('input', syncComposer);
     tasksButton.removeEventListener('click', showTasks);
     completedButton.removeEventListener('click', filterTasks);
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
+    terminalButton.removeEventListener('click', openTerminal);
+    cancelReply.removeEventListener('click', clearReplyTarget);
     kindSelect.removeEventListener('change', filterReports);
     root.replaceChildren();
-    root.classList.remove('pm-chat', 'pm-chat--logs');
+    root.classList.remove('pm-chat', 'pm-chat--logs', 'pm-chat--chat');
   }
+  homeButton.addEventListener('click', showHome);
+  decideButton.addEventListener('click', showDecisions);
+  progressButton.addEventListener('click', showProgress);
+  chatButton.addEventListener('click', showChat);
+  composer.addEventListener('submit', submitDraft);
+  draft.addEventListener('keydown', draftKeydown);
+  draft.addEventListener('input', syncComposer);
   reportsButton.addEventListener('click', showReports);
   tasksButton.addEventListener('click', showTasks);
   completedButton.addEventListener('click', filterTasks);
   logButton.addEventListener('click', showLog);
+  terminalButton.addEventListener('click', openTerminal);
+  cancelReply.addEventListener('click', clearReplyTarget);
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
-  showTasks();
-  return { update, setSession, showTasks, showReports, dispose };
+  showHome();
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showMessage, showTasks, showReports, receiveHumanAttention, dispose,
+    isChatVisible: () => !disposed && activeView === 'chat' };
 }

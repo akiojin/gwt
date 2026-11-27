@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use gwt_agent::session::GWT_SESSION_ID_ENV;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -104,13 +106,30 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            if super::feedback::safe_intake_required(env.repo_path()) {
-                // A malformed envelope cannot reliably identify its operation.
-                // Never echo serde's caller-controlled keys/values in Auto.
-                let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
+            let redact = !matches!(
+                err,
+                CliParseError::InvalidVerificationMode | CliParseError::InvalidParams(_)
+            ) && super::feedback::safe_intake_required(env.repo_path());
+            let (code, message) = if redact {
+                // Malformed input cannot reliably identify an operation, and
+                // serde diagnostics may contain secrets supplied by the caller.
+                ("INPUT_INVALID_ENVELOPE", "invalid JSON envelope; check schema_version, operation and params with gwtd --help".into())
             } else {
-                let _ = writeln!(env.stderr(), "{prog}: {err}");
+                let code = match err {
+                    CliParseError::UnknownSubcommand(_) => "INPUT_UNKNOWN_OPERATION",
+                    CliParseError::InvalidJson(_) => "INPUT_INVALID_ENVELOPE",
+                    _ => "INPUT_INVALID_PARAMS",
+                };
+                (code, err.to_string())
+            };
+            let payload = serde_json::json!({
+                "ok": false, "operation": null, "exit_code": 2,
+                "error_category": "input", "error_code": code, "error": message,
+            });
+            if let Err(error) = write_dispatch_response(env, &mut captured, &payload) {
+                return report_undelivered_response(env, prog, "envelope", &error);
             }
+            let _ = writeln!(env.stderr(), "{prog}: {message}");
             return 2;
         }
     };
@@ -127,8 +146,35 @@ pub(super) fn dispatch_input<E: CliEnv>(
     // operation on this thread left behind before this one runs.
     super::operation_warnings::take();
     let mut pr_checks_data = None;
+    let mut operation_data = None;
     let mut verification_response = None;
     let outcome = match parsed.command {
+        command @ (CliCommand::Issue(_) | CliCommand::Pr(_))
+            if !matches!(command, CliCommand::Pr(PrCommand::Checks { .. })) =>
+        {
+            let mut output = String::new();
+            let result = match command {
+                CliCommand::Issue(command) => {
+                    super::issue::run_with_data(env, command, &mut output, &mut operation_data)
+                }
+                CliCommand::Pr(command) => {
+                    super::pr::run_with_data(env, command, &mut output, &mut operation_data)
+                }
+                _ => unreachable!(),
+            };
+            result
+                .map(|exit_code| super::governance::GovernedCommandOutput {
+                    exit_code,
+                    output,
+                    refusal: None,
+                })
+                .map_err(|error| {
+                    Box::new(super::governance::GovernedCommandFailure {
+                        error,
+                        refusal: None,
+                    })
+                })
+        }
         CliCommand::Verify(command) => {
             let mut output = String::new();
             super::verification_record::run_with_response(
@@ -185,7 +231,21 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 "exit_code": code,
                 "output": output,
             });
+            if let Some(data) = operation_data.or_else(|| {
+                serde_json::from_str::<Value>(&output)
+                    .ok()
+                    .filter(|data| data.is_object() || data.is_array())
+            }) {
+                payload["data"] = data;
+            }
             if code == 0 {
+                crate::pm_activity::record_successful_operation(
+                    requested_project_root
+                        .as_deref()
+                        .map(Path::new)
+                        .unwrap_or_else(|| env.repo_path()),
+                    &operation,
+                );
                 match operation.as_str() {
                     "issue.view" | "issue.monitor.status" => payload["kind"] = "issue".into(),
                     "pr.view" | "pr.list" => payload["kind"] = "pull_request".into(),
@@ -210,6 +270,31 @@ pub(super) fn dispatch_input<E: CliEnv>(
             if !warnings.is_empty() {
                 payload["warnings"] =
                     serde_json::to_value(&warnings).expect("operation warnings must serialize");
+            }
+            if code != 0 && (operation.starts_with("workspace.") || operation.starts_with("build."))
+            {
+                if let Ok(error) = serde_json::from_str::<crate::AgentWorkspaceUpdateError>(&output)
+                {
+                    payload["error_code"] = serde_json::to_value(error.code).unwrap_or(Value::Null);
+                    payload["error"] = Value::String(error.message);
+                    if let Some(reason) = error.diagnostic_reason {
+                        payload["diagnostic_reason"] = Value::String(reason);
+                    }
+                    if !error.mismatched_fields.is_empty() {
+                        payload["mismatched_fields"] =
+                            serde_json::to_value(error.mismatched_fields).unwrap();
+                    }
+                    if !error.recovery_operations.is_empty() {
+                        payload["recovery_operations"] =
+                            serde_json::to_value(error.recovery_operations).unwrap();
+                    }
+                    if let Some(details) = error.details {
+                        payload["details"] = serde_json::to_value(details).unwrap_or(Value::Null);
+                    }
+                }
+            }
+            if code != 0 {
+                attach_error_metadata(&mut payload, None);
             }
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
@@ -265,6 +350,7 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
             }
+            attach_error_metadata(&mut payload, Some(&failure.error));
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -284,6 +370,79 @@ pub(super) fn dispatch_input<E: CliEnv>(
             }
             1
         }
+    }
+}
+
+/// Stable categories come from typed failures, never human-message matching.
+/// Keep operation-specific codes and refusal/recovery metadata additive.
+fn attach_error_metadata(payload: &mut Value, error: Option<&gwt_github::SpecOpsError>) {
+    use gwt_github::{ApiError, SpecOpsError};
+    let (category, code) = match error {
+        Some(SpecOpsError::LocalIo(error)) => match error.kind() {
+            std::io::ErrorKind::NotFound => ("not_found", "NOT_FOUND_LOCAL_RESOURCE"),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::WouldBlock => {
+                ("conflict", "CONFLICT_LOCAL_STATE")
+            }
+            std::io::ErrorKind::PermissionDenied => ("permission", "PERMISSION_DENIED"),
+            std::io::ErrorKind::InvalidInput => ("input", "INPUT_INVALID_PARAMS"),
+            _ => ("internal", "INTERNAL_LOCAL_IO"),
+        },
+        Some(SpecOpsError::Api(ApiError::NotFound(_))) => ("not_found", "NOT_FOUND_ISSUE"),
+        Some(SpecOpsError::Api(ApiError::CommentNotFound(_))) => ("not_found", "NOT_FOUND_COMMENT"),
+        Some(SpecOpsError::SectionNotFound(_)) => ("not_found", "NOT_FOUND_SECTION"),
+        Some(SpecOpsError::CacheConflict(_)) => ("conflict", "ISSUE_CACHE_CONFLICT"),
+        Some(SpecOpsError::ConcurrentWrite) => ("conflict", "CONFLICT_CONCURRENT_WRITE"),
+        Some(SpecOpsError::ReadbackMismatch { .. }) => ("conflict", "CONFLICT_READBACK_MISMATCH"),
+        Some(SpecOpsError::Api(ApiError::Unauthorized)) => {
+            ("permission", "PERMISSION_AUTHENTICATION_REQUIRED")
+        }
+        Some(SpecOpsError::Api(ApiError::PermissionDenied { .. })) => {
+            ("permission", "PERMISSION_DENIED")
+        }
+        Some(SpecOpsError::Api(ApiError::RepositoryMismatch { .. })) => {
+            ("permission", "PERMISSION_REPOSITORY_MISMATCH")
+        }
+        Some(SpecOpsError::Validation(_)) => ("input", "INPUT_VALIDATION_FAILED"),
+        Some(SpecOpsError::Api(ApiError::BodyTooLarge)) => ("input", "INPUT_BODY_TOO_LARGE"),
+        Some(SpecOpsError::Api(ApiError::PullRequestInsteadOfIssue(_))) => {
+            ("input", "INPUT_RESOURCE_KIND")
+        }
+        Some(SpecOpsError::Api(ApiError::RateLimited { .. })) => {
+            ("external", "EXTERNAL_RATE_LIMITED")
+        }
+        Some(SpecOpsError::Api(ApiError::Timeout { .. })) => ("external", "EXTERNAL_TIMEOUT"),
+        Some(SpecOpsError::Api(ApiError::Network(_))) => ("external", "EXTERNAL_NETWORK"),
+        Some(SpecOpsError::Api(ApiError::PartialPage { .. })) => {
+            ("external", "EXTERNAL_PARTIAL_PAGE")
+        }
+        Some(SpecOpsError::IndexIntegrity(_)) => ("internal", "INTERNAL_INDEX_INTEGRITY"),
+        Some(SpecOpsError::Cache(_)) => ("internal", "INTERNAL_CACHE"),
+        Some(_) => ("internal", "INTERNAL_OPERATION_FAILED"),
+        None => match payload["error_code"].as_str() {
+            Some("invalid_request") => ("input", "INPUT_INVALID_REQUEST"),
+            Some("identity_conflict" | "transaction_conflict") => ("conflict", "CONFLICT_STATE"),
+            Some(
+                "primary_actor_required" | "execution_binding_mismatch" | "provenance_mismatch",
+            ) => ("permission", "PERMISSION_AUTHORITY"),
+            Some("internal") => ("internal", "INTERNAL_OPERATION_FAILED"),
+            _ => ("operation", "OPERATION_FAILED"),
+        },
+    };
+    // Governance is authoritative even when a legacy error wrapper has lost
+    // the underlying cause (for example an identity refusal in Unexpected).
+    let (category, code) = match payload["refusal"]["governance"]["cause"].as_str() {
+        Some("authority" | "managed_identity" | "structural_governance") => {
+            ("permission", "PERMISSION_AUTHORITY")
+        }
+        Some("integrity") => ("internal", "INTERNAL_INTEGRITY"),
+        Some("domain_invalid") => ("input", "INPUT_DOMAIN_INVALID"),
+        Some("transient_governance" | "not_ready") => ("conflict", "CONFLICT_NOT_READY"),
+        Some("external_wait") => ("external", "EXTERNAL_WAIT"),
+        _ => (category, code),
+    };
+    payload["error_category"] = category.into();
+    if payload.get("error_code").is_none() {
+        payload["error_code"] = code.into();
     }
 }
 
@@ -486,6 +645,43 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "agent.registry.restore_schema3" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::RestoreSchema3)
+        }
+        "agent.registry.status" => {
+            reject_unknown_params(params, &["source_key"], &envelope.operation)?;
+            let source_key: Option<String> = serde_json::from_value(
+                lookup(params, "source_key").cloned().unwrap_or(Value::Null),
+            )
+            .map_err(|error| CliParseError::InvalidJson(format!("source_key: {error}")))?;
+            if let Some(key) = &source_key {
+                gwt_core::repo_hash::ProjectKey::parse(key)
+                    .map_err(|error| CliParseError::InvalidJson(format!("source_key: {error}")))?;
+            }
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::Status { source_key })
+        }
+        "agent.registry.reconcile" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "expected_phase",
+                    "expected_registry_revision",
+                    "source_key",
+                    "expected_transaction_id",
+                    "expected_source_sha256",
+                    "expected_floor_sha256",
+                    "action",
+                ],
+                &envelope.operation,
+            )?;
+            let request: crate::agent_registry::RegistryReconcileRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            gwt_core::repo_hash::ProjectKey::parse(&request.source_key)
+                .map_err(|error| CliParseError::InvalidJson(format!("source_key: {error}")))?;
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::Reconcile(Box::new(request)))
+        }
         "feedback.create" => {
             params.keys().for_each(|key| param_audit::note(key));
             let input = serde_json::from_value(Value::Object(params.clone()))
@@ -546,6 +742,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
             })
         }
+        "workspace.repair_close_proof" => {
+            reject_unknown_params(params, &["reason"], "workspace.repair_close_proof")?;
+            CliCommand::Workspace(WorkspaceCommand::RepairCloseProof {
+                reason: required_nonempty_workspace_reopen_string(params, "reason")?,
+            })
+        }
+        "workspace.reopen" => CliCommand::Workspace(WorkspaceCommand::Reopen {
+            reason: required_nonempty_workspace_reopen_string(params, "reason")?,
+            observed_done_event_id: required_nonempty_workspace_reopen_string(
+                params,
+                "observed_done_event_id",
+            )?,
+        }),
         "workspace.projection_list" | "workspace.projection-list" => {
             CliCommand::Workspace(WorkspaceCommand::ProjectionList {
                 stale: optional_bool(params, "stale")?.unwrap_or(false),
@@ -639,6 +848,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 branches: optional_string_vec(params, "branches")?,
             })
         }
+        "worktree.remove_merged" | "worktree.remove-merged" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "branches"],
+                "worktree.remove_merged",
+            )?;
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::RemoveMerged {
+                // Removing a worktree drops its directory and local branch, so
+                // an unqualified call only reports candidates (Issue #7324).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                branches: optional_string_vec(params, "branches")?,
+            })
+        }
         "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
             reject_unknown_params(
                 params,
@@ -703,6 +926,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
             archive_comments: optional_u64_vec(params, "archive_comments")?,
+            wrap_body: optional_bool(params, "wrap_body")?.unwrap_or(false),
         }),
         "issue.cache.repair" => CliCommand::Issue(IssueCommand::CacheRepair {
             number: required_u64(params, "number")?,
@@ -761,6 +985,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 issue_number: required_u64(params, "issue_number")?,
                 reviewed_sha: required_string(params, "reviewed_sha")?,
                 verdict_raw: required_string(params, "verdict_raw")?,
+                evidence_review_token: optional_string(params, "evidence_review_token")?,
+            })
+        }
+        "issue.monitor.review_merged_evidence" => {
+            CliCommand::Issue(IssueCommand::MonitorReviewMergedEvidence {
+                issue_number: required_u64(params, "issue_number")?,
+                pr_number: required_u64(params, "pr_number")?,
+                reviewed_sha: required_string(params, "reviewed_sha")?,
+                evidence_revision: required_string(params, "evidence_revision")?,
             })
         }
         "update.settings.status" => CliCommand::Update(super::UpdateCommand::SettingsStatus {
@@ -774,14 +1007,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let recovery_id = required_string(params, "recovery_id")?;
             let body = required_string(params, "body")?;
             let recovered_at = required_string(params, "recovered_at")?;
-            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+            let recovered_at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&recovered_at)
                 .map_err(|_| {
                     CliParseError::InvalidJson(
                         "recovered_at must be an RFC3339 timestamp of the actual intervention"
                             .into(),
                     )
                 })?
-                .with_timezone(&chrono::Utc)
                 .to_rfc3339();
             if number == 0
                 || body.trim().is_empty()
@@ -798,6 +1030,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let key = format!("{number}:{recovery_id}");
             CliCommand::Board(BoardCommand::RecoveryPost {
                 intent_id: format!("manual-recovery:{key}"),
+                manual_recovery: true,
                 command: Box::new(BoardPostCommand {
                     kind: "decision".into(),
                     body: Some(body),
@@ -900,6 +1133,29 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "issue.monitor.verification.declare" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Assignment {
+                id: String,
+                verifier: String,
+            }
+            let criteria: Vec<Assignment> =
+                serde_json::from_value(lookup(params, "criteria").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| {
+                        CliParseError::InvalidJson(format!(
+                            "criteria must contain {{id, verifier}} assignments: {error}"
+                        ))
+                    })?;
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                criteria: criteria
+                    .into_iter()
+                    .map(|entry| (entry.id, entry.verifier))
+                    .collect(),
+            })
+        }
         "issue.monitor.wait" => {
             let clear = optional_bool(params, "clear")?.unwrap_or(false);
             let (reason, resume_condition) = if clear {
@@ -947,15 +1203,42 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
             action: crate::issue_monitor::AgentSwitchAction::Read { request_id: None },
         }),
-        "issue.monitor.switch.request" => CliCommand::Issue(IssueCommand::MonitorSwitch {
-            project_root: optional_path(params, "project_root")?,
-            action: crate::issue_monitor::AgentSwitchAction::Request {
-                operation_id: required_string(params, "operation_id")?,
-                member_id: required_string(params, "member_id")?,
-                expected_roster_revision: required_u64(params, "expected_roster_revision")?,
-                target_issue_number: required_u64(params, "target_issue_number")?,
-            },
-        }),
+        "issue.monitor.switch.request" => {
+            use crate::issue_monitor::AgentSwitchDisposition;
+            let disposition = lookup(params, "disposition")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| CliParseError::InvalidJson(format!("disposition: {error}")))?
+                .unwrap_or_default();
+            let target_issue_number = match disposition {
+                AgentSwitchDisposition::SwitchToTarget => {
+                    Some(required_u64(params, "target_issue_number")?)
+                }
+                AgentSwitchDisposition::SaveAndReturn => {
+                    if lookup(params, "target_issue_number").is_some() {
+                        return Err(CliParseError::InvalidJson(
+                            "save_and_return does not accept target_issue_number".into(),
+                        ));
+                    }
+                    None
+                }
+            };
+            if !disposition.permits_target(target_issue_number) {
+                return Err(CliParseError::InvalidJson(
+                    "target_issue_number must be a positive Issue number".into(),
+                ));
+            }
+            CliCommand::Issue(IssueCommand::MonitorSwitch {
+                project_root: optional_path(params, "project_root")?,
+                action: crate::issue_monitor::AgentSwitchAction::Request {
+                    operation_id: required_string(params, "operation_id")?,
+                    member_id: required_string(params, "member_id")?,
+                    expected_roster_revision: required_u64(params, "expected_roster_revision")?,
+                    disposition,
+                    target_issue_number,
+                },
+            })
+        }
         "issue.monitor.switch.cancel" => CliCommand::Issue(IssueCommand::MonitorSwitch {
             project_root: optional_path(params, "project_root")?,
             action: crate::issue_monitor::AgentSwitchAction::Cancel {
@@ -967,6 +1250,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             head: required_string(params, "head")?,
             work_id: required_string(params, "work_id")?,
             board_entry_id: required_string(params, "board_entry_id")?,
+            resume_condition: lookup(params, "resume_condition")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| {
+                    CliParseError::InvalidJson(format!("resume_condition: {error}"))
+                })?,
         }),
         "issue.monitor.schedule.read" => CliCommand::Issue(IssueCommand::MonitorSchedule {
             project_root: optional_path(params, "project_root")?,
@@ -982,6 +1271,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 expected_queue_revision: required_string(params, "expected_queue_revision")?,
                 expected_schedule_revision: required_u64(params, "expected_schedule_revision")?,
             },
+        }),
+        "issue.monitor.queue.adopt" => CliCommand::Issue(IssueCommand::MonitorQueueAdopt {
+            project_root: optional_path(params, "project_root")?,
+            terminal: required_string(params, "terminal")?,
         }),
         "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
             project_root: optional_path(params, "project_root")?,
@@ -1044,6 +1337,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "board.config.set"
         | "repository.required_checks.update"
         | "repository.settings.set"
+        | "repository.branch_protection.update"
         | "release.metadata.set"
         | "pr.reopen"
         | "pr.review.submit"
@@ -1484,6 +1778,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.health" => hook_health(params)?,
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
+        "decision.register" | "decision.list" | "decision.attach" | "decision.merge"
+        | "decision.answer" | "decision.defer" => {
+            decision_operation(envelope.operation.as_str(), params)?
+        }
         "discussion.update" => discussion_update(params)?,
         "discuss.resolve" => discuss_proposal(params, DiscussEnvelopeAction::Resolve)?,
         "discuss.park" => discuss_proposal(params, DiscussEnvelopeAction::Park)?,
@@ -1560,7 +1858,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             let quarantines = verification_quarantine_requests(params)?;
-            let mode = optional_string(params, "mode")?.unwrap_or_else(|| "full".into());
+            let mode = optional_string(params, "mode")
+                .map_err(|_| CliParseError::InvalidVerificationMode)?
+                .unwrap_or_else(|| "full".into());
+            if mode != "full" && mode != "pre-pr" {
+                return Err(CliParseError::InvalidVerificationMode);
+            }
             let acceptance_commands = optional_string_vec(params, "acceptance_commands")?;
             if mode == "pre-pr" {
                 if !derive {
@@ -1575,8 +1878,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     quarantines,
                 })
             } else {
-                if mode != "full" || !acceptance_commands.is_empty() {
-                    return Err(CliParseError::InvalidJson("verify.plan mode must be full or pre-pr; acceptance_commands requires mode pre-pr".into()));
+                if !acceptance_commands.is_empty() {
+                    return Err(CliParseError::InvalidJson(
+                        "acceptance_commands requires mode pre-pr".into(),
+                    ));
                 }
                 if commands.is_empty() && !derive {
                     return Err(CliParseError::MissingFlag("commands"));
@@ -1682,9 +1987,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "execution.repair" => {
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Repair {
-                reason: required_string(params, "reason")?,
-            })
+            let reason = required_string(params, "reason")?;
+            let command = match lookup(params, "session_id")
+                .map(|_| required_string(params, "session_id"))
+                .transpose()?
+            {
+                Some(session_id) => crate::cli::execution_state::ExecutionCommand::RepairSession {
+                    session_id,
+                    reason,
+                },
+                None => crate::cli::execution_state::ExecutionCommand::Repair { reason },
+            };
+            CliCommand::Execution(command)
         }
         "execution.continue" => {
             let operation_id = required_string(params, "operation_id")?;
@@ -1836,6 +2150,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 id: optional_string(params, "id")?,
             })
         }
+        "pane.layout.place" => {
+            let lane_id = required_string(params, "lane_id")?;
+            let lane_id = serde_json::from_value(Value::String(lane_id)).map_err(|_| {
+                CliParseError::InvalidValue {
+                    flag: "lane_id",
+                    reason: "expected plan, active, blocked, or done",
+                }
+            })?;
+            let order = optional_u64(params, "order")?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| CliParseError::InvalidValue {
+                    flag: "order",
+                    reason: "expected a 32-bit unsigned integer",
+                })?;
+            CliCommand::ProjectControl(super::open::ProjectControlCommand::PlacePane {
+                id: required_string(params, "id")?,
+                board_id: required_string(params, "board_id")?,
+                lane_id,
+                order,
+            })
+        }
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {
@@ -1902,6 +2238,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ));
             }
             CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
+        }
+        "project.open" => CliCommand::ProjectControl(super::open::ProjectControlCommand::Open {
+            path: required_string(params, "path")?.into(),
+        }),
+        "pm.agent.add" => {
+            reject_unknown_params(params, &["name", "agent_id"], &envelope.operation)?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::AgentAdd {
+                name: required_string(params, "name")?,
+                agent_id: required_string(params, "agent_id")?,
+            })
         }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.request_tasks.read" => {
@@ -2059,12 +2405,56 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 })
             }
         }
+        "pm.theme.record" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "original", "decision", "title", "summary", "number", "note", "reason",
+                ],
+                "pm.theme.record",
+            )?;
+            let text = |key: &'static str| required_nonempty_workspace_reopen_string(params, key);
+            let decision = match text("decision")?.as_str() {
+                "create" => crate::themes::ThemeDecision::Create {
+                    title: text("title")?,
+                    summary: text("summary")?,
+                },
+                "update" => crate::themes::ThemeDecision::Update {
+                    number: required_u64(params, "number")?,
+                    note: text("note")?,
+                },
+                "none" => crate::themes::ThemeDecision::None {
+                    reason: text("reason")?,
+                },
+                "declined" => crate::themes::ThemeDecision::Declined {
+                    reason: text("reason")?,
+                },
+                _ => {
+                    return Err(CliParseError::InvalidValue {
+                        flag: "decision",
+                        reason: "expected one of: create, update, none, declined",
+                    })
+                }
+            };
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeRecord {
+                original: required_string(params, "original")?,
+                decision,
+            })
+        }
+        "pm.theme.list" => {
+            reject_unknown_params(params, &[], "pm.theme.list")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::ThemeList)
+        }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
             project_root: optional_string(params, "project_root")?,
         }),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
+        "pm.branch_freshness.refresh" => {
+            reject_unknown_params(params, &[], "pm.branch_freshness.refresh")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::BranchFreshnessRefresh)
+        }
         "pm.status.set" => {
             reject_unknown_params(
                 params,
@@ -2090,6 +2480,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 input,
             })
         }
+        "pm.auto_start.set" => CliCommand::Pm(crate::cli::pm::PmCommand::SetAutoStart {
+            project_root: optional_string(params, "project_root")?,
+            enabled: optional_bool(params, "enabled")?
+                .ok_or(CliParseError::MissingFlag("enabled"))?,
+        }),
         "pm.pause" | "pm.resume" => CliCommand::Pm(crate::cli::pm::PmCommand::SetPaused {
             project_root: optional_string(params, "project_root")?,
             paused: envelope.operation == "pm.pause",
@@ -2270,12 +2665,32 @@ fn workspace_ensure(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
     }))
 }
 
+fn required_nonempty_workspace_reopen_string(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<String, CliParseError> {
+    let value = required_string(params, key)?;
+    if value.trim().is_empty() {
+        return Err(CliParseError::InvalidValue {
+            flag: key,
+            reason: "must not be empty",
+        });
+    }
+    Ok(value)
+}
+
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     reject_unknown_params(
         params,
-        &["workspace", "all", "limit", "unresolved"],
+        &["workspace", "all", "limit", "unresolved", "unread"],
         "board.show",
     )?;
+    if optional_bool(params, "unread")?.unwrap_or(false) {
+        reject_unknown_params(params, &["unread", "limit"], "board.show unread")?;
+        return Ok(CliCommand::Board(BoardCommand::ShowUnread {
+            limit: optional_usize(params, "limit")?.unwrap_or(20),
+        }));
+    }
     Ok(CliCommand::Board(BoardCommand::Show {
         json: true,
         workspace: optional_string(params, "workspace")?,
@@ -2325,7 +2740,11 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
         broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
     });
     Ok(CliCommand::Board(match intent_id {
-        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        Some(intent_id) => BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery: false,
+        },
         None => BoardCommand::Post(command),
     }))
 }
@@ -2369,6 +2788,78 @@ fn issue_spec_create(params: &Map<String, Value>) -> Result<CliCommand, CliParse
         body: required_string(params, "body")?,
         labels: optional_string_vec(params, "labels")?,
     }))
+}
+
+/// Issue #7742: `decision.*`. Registration fields stay optional here so the
+/// queue itself reports every missing field of the kind in one refusal.
+fn decision_operation(
+    operation: &str,
+    params: &Map<String, Value>,
+) -> Result<CliCommand, CliParseError> {
+    use crate::cli::decision::DecisionCommand;
+    let command = match operation {
+        "decision.register" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "issue",
+                    "kind",
+                    "target",
+                    "question",
+                    "materials",
+                    "options",
+                    "recommendation",
+                    "reason",
+                ],
+                operation,
+            )?;
+            DecisionCommand::Register(Box::new(gwt_core::decision_queue::Registration {
+                issue: optional_u64(params, "issue")?,
+                kind: optional_string(params, "kind")?,
+                target: optional_string(params, "target")?,
+                question: optional_string(params, "question")?,
+                materials: optional_string(params, "materials")?,
+                options: optional_string_vec(params, "options")?,
+                recommendation: optional_string(params, "recommendation")?,
+                reason: optional_string(params, "reason")?,
+                session_id: None,
+            }))
+        }
+        "decision.list" => {
+            reject_unknown_params(params, &["issue", "include_closed"], operation)?;
+            DecisionCommand::List {
+                issue: optional_u64(params, "issue")?,
+                include_closed: optional_bool(params, "include_closed")?.unwrap_or(false),
+            }
+        }
+        "decision.attach" => {
+            reject_unknown_params(params, &["id"], operation)?;
+            DecisionCommand::Attach {
+                id: required_string(params, "id")?,
+            }
+        }
+        "decision.merge" => {
+            reject_unknown_params(params, &["into", "ids"], operation)?;
+            DecisionCommand::Merge {
+                into: required_string(params, "into")?,
+                ids: optional_string_vec(params, "ids")?,
+            }
+        }
+        "decision.answer" => {
+            reject_unknown_params(params, &["id", "answer"], operation)?;
+            DecisionCommand::Answer {
+                id: required_string(params, "id")?,
+                answer: required_string(params, "answer")?,
+            }
+        }
+        _ => {
+            reject_unknown_params(params, &["id"], operation)?;
+            DecisionCommand::Defer {
+                id: required_string(params, "id")?,
+            }
+        }
+    };
+    Ok(CliCommand::Decision(command))
 }
 
 fn memory_add(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -3203,10 +3694,10 @@ mod tests {
     }
 
     use super::{
-        parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
-        CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
-        IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
-        WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
+        parse, parse_operation, report_undelivered_response, write_response, ActionsCommand,
+        CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand,
+        IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction,
+        WorkflowBypassMode, WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::{dispatch_json_input, TestEnv};
@@ -3225,8 +3716,12 @@ mod tests {
             r#"{"schema_version":1,"operation":"search","params":{"query":"admission","project_root":"/elsewhere"}}"#,
         ] {
             assert_eq!(dispatch_json_input(&mut env, "gwtd", input), 2);
-            assert!(env.stdout.is_empty());
+            let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["error_category"], "input");
+            assert!(reply["error_code"].as_str().is_some());
             assert!(String::from_utf8_lossy(&env.stderr).starts_with("gwtd: "));
+            env.stdout.clear();
             env.stderr.clear();
         }
 
@@ -3335,6 +3830,8 @@ mod tests {
         );
         let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
         let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(reply["data"], result);
+        assert_eq!(reply["data"]["after"]["data"]["dry_run"], true);
         assert_eq!(result["after"]["operation"], "worktree.gc_build_artifacts");
         assert_eq!(result["after"]["ok"], true);
         let report: Value =
@@ -3450,8 +3947,121 @@ mod tests {
             assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
             let response: Value = serde_json::from_slice(&env.stdout).unwrap();
             assert_eq!(response["kind"], kind);
+            assert_eq!(response["data"]["number"], number);
+            assert_eq!(response["data"]["title"], "typed resource");
             assert!(response["output"].as_str().unwrap().starts_with(header));
         }
+    }
+
+    #[test]
+    fn issue_7521_status_and_list_expose_json_data_without_changing_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().join("repo"));
+        for operation in ["execution.status", "pr.list", "board.show"] {
+            env.stdout.clear();
+            env.stdin = envelope(operation, json!({}));
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0, "{operation}");
+            let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+            let legacy: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+            assert!(legacy.is_object() || legacy.is_array(), "{operation}");
+            assert_eq!(reply["data"], legacy, "{operation}");
+        }
+    }
+
+    #[test]
+    fn issue_7521_typed_failures_have_stable_categories_and_preserve_legacy_codes() {
+        use gwt_github::{ApiError, IssueNumber, SpecOpsError};
+        for (error, category, code) in [
+            (
+                SpecOpsError::Api(ApiError::NotFound(IssueNumber(1))),
+                "not_found",
+                "NOT_FOUND_ISSUE",
+            ),
+            (
+                SpecOpsError::ConcurrentWrite,
+                "conflict",
+                "CONFLICT_CONCURRENT_WRITE",
+            ),
+            (
+                SpecOpsError::Api(ApiError::PermissionDenied {
+                    message: "policy".into(),
+                }),
+                "permission",
+                "PERMISSION_DENIED",
+            ),
+            (
+                SpecOpsError::Validation("body".into()),
+                "input",
+                "INPUT_VALIDATION_FAILED",
+            ),
+            (
+                SpecOpsError::IndexIntegrity("index".into()),
+                "internal",
+                "INTERNAL_INDEX_INTEGRITY",
+            ),
+        ] {
+            let mut reply = json!({"ok":false,"error":error.to_string()});
+            super::attach_error_metadata(&mut reply, Some(&error));
+            assert_eq!(reply["error_category"], category);
+            assert_eq!(reply["error_code"], code);
+        }
+        let mut reply = json!({"ok":false,"error_code":"ISSUE_CACHE_CONFLICT"});
+        super::attach_error_metadata(
+            &mut reply,
+            Some(&SpecOpsError::CacheConflict(IssueNumber(1))),
+        );
+        assert_eq!(reply["error_category"], "conflict");
+        assert_eq!(reply["error_code"], "ISSUE_CACHE_CONFLICT");
+        let legacy = SpecOpsError::Api(ApiError::Unexpected("missing identity".into()));
+        for error in [None, Some(&legacy)] {
+            let refusal = json!({"governance":{"cause":"managed_identity"}});
+            let mut reply = json!({"ok":false,"refusal":refusal});
+            super::attach_error_metadata(&mut reply, error);
+            assert_eq!(reply["error_category"], "permission");
+            assert_eq!(reply["error_code"], "PERMISSION_AUTHORITY");
+            assert_eq!(reply["refusal"], refusal);
+        }
+    }
+
+    #[test]
+    fn issue_7521_stale_queue_order_is_a_conflict_through_the_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &Default::default()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope(
+            "issue.monitor.queue.move",
+            json!({
+                "number":42, "position":0, "expected_queue_order":[42]
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "conflict");
+        assert_eq!(reply["error_code"], "CONFLICT_LOCAL_STATE");
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("network error: queue_order changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn issue_7521_linked_pr_transport_failure_remains_external() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().join("repo"));
+        env.linked_pr_errors.insert(42, "connection reset".into());
+        env.stdin = envelope("issue.linked_prs", json!({"number":42,"refresh":true}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "external");
+        assert_eq!(reply["error_code"], "EXTERNAL_NETWORK");
     }
 
     #[test]
@@ -3494,6 +4104,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_7518_project_and_pane_operations_accept_typed_params() {
+        let _ = ok("project.open", json!({"path": "./project"}));
+        let _ = ok(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"active","order":0}),
+        );
+        let _ = err("project.open", json!({"path": ""}));
+        let _ = err(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"unknown"}),
+        );
+        let _ = err(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"active","project_key":"foreign"}),
+        );
+    }
+
     fn concern_call(env: &mut TestEnv, operation: &str, params: Value) -> Value {
         env.stdout.clear();
         env.stderr.clear();
@@ -3532,6 +4160,83 @@ mod tests {
         ] {
             assert!(!is_read_only_json_envelope_operation(operation));
         }
+    }
+
+    /// Issue #7259: under the fail-closed safe intake (auto mode), a rejected
+    /// `concern.measure` must name the missing/unknown param instead of a bare
+    /// `invalid JSON envelope`, without echoing caller-controlled keys/values,
+    /// and the documented shape must still be accepted.
+    #[test]
+    fn concern_measure_under_safe_intake_names_the_rejected_param() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo);
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+
+        let rejected = |env: &mut TestEnv, params: Value| -> String {
+            env.stdout.clear();
+            env.stderr.clear();
+            env.stdin = envelope("concern.measure", params);
+            assert_eq!(super::dispatch(env, "gwtd"), 2);
+            String::from_utf8_lossy(&env.stderr).into_owned()
+        };
+        let stderr = rejected(&mut env, json!({}));
+        assert!(stderr.contains("`id`"), "{stderr}");
+        assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+
+        let stderr = rejected(
+            &mut env,
+            json!({"id":id,"cycle_id":"x","measurement":{"cpu_percent":45.6}}),
+        );
+        assert!(stderr.contains("concern.measure"), "{stderr}");
+        assert!(stderr.contains("`owner_progress`"), "{stderr}");
+        assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+
+        let stderr = rejected(
+            &mut env,
+            json!({"id":id,"cycle_id":"x","measurement":{},"owner_progress":[],
+                   "private-key-value":"private-secret-value"}),
+        );
+        assert!(stderr.contains("`owner_progress`"), "{stderr}");
+        assert!(!stderr.contains("private-key-value"), "{stderr}");
+        assert!(!stderr.contains("private-secret-value"), "{stderr}");
+
+        let stderr = rejected(
+            &mut env,
+            json!({"id":id,"cycle_id":"x","measurement":{},"owner_progress":"private-secret-value"}),
+        );
+        assert!(stderr.contains("concern.measure"), "{stderr}");
+        assert!(!stderr.contains("private-secret-value"), "{stderr}");
+        assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+
+        let measured = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"x","measurement":{"cpu_percent":45.6},
+                "owner_progress":concern_owner_progress("open")
+            }),
+        );
+        assert_eq!(
+            measured["concern"]["last_measurement"],
+            json!({"cpu_percent":45.6})
+        );
     }
 
     fn concern_owner_progress(state: &str) -> Value {
@@ -3756,7 +4461,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&env.stdout).contains("measurement"));
         assert!(matches!(
             err("concern.update", json!({"id":id,"state":"verified"})),
-            CliParseError::InvalidJson(_)
+            CliParseError::InvalidParams(_)
         ));
     }
 
@@ -3788,7 +4493,7 @@ mod tests {
     fn every_named_pr_default_action_operation_is_callable() {
         use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
 
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut seen_update_branch = false;
         for (mergeable, merge_state_status, ci_status, is_draft) in [
             ("MERGEABLE", "BEHIND", "SUCCESS", true),
@@ -4060,6 +4765,55 @@ mod tests {
                 unresolved.join("\n")
             );
         }
+    }
+
+    #[test]
+    fn agent_registry_operations_parse_strict_recovery_identity() {
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({})).is_ok());
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({"force":true})).is_err());
+        assert!(parse_operation("agent.registry.status", &json!({})).is_ok());
+        assert!(parse_operation(
+            "agent.registry.status",
+            &json!({"source_key":"aaaaaaaaaaaaaaaa"}),
+        )
+        .is_ok());
+        let request = json!({
+            "expected_phase":"active",
+            "expected_registry_revision":7,
+            "source_key":"aaaaaaaaaaaaaaaa",
+            "expected_transaction_id":"transaction-7",
+            "expected_source_sha256":"a".repeat(64),
+            "action":"quarantine_replay_mirror",
+        });
+        assert!(parse_operation("agent.registry.reconcile", &request).is_ok());
+        let mut prepared = request.clone();
+        prepared["expected_phase"] = json!("prepared");
+        prepared["action"] = json!("refresh_prepared_source");
+        assert!(parse_operation("agent.registry.reconcile", &prepared).is_ok());
+        let mut observed_floor = request.clone();
+        observed_floor["expected_floor_sha256"] = json!("b".repeat(64));
+        assert!(
+            parse_operation("agent.registry.reconcile", &observed_floor).is_ok(),
+            "explicit recovery floor observations must reach the typed recovery API",
+        );
+
+        assert!(parse_operation("agent.registry.status", &json!({"source_key":""})).is_err());
+        assert!(
+            parse_operation("agent.registry.status", &json!({"source_key":"../foreign"}),).is_err()
+        );
+        assert!(parse_operation("agent.registry.status", &json!({"apply":true})).is_err());
+        let mut missing = request.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_transaction_id");
+        assert!(parse_operation("agent.registry.reconcile", &missing).is_err());
+        let mut unknown = request.clone();
+        unknown["force"] = json!(true);
+        assert!(parse_operation("agent.registry.reconcile", &unknown).is_err());
+        let mut invalid = request;
+        invalid["source_key"] = json!("../foreign");
+        assert!(parse_operation("agent.registry.reconcile", &invalid).is_err());
     }
 
     /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
@@ -4445,6 +5199,8 @@ mod tests {
         assert_eq!(payload["ok"], json!(false));
         assert_eq!(payload["operation"], json!("issue.view"));
         assert_eq!(payload["exit_code"], json!(1));
+        assert_eq!(payload["error_category"], "not_found");
+        assert_eq!(payload["error_code"], "NOT_FOUND_ISSUE");
         assert!(
             payload["error"]
                 .as_str()
@@ -4876,6 +5632,25 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    /// Issue #7324: an unqualified `worktree.remove_merged` is a dry run.
+    #[test]
+    fn worktree_remove_merged_defaults_to_a_dry_run() {
+        match ok("worktree.remove_merged", json!({})) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::RemoveMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(branches.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let error = err("worktree.remove_merged", json!({ "force": true }));
+        assert!(format!("{error}").contains("force"), "{error}");
     }
 
     #[test]
@@ -5374,6 +6149,7 @@ mod tests {
                 issue_number,
                 reviewed_sha,
                 verdict_raw,
+                evidence_review_token: _,
             }) => {
                 assert_eq!(issue_number, 42);
                 assert_eq!(reviewed_sha, "abc123");
@@ -6461,6 +7237,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn issue_7536_verification_declaration_requires_typed_assignments() {
+        assert_eq!(
+            ok(
+                "issue.monitor.verification.declare",
+                json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}]})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: None,
+                number: 42,
+                criteria: vec![("AC-1".into(), "PM".into())]
+            })
+        );
+        for params in [
+            json!({"number":42}),
+            json!({"number":42,"criteria":[{"id":"AC-1"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM","text":"caller supplied"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}],"verifier":"extra"}),
+        ] {
+            let _ = err("issue.monitor.verification.declare", params);
+        }
+    }
+
     /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
     /// target and the reason are mandatory because an unexplained
     /// invalidation is exactly the record AC-2 says must exist.
@@ -6739,7 +7538,7 @@ mod tests {
             }),
         );
         assert!(matches!(command,
-            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command })
+            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command, manual_recovery: true })
             if intent_id == "manual-recovery:5876:incident-a"
                 && command.kind == "decision"
                 && command.owners == ["5876"]
@@ -6792,6 +7591,36 @@ mod tests {
             forged[field] = json!("untrusted");
             let _ = err("issue.monitor.switch.ack", forged);
         }
+    }
+
+    #[test]
+    fn issue_monitor_switch_save_and_return_accepts_no_target_and_typed_resume_condition() {
+        let mut request = json!({
+            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "member_id": "member",
+            "expected_roster_revision": 3,
+            "disposition": "save_and_return"
+        });
+        let _ = ok("issue.monitor.switch.request", request.clone());
+        request["target_issue_number"] = json!(42);
+        let _ = err("issue.monitor.switch.request", request.clone());
+        request["target_issue_number"] = json!(null);
+        let _ = err("issue.monitor.switch.request", request);
+
+        let mut ack = json!({
+            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "head": "a".repeat(40),
+            "work_id": "work",
+            "board_entry_id": "board",
+            "resume_condition": {
+                "blocker_numbers": [42],
+                "reason": "waiting for dependency",
+                "next_action": "resume saved Work"
+            }
+        });
+        let _ = ok("issue.monitor.switch.ack", ack.clone());
+        ack["resume_condition"]["claim_id"] = json!("forged");
+        let _ = err("issue.monitor.switch.ack", ack);
     }
 
     #[test]
@@ -7379,8 +8208,23 @@ mod tests {
                 "issue.spec.repair",
                 json!({"number": 3590, "archive_comments": [5565328835u64]})
             ),
-            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments })
+            CliCommand::Issue(IssueCommand::SpecRepair { number: 3590, archive_comments, wrap_body: false })
                 if archive_comments == vec![5565328835]
+        ));
+    }
+
+    #[test]
+    fn issue_spec_repair_accepts_wrap_body() {
+        assert!(matches!(
+            ok(
+                "issue.spec.repair",
+                json!({"number": 7691, "wrap_body": true})
+            ),
+            CliCommand::Issue(IssueCommand::SpecRepair {
+                number: 7691,
+                wrap_body: true,
+                ..
+            })
         ));
     }
 
@@ -7700,6 +8544,14 @@ mod tests {
         assert_eq!(saved["report"]["kind"], "qa");
         assert_eq!(saved["report"]["question"], "Can we ship?");
         assert_eq!(saved["report"]["body"], "Checks passed.");
+        // Issue #7642: the saved report is recorded on the Board as it is saved.
+        let board_id = format!("pm-report-{}", saved["report"]["id"].as_str().unwrap());
+        assert!(gwt_core::coordination::load_snapshot(&repo)
+            .unwrap()
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == board_id));
         let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
         let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
         let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();
@@ -8176,6 +9028,29 @@ mod tests {
     }
 
     #[test]
+    fn workspace_reopen_requires_observed_terminal_event_and_reason() {
+        let input = envelope(
+            "workspace.reopen",
+            json!({
+                "reason": "Recover unintended helper completion",
+                "observed_done_event_id": "done-event-3725"
+            }),
+        );
+        assert!(
+            parse(&input).is_ok(),
+            "explicit Work recovery must be reachable"
+        );
+        assert!(parse(&envelope("workspace.reopen", json!({"reason": "recover"}))).is_err());
+        assert!(parse(&envelope(
+            "workspace.reopen",
+            json!({
+                "observed_done_event_id": "done-event-3725", "reason": "  "
+            })
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn pm_status_variants() {
         assert!(matches!(
             ok("pm.status", json!({})),
@@ -8546,6 +9421,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pm_auto_start_set_requires_an_explicit_boolean() {
+        let _ = ok("pm.auto_start.set", json!({"enabled": false}));
+        for params in [
+            json!({}),
+            json!({"enabled": null}),
+            json!({"enabled": "false"}),
+            json!({"enabled": false, "session_id": "resident"}),
+        ] {
+            let error = err("pm.auto_start.set", params);
+            assert!(!matches!(error, CliParseError::UnknownSubcommand(_)));
+        }
+    }
+
+    #[test]
+    fn pm_auto_start_set_preserves_residency_and_requires_pm_authority() {
+        use crate::pm_registry;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let original: pm_registry::PmPrefs = serde_json::from_value(json!({
+            "settings": {"auto_start": true, "paused": true, "loop_interval_secs": 90},
+            "registration": {"session_id":"resident", "agent_id":"codex", "worktree_path":repo}
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&path, &original).unwrap();
+
+        let set = |enabled| ok("pm.auto_start.set", json!({"enabled": enabled}));
+        let (_, output) = crate::cli::run_collect(&mut env, set(false)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["auto_start"],
+            false
+        );
+        let mut expected = original.clone();
+        expected.settings.auto_start = false;
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), expected);
+
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "unrelated-agent");
+        assert!(crate::cli::run_collect(&mut env, set(true)).is_err());
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), expected);
+
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        let (_, output) = crate::cli::run_collect(
+            &mut env,
+            ok(
+                "pm.auto_start.set",
+                json!({"enabled": true, "project_root": repo}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["auto_start"],
+            true
+        );
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), original);
+    }
+
     // Issue #4249 FR-003: the PM self-description is a read-only diagnostic.
     #[test]
     fn pm_capabilities_parses_and_stays_read_only() {
@@ -8558,6 +9499,90 @@ mod tests {
                 "pm.capabilities"
             )
         );
+    }
+
+    #[test]
+    fn pm_agent_add_is_published_and_registers_one_member() {
+        use crate::{agent_names, pm_registry};
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let pm_worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).unwrap();
+        let mut env = TestEnv::new(pm_worktree.clone());
+        let (_, output) =
+            crate::cli::run_collect(&mut env, ok("pm.capabilities", json!({}))).unwrap();
+        let catalog: Value = serde_json::from_str(&output).unwrap();
+        assert!(
+            catalog["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["operation"] == "pm.agent.add" && row["executable"] == true),
+            "the published catalog must offer member registration"
+        );
+
+        let monitor_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let before = agent_names::read_project_roster(&repo, &sessions).unwrap();
+        let monitor_before = std::fs::read(&monitor_path).unwrap();
+        let pm_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let pm_prefs = serde_json::from_value(json!({
+            "registration": {
+                "session_id": "resident", "agent_id": "codex", "worktree_path": pm_worktree
+            }
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&pm_path, &pm_prefs).unwrap();
+        let pm_before = std::fs::read(&pm_path).unwrap();
+        let params = json!({"name": "Additional teammate", "agent_id": "codex"});
+        let add = || ok("pm.agent.add", params.clone());
+        let registry_path = crate::agent_registry::path();
+        let registry_before = std::fs::read(&registry_path).unwrap();
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "another-agent");
+            assert!(crate::cli::run_collect(&mut env, add()).is_err());
+            assert_eq!(std::fs::read(&registry_path).unwrap(), registry_before);
+        }
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        assert!(crate::cli::run_collect(
+            &mut env,
+            ok(
+                "pm.agent.add",
+                json!({"name": "Other teammate", "agent_id": "unregistered-tool"})
+            )
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry_before);
+        let (_, output) = crate::cli::run_collect(&mut env, add()).unwrap();
+        let member: agent_names::AgentMember = serde_json::from_str(&output).unwrap();
+        assert_eq!(member.name, "Additional teammate");
+        assert_eq!(member.agent_id.as_deref(), Some("codex"));
+        assert!(member.implementation_eligible());
+        assert!(member.assignment.is_none());
+        let key = gwt_core::paths::project_scope_hash(&repo);
+        let persisted = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .project_snapshot(&key)
+            .unwrap()
+            .agent_roster
+            .unwrap();
+        assert_eq!(
+            persisted.members.split_last(),
+            Some((&member, before.members.as_slice()))
+        );
+        let registry_after = std::fs::read(&registry_path).unwrap();
+        assert!(crate::cli::run_collect(&mut env, add()).is_err());
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry_after);
+        assert_eq!(std::fs::read(monitor_path).unwrap(), monitor_before);
+        assert_eq!(std::fs::read(pm_path).unwrap(), pm_before);
     }
 
     #[test]
@@ -8732,6 +9757,15 @@ mod tests {
             err("execution.repair", json!({})),
             CliParseError::MissingFlag("reason")
         ));
+        for session_id in ["", "  "] {
+            assert!(matches!(
+                err(
+                    "execution.repair",
+                    json!({"reason": "repair target", "session_id": session_id})
+                ),
+                CliParseError::MissingFlag("session_id")
+            ));
+        }
         assert!(matches!(
             ok("execution.reopen", json!({"reason": "blocker resolved"})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Reopen { .. })
@@ -8900,6 +9934,39 @@ mod tests {
             json!({"mode": "pretend-fast", "derive": true}),
         );
         assert!(error.to_string().contains("mode"));
+    }
+
+    #[test]
+    fn verification_plan_invalid_mode_diagnostic_is_safe_and_actionable() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        for autonomous_mode in [false, true] {
+            crate::save_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo.path()),
+                &crate::IssueMonitorPrefs {
+                    autonomous_mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            let input = envelope(
+                "verify.plan",
+                json!({"mode": "private-mode-value", "derive": true}),
+            );
+            assert_eq!(crate::cli::dispatch_json_input(&mut env, "gwtd", &input), 2);
+            let stderr = String::from_utf8_lossy(&env.stderr);
+            assert!(
+                stderr.contains("verify.plan mode must be full or pre-pr"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("private-mode-value"), "{stderr}");
+            assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+        }
     }
 
     #[test]
@@ -9126,6 +10193,7 @@ mod tests {
             restart_args: Vec::new(),
             projects: Vec::new(),
             attempt: 1,
+            helper_pid: None,
         })
         .unwrap();
         assert!(

@@ -7,10 +7,11 @@
 //! Slack's `conversations.history` rate limit (FR-009). API/network failures
 //! surface as errors — never a silent fall back to local (FR-010).
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use gwt_core::coordination::{
@@ -242,7 +243,7 @@ impl SlackProvider {
 
     /// History for the default channel, served from cache within the TTL.
     fn cached_history(&self, worktree_root: &Path) -> Result<Vec<BoardEntry>> {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         if let Some(cached) = self.cache.get(now) {
             return Ok(cached);
         }
@@ -266,7 +267,7 @@ impl SlackProvider {
                 oldest_entry_id,
                 newest_entry_id,
                 total_entries,
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
             },
         }
     }
@@ -425,7 +426,7 @@ impl SlackProvider {
                         channel: channel.to_string(),
                         root_id: existing.root_id.clone(),
                         card_hash: hash,
-                        updated_at: Utc::now(),
+                        updated_at: UtcTimestamp::now(),
                     },
                 );
             }
@@ -441,7 +442,7 @@ impl SlackProvider {
                 channel: channel.to_string(),
                 root_id: root_ts.clone(),
                 card_hash: hash,
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
             },
         );
         Ok(root_ts)
@@ -580,7 +581,7 @@ impl BoardProvider for SlackProvider {
     fn load_entries_since(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
     ) -> Result<Vec<BoardEntry>> {
         Ok(self
             .cached_history(worktree_root)?
@@ -592,7 +593,7 @@ impl BoardProvider for SlackProvider {
     fn load_entries_since_for_scope(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
         _scope: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>> {
         self.load_entries_since(worktree_root, since)
@@ -603,9 +604,9 @@ impl BoardProvider for SlackProvider {
         worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
-        within: chrono::Duration,
+        within: time::Duration,
     ) -> Result<bool> {
-        let threshold = Utc::now() - within;
+        let threshold = UtcTimestamp::now() - within;
         Ok(self.cached_history(worktree_root)?.iter().any(|entry| {
             entry.author == author && entry.kind == *kind && entry.updated_at > threshold
         }))
@@ -614,11 +615,11 @@ impl BoardProvider for SlackProvider {
     fn load_prompt_reminder(
         &self,
         worktree_root: &Path,
-        diff_since: DateTime<Utc>,
+        diff_since: UtcTimestamp,
         _scope: &BoardAudienceScope,
         status_author: &str,
         status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
+        status_since: UtcTimestamp,
     ) -> Result<gwt_core::coordination::PromptBoardRead> {
         Ok(
             gwt_core::coordination::PromptBoardRead::from_channel_history(
@@ -897,7 +898,7 @@ mod tests {
                 channel: channel.to_string(),
                 root_id: root_id.to_string(),
                 card_hash: "hash".to_string(),
-                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+                updated_at: UtcTimestamp::UNIX_EPOCH,
             },
         )
         .unwrap();
@@ -1435,7 +1436,7 @@ mod tests {
         );
 
         // load_entries_since: an epoch-0 `since` returns every cached entry.
-        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let epoch = UtcTimestamp::UNIX_EPOCH;
         assert_eq!(prov.load_entries_since(&root, epoch).unwrap().len(), 3);
         assert_eq!(
             prov.load_entries_since_for_scope(&root, epoch, &scope)
@@ -1445,7 +1446,7 @@ mod tests {
         );
 
         // has_recent_post_by executes the predicate over every entry.
-        let wide = chrono::Duration::days(1_000_000);
+        let wide = time::Duration::days(1_000_000);
         assert!(prov
             .has_recent_post_by(&root, "nobody", &BoardEntryKind::Status, wide)
             .is_ok());
@@ -1608,7 +1609,7 @@ mod tests {
                 channel: "CH-A".to_string(),
                 root_id: "OLD-ROOT".to_string(),
                 card_hash: "stale".to_string(),
-                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+                updated_at: UtcTimestamp::UNIX_EPOCH,
             },
         )
         .unwrap();

@@ -2419,6 +2419,49 @@ fn app_runtime_open_launch_wizard_accepts_work_window_preset() {
     );
 }
 
+// Issue #7768: Work and Branches presets canonicalize to Issues, so the Issues
+// window is the only one that hosts the Workspace row ▶ and `Launch Agent`.
+#[test]
+fn app_runtime_open_launch_wizard_accepts_issues_window_preset() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::OpenLaunchWizard {
+            id: window_id,
+            branch_name: "main".to_string(),
+            linked_issue_number: None,
+        },
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::LaunchWizardOpenError { .. })),
+        "the Issues window hosts the Workspace launch buttons and must not be rejected"
+    );
+    assert!(
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_some(),
+        "Launch wizard should open from the Issues window"
+    );
+}
+
 #[test]
 fn app_runtime_resume_branch_latest_agent_accepts_work_window_preset() {
     let temp = tempdir().expect("tempdir");
@@ -2902,6 +2945,7 @@ fn issue6682_owner_status_is_shared_with_hub_when_gui_inventory_lags() {
         1,
         Some(identity.clone()),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3178,6 +3222,7 @@ fn issue6682_unconfirmed_stop_retains_views_and_reconciliation_intent() {
         1,
         Some(identity.clone()),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3376,6 +3421,58 @@ fn issue6682_view_receipt_is_single_use_and_client_bound() {
             .project_execution_status(&context, None)
             .view_set_revision,
         revision
+    );
+}
+
+/// Issue #7665: a Monitor launch that arrives before the Project view is
+/// registered used to be dropped, leaving its claim `launching` with no window.
+#[test]
+fn issue7665_monitor_launch_withheld_without_a_view_resumes_when_the_view_registers() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab("tab-1", "Repo", temp.path().into(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    let _ = std::fs::remove_file(gwt::project_execution_policy::observation_path(
+        &context.project_root,
+    ));
+    let (spawner, _queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let withheld = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &context.project_root,
+        7303,
+        LinkedIssueKind::Issue,
+        Some("delivery-7303".into()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    assert!(withheld.is_empty());
+    assert!(runtime.issue_monitor_launch_preparations.is_empty());
+
+    let scope = ClientScope::Project(context.project_key.clone());
+    let hydrated =
+        runtime.handle_frontend_event_in_scope("a".into(), FrontendEvent::FrontendReady, &scope);
+    let nonce = hydrated
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ProjectViewChallenge { nonce, .. } => Some(nonce.clone()),
+            _ => None,
+        })
+        .unwrap();
+    runtime.handle_frontend_event_in_scope(
+        "a".into(),
+        serde_json::from_value(serde_json::json!({"kind":"project_view_ready", "generation":context.generation, "nonce":nonce, "view_id":"view-a"})).unwrap(),
+        &scope,
+    );
+    assert!(gwt::project_execution_policy::actual_open(&context.project_root).unwrap());
+    assert_eq!(
+        runtime.issue_monitor_launch_preparations.len(),
+        1,
+        "the withheld delivery starts once the view admits it"
     );
 }
 
@@ -3689,6 +3786,7 @@ fn issue6682_owner_health_failure_keeps_cached_running_work_unknown() {
         1,
         Some(identity),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3705,6 +3803,7 @@ fn issue6682_owner_health_failure_keeps_cached_running_work_unknown() {
         2,
         None,
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Degraded,
             detail: Some("owner connection lost".into()),
@@ -3754,6 +3853,7 @@ fn issue6682_continued_work_stays_observed_running_after_last_view_detaches() {
         1,
         Some(identity),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -3876,6 +3976,7 @@ fn issue6682_reopened_running_work_becomes_selection_pending_on_raw_detach() {
         1,
         Some(identity),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,

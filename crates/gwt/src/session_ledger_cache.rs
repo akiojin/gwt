@@ -51,7 +51,10 @@ fn schedule_retention(sessions_dir: &Path) {
     match std::thread::Builder::new()
         .name("gwt-session-retention".into())
         .spawn(move || {
-            match crate::session_retention::prune_session_ledger(&directory, chrono::Utc::now()) {
+            match crate::session_retention::prune_session_ledger(
+                &directory,
+                gwt_core::timestamp::UtcTimestamp::now(),
+            ) {
                 Ok(stats) => tracing::info!(
                     sessions_pruned = stats.sessions_pruned,
                     temporary_files_pruned = stats.temporary_files_pruned,

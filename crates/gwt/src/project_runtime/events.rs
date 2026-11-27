@@ -24,6 +24,36 @@ impl OwnerInputObservation {
     }
 }
 
+/// Attachment-only physical writer result, carried on the existing private reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerAttachmentInputOutcome {
+    Written,
+    NotStarted,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerAttachmentInputReason {
+    TargetUnavailable,
+    WriterUnavailable,
+    WriteUncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerAttachmentInputReceipt {
+    pub tag: String,
+    pub schema_version: u32,
+    pub pane_id: String,
+    pub incarnation: u64,
+    pub session_id: String,
+    pub outcome: OwnerAttachmentInputOutcome,
+    pub reason: Option<OwnerAttachmentInputReason>,
+    pub input_observation: Option<OwnerInputObservation>,
+}
+
 /// Immutable readback of an exact Genesis compensation. This receipt only
 /// invalidates caches; it never grants cleanup or input authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +160,12 @@ pub struct OwnerMonitorLaunchRejection {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerCommand {
+    AttachmentInput {
+        id: String,
+        incarnation: u64,
+        session_id: String,
+        data: Vec<u8>,
+    },
     InvalidateProjectObservation {
         host_pid: u32,
         host_started_at: u64,
@@ -248,6 +284,12 @@ pub enum OwnerCommand {
         cols: u16,
         rows: u16,
     },
+    SwitchExecutionAccount {
+        id: String,
+        incarnation: u64,
+        #[serde(default)]
+        deleted_account_id: Option<String>,
+    },
     LaunchAgent {
         id: String,
         operation_id: String,
@@ -294,6 +336,10 @@ pub enum OwnerCommand {
         id: String,
         incarnation: u64,
     },
+    Stop {
+        id: String,
+        incarnation: u64,
+    },
 }
 
 /// Read-only screen captured after the exact runtime's output reader joined.
@@ -307,6 +353,9 @@ pub struct OwnerFinalScreen {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerEvent {
+    AgentSwitch {
+        snapshot: crate::issue_monitor::AgentSwitchSnapshot,
+    },
     ProjectExecutionStatus {
         status: crate::protocol::ProjectExecutionStatusView,
     },
@@ -375,6 +424,10 @@ pub enum OwnerEvent {
         exit_confirmed: bool,
         raw_status: crate::WindowProcessStatus,
         exit_code: Option<u32>,
+        /// The owner's last provider hook state. The composed `status` cannot
+        /// tell a hook-observed Running from the launch placeholder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_status: Option<crate::WindowProcessStatus>,
     },
     WindowRemoved {
         id: String,
@@ -386,6 +439,8 @@ pub enum OwnerEvent {
         id: String,
         incarnation: u64,
         error: Option<String>,
+        #[serde(default)]
+        explicit_stop: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_screen: Option<OwnerFinalScreen>,
     },

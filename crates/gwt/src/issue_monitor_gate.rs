@@ -58,6 +58,57 @@ impl AcceptanceCriteria {
         self.machine_checkable && self.unchecked.is_empty()
     }
 
+    /// Only explicit tags may defer remaining work for production measurement.
+    /// Unknown or mixed implementation criteria must keep the work runnable.
+    pub fn only_measurement_remaining(&self) -> bool {
+        self.machine_checkable
+            && !self.unchecked.is_empty()
+            && self.unchecked.iter().all(|id| {
+                let mut matching = self
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion_id, _)| criterion_id == id)
+                    .peekable();
+                matching.peek().is_some()
+                    && matching.all(|(_, text)| {
+                        let text = text.to_ascii_lowercase();
+                        text.contains("(measurement)") || text.contains("[measurement]")
+                    })
+            })
+    }
+
+    /// External verification is opt-in. Never infer a release or host wait
+    /// from prose that could also describe implementation work.
+    pub fn only_external_verification_remaining(&self) -> bool {
+        let mut external = false;
+        self.machine_checkable
+            && !self.unchecked.is_empty()
+            && self.unchecked.iter().all(|id| {
+                let mut matching = self
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion_id, _)| criterion_id == id)
+                    .peekable();
+                matching.peek().is_some()
+                    && matching.all(|(_, text)| {
+                        let text = text.to_ascii_lowercase();
+                        let tagged = [
+                            "(release-verification)",
+                            "[release-verification]",
+                            "(main-verification)",
+                            "[main-verification]",
+                            "(host-verification)",
+                            "[host-verification]",
+                        ]
+                        .iter()
+                        .any(|tag| text.contains(tag));
+                        external |= tagged;
+                        tagged || text.contains("(measurement)") || text.contains("[measurement]")
+                    })
+            })
+            && external
+    }
+
     /// Actionable rejection reason naming the missing element (Issue #3930
     /// AC-2), or `None` when the criteria are machine-checkable.
     pub fn rejection_reason(&self) -> Option<String> {
@@ -132,23 +183,33 @@ impl AcceptanceSnapshot {
 }
 
 /// Heading lines (case-insensitive, trimmed of leading `#`/spaces) that open the
-/// structured acceptance-criteria block.
+/// structured acceptance-criteria block. Japanese entries are stored in the
+/// okurigana-less spelling `heading_text` normalizes to.
 const ACCEPTANCE_HEADINGS: &[&str] = &[
     "acceptance criteria",
-    "受け入れ基準",
-    "受け入れ条件",
-    "受け入れシナリオ",
+    "受入基準",
+    "受入条件",
+    "受入シナリオ",
 ];
 
 /// The heading text without its `#` markers: lower-cased for matching and as
 /// written for messages. `None` for a non-heading line.
+///
+/// Issue #7359: the matching form folds the okurigana variants of 受け入れ
+/// (`受け入れ` / `受入れ` / `受け入` / `受入`) into `受入`, so `## 受入条件`
+/// opens the block exactly like `## 受け入れ条件`.
 fn heading_text(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('#') {
         return None;
     }
     let written = trimmed.trim_start_matches('#').trim();
-    Some((written.to_ascii_lowercase(), written.to_string()))
+    let matching = written
+        .to_ascii_lowercase()
+        .replace("受け入れ", "受入")
+        .replace("受入れ", "受入")
+        .replace("受け入", "受入");
+    Some((matching, written.to_string()))
 }
 
 /// Split an item's text into its explicit `AC-<id>` (when the item starts with
@@ -403,6 +464,69 @@ pub fn evaluate_autonomous_gate(inputs: &AutonomousGateInputs) -> GateDecision {
     GateDecision::Pass
 }
 
+/// Issue #7810 AC-2: every gate input that keeps the gate closed, named so
+/// the log and `issue.monitor.status` say why nothing was merged. Empty when
+/// the gate passes. `base_branch` is the branch whose protection was applied.
+pub fn closed_gate_inputs(
+    inputs: &AutonomousGateInputs,
+    rollup_json: &str,
+    base_branch: &str,
+) -> Vec<String> {
+    use crate::issue_monitor_review::ReviewGateOutcome;
+
+    let mut closed = Vec::new();
+    match &inputs.branch_protection {
+        gwt_git::branch_protection::BranchProtectionStatus::Verified { required_checks }
+            if !required_checks.is_empty() =>
+        {
+            let items: Vec<serde_json::Value> = match serde_json::from_str(rollup_json) {
+                Ok(serde_json::Value::Array(items)) => items,
+                _ => Vec::new(),
+            };
+            let unpassed: Vec<String> = required_checks
+                .iter()
+                .filter_map(|required| {
+                    let state = items
+                        .iter()
+                        .find(|item| ci_item_name(item) == Some(required.as_str()))
+                        .map(ci_item_state);
+                    match state {
+                        Some(CiItemState::Success) => None,
+                        Some(CiItemState::Failed) => Some(format!("{required} (failed)")),
+                        Some(CiItemState::Pending) => Some(format!("{required} (pending)")),
+                        None => Some(format!("{required} (not reported)")),
+                    }
+                })
+                .collect();
+            if !unpassed.is_empty() {
+                closed.push(format!(
+                    "ci: required checks of {base_branch} not passed: {}",
+                    unpassed.join(", ")
+                ));
+            }
+        }
+        _ => closed.push(format!(
+            "branch protection: {base_branch} has no verified required checks"
+        )),
+    }
+    if inputs.review != ReviewGateOutcome::Pass {
+        closed.push("review: the independent review did not pass".to_string());
+    }
+    if !inputs.acceptance_unchanged {
+        closed.push("acceptance: criteria changed after launch".to_string());
+    }
+    if inputs.reviewed_sha.is_empty() || inputs.reviewed_sha != inputs.head_sha {
+        closed.push(format!(
+            "sha: reviewed {:?} is not the head {:?}",
+            inputs.reviewed_sha, inputs.head_sha
+        ));
+    }
+    if let Some(reason) = unmergeable_reason(inputs.mergeability) {
+        closed.push(format!("mergeability: {reason}"));
+    }
+    closed
+}
+
 /// Issue #4726: why GitHub will not merge a PR in this state, if it will not.
 /// `Unknown` is not a refusal: GitHub is still computing, and the Delivering
 /// merge-watch re-reads it every scan.
@@ -567,6 +691,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn issue_7536_only_explicit_external_verification_can_wait() {
+        let source = "## Acceptance Criteria\n- [x] AC-1: implement\n- [ ] AC-2: PM checks main [main-verification]\n- [ ] AC-3: owner checks Windows (host-verification)\n- [ ] AC-4: observe release [release-verification]\n- [ ] AC-5: observe results (measurement)\n";
+        assert!(classify_acceptance_criteria(source).only_external_verification_remaining());
+        for replacement in ["implement remaining work", "check main after release"] {
+            let changed = source.replace("PM checks main [main-verification]", replacement);
+            assert!(!classify_acceptance_criteria(&changed).only_external_verification_remaining());
+        }
+        let duplicate = "## Acceptance Criteria\n- [x] AC-1: [release-verification] check release\n- [ ] AC-1: implement\n";
+        assert!(!classify_acceptance_criteria(duplicate).only_external_verification_remaining());
+        assert!(!classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [ ] AC-1: (measurement) observe\n"
+        )
+        .only_external_verification_remaining());
+    }
+
+    #[test]
+    fn issue_6994_duplicate_ids_cannot_borrow_a_measurement_tag() {
+        let criteria = classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [x] AC-1: (measurement) observe results\n- [ ] AC-1: implement the fix\n",
+        );
+        assert!(!criteria.only_measurement_remaining());
+    }
+
+    #[test]
     fn register_spec_body_template_is_autonomy_eligible() {
         // Issue #3873 AC-4: writing a SPEC exactly as the canonical template
         // dictates must already satisfy the Monitor's eligibility classifier.
@@ -690,6 +838,26 @@ mod tests {
         let c = classify_acceptance_criteria(body);
         assert!(c.machine_checkable, "受け入れ条件 must open the block");
         assert_eq!(c.ids, vec!["AC-1"]);
+    }
+
+    #[test]
+    fn japanese_headings_without_okurigana_are_recognized() {
+        // Issue #7359 (feedback #6565): an ordinary Issue wrote its three
+        // Japanese checkbox criteria under `## 受入条件`. The okurigana-less
+        // spelling opened no block, so the independent review was dispatched
+        // with zero required criteria and parked the Issue as needs_human.
+        for heading in ["受入条件", "受入基準", "受入れ条件", "受け入れ条件"] {
+            let body = format!(
+                "## {heading}\n\
+                 - [ ] 設定が保存される\n\
+                 - [ ] 一覧が更新される\n\
+                 - [ ] エラーが表示されない\n"
+            );
+            let c = classify_acceptance_criteria(&body);
+            assert!(c.machine_checkable, "`## {heading}` must open the block");
+            assert_eq!(c.ids, vec!["AC-1", "AC-2", "AC-3"], "{heading}");
+            assert_eq!(c.rejection_reason(), None, "{heading}");
+        }
     }
 
     #[test]

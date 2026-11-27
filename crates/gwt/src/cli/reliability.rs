@@ -3,10 +3,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
 use gwt_core::coordination::{BoardEntry, BoardEntryKind};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::Serialize;
 use serde_json::{json, Value};
+use time::Duration;
 
 pub(super) const MANUAL_RECOVERY_TOPIC: &str = "gwt-manual-recovery:";
 pub(super) const MANUAL_RECOVERY_AT_TOPIC: &str = "gwt-manual-recovery-at:";
@@ -26,7 +27,7 @@ const CATEGORIES: [(&str, &str); 10] = [
 
 #[derive(Serialize)]
 struct Day {
-    date: chrono::NaiveDate,
+    date: String,
     complete_day: bool,
     blocked_total: usize,
     categories: BTreeMap<&'static str, usize>,
@@ -34,14 +35,12 @@ struct Day {
     manual_recoveries: usize,
 }
 
-fn window_start(now: DateTime<Utc>) -> DateTime<Utc> {
-    (now.date_naive() - Duration::days(7))
-        .and_hms_opt(0, 0, 0)
-        .expect("midnight")
-        .and_utc()
+fn window_start(now: UtcTimestamp) -> UtcTimestamp {
+    let start = (now.utc_date() - Duration::days(7)).midnight().assume_utc();
+    UtcTimestamp::from_unix_seconds(start.unix_timestamp()).expect("supported window start")
 }
 
-pub(super) fn load_report(repo: &Path, now: DateTime<Utc>) -> Value {
+pub(super) fn load_report(repo: &Path, now: UtcTimestamp) -> Value {
     if crate::board_provider::routing_for(repo).provider != "local" {
         return json!({
             "available": false,
@@ -62,11 +61,11 @@ pub(super) fn load_report(repo: &Path, now: DateTime<Utc>) -> Value {
     }
 }
 
-fn summarize(entries: &[BoardEntry], now: DateTime<Utc>) -> Value {
+fn summarize(entries: &[BoardEntry], now: UtcTimestamp) -> Value {
     let start = window_start(now);
     let mut days = (0..8)
         .map(|offset| Day {
-            date: (start + Duration::days(offset)).date_naive(),
+            date: (start + Duration::days(offset)).utc_date().to_string(),
             complete_day: offset < 7,
             blocked_total: 0,
             categories: CATEGORIES.iter().map(|(key, _)| (*key, 0)).collect(),
@@ -86,7 +85,7 @@ fn summarize(entries: &[BoardEntry], now: DateTime<Utc>) -> Value {
         }
         if entry.kind == BoardEntryKind::Blocked && entry.created_at >= start {
             let day =
-                &mut days[(entry.created_at.date_naive() - start.date_naive()).num_days() as usize];
+                &mut days[(entry.created_at.utc_date() - start.utc_date()).whole_days() as usize];
             let category = classify(&entry.body);
             day.blocked_total += 1;
             *day.categories.get_mut(category).expect("known category") += 1;
@@ -107,15 +106,14 @@ fn summarize(entries: &[BoardEntry], now: DateTime<Utc>) -> Value {
             let recovered_at = entry.related_topics.iter().find_map(|topic| {
                 topic
                     .strip_prefix(MANUAL_RECOVERY_AT_TOPIC)
-                    .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-                    .map(|at| at.with_timezone(&Utc))
+                    .and_then(|at| UtcTimestamp::parse_from_rfc3339(at).ok())
             });
             for topic in &entry.related_topics {
                 if topic.starts_with(MANUAL_RECOVERY_TOPIC) && seen_recoveries.insert(topic) {
                     let Some(at) = recovered_at.filter(|at| *at >= start && *at <= now) else {
                         continue;
                     };
-                    let day = &mut days[(at.date_naive() - start.date_naive()).num_days() as usize];
+                    let day = &mut days[(at.utc_date() - start.utc_date()).whole_days() as usize];
                     day.manual_recoveries += 1;
                     manual_recovery_records.push(json!({
                         "recovery_id": topic.trim_start_matches(MANUAL_RECOVERY_TOPIC),
@@ -233,8 +231,8 @@ fn classify(body: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
     use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+    use gwt_core::timestamp::UtcTimestamp;
 
     fn entry(id: &str, at: &str, kind: BoardEntryKind, body: &str) -> BoardEntry {
         let mut entry = BoardEntry::new(
@@ -253,7 +251,7 @@ mod tests {
         entry
     }
 
-    fn now() -> DateTime<Utc> {
+    fn now() -> UtcTimestamp {
         "2026-10-21T12:00:00Z".parse().unwrap()
     }
 

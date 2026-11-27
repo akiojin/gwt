@@ -35,7 +35,7 @@ pub(super) trait UpdateCliOps {
         current_exe: &Path,
         payload: &Path,
         args_file: &Path,
-    ) -> Result<(), String>;
+    ) -> Result<u32, String>;
     fn spawn_internal_run_installer(
         &mut self,
         helper_exe: &Path,
@@ -44,7 +44,7 @@ pub(super) trait UpdateCliOps {
         installer: &Path,
         kind: InstallerKind,
         args_file: &Path,
-    ) -> Result<(), String>;
+    ) -> Result<u32, String>;
 }
 
 pub(super) struct RealUpdateCliOps {
@@ -112,7 +112,7 @@ impl UpdateCliOps for RealUpdateCliOps {
                 version: latest.to_string(),
                 asset_url: asset_url.to_string(),
                 payload: payload.clone(),
-                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
                 auto_apply_deferred: false,
             },
@@ -137,7 +137,7 @@ impl UpdateCliOps for RealUpdateCliOps {
         current_exe: &Path,
         payload: &Path,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.mgr
             .spawn_internal_apply_update(helper_exe, old_pid, current_exe, payload, args_file)
     }
@@ -150,7 +150,7 @@ impl UpdateCliOps for RealUpdateCliOps {
         installer: &Path,
         kind: InstallerKind,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.mgr.spawn_internal_run_installer(
             helper_exe,
             old_pid,

@@ -285,11 +285,123 @@ pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDis
                 .any(|effort| effort == option.stored_value),
             None => CODEX_FALLBACK_EFFORTS.contains(&option.stored_value),
         })
+        .filter(|option| {
+            gwt_agent::codex_reasoning_effort(Some(model), Some(option.stored_value))
+                == Some(option.stored_value)
+        })
         .map(|option| ReasoningDisplayOption {
             is_default: option.stored_value == default_effort,
             ..*option
         })
         .collect()
+}
+
+pub(super) fn reasoning_options_for_agent_model(
+    agent_id: &str,
+    model: &str,
+    ultracode_supported: bool,
+) -> Vec<ReasoningDisplayOption> {
+    match agent_id {
+        "codex" => codex_reasoning_options_for_model(model),
+        "grok" => GROK_REASONING_OPTIONS.to_vec(),
+        "claude" if is_claude_opus_tier_model(model) => {
+            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
+            if !ultracode_supported {
+                options.retain(|option| option.stored_value != "ultracode");
+            }
+            options
+        }
+        "claude" if model == "sonnet" => CLAUDE_SONNET_REASONING_OPTIONS.to_vec(),
+        "agy" => antigravity_reasoning_options_for_model(model),
+        _ => Vec::new(),
+    }
+}
+
+// Issue #7778: the steps an Antigravity model's `agy models` labels carry.
+fn antigravity_reasoning_options_for_model(model: &str) -> Vec<ReasoningDisplayOption> {
+    let Some(row) = gwt_agent::antigravity_model(model) else {
+        return Vec::new();
+    };
+    CODEX_REASONING_LADDER
+        .iter()
+        .filter(|option| row.efforts.contains(&option.stored_value))
+        .map(|option| ReasoningDisplayOption {
+            is_default: row.default_effort == Some(option.stored_value),
+            ..*option
+        })
+        .collect()
+}
+
+/// Project missing saved tuning through the same defaults as a fresh wizard.
+pub(crate) fn default_launch_tuning(
+    agent_id: &str,
+    saved_model: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let models = current_model_options(agent_id);
+    let model = saved_model.unwrap_or_else(|| models.first().map(String::as_str).unwrap_or(""));
+    // Ultracode is an explicit, non-default capability; default resolution
+    // must neither select it nor infer the installed tool's capability.
+    let options = reasoning_options_for_agent_model(agent_id, model, false);
+    let reasoning = options
+        .iter()
+        .find(|option| option.is_default)
+        .or_else(|| options.first())
+        .map(|option| option.stored_value.to_string());
+    (
+        is_explicit_model_selection(model).then(|| model.to_string()),
+        reasoning,
+    )
+}
+
+/// The steps the common reasoning levels are placed on, lowest first. A
+/// tool's own extra steps (`auto`, `ultracode`, ...) are never chosen for an
+/// agent's level.
+const TRAIT_REASONING_STEPS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Give the candidate the agent's fixed traits on the tool it is about to
+/// run (SPEC #7007 items 48 and 181).
+///
+/// The common level becomes the tool's own step of the same strength; a tool
+/// without that step takes the nearest one below it, and a tool with no
+/// reasoning steps is passed none. An unset level or speed keeps the
+/// candidate's value.
+pub(crate) fn apply_agent_traits(
+    profile: &mut crate::issue_monitor::IssueMonitorLaunchProfile,
+    traits: &crate::agent_names::AgentTraits,
+) {
+    use crate::agent_names::{TraitReasoningLevel, TraitSpeed};
+    let tool = gwt_agent::resolve_agent_id(&profile.agent_id);
+    let tool = tool
+        .as_ref()
+        .map_or(profile.agent_id.as_str(), gwt_agent::AgentId::command);
+    if let Some(level) = traits.reasoning_level {
+        let wanted = match level {
+            TraitReasoningLevel::Low => 0,
+            TraitReasoningLevel::Standard => 1,
+            TraitReasoningLevel::High => 2,
+            TraitReasoningLevel::Max => 4,
+        };
+        let models = current_model_options(tool);
+        let model = profile
+            .model
+            .as_deref()
+            .or(models.first().map(String::as_str))
+            .unwrap_or("");
+        let offered = reasoning_options_for_agent_model(tool, model, false);
+        profile.reasoning = TRAIT_REASONING_STEPS[..=wanted]
+            .iter()
+            .rev()
+            .find(|step| offered.iter().any(|option| option.stored_value == **step))
+            .map(|step| (*step).to_string());
+    }
+    if let Some(speed) = traits.speed {
+        profile.codex_speed = match (tool, speed) {
+            ("codex", TraitSpeed::Fast) => gwt_agent::CodexSpeed::Fast,
+            ("codex", TraitSpeed::Fastest) => gwt_agent::CodexSpeed::Ultrafast,
+            _ => gwt_agent::CodexSpeed::Off,
+        };
+        profile.fast_mode = tool == "claude" && speed != TraitSpeed::Normal;
+    }
 }
 
 pub(super) const EXECUTION_MODE_OPTIONS: [ExecutionModeOption; 3] = [
@@ -699,6 +811,16 @@ pub(super) fn model_display_options(agent_id: &str) -> Vec<ModelDisplayOption> {
                 description: row.description.clone(),
             })
             .collect(),
+        // Issue #7778: `agy --model` takes the `agy models` label; the
+        // reasoning suffix is chosen on the reasoning step.
+        "agy" => gwt_agent::ANTIGRAVITY_MODELS
+            .iter()
+            .map(|model| ModelDisplayOption {
+                label: model.label.to_string(),
+                stored_value: model.label.to_string(),
+                description: model.description.to_string(),
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1044,8 +1166,8 @@ pub(super) fn no_detected_agent_setup_view() -> super::LaunchWizardAgentSetupVie
 }
 
 pub(super) fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {
-    gwt_agent::builtin_agent_descriptor_for_command(agent_id)
-        .map(|descriptor| descriptor.id.clone())
+    gwt_agent::resolve_agent_id(agent_id)
+        .filter(|resolved| !matches!(resolved, gwt_agent::AgentId::Custom(_)))
         .unwrap_or_else(|| gwt_agent::AgentId::Custom(agent_id.to_string()))
 }
 
@@ -1199,6 +1321,112 @@ mod tests {
         );
         state.set_agent_id("grok");
         state
+    }
+
+    fn traits_candidate(
+        agent_id: &str,
+        model: Option<&str>,
+    ) -> crate::issue_monitor::IssueMonitorLaunchProfile {
+        serde_json::from_value(serde_json::json!({
+            "agent_id": agent_id, "model": model, "reasoning": "saved",
+        }))
+        .unwrap()
+    }
+
+    // Issue #7647 AC-1 (items 48 and 181): the agent's common level becomes
+    // the tool's own, rounded down when the tool has no such step.
+    #[test]
+    fn agent_traits_map_to_the_tool_level_rounding_down() {
+        use crate::agent_names::{AgentTraits, TraitReasoningLevel as Level, TraitSpeed as Speed};
+        let reasoning = |agent: &str, model: Option<&str>, level: Level| {
+            let mut profile = traits_candidate(agent, model);
+            apply_agent_traits(
+                &mut profile,
+                &AgentTraits {
+                    reasoning_level: Some(level),
+                    ..AgentTraits::default()
+                },
+            );
+            profile.reasoning
+        };
+        for (level, expected) in [
+            (Level::Low, "low"),
+            (Level::Standard, "medium"),
+            (Level::High, "high"),
+            (Level::Max, "max"),
+        ] {
+            assert_eq!(
+                reasoning("claude", Some("opus"), level).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            reasoning("claude", Some("sonnet"), Level::Max).as_deref(),
+            Some("high"),
+            "a tool without the step takes the nearest one below it"
+        );
+        assert_eq!(
+            reasoning("codex", Some("unlisted-model"), Level::Max).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            reasoning("grok", None, Level::Standard).as_deref(),
+            Some("medium")
+        );
+        // Issue #7778: Antigravity's label steps follow the same rounding.
+        assert_eq!(
+            reasoning("agy", Some("Gemini 3.1 Pro"), Level::Standard).as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            reasoning("agy", Some("Gemini 3.5 Flash"), Level::Max).as_deref(),
+            Some("high")
+        );
+        for (agent, model) in [("claude", Some("haiku")), ("opencode", None)] {
+            assert_eq!(
+                reasoning(agent, model, Level::High),
+                None,
+                "{agent} has no reasoning steps, so none is passed"
+            );
+        }
+
+        let speed = |agent: &str, speed: Speed| {
+            let mut profile = traits_candidate(agent, None);
+            profile.fast_mode = true;
+            profile.codex_speed = gwt_agent::CodexSpeed::Fast;
+            apply_agent_traits(
+                &mut profile,
+                &AgentTraits {
+                    speed: Some(speed),
+                    ..AgentTraits::default()
+                },
+            );
+            (profile.fast_mode, profile.codex_speed)
+        };
+        use gwt_agent::CodexSpeed::{Fast, Off, Ultrafast};
+        assert_eq!(speed("codex", Speed::Normal), (false, Off));
+        assert_eq!(speed("codex", Speed::Fast), (false, Fast));
+        assert_eq!(speed("codex", Speed::Fastest), (false, Ultrafast));
+        assert_eq!(speed("claude", Speed::Normal), (false, Off));
+        assert_eq!(speed("claude", Speed::Fast), (true, Off));
+        assert_eq!(
+            speed("claude", Speed::Fastest),
+            (true, Off),
+            "Claude Code has one fast step, so the fastest rounds down to it"
+        );
+        assert_eq!(speed("grok", Speed::Fastest), (false, Off));
+
+        let mut untouched = traits_candidate("codex", Some("unlisted-model"));
+        untouched.codex_speed = Fast;
+        let before = untouched.clone();
+        apply_agent_traits(
+            &mut untouched,
+            &AgentTraits {
+                personality: Some("Verify first.".into()),
+                ..AgentTraits::default()
+            },
+        );
+        assert_eq!(untouched, before, "an unset level or speed changes nothing");
     }
 
     #[test]
@@ -1721,6 +1949,13 @@ mod tests {
         assert_eq!(agent_id_from_key("opencode"), gwt_agent::AgentId::OpenCode);
         assert_eq!(agent_id_from_key("openclaw"), gwt_agent::AgentId::OpenClaw);
         assert_eq!(agent_id_from_key("hermes"), gwt_agent::AgentId::Hermes);
+        for builtin_alias in ["codex", "Codex", "CODEX"] {
+            assert_eq!(agent_id_from_key(builtin_alias), gwt_agent::AgentId::Codex);
+        }
+        assert_eq!(
+            agent_id_from_key("ReviewBot"),
+            gwt_agent::AgentId::Custom("ReviewBot".to_string())
+        );
         assert_eq!(
             agent_id_from_key("custom"),
             gwt_agent::AgentId::Custom("custom".to_string())
@@ -1789,8 +2024,16 @@ mod tests {
         );
         assert!(current_model_options("gemini").is_empty());
         assert!(model_display_options("gemini").is_empty());
-        assert!(current_model_options("agy").is_empty());
-        assert!(model_display_options("agy").is_empty());
+        // Issue #7778: Antigravity offers `agy models` labels, never slugs.
+        let agy = current_model_options("agy");
+        assert!(agy.contains(&"Gemini 3.1 Pro".to_string()));
+        assert!(agy.iter().all(|model| model.contains(' ')));
+        let pro: Vec<_> = reasoning_options_for_agent_model("agy", "Gemini 3.1 Pro", false)
+            .iter()
+            .map(|option| (option.stored_value, option.is_default))
+            .collect();
+        assert_eq!(pro, vec![("low", false), ("high", true)]);
+        assert!(reasoning_options_for_agent_model("agy", "Claude Opus 4.6", false).is_empty());
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
         assert!(!model_display_options("codex").is_empty());
@@ -1822,6 +2065,37 @@ mod tests {
         // (gpt-reserve / codex-auto-review).
     }
 
+    // Issue #3986 AC-2 / AC-5: every model the wizard can launch must resolve
+    // a context window in `gwt_core::usage::model_context`, so adding a row to
+    // this catalog without a matching family entry fails here instead of
+    // silently dropping the context-left estimate. The Claude "Default (...)"
+    // row is not a model name (it launches without `--model`), so only
+    // explicit selections are walked.
+    #[test]
+    fn every_catalog_model_resolves_a_context_limit() {
+        let mut walked = 0usize;
+        let mut missing = Vec::new();
+        for agent in ["claude", "codex"] {
+            for model in current_model_options(agent) {
+                if !is_explicit_model_selection(&model) {
+                    continue;
+                }
+                walked += 1;
+                if gwt_core::usage::model_context::context_limit(&model).is_none() {
+                    missing.push(format!("{agent}:{model}"));
+                }
+            }
+        }
+        assert!(
+            walked > 0,
+            "catalog walk must cover explicit model selections"
+        );
+        assert!(
+            missing.is_empty(),
+            "catalog models without a context_limit entry: {missing:?}"
+        );
+    }
+
     fn codex_capability_row(model: &str) -> (Vec<&'static str>, &'static str) {
         let options = codex_reasoning_options_for_model(model);
         let values: Vec<&'static str> = options.iter().map(|option| option.stored_value).collect();
@@ -1835,11 +2109,10 @@ mod tests {
 
     // SPEC-1921 US-20 / FR-122 + FR-123 + Issue #3962 AC-3: reasoning rows and
     // the initial stop derive from the selected model's capability row. The
-    // expectations below mirror the CLI's own effort picker
-    // (`supported_reasoning_levels` / `default_reasoning_level`), so Astra /
-    // Sol / Terra expose six stops through Ultra, Luna five through Max, and
-    // gpt-5.5 four through Extra high. gpt-6.1-sol and gpt-5.6-sol default
-    // to Low; every other visible model defaults to Medium.
+    // expectations below combine the catalog's effort picker with native
+    // lowering: Sol / Terra expose six stops through Ultra, Astra / Luna five
+    // through Max, and retired gpt-5.5 four through Extra high. gpt-6.1-sol,
+    // gpt-6.1-terra and gpt-5.6-sol default to Low; the other rows use Medium.
     #[test]
     fn codex_reasoning_capability_rows_follow_model() {
         const SIX: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
@@ -1849,7 +2122,7 @@ mod tests {
         assert_eq!(codex_capability_row("gpt-6.1-sol"), (SIX.to_vec(), "low"));
         assert_eq!(
             codex_capability_row("gpt-6-astra"),
-            (SIX.to_vec(), "medium")
+            (FIVE.to_vec(), "medium")
         );
         assert_eq!(codex_capability_row("gpt-5.6-sol"), (SIX.to_vec(), "low"));
         assert_eq!(
@@ -1950,6 +2223,7 @@ mod tests {
             live_window_id: None,
             skip_permissions: true,
             codex_fast_mode: true,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
             docker_service: Some("gwt".to_string()),
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,

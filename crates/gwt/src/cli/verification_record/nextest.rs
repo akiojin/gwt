@@ -19,6 +19,43 @@ pub struct NextestEvidence {
     pub slowest: Vec<TestDuration>,
 }
 
+/// Add `--config-file <path>` to a nextest shell command line, ahead of the
+/// first unquoted `--` so the flag reaches nextest rather than the libtest
+/// filter arguments that follow the separator.
+pub fn with_config_file(command: &str, path: &str) -> String {
+    let flag = format!("--config-file \"{path}\"");
+    match libtest_separator(command) {
+        Some(at) => format!("{}{flag} {}", &command[..at], &command[at..]),
+        None => format!("{command} {flag}"),
+    }
+}
+
+/// Byte offset of the first unquoted, whitespace-delimited `--` token.
+fn libtest_separator(command: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut token_start = None;
+    for (index, byte) in command.bytes().chain(*b" ").enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if byte.is_ascii_whitespace() => {
+                if let Some(start) = token_start.take() {
+                    if &command[start..index] == "--" {
+                        return Some(start);
+                    }
+                }
+            }
+            None => {
+                if byte == b'"' || byte == b'\'' {
+                    quote = Some(byte);
+                }
+                token_start.get_or_insert(index);
+            }
+        }
+    }
+    None
+}
+
 pub struct Capture {
     directory: tempfile::TempDir,
 }
@@ -211,6 +248,31 @@ path = 'stale.xml'
         let path = report_path(capture);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, xml).unwrap();
+    }
+
+    #[test]
+    fn config_file_goes_before_the_libtest_separator() {
+        // #7320 / #6097: appended after `--`, nextest handed `--config-file`
+        // to the test binaries and failed before running any test.
+        assert_eq!(
+            with_config_file(
+                "cargo nextest run -p gwt --profile gwt-verify --retries 0 -- a:: b::",
+                "C:\\t\\nextest.toml"
+            ),
+            "cargo nextest run -p gwt --profile gwt-verify --retries 0 --config-file \"C:\\t\\nextest.toml\" -- a:: b::"
+        );
+        assert_eq!(
+            with_config_file("cargo nextest run --profile gwt-verify", "/t/n.toml"),
+            "cargo nextest run --profile gwt-verify --config-file \"/t/n.toml\""
+        );
+        // A quoted `--` or a `--`-prefixed flag is not the separator.
+        assert_eq!(
+            with_config_file(
+                "cargo nextest run --profile gwt-verify -E \"a -- b\" --retries 0",
+                "/t/n.toml"
+            ),
+            "cargo nextest run --profile gwt-verify -E \"a -- b\" --retries 0 --config-file \"/t/n.toml\""
+        );
     }
 
     #[test]

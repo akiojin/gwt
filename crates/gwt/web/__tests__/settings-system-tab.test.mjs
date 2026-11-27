@@ -15,14 +15,17 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createAgentsSurface } from "../agents-surface.js";
 import { createInteractionGuard } from "../interaction-guard.js";
 import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "../first-run-setup.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const settingsSource = readFileSync(resolve(here, "../settings-surface.js"), "utf8");
+const agentsSource = readFileSync(resolve(here, "../agents-surface.js"), "utf8");
 const componentsCss = readFileSync(
   resolve(here, "../styles/components.css"),
   "utf8",
@@ -69,10 +72,12 @@ function createSettingsHarness({ scheduleFrame, onSend, activeProjectTab = () =>
     { member_id: "member-custom", name: "Custom member", agent_id: "fixture-cli", enabled: true },
   ] }, { scheduleFrame: frameScheduler });
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", `${settingsSource
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason",
+    "SETUP_REVIEW_STEPS", "firstRunSetupUrlPath", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
     document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason,
+    SETUP_REVIEW_STEPS, firstRunSetupUrlPath,
   );
   const surface = factory({
     scheduleFrame: frameScheduler,
@@ -808,7 +813,8 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   sent.length = 0;
   surface.resyncSettings();
   assert.deepEqual(sent, [
-    { kind: "list_issue_monitor" }, { kind: "get_repository_labels", refresh: false }, { kind: "get_issue_monitor_profiles" },
+    { kind: "get_project_environment_set" },
+    { kind: "list_issue_monitor" }, { kind: "get_repository_labels", refresh: false }, { kind: "get_issue_monitor_profiles" }, { kind: "get_execution_environments" },
     { kind: "agent_roster", action: { kind: "read" }, expected_revision: null },
     { kind: "list_supported_agents" }, { kind: "get_system_settings" },
     { kind: "get_update_settings" }, { kind: "get_board_auth_status" },
@@ -972,7 +978,8 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   ]);
   assert.match(panel.textContent, /next.*startup/i);
   assert.match(panel.textContent, /installed agents with a verified update route/i);
-  assert.match(panel.textContent, /agent windows/i);
+  // Issue #7744: only the windows running a tool hold back its maintenance.
+  assert.match(panel.textContent, /refused while an agent window is running that tool/i);
   const supportedAgentsModel = createUiStateStore({
     agents, autoUpdate: false, maintenanceByAgent: {},
   });
@@ -1011,7 +1018,12 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
   handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
   assert.match(panel.querySelector('[role="alert"]').textContent, /Check your connection and retry/);
-  assert.equal(panel.querySelector('[role="alert"]').title, "Registry unavailable. Check your connection and retry.");
+  const result = panel.querySelector('[data-agent-maintenance-id="opencode"]');
+  assert.ok(result, "maintenance guidance needs an agent-labelled result");
+  assert.equal(result.parentNode, panel, "long recovery instructions must stay outside clipped table cells");
+  assert.match(result.textContent, /^OpenCode: Registry unavailable/);
+  assert.equal(result.title, result.textContent);
+  assert.match(componentsCss, /\.settings-agent-maintenance-result\s*\{[^}]*overflow-wrap:\s*anywhere/s);
   assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false);
   agents[1].installed_version = "grok 2.0.0";
   agents[1].update_available = false;
@@ -1252,132 +1264,89 @@ test("settings-select uses --color-focus-ring on focus-visible", () => {
   assert.match(block[1], /var\(--color-focus-ring\)/);
 });
 
-test("renderSettingsWindow builds a tablist toolbar with System, Project Manager, and Custom Agents tabs", () => {
-  // The renderer must declare role="tablist" so assistive tech sees the tab
-  // group, and emit both data-settings-tab values that switchSettingsTab
-  // expects.
+function createAgentsPmSettingsHarness(pmSettingsPanel = null) {
+  const { document } = parseHTML("<!doctype html><body><main></main></body>");
+  const options = { scheduleFrame: () => () => {} };
+  const surface = createAgentsSurface({
+    document,
+    rosterModel: createUiStateStore({ revision: 1, members: [], past_contributors: [] }, options),
+    activityModel: createUiStateStore({ agents: [], count: 0 }, options),
+    windowCatalogModel: createUiStateStore({ catalog: { appState: { tabs: [] }, version: 1 } }, options),
+    pmSettingsPanel,
+  });
+  document.querySelector("main").append(surface.element);
+  return { document, surface };
+}
+
+test("Settings exposes System and Custom Agents tabs while Agents owns Project Manager operations", () => {
   const renderSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
   assert.match(renderSource, /toolbar\.className\s*=\s*"settings-toolbar"/);
   assert.match(renderSource, /tabs\.setAttribute\("role",\s*"tablist"\)/);
   assert.match(renderSource, /buildSettingsTab\("system",\s*"System"/);
-  assert.match(
-    renderSource,
-    /buildSettingsTab\(\s*"project-manager",\s*"Project Manager"/,
-  );
-  assert.match(
-    renderSource,
-    /buildSettingsTab\("custom-agents",\s*"Custom Agents"/,
-  );
+  assert.match(renderSource, /buildSettingsTab\("custom-agents",\s*"Custom Agents"/);
+  assert.doesNotMatch(renderSource, /buildSettingsTab\(\s*"project-manager"/);
+  const { surface } = createAgentsPmSettingsHarness();
+  assert.ok(surface.element.querySelector('[data-role="pm-project-operations"]'));
+  surface.dispose();
 });
 
-test("Project Manager tab mounts the shared PM editor controller", () => {
-  const { document } = parseHTML('<!doctype html><body><div id="settings-body"></div></body>');
-  const settingsBody = document.getElementById("settings-body");
-  const mounted = [];
-  const pmSettingsPanel = {
-    mount(node) {
-      mounted.push(node);
-    },
-  };
-  const mountProjectManagerSettingsPanel = loadFunction(
-    "mountProjectManagerSettingsPanel",
-  );
-
-  mountProjectManagerSettingsPanel(document, settingsBody, pmSettingsPanel);
-
+test("Agents mounts and unmounts the shared Project Manager editor controller", () => {
+  const mounted = [], unmounted = [];
+  const { surface } = createAgentsPmSettingsHarness({
+    mount: node => mounted.push(node), unmount: node => unmounted.push(node),
+  });
+  const host = surface.element.querySelector('[data-role="pm-project-operations"]');
   assert.equal(mounted.length, 1);
-  assert.equal(mounted[0].dataset.settingsPanel, "project-manager");
-  assert.equal(mounted[0].parentElement, settingsBody);
-
-  const renderSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
-  const mountSource = extractFunctionSource(
-    settingsSource,
-    "mountProjectManagerSettingsPanel",
-  );
-  assert.match(
-    renderSource,
-    /mountProjectManagerSettingsPanel\(\s*document,\s*bodyEl,\s*pmSettingsPanel,\s*windowData\.id,\s*\)/,
-    "renderSettingsWindow must mount the shared PM editor at its render boundary",
-  );
-  assert.doesNotMatch(
-    `${renderSource}\n${mountSource}`,
-    /set_pm_(?:auto_start|launch_profile|loop_interval)/,
-    "Settings render and mount helpers must not duplicate PM event construction",
-  );
+  assert.equal(mounted[0], host);
+  assert.equal(host.parentElement, surface.element.querySelector(".roster-team"));
+  assert.equal(host.isConnected, true);
+  assert.match(agentsSource, /pmSettingsPanel\?\.mount\(element\.querySelector\('\[data-role="pm-project-operations"\]'\)\)/);
+  assert.doesNotMatch(agentsSource, /set_pm_(?:auto_start|launch_profile|loop_interval)/,
+    "Agents must mount the shared editor without duplicating PM event construction");
+  surface.dispose();
+  assert.deepEqual(unmounted, [host]);
 });
 
-test("Project Manager tab and panel expose an explicit accessible relationship", () => {
-  const { document } = parseHTML('<!doctype html><body><div id="settings-body"></div></body>');
-  const settingsBody = document.getElementById("settings-body");
-  const mountProjectManagerSettingsPanel = loadFunction(
-    "mountProjectManagerSettingsPanel",
-  );
-
-  const panel = mountProjectManagerSettingsPanel(
-    document,
-    settingsBody,
-    null,
-    "window-7",
-  );
-
-  assert.equal(panel.id, "settings-window-7-panel-project-manager");
-  assert.equal(
-    panel.getAttribute("aria-labelledby"),
-    "settings-window-7-tab-project-manager",
-  );
-
-  const tabSource = extractFunctionSource(settingsSource, "buildSettingsTab");
-  assert.match(tabSource, /btn\.id\s*=\s*settingsTabId\(windowId,\s*id\)/);
-  assert.match(
-    tabSource,
-    /btn\.setAttribute\("aria-controls",\s*settingsPanelId\(windowId,\s*id\)\)/,
-  );
+test("Project Manager operations belong to an accessible Agents Team tabpanel", () => {
+  const { document, surface } = createAgentsPmSettingsHarness();
+  const host = surface.element.querySelector('[data-role="pm-project-operations"]');
+  assert.equal(host.getAttribute("aria-label"), "Project Manager operations");
+  const panel = host.closest('[role="tabpanel"]');
+  const tab = document.getElementById(panel.getAttribute("aria-labelledby"));
+  assert.equal(tab.getAttribute("role"), "tab");
+  assert.equal(tab.getAttribute("aria-controls"), panel.id);
+  assert.equal(tab.dataset.tab, "team");
+  assert.equal(tab.getAttribute("aria-selected"), "true");
+  assert.equal(panel.hidden, false);
+  surface.element.querySelector('[data-tab="past"]').click();
+  assert.equal(tab.getAttribute("aria-selected"), "false");
+  assert.equal(panel.hidden, true);
+  tab.click();
+  assert.equal(tab.getAttribute("aria-selected"), "true");
+  assert.equal(panel.hidden, false);
+  surface.dispose();
 });
 
-test("settings:open routes to the Project Manager tab and frames an existing Settings window", () => {
-  const { document } = parseHTML(`<!doctype html><body>
-    <div id="settings-body">
-      <button class="settings-tab active" data-settings-tab="system" aria-selected="true"></button>
-      <button class="settings-tab" data-settings-tab="project-manager" aria-selected="false"></button>
-      <section class="settings-panel" data-settings-panel="system"></section>
-      <section class="settings-panel hidden" data-settings-panel="project-manager"></section>
-    </div>
-  </body>`);
-  const settingsBody = document.getElementById("settings-body");
+test("settings:open routes Project Manager settings to the existing Agents editor", () => {
+  const { document, surface } = createAgentsPmSettingsHarness();
   const framed = [];
-  const installSettingsOpenHandler = loadFunctionWithDeps(
-    "installSettingsOpenHandler",
-    ["switchSettingsTab"],
-  );
-
+  surface.element.querySelector('[data-tab="past"]').click();
+  const installSettingsOpenHandler = loadFunctionWithDeps("installSettingsOpenHandler", ["switchSettingsTab"]);
   installSettingsOpenHandler({
     document,
-    settingsWindowBodies: new Set([settingsBody]),
-    focusOrSpawnPreset: (preset) => framed.push(preset),
-    setPendingTarget: () => assert.fail("an existing Settings window must not pend"),
+    settingsWindowBodies: new Set(),
+    onOpenAgents: () => { framed.push("agents"); surface.openPmSettings(); },
+    focusOrSpawnPreset: () => assert.fail("the shared Agents editor must own PM settings"),
+    setPendingTarget: () => assert.fail("PM settings must not pend a Settings tab"),
   });
-  document.dispatchEvent(
-    new document.defaultView.CustomEvent("settings:open", {
-      detail: { target: "project-manager" },
-    }),
-  );
-
-  assert.equal(
-    settingsBody.querySelector('[data-settings-tab="project-manager"]')
-      .getAttribute("aria-selected"),
-    "true",
-  );
-  assert.equal(
-    settingsBody.querySelector('[data-settings-panel="project-manager"]')
-      .classList.contains("hidden"),
-    false,
-  );
-  assert.equal(
-    settingsBody.querySelector('[data-settings-panel="system"]')
-      .classList.contains("hidden"),
-    true,
-  );
-  assert.deepEqual(framed, ["settings"]);
+  document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", {
+    detail: { target: "project-manager" },
+  }));
+  assert.deepEqual(framed, ["agents"]);
+  assert.equal(surface.element.querySelector('[data-tab="team"]').getAttribute("aria-selected"), "true");
+  assert.equal(surface.element.querySelector(".roster-team").hidden, false);
+  assert.equal(surface.element.querySelector(".roster-past").hidden, true);
+  surface.dispose();
 });
 
 test("System tab Language select offers Auto / English / 日本語", () => {
@@ -1799,7 +1768,7 @@ test("Custom Agents panel keeps the data-role='settings-scroll' hook for the leg
 test("Custom Agents panel wires the env editor to update_custom_agent", () => {
   assert.match(
     settingsSource,
-    /from "\/custom-agent-env-editor\.js"/,
+    /from "\.\/custom-agent-env-editor\.js"/,
     "settings surface must import the custom agent env editor module",
   );
   assert.match(
@@ -1947,4 +1916,86 @@ test("Works loads its saved output line count on reconnect without a Settings mo
   const { surface, sent } = createSettingsHarness();
   surface.resyncSettings();
   assert.deepEqual(sent, [{ kind: "get_system_settings" }]);
+});
+
+// Issue #7731 AC-1: the setup is not a one-time screen. Settings links to
+// each of its steps on the Hub page.
+test("Issue #7731: Application settings link to every step of the first-run setup", () => {
+  const { surface, body } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const section = body.querySelector("[data-first-run-setup-review]");
+  assert.equal(section.querySelector(".settings-section-heading").textContent, "Review first-run setup");
+  assert.deepEqual([...section.querySelectorAll("a")].map(link => [link.textContent, link.getAttribute("href")]), [
+    ["Welcome", "/?view=setup&step=welcome"],
+    ["Tools", "/?view=setup&step=tools"],
+    ["Project Manager", "/?view=setup&step=pm"],
+    ["Open a project", "/?view=setup&step=project"],
+  ]);
+});
+
+// Issue #7646 AC-2: Application settings keep only a link to the agent
+// ledger. Members are never edited from Settings.
+test("Issue #7646: Application settings link to the agent ledger without editing it", () => {
+  assert.match(settingsSource, /dataset\.action = "open-agent-ledger"/);
+  assert.match(settingsSource, /CustomEvent\("agents:open"\)/);
+  assert.match(appSource, /addEventListener\("agents:open", \(\) => openAgents\("ledger"\)\)/);
+  assert.doesNotMatch(settingsSource, /kind:\s*"(add|rest|activate|rename|move|remove|select_pm|set_pm_eligibility)"/,
+    "Settings sends no member change");
+});
+
+// Issue #7248 AC-2: the last apply result and this session's last apply error
+// stay visible in Settings status with a route to the update log.
+test("issue #7248: Settings update status shows the last apply result and the last apply error", () => {
+  const { surface, body, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const panel = () => body.querySelector("[data-update-settings-status]");
+  surface.applyGlobalUpdateSettings({ project_root: "/projects/A", status: {
+    auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null,
+    last_apply_result: {
+      outcome: "failure", from_version: "1.0.0", to_version: "1.1.0", observed_version: "1.0.0",
+      attempt: 2, recorded_at: "2026-11-11T00:00:00Z", message: "version mismatch",
+    },
+  } });
+  flush();
+  const result = panel().querySelector("[data-update-last-apply-result]");
+  assert.ok(result, "the last apply result has its own line");
+  assert.equal(result.getAttribute("role"), "alert");
+  assert.match(result.textContent, /Last update: Failed · v1\.0\.0 → v1\.1\.0 · expected v1\.1\.0, observed v1\.0\.0 · 2026-11-11T00:00:00Z/);
+  assert.match(result.textContent, /version mismatch/);
+  const openLog = panel().querySelector("[data-update-open-log]");
+  assert.ok(openLog, "a failed apply links to the update log");
+  openLog.click();
+  assert.deepEqual(sent.at(-1), { kind: "open_update_log" });
+
+  surface.applyUpdateApplyFailure({ stage: "Download asset", reason: "network down", log_path: "/logs/update.log" });
+  flush();
+  const error = panel().querySelector("[data-update-last-apply-error]");
+  assert.ok(error, "an in-session failure reaches Settings whatever the CTA status");
+  assert.match(error.textContent, /Last apply error: Download asset — network down · /);
+  panel().querySelector("[data-update-open-log]").click();
+  assert.deepEqual(sent.at(-1), { kind: "open_update_log", log_path: "/logs/update.log" });
+
+  surface.applyGlobalUpdateSettings({ project_root: "/projects/A", status: {
+    auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null,
+    last_apply_result: {
+      outcome: "success", from_version: "1.0.0", to_version: "1.1.0", observed_version: "1.1.0",
+      attempt: 1, recorded_at: "2026-11-12T00:00:00Z",
+    },
+  } });
+  flush();
+  assert.match(panel().querySelector("[data-update-last-apply-result]").textContent,
+    /Last update: Succeeded · v1\.0\.0 → v1\.1\.0 · observed v1\.1\.0 · 2026-11-12T00:00:00Z/);
+  assert.ok(panel().querySelector("[data-update-last-apply-error]"), "a later success keeps the session error visible");
+});
+
+test("issue #7248: Settings update status says when no apply has been recorded", () => {
+  const { surface, body, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  surface.applyGlobalUpdateSettings({ project_root: "/projects/A", status: {
+    auto_apply_updates: false, auto_apply_updates_effective: false, update_drain: null,
+  } });
+  flush();
+  const panel = body.querySelector("[data-update-settings-status]");
+  assert.match(panel.querySelector("[data-update-last-apply-result]").textContent, /Last update: none recorded/);
+  assert.equal(panel.querySelector("[data-update-open-log]"), null);
 });

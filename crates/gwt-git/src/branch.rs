@@ -94,9 +94,8 @@ pub fn is_branch_merged_into(repo_path: &Path, branch: &str, base: &str) -> Resu
     is_branch_merged_into_existing_refs(repo_path, branch, base)
 }
 
-/// Issue #6877 AC-3: resolve both tips once, answer a real (merge-commit)
-/// landing with `merge-base --is-ancestor`, and let the persistent verdict
-/// cache decide squash merges so `git cherry` runs only for a branch tip it
+/// Issue #6877 AC-3: resolve both tips once and let the persistent verdict
+/// cache decide, so `merge-base` and `git cherry` run only for a branch tip it
 /// has not seen.
 fn is_branch_merged_into_existing_refs(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
     let Some((branch_sha, base_sha)) =
@@ -104,9 +103,7 @@ fn is_branch_merged_into_existing_refs(repo_path: &Path, branch: &str, base: &st
     else {
         return Ok(false);
     };
-    if branch_sha == base_sha
-        || crate::merge_verdict_cache::is_ancestor(repo_path, &branch_sha, &base_sha)?
-    {
+    if branch_sha == base_sha {
         return Ok(true);
     }
     crate::merge_verdict_cache::is_merged_cached(repo_path, &branch_sha, &base_sha)
@@ -1020,6 +1017,66 @@ mod tests {
         );
     }
 
+    /// Issue #6877: a branch checked against `develop` and then `main` keeps a
+    /// lineage for each base. `main` contains the old `develop` tip after a
+    /// release, so advancing the `main` verdict must not consume the `develop`
+    /// lineage; otherwise every pass re-runs `git cherry` for both bases. An
+    /// unchanged pair answers from the cache with only the ref lookups.
+    #[test]
+    fn is_branch_merged_into_keeps_one_lineage_per_base_across_releases() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["branch", "develop"], repo);
+        run(&["checkout", "-b", "feature/both"], repo);
+        make_commit(repo, "a.txt", "a\n", "feat: a");
+        run(&["checkout", "develop"], repo);
+        make_commit(repo, "d1.txt", "d1\n", "feat: d1");
+        let release = |repo: &Path| {
+            run(&["checkout", "main"], repo);
+            run(&["merge", "--no-ff", "-m", "release", "develop"], repo);
+            run(&["checkout", "develop"], repo);
+        };
+        release(repo);
+
+        assert!(!is_branch_merged_into(repo, "feature/both", "develop").unwrap());
+        assert!(!is_branch_merged_into(repo, "feature/both", "main").unwrap());
+
+        make_commit(repo, "d2.txt", "d2\n", "feat: d2");
+        release(repo);
+        assert!(!is_branch_merged_into(repo, "feature/both", "develop").unwrap());
+        assert!(!is_branch_merged_into(repo, "feature/both", "main").unwrap());
+
+        let tip_of = |reference: &str| {
+            String::from_utf8(
+                gwt_core::process::hidden_command("git")
+                    .args(["rev-parse", reference])
+                    .current_dir(repo)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        };
+        let bases = crate::merge_verdict_cache::cached_lineage_bases(repo, &tip_of("feature/both"));
+        assert!(
+            bases.contains(&tip_of("develop")) && bases.contains(&tip_of("main")),
+            "each base keeps its own lineage: {bases:?}"
+        );
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        assert!(!is_branch_merged_into(repo, "feature/both", "develop").unwrap());
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count() - before,
+            3,
+            "an unchanged pair costs only the two ref checks and one rev-parse"
+        );
+    }
+
     #[test]
     fn is_branch_merged_into_false_for_unmerged() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1049,6 +1106,20 @@ mod tests {
         run(
             &["update-ref", "refs/remotes/origin/develop", "develop"],
             repo,
+        );
+
+        // Issue #3447: delivery may delete the remote work branch. Cleanup
+        // must compare the local branch to the base without requiring it.
+        run(
+            &["update-ref", "refs/remotes/origin/work/sq", "work/sq"],
+            repo,
+        );
+        let before_remote_delete = cleanup_readiness_base_target(repo, "work/sq").unwrap();
+        assert!(before_remote_delete.is_some());
+        run(&["update-ref", "-d", "refs/remotes/origin/work/sq"], repo);
+        assert_eq!(
+            cleanup_readiness_base_target(repo, "work/sq").unwrap(),
+            before_remote_delete
         );
 
         let target = merged_base_target(repo, "work/sq").unwrap();

@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn workspace_group_key_groups_same_branch_across_spellings_and_ids() {
         let project_root = Path::new("/tmp/repo");
-        let now = chrono::Utc::now();
+        let now = crate::timestamp::UtcTimestamp::now();
         let mut item_a = WorkItem {
             id: "work-session-aaaa".to_string(),
             title: "a".to_string(),

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -21,7 +22,7 @@ test.describe("Agent window navigation without tabs", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installTabbedAgentsBackend(page);
     await page.goto(appUrl);
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
     await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
   });
@@ -68,7 +69,7 @@ test.describe("Agent window navigation without tabs", () => {
     // Back changes presentation only; the native terminal remains owned by its session.
     await page.locator('.works-full [data-action="back"]').click();
     expect(await closedIds()).toEqual([]);
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await openWorks(page);
     await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
     expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);
@@ -83,8 +84,9 @@ test.describe("Agent window navigation without tabs", () => {
       await page.evaluate(state => window.__tabbedAgentsFixture.emitProviderStates(state), state);
       await expect.poll(() => page.evaluate(({ state, label }) => {
         const rows = ["agent-1", "agent-2"].every(id => document.querySelector(`.work-row[data-window-id="${id}"] .work-state`)?.textContent === label);
+        // SPEC #5016 AC-HS1: the strip and the Works heading render the same server BLOCK count.
         const counts = ["running", "waiting", "idle"].every(candidate =>
-          document.querySelector(`.works-counts [data-count="${candidate}"]`)?.textContent === (candidate === state ? "2" : "0") &&
+          document.querySelector(`.works-counts [data-count="${candidate === "waiting" ? "block" : candidate}"]`)?.textContent === (candidate === state ? "2" : "0") &&
           document.getElementById(`op-strip-${candidate}`)?.textContent === (candidate === state ? "2" : "0"));
         if (rows && counts) window.__tabbedAgentsFixture.lastStateObserved = performance.now();
         return rows && counts;
@@ -235,9 +237,15 @@ async function installTabbedAgentsBackend(page) {
       },
       emitProviderStates(status) {
         this.lastStatePush = performance.now();
+        // Like the backend, publish the project aggregate after both agents change.
+        const both = (...states) => (states.includes(status) ? 2 : 0);
+        this.aggregateRevision = (this.aggregateRevision || 0) + 1;
+        const aggregate = { running_count: both("running", "starting"), block_count: both("waiting", "stopped", "interrupted", "error"),
+          idle_count: both("idle"), error_count: both("error"), unread: false, revision: this.aggregateRevision };
         FixtureWebSocket.instances.forEach(socket => {
           socket.emit({ kind: "window_state", window_id: "agent-1", state: status });
           socket.emit({ kind: "terminal_status", id: "agent-2", status });
+          socket.emit({ kind: "project_agent_aggregate", aggregate });
         });
       },
       resetUngrouped() {

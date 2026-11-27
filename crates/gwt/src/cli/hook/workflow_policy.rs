@@ -254,8 +254,8 @@ Required command shape:\n\
 Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
 Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
-workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as a single-segment gwtd command.\n\n\
-While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
+workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as its own gwtd invocation.\n\n\
+While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, workspace.reopen, workspace.repair_close_proof, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -330,6 +330,7 @@ fn is_review_dispatch_denied_operation(operation: &str) -> bool {
         return false;
     }
     operation.starts_with("execution.")
+        || operation.starts_with("agent.registry.")
         || operation.starts_with("workspace.")
         || operation.starts_with("build.")
         || operation.starts_with("pr.")
@@ -632,7 +633,7 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 /// not threaten that, and refusing them is what closed the interlock #4533
 /// reports:
 ///
-/// - `execution.adopt` / `execution.repair` / `execution.reopen` /
+/// - `execution.adopt` / `execution.repair` / `execution.reopen` / `workspace.reopen` /
 ///   `execution.release_prepared` are recovery-only. They are exactly what
 ///   `execution.status` advertises in `available_recoveries`, and a session
 ///   that cannot set its title is the only kind of session that ever needs
@@ -672,6 +673,10 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             // Repair proves an existing Work's immutable source history;
             // a broken assignment must not prevent its own bounded recovery.
             | "workspace.work_repair"
+            // Work-only recovery authenticates the current primary actor and
+            // exact Done event; it must remain reachable before identity repair.
+            | "workspace.reopen"
+            | "workspace.repair_close_proof"
             | "execution.reopen"
             | "execution.release_prepared"
             | "execution.release-prepared"
@@ -771,15 +776,49 @@ pub(crate) fn identity_gate_admits_operation(operation: &str) -> bool {
 
 fn is_workspace_identity_update_command(command: &str) -> bool {
     let segments = super::segments::split_command_segments(command);
-    if segments.len() == 1
-        && segments
-            .first()
-            .is_some_and(|segment| is_gwtd_only_segment(segment))
-        && is_workspace_identity_update_json_segment(command)
+    let payload = match segments.as_slice() {
+        [segment] if is_gwtd_only_segment(segment) => Some(command),
+        [_, segment] if matches!(segment.as_str(), r#""$GWT_BIN""# | r#""${GWT_BIN}""#) => {
+            resolved_gwtd_heredoc_body(command, segment)
+        }
+        _ => None,
+    };
+    payload.is_some_and(|payload| {
+        !has_file_output_redirection(command) && is_workspace_identity_update_json_segment(payload)
+    })
+}
+
+fn resolved_gwtd_heredoc_body<'a>(command: &'a str, binary: &str) -> Option<&'a str> {
+    let (assignment, invocation) = command.trim_start().split_once('\n')?;
+    let value = assignment.trim_end().strip_prefix("GWT_BIN=")?;
+    let quoted_path = ['\'', '"']
+        .into_iter()
+        .find_map(|quote| value.strip_prefix(quote)?.strip_suffix(quote));
+    let path = quoted_path.unwrap_or(value);
+    // Accept a literal resolved path without admitting shell expansions.
+    if !path.starts_with('/')
+        || !path.ends_with("/gwtd")
+        || !path.chars().all(|ch| {
+            ch.is_alphanumeric()
+                || matches!(ch, '/' | '.' | '_' | '-')
+                || (ch == ' ' && quoted_path.is_some())
+        })
     {
-        return true;
+        return None;
     }
-    false
+
+    let (header, body) = invocation.split_once('\n')?;
+    let delimiter = header
+        .trim()
+        .strip_prefix(binary)?
+        .trim_start()
+        .strip_prefix("<<")?;
+    if delimiter.trim() != "'JSON'" {
+        return None;
+    }
+    body.split_once("\nJSON\n")
+        .map(|(body, _)| body)
+        .or_else(|| body.strip_suffix("\nJSON"))
 }
 
 fn is_gwtd_only_segment(segment: &str) -> bool {
@@ -864,7 +903,8 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     }
     matches!(
         operation,
-        "workspace.candidates"
+        "agent.registry.status"
+            | "workspace.candidates"
             | "feedback.status"
             | "workspace.receipt"
             | "workspace.projection_list"
@@ -873,6 +913,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "board.config.show"
             | "board.config-show"
             | "concern.list"
+            | "decision.list"
             | "issue.view"
             | "issue.comments"
             | "issue.linked_prs"
@@ -920,6 +961,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "pm.status"
             | "project.execution.status"
             | "pm.report.list"
+            | "pm.theme.list"
             | "search"
     )
 }
@@ -1484,6 +1526,7 @@ mod tests {
             "pr.checks",
             "workspace.candidates",
             "verify.lease.status",
+            "agent.registry.status",
         ] {
             assert!(
                 !is_review_dispatch_denied_operation(operation),
@@ -1496,6 +1539,7 @@ mod tests {
             "verify.adjudicate",
             "verify.lease.acquire",
             "build.complete",
+            "agent.registry.reconcile",
         ] {
             assert!(
                 is_review_dispatch_denied_operation(operation),
@@ -2017,6 +2061,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_registry_status_is_read_only_but_reconcile_requires_workspace_identity() {
+        assert!(is_read_only_json_envelope_operation(
+            "agent.registry.status"
+        ));
+        assert!(!is_read_only_json_envelope_operation(
+            "agent.registry.reconcile"
+        ));
+        let repo = tempfile::tempdir().unwrap();
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        let status = envelope_command("agent.registry.status", "{}");
+        assert_eq!(
+            evaluate_with_context(&bash_event(&status), repo.path(), &context).unwrap(),
+            HookOutput::Silent,
+            "registry diagnosis must remain reachable before workspace identity",
+        );
+        let reconcile = envelope_command("agent.registry.reconcile", "{}");
+        let refusal =
+            evaluate_with_context(&bash_event(&reconcile), repo.path(), &context).unwrap();
+        assert!(refusal.summary().contains("workspace.ensure"));
+        assert_eq!(
+            evaluate_with_context(
+                &bash_event(&reconcile),
+                repo.path(),
+                &WorkflowContext::unknown(),
+            )
+            .unwrap(),
+            HookOutput::Silent,
+            "legitimate reconciliation remains available after workspace identity",
+        );
+    }
+
+    #[test]
     fn issue_monitor_json_operations_have_the_expected_policy_classification() {
         assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
         assert!(is_read_only_json_envelope_operation("issue.monitor.tiers"));
@@ -2159,6 +2235,47 @@ mod tests {
             evaluate_title_summary_guard(&bash_event(&update), true).unwrap(),
             HookOutput::PreToolUsePermission { .. }
         ));
+    }
+
+    #[test]
+    fn title_summary_guard_allows_resolved_binary_workspace_ensure() {
+        let ensure = envelope_command(
+            "workspace.ensure",
+            r#"{"purpose":"Identity recovery","current_focus":"Inspect owner"}"#,
+        );
+        let command = ensure.replacen(
+            "gwtd",
+            "GWT_BIN='/Applications/GWT.app/Contents/MacOS/gwtd'\n\"$GWT_BIN\"",
+            1,
+        );
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+            HookOutput::Silent
+        );
+        let pretty = r#"GWT_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
+"${GWT_BIN}" <<'JSON'
+{
+  "schema_version": 1,
+  "operation": "workspace.ensure",
+  "params": {
+    "purpose": "Identity recovery"
+  }
+}
+JSON"#;
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(pretty), true).unwrap(),
+            HookOutput::Silent
+        );
+        for rejected in [
+            format!("{command}\ncargo test -p gwt"),
+            format!("{command}\n> source.txt"),
+            format!("{ensure}\n> source.txt"),
+        ] {
+            assert!(matches!(
+                evaluate_title_summary_guard(&bash_event(&rejected), true).unwrap(),
+                HookOutput::PreToolUsePermission { .. }
+            ));
+        }
     }
 
     #[test]
@@ -2383,6 +2500,14 @@ mod tests {
                 r#"{"reason":"stale fence","operation_id":"op-1"}"#,
             ),
             envelope_command("workspace.work_repair", r#"{"work_id":"existing-work"}"#),
+            envelope_command(
+                "workspace.reopen",
+                r#"{"reason":"resume premature completion","observed_done_event_id":"done-event"}"#,
+            ),
+            envelope_command(
+                "workspace.repair_close_proof",
+                r#"{"reason":"restore durable close proof"}"#,
+            ),
         ] {
             assert_eq!(
                 evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),

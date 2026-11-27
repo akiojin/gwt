@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -92,11 +92,14 @@ pub fn reconcile_repo(opts: &ReconcileOptions) -> Result<()> {
 
     // Reconcile on the existing refresh/startup path, before a new writer pins
     // its artifacts. The sweep was previously only called by tests.
+    let now = time::OffsetDateTime::now_utc();
     let sweep = sweep_file_index_v2(&FileIndexGcOptions {
         index_root: opts.index_root.clone(),
         repo_hash: opts.repo_hash.clone(),
         active_worktree_hashes: valid_hashes.into_iter().collect(),
-        now_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX).max(0) as u64,
+        now_unix_nanos: i64::try_from(now.unix_timestamp_nanos())
+            .unwrap_or(i64::MAX)
+            .max(0) as u64,
         artifact_ttl: Duration::from_secs(24 * 60 * 60),
         worktree_grace: Duration::from_secs(24 * 60 * 60),
     });
@@ -245,7 +248,7 @@ impl FileIndexGcPin {
                 worktree_hash.map(str::to_string),
                 protected_paths,
                 std::process::id(),
-                Utc::now().to_rfc3339(),
+                UtcTimestamp::now().to_rfc3339(),
             )
             .map_err(|error| GwtError::Other(format!("create file-index GC pin: {error}")))?;
             write_json_atomic(&pin_dir.join(GC_PIN_FILE), &marker)?;
@@ -816,22 +819,74 @@ struct IssueMetadata {
 /// Issues runners must terminate before their heavy lease expires.
 pub const ISSUE_INDEX_BUILD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-fn issue_store_exists(repo_dir: &Path) -> bool {
+/// Check the supported published Issue storage contract without opening Chroma.
+/// The Python reader additionally verifies that every member exists in the pool.
+pub fn issue_store_exists(repo_dir: &Path) -> bool {
+    use serde_json::Value;
+
     let generations = repo_dir.join("issues.gen");
     let pointer = generations.join("active.json");
-    let store = if pointer.exists() {
-        let generation = fs::read(&pointer)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value.get("generation")?.as_str().map(str::to_owned));
-        let Some(generation) = generation else {
-            return false;
-        };
-        generations.join(generation)
-    } else {
-        repo_dir.join("issues")
-    };
-    store.join("chroma.sqlite3").is_file()
+    let store = (|| -> Option<PathBuf> {
+        if !pointer.exists() {
+            return Some(repo_dir.join("issues"));
+        }
+        let pointer: Value = serde_json::from_slice(&fs::read(pointer).ok()?).ok()?;
+        let generation = pointer.get("generation")?.as_str()?;
+        if !generation.starts_with("gen-")
+            || generation.len() <= 4
+            || !generation
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return None;
+        }
+        let generation = generations.join(generation);
+        let schema_version = pointer.get("schema_version")?.as_u64()?;
+        if schema_version == 1 {
+            return pointer
+                .get("writer_protocol")
+                .is_none()
+                .then_some(generation);
+        }
+        if schema_version != 2
+            || pointer.get("writer_protocol")?.as_str() != Some("issues-records-v1")
+            || pointer.get("scope")?.as_str() != Some("issues")
+            || pointer.get("delta").is_some()
+        {
+            return None;
+        }
+        let membership: Value =
+            serde_json::from_slice(&fs::read(generation.join("membership.json")).ok()?).ok()?;
+        let members = membership.get("members")?.as_object()?;
+        let mut storage_ids = HashSet::new();
+        if membership.as_object()?.len() != 5
+            || membership.get("schema_version")?.as_u64() != Some(1)
+            || membership.get("writer_protocol")?.as_str() != Some("issues-records-v1")
+            || membership.get("record_layout")?.as_str() != Some("issue-spec-chunks-v1")
+            || pointer.get("document_count")?.as_u64() != Some(members.len() as u64)
+            || !members.iter().all(|(logical_id, storage_id)| {
+                !logical_id.is_empty()
+                    && logical_id.is_ascii()
+                    && storage_id.as_str().is_some_and(|storage_id| {
+                        storage_id.len() == 64
+                            && storage_id
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                            && storage_ids.insert(storage_id)
+                    })
+            })
+        {
+            return None;
+        }
+        let digest = crate::index::view::canonical_json_sha256(&membership["members"]);
+        if membership.get("members_digest")?.as_str() != Some(digest.as_str())
+            || pointer.get("membership_digest")?.as_str() != Some(digest.as_str())
+        {
+            return None;
+        }
+        Some(generations.join("record-stores/issues-records-v1/store"))
+    })();
+    store.is_some_and(|store| store.join("chroma.sqlite3").is_file())
 }
 
 /// Source drift can reuse vectors, but a missing/inconsistent manifest cannot.
@@ -959,10 +1014,10 @@ pub async fn refresh_issues_if_stale<S: RunnerSpawner + ?Sized>(
                 if meta.document_count > 0
                     && issues_dir.parent().is_some_and(issue_store_exists) =>
             {
-                match DateTime::parse_from_rfc3339(&meta.last_full_refresh) {
-                    Ok(dt) => {
-                        let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
-                        let age_std = age.to_std().unwrap_or(Duration::MAX);
+                match UtcTimestamp::parse_rfc3339(&meta.last_full_refresh) {
+                    Some(dt) => {
+                        let age = UtcTimestamp::now().signed_duration_since(dt);
+                        let age_std = Duration::try_from(age).unwrap_or(Duration::MAX);
                         if age_std >= opts.ttl {
                             true
                         } else {
@@ -970,7 +1025,7 @@ pub async fn refresh_issues_if_stale<S: RunnerSpawner + ?Sized>(
                             false
                         }
                     }
-                    Err(_) => true,
+                    None => true,
                 }
             }
             _ => true,
@@ -1005,7 +1060,7 @@ fn read_issue_meta(path: &Path) -> Option<IssueMetadata> {
 pub fn issue_index_refreshed_since(
     index_root: &Path,
     repo_hash: &str,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
 ) -> bool {
     let meta_path = index_root.join(repo_hash).join("issues").join("meta.json");
     let Some(meta) = read_issue_meta(&meta_path) else {
@@ -1014,10 +1069,10 @@ pub fn issue_index_refreshed_since(
     if meta.document_count == 0 || !issue_store_exists(&index_root.join(repo_hash)) {
         return false;
     }
-    let Ok(last) = DateTime::parse_from_rfc3339(&meta.last_full_refresh) else {
+    let Some(last) = UtcTimestamp::parse_rfc3339(&meta.last_full_refresh) else {
         return false;
     };
-    last.with_timezone(&Utc) >= since
+    last >= since
 }
 
 // =====================================================================
@@ -1188,7 +1243,7 @@ fn run_coordinated_issue_index(
         }
     };
     let key = TargetKey::repo_shared(repo_hash, "issues");
-    let requested_at = Utc::now();
+    let requested_at = UtcTimestamp::now();
     match coordinator.request_job(&key, JobPriority::Background, ISSUE_INDEX_ADMISSION_TIMEOUT) {
         Ok(JobAdmission::Owner(guard)) => {
             cmd.arg("--mode").arg(issue_rebuild_mode(
@@ -1505,7 +1560,7 @@ mod tests {
         std::fs::create_dir_all(&issues).unwrap();
         std::fs::write(
             issues.join("meta.json"),
-            serde_json::json!({"schema_version": 2, "ttl_minutes": 15, "last_full_refresh": Utc::now().to_rfc3339(), "document_count": 0}).to_string(),
+            serde_json::json!({"schema_version": 2, "ttl_minutes": 15, "last_full_refresh": UtcTimestamp::now().to_rfc3339(), "document_count": 0}).to_string(),
         ).unwrap();
         let spawner = RecordingSpawner::default();
         let result = refresh_issues_if_stale(

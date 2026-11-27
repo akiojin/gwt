@@ -38,6 +38,8 @@ case "$all" in
     echo '{"required_status_checks":{"contexts":["build"]},"restrictions":null,"allow_force_pushes":{"enabled":false}}' ;;
   *"pr view"*state,headRefOid,autoMergeRequest,mergeCommit*)
     echo '{"state":"OPEN","headRefOid":"abc123","autoMergeRequest":null,"mergeCommit":null}' ;;
+  *"pr view"*statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus*)
+    echo '{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   *"pr view"*headRefOid*)         echo '{"headRefOid":"abc123"}' ;;
   *"pr view"*mergeStateStatus*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   *"pr view"*statusCheckRollup*)  echo '{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;

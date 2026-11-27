@@ -77,6 +77,24 @@ export function notificationForTransition(input) {
 }
 
 // Issue #6932: presentation identity only; the raw diagnostic ledger is unchanged.
+// Timestamps and durations vary between occurrences of one cause, so they are
+// not part of an Issues notice's identity at any level.
+function normalizeMonitorText(raw) {
+  return raw
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g, "<time>")
+    .replace(/\b\d+(?:\.\d+)?(?:ms|s)\b/g, "<duration>")
+    .replace(/\s+/g, " ");
+}
+
+// Issue #7520: the history identity of a non-error Issues notice. A renewed
+// steering request repeats the same Issue and reason with a higher request
+// count, so the count is not part of the identity either: the renewal is one
+// more occurrence of the same row, which then shows the latest text.
+export function monitorNoticeIdentity(message) {
+  const raw = typeof message === "string" ? message.trim() : "";
+  return raw ? normalizeMonitorText(raw).replace(/^(Issue #\d+ steering requested) \(\d+\):/, "$1:") : null;
+}
+
 export function monitorDiagnostic({ message, kind, stage, issue_number } = {}) {
   const raw = typeof message === "string" ? message.trim() : "";
   if (!raw) return null;
@@ -84,10 +102,7 @@ export function monitorDiagnostic({ message, kind, stage, issue_number } = {}) {
   if (raw.startsWith("scan continued:") && !raw.includes("launch_suppressed") && continuations.length
     && continuations.every(([, value]) => ["stale_readback", "previous_candidates"].includes(value))) return null;
   const stalled = raw.startsWith("Issues scan stalled");
-  const normalized = raw
-    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g, "<time>")
-    .replace(/\b\d+(?:\.\d+)?(?:ms|s)\b/g, "<duration>")
-    .replace(/\s+/g, " ");
+  const normalized = normalizeMonitorText(raw);
   const identity = stalled
     ? normalized.replace(/ for <duration> \(poll interval <duration>\)/, "").replace(/; last scan at <time>/, "")
     : normalized;

@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use chrono::{TimeZone, Utc};
 use gwt_core::process::hidden_command;
 use tempfile::tempdir;
 
@@ -145,8 +144,7 @@ fn start_work_launch_confirmation_materializes_reserved_work_branch_and_worktree
         gwt::start_work::resolve_start_work_base_branch(&repo).expect("start work base branch");
     let reserved_branch = gwt::start_work::reserve_start_work_branch_name(
         &repo,
-        Utc.with_ymd_and_hms(2026, 5, 4, 12, 34, 0)
-            .single()
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 4, 12, 34, 0)
             .expect("timestamp"),
     )
     .expect("reserve start work branch name");
@@ -301,9 +299,7 @@ fn start_work_reserves_branch_name_from_workspace_home_with_child_bare_repo() {
     let temp = tempdir().expect("tempdir");
     let workspace_home = temp.path().join("sample");
     let (bare_repo, _origin) = init_main_only_bare_workspace_home(&workspace_home);
-    let now = Utc
-        .with_ymd_and_hms(2026, 5, 21, 1, 39, 0)
-        .single()
+    let now = gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 21, 1, 39, 0)
         .expect("timestamp");
     run_git(&bare_repo, &["branch", "work/20260521-0139", "main"]);
 

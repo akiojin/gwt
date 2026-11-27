@@ -332,6 +332,11 @@ fn agent_idle_wake_completion_ignores_a_replaced_pm_pane() {
     )
     .expect("retire the actual PM before replacing it at the same GUI id");
     assert!(previous.pty.tree_exit_confirmed());
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        &previous.session.as_ref().unwrap().id,
+    )
+    .expect("intentional stop clears the old PM registration before NEW");
     let _replacement = attach_live_pm_pane(&mut runtime, &pm_id);
     let successor = owner_runtime_probe(&runtime, &pm_id);
     assert_ne!(successor.incarnation, previous.incarnation);
@@ -1122,12 +1127,9 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
     init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    // Issue #4375: the spawn this test is about now begins with a Git refresh
-    // handed to the blocking worker, so the queue is where "did the launcher
-    // start the PM?" is answered. Holding the queue also keeps the fixture's
-    // remote-less repository from running `git fetch` at all.
-    let (spawner, queued) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
+    // Issue #4375: hold the blocking queue so the accepted PM preparation
+    // gate can be observed without running Git in the remote-less fixture.
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
 
     // A crashed PM registration whose backoff floor is far in the future, with
     // no live pane and no materializable session (forces the fresh-spawn arm).
@@ -1149,17 +1151,24 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
         "the automatic ladder must keep honouring the backoff floor"
     );
     assert!(
-        queued.lock().expect("queued tasks").is_empty(),
-        "the backoff floor must stop the automatic ladder before it even          prepares the worktree"
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .is_empty(),
+        "the backoff floor must stop the automatic ladder before it prepares the worktree"
     );
     drop(automatic);
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::super::pm::PmEnsureTrigger::Explicit);
 
-    assert_eq!(
-        queued.lock().expect("queued tasks").len(),
-        1,
-        "FR-021: the explicit launcher must start the PM despite the backoff          floor, which now begins by preparing the worktree off the event loop"
+    assert!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .contains(&repo),
+        "FR-021: the explicit launcher must prepare the PM worktree despite the backoff floor"
     );
 }
 
@@ -2210,4 +2219,80 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
             .any(|event| matches!(&event.event, BackendEvent::IssueMonitorStatus { .. })),
         "the tick must produce a monitor status snapshot for the enabled project"
     );
+}
+
+/// Issue #7772 AC-1/AC-2/AC-4: an owner-managed pane reports its hook edges
+/// only through `OwnerEvent::Status`. A hook-observed Running arms the wake;
+/// the launch placeholder followed by SessionStart does not.
+#[test]
+fn agent_idle_wake_arms_from_the_owner_status_projection() {
+    use gwt::project_runtime::events::OwnerEvent;
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    let identity = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: 42,
+        host_started_at: 100,
+        host_instance_id: "owner".into(),
+    };
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    let mut endpoint = gwt_core::daemon::DaemonEndpoint::new(
+        gwt_core::daemon::RuntimeScope::new(
+            context.project_key.as_str(),
+            "fixture",
+            repo.clone(),
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap(),
+        identity.pid,
+        "fixture".into(),
+        "private-fixture".into(),
+        "fixture".into(),
+    );
+    endpoint.project_transport_url = Some("http://127.0.0.1:1".into());
+    runtime.runtimes.insert(
+        "tab-1::other-window".into(),
+        WindowRuntime::remote(
+            "owner-pane".into(),
+            7,
+            100,
+            gwt::project_runtime::client::ProjectRuntimeClient::new(&endpoint).unwrap(),
+            identity.clone(),
+        ),
+    );
+    let mut project = |status, hook_status| {
+        runtime.handle_project_owner_event(
+            &context,
+            1,
+            &identity,
+            OwnerEvent::Status {
+                id: "owner-pane".into(),
+                incarnation: 7,
+                raw_status: WindowProcessStatus::Running,
+                status,
+                hook_status: Some(hook_status),
+                detail: None,
+                exit_confirmed: false,
+                exit_code: None,
+            },
+        );
+        runtime.pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+    };
+    assert!(project(WindowProcessStatus::Running, WindowProcessStatus::Starting).is_none());
+    assert!(
+        project(WindowProcessStatus::Idle, WindowProcessStatus::Idle).is_none(),
+        "the launch placeholder followed by SessionStart is not a finished turn"
+    );
+    assert!(project(WindowProcessStatus::Running, WindowProcessStatus::Running).is_none());
+    let wake = project(WindowProcessStatus::Idle, WindowProcessStatus::Idle)
+        .expect("a hook-observed turn end must notify the PM");
+    assert_eq!(wake.window_id, pm_id);
+    assert!(wake.prompt.contains("[gwt] Agent idle:"), "{}", wake.prompt);
 }

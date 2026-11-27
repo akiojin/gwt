@@ -128,6 +128,8 @@ pub struct SpawnOptions {
     pub capture_stderr: bool,
     /// Whether captured output is forwarded to the Process Console hub.
     pub forward_output: bool,
+    /// Whether a descendant may leave the deadline-bounded process tree.
+    pub allow_resident_descendant: bool,
 }
 
 impl SpawnOptions {
@@ -142,6 +144,7 @@ impl SpawnOptions {
             capture_stdout: true,
             capture_stderr: true,
             forward_output: true,
+            allow_resident_descendant: false,
         }
     }
 
@@ -178,6 +181,17 @@ impl SpawnOptions {
 
     pub fn forward_output(mut self, forward: bool) -> Self {
         self.forward_output = forward;
+        self
+    }
+
+    /// Let the command start a resident process that survives its deadline.
+    ///
+    /// Deadline expiry still terminates the command and every ordinary
+    /// descendant. On Windows the Job additionally permits
+    /// `CREATE_BREAKAWAY_FROM_JOB`; on Unix a descendant leaves by starting
+    /// its own session, which needs no permission.
+    pub fn allow_resident_descendant(mut self, allow: bool) -> Self {
+        self.allow_resident_descendant = allow;
         self
     }
 }
@@ -398,7 +412,7 @@ async fn spawn_logged_inner(
         (manage_gh_quota && matches!(kind, ProcessKind::Gh)).then(|| gh_arg_strings(args));
     if let Some(args) = &gh_quota {
         let ledger = crate::github_budget::BudgetLedger::global();
-        let now = chrono::Utc::now();
+        let now = crate::timestamp::UtcTimestamp::now();
         if let Some(detail) = crate::github_budget::suppressed_spawn_detail(
             crate::github_quota::global(),
             &ledger,
@@ -489,7 +503,11 @@ async fn spawn_logged_inner(
         Stdio::null()
     });
 
-    let mut process_tree = match ChildProcessTree::prepare(&mut command, deadline.is_some()) {
+    let mut process_tree = match ChildProcessTree::prepare(
+        &mut command,
+        deadline.is_some(),
+        options.allow_resident_descendant,
+    ) {
         Ok(process_tree) => process_tree,
         Err(error) => {
             finish_failed_launch(
@@ -777,7 +795,7 @@ async fn reconcile_github_quota(
         return stderr;
     }
 
-    let now = chrono::Utc::now();
+    let now = crate::timestamp::UtcTimestamp::now();
     let probe = probe_rate_limit(hub, program, options, quota, deadline).await;
     // Issue #3891: the refusal is also visible to the next process, which can
     // then throttle its non-essential reads instead of re-discovering it.
@@ -818,7 +836,7 @@ async fn probe_rate_limit(
     if !output.success() {
         return None;
     }
-    let now = chrono::Utc::now();
+    let now = crate::timestamp::UtcTimestamp::now();
     if let Some(snapshot) = crate::github_budget::parse_rate_limit_probe_all(&output.stdout, now) {
         crate::github_budget::BudgetLedger::global().record_probe(&snapshot);
     }
@@ -1175,7 +1193,12 @@ struct ChildProcessTree {
 }
 
 impl ChildProcessTree {
-    fn prepare(command: &mut TokioCommand, deadline_enabled: bool) -> std::io::Result<Self> {
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn prepare(
+        command: &mut TokioCommand,
+        deadline_enabled: bool,
+        allow_resident_descendant: bool,
+    ) -> std::io::Result<Self> {
         if deadline_enabled {
             command.kill_on_drop(true);
         }
@@ -1189,8 +1212,12 @@ impl ChildProcessTree {
         #[cfg(windows)]
         {
             let job = if deadline_enabled {
-                let job =
-                    crate::process_tree::WindowsJobObject::new().map_err(windows_job_io_error)?;
+                let job = if allow_resident_descendant {
+                    crate::process_tree::WindowsJobObject::new_allowing_breakaway()
+                } else {
+                    crate::process_tree::WindowsJobObject::new()
+                }
+                .map_err(windows_job_io_error)?;
                 crate::process_tree::WindowsJobObject::configure_suspended(command.as_std_mut());
                 Some(job)
             } else {
@@ -1672,7 +1699,8 @@ mod tests {
             .kill_on_drop(true)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut tree = ChildProcessTree::prepare(&mut command, false).expect("empty process tree");
+        let mut tree =
+            ChildProcessTree::prepare(&mut command, false, false).expect("empty process tree");
         let mut child = command.spawn().expect("spawn cleanup fixture");
         tokio::time::timeout(crate::deadline_budget::HANG_GUARD, child.wait())
             .await

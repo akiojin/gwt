@@ -9,8 +9,8 @@
 //!   `window_minutes`, not the key (Issue #3860: upstream dropped the 5h
 //!   window and `primary` became weekly with `secondary: null`).
 //! - `info.total_token_usage` — cumulative per-session tokens.
-//! - `info.model_context_window` — the model's context size (so no static
-//!   table lookup is needed for Codex).
+//! - `info.model_context_window` — the model's context size. When omitted,
+//!   `super::model_context` supplies a catalog estimate.
 //!
 //! Reset instants come as `resets_at` (unix epoch seconds, observed) and we
 //! also accept `resets_at` RFC3339 strings and relative `resets_in_seconds`
@@ -20,13 +20,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{DateTime, Duration, Utc};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::state::{apply_staleness, DEFAULT_STALE_AFTER_SECS};
 use super::types::{
-    ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
+    CodexCredits, ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
 };
 
 /// Parsed account-level fields from a `rate_limits` object.
@@ -34,16 +36,33 @@ use super::types::{
 pub struct CodexAccount {
     pub windows: Vec<UsageWindow>,
     pub plan: Option<String>,
+    pub credits: Option<CodexCredits>,
     pub limit_reached: bool,
 }
 
-fn parse_reset(window: &Value, observed_at: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+fn parse_credits(value: &Value) -> Option<CodexCredits> {
+    let object = value.as_object()?;
+    let balance = object
+        .get("balance")
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+        .filter(|balance| balance.is_finite() && *balance >= 0.0);
+    Some(CodexCredits {
+        has_credits: object.get("has_credits").and_then(Value::as_bool)?,
+        unlimited: object
+            .get("unlimited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        balance,
+    })
+}
+
+fn parse_reset(window: &Value, observed_at: Option<UtcTimestamp>) -> Option<UtcTimestamp> {
     if let Some(epoch) = window.get("resets_at").and_then(Value::as_i64) {
-        return DateTime::from_timestamp(epoch, 0);
+        return UtcTimestamp::from_timestamp(epoch, 0);
     }
     if let Some(text) = window.get("resets_at").and_then(Value::as_str) {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
-            return Some(dt.with_timezone(&Utc));
+        if let Some(dt) = UtcTimestamp::parse_rfc3339(text) {
+            return Some(dt);
         }
     }
     if let Some(rel) = window.get("resets_in_seconds").and_then(Value::as_i64) {
@@ -68,7 +87,7 @@ fn classify_pool(key: &str, window_minutes: Option<u32>) -> WindowKind {
         .unwrap_or(WindowKind::Unknown)
 }
 
-fn window_from(key: &str, obj: &Value, observed_at: Option<DateTime<Utc>>) -> Option<UsageWindow> {
+fn window_from(key: &str, obj: &Value, observed_at: Option<UtcTimestamp>) -> Option<UsageWindow> {
     let used = obj.get("used_percent").and_then(Value::as_f64)? as f32;
     let window_minutes = obj
         .get("window_minutes")
@@ -86,13 +105,13 @@ fn window_from(key: &str, obj: &Value, observed_at: Option<DateTime<Utc>>) -> Op
 
 /// Parse a `rate_limits` JSON object into account windows. Returns `None` when
 /// the value is `null` (Codex exec mode) or has no recognized windows.
-pub fn parse_rate_limits(rate_limits: &Value, now: DateTime<Utc>) -> Option<CodexAccount> {
+pub fn parse_rate_limits(rate_limits: &Value, now: UtcTimestamp) -> Option<CodexAccount> {
     parse_rate_limits_at(rate_limits, Some(now))
 }
 
 pub(super) fn parse_rate_limits_at(
     rate_limits: &Value,
-    observed_at: Option<DateTime<Utc>>,
+    observed_at: Option<UtcTimestamp>,
 ) -> Option<CodexAccount> {
     if rate_limits.is_null() {
         return None;
@@ -115,12 +134,13 @@ pub(super) fn parse_rate_limits_at(
     Some(CodexAccount {
         windows,
         plan,
+        credits: rate_limits.get("credits").and_then(parse_credits),
         limit_reached,
     })
 }
 
 /// Preserve the source event time: rereading a rollout is not a new observation.
-fn last_token_count_event(jsonl: &str) -> Option<(Value, Option<DateTime<Utc>>)> {
+fn last_token_count_event(jsonl: &str) -> Option<(Value, Option<UtcTimestamp>)> {
     let mut last = None;
     for line in jsonl.lines() {
         let line = line.trim();
@@ -135,8 +155,7 @@ fn last_token_count_event(jsonl: &str) -> Option<(Value, Option<DateTime<Utc>>)>
             let observed_at = obj
                 .get("timestamp")
                 .and_then(Value::as_str)
-                .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
-                .map(|time| time.with_timezone(&Utc));
+                .and_then(UtcTimestamp::parse_rfc3339);
             last = Some((payload.clone(), observed_at));
         }
     }
@@ -171,7 +190,7 @@ fn last_model(jsonl: &str) -> Option<String> {
 }
 
 /// Parse account usage from full rollout JSONL text.
-pub fn parse_codex_account(jsonl: &str, now: DateTime<Utc>) -> Option<CodexAccount> {
+pub fn parse_codex_account(jsonl: &str, now: UtcTimestamp) -> Option<CodexAccount> {
     let tc = last_token_count(jsonl)?;
     let rl = tc.get("rate_limits")?;
     parse_rate_limits(rl, now)
@@ -262,7 +281,7 @@ pub fn read_auth_account_identity(home: &Path) -> Option<String> {
 /// On a stateless read, observations predating the current auth file cannot be
 /// safely attributed to its account. A live poller can retain this boundary
 /// across token refreshes while the stable account identity stays the same.
-pub fn auth_modified_at(home: &Path) -> Option<DateTime<Utc>> {
+pub fn auth_modified_at(home: &Path) -> Option<UtcTimestamp> {
     fs::metadata(home.join("auth.json"))
         .ok()?
         .modified()
@@ -288,9 +307,15 @@ pub fn parse_codex_session(session_id: &str, jsonl: &str) -> SessionUsage {
         .and_then(Value::as_u64)
         .unwrap_or(input + output);
 
+    let model = last_model(jsonl);
     let context_limit = info
         .and_then(|i| i.get("model_context_window"))
-        .and_then(Value::as_u64);
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            model
+                .as_deref()
+                .and_then(super::model_context::context_limit)
+        });
     // Approximate current context occupancy from the last turn's prompt size.
     // `input_tokens` already includes the cached portion, so it must NOT be
     // summed with `cached_input_tokens` (that double-counts and pins ctx to 0%).
@@ -317,7 +342,7 @@ pub fn parse_codex_session(session_id: &str, jsonl: &str) -> SessionUsage {
     SessionUsage {
         session_id: session_id.to_string(),
         provider: UsageProvider::Codex,
-        model: last_model(jsonl),
+        model,
         input_tokens: input,
         output_tokens: output,
         total_tokens,
@@ -424,6 +449,14 @@ pub(super) fn rollout_matches_session(path: &Path, session_id: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
+/// The conversation id (uuid) at the end of a rollout filename.
+pub fn rollout_session_id(path: &Path) -> Option<&str> {
+    let stem = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
+    let split = stem.len().checked_sub(36)?;
+    let (prefix, id) = (stem.get(..split)?, stem.get(split..)?);
+    prefix.ends_with('-').then_some(id)
+}
+
 /// Locate a rollout file for the exact session id (uuid).
 pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
     let sessions = home.join("sessions");
@@ -442,15 +475,15 @@ pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
 /// recent files avoids a spurious `NoData`. `rate_limits` is account-global, so
 /// the most recent one is the freshest account state. Returns degraded
 /// `NoData` when none have account data.
-pub fn read_codex_account(home: &Path, now: DateTime<Utc>) -> ProviderUsage {
+pub fn read_codex_account(home: &Path, now: UtcTimestamp) -> ProviderUsage {
     read_codex_account_since(home, now, auth_modified_at(home))
 }
 
 /// Read observations after an authentication boundary retained by the poller.
 pub fn read_codex_account_since(
     home: &Path,
-    now: DateTime<Utc>,
-    authenticated_at: Option<DateTime<Utc>>,
+    now: UtcTimestamp,
+    authenticated_at: Option<UtcTimestamp>,
 ) -> ProviderUsage {
     read_codex_account_with(home, now, authenticated_at, || {
         recent_rollouts(home, 8)
@@ -468,9 +501,9 @@ pub fn read_codex_account_since(
 /// Share account attribution/freshness rules with the poll-owned offset cache.
 pub(super) fn read_codex_account_with(
     home: &Path,
-    now: DateTime<Utc>,
-    authenticated_at: Option<DateTime<Utc>>,
-    read: impl FnOnce() -> Vec<(CodexAccount, Option<DateTime<Utc>>)>,
+    now: UtcTimestamp,
+    authenticated_at: Option<UtcTimestamp>,
+    read: impl FnOnce() -> Vec<(CodexAccount, Option<UtcTimestamp>)>,
 ) -> ProviderUsage {
     let auth = fs::read_to_string(home.join("auth.json")).ok();
     let account_id = auth.as_deref().and_then(parse_auth_account_identity);
@@ -478,7 +511,7 @@ pub(super) fn read_codex_account_with(
         return ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData);
     }
     let account_label = auth.as_deref().and_then(parse_auth_account_label);
-    let mut newest: Option<(CodexAccount, Option<DateTime<Utc>>)> = None;
+    let mut newest: Option<(CodexAccount, Option<UtcTimestamp>)> = None;
     for (acc, observed_at) in read() {
         if observed_at.is_some_and(|at| at > now)
             || authenticated_at.is_some_and(|boundary| observed_at.is_none_or(|at| at < boundary))
@@ -504,10 +537,13 @@ pub(super) fn read_codex_account_with(
     let fetched_at = observed_at.filter(|_| authenticated_at.is_some());
     ProviderUsage {
         provider: UsageProvider::Codex,
+        pool_account_id: None,
+        last_limit: None,
         account_id,
         account_label,
         plan: acc.plan,
         extra_usage: None,
+        credits: acc.credits,
         windows: acc.windows,
         limit_reached: acc.limit_reached,
         state: if let Some(at) = fetched_at {
@@ -530,8 +566,19 @@ pub fn read_codex_session(home: &Path, session_id: &str) -> Option<SessionUsage>
 mod tests {
     use super::*;
 
-    fn now() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    #[test]
+    fn a_rollout_names_its_conversation() {
+        let id = "019a1b2c-3d4e-7f60-8a9b-0c1d2e3f4a5b";
+        let path = PathBuf::from(format!(
+            "/s/2026/11/24/rollout-2026-11-24T01-02-03-{id}.jsonl"
+        ));
+        assert_eq!(rollout_session_id(&path), Some(id));
+        assert_eq!(rollout_session_id(Path::new("/s/short.jsonl")), None);
+        assert_eq!(rollout_session_id(Path::new("/s/notes.txt")), None);
+    }
+
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(1_780_000_000, 0).unwrap()
     }
 
     fn write_auth_fixture(home: &Path) {
@@ -549,7 +596,7 @@ mod tests {
             .unwrap();
     }
 
-    fn write_account_fixture(home: &Path, event_at: DateTime<Utc>) {
+    fn write_account_fixture(home: &Path, event_at: UtcTimestamp) {
         write_auth_fixture(home);
         let sessions = home.join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -612,7 +659,7 @@ mod tests {
         assert_eq!(acc.windows[1].used_percent, 23.0);
         assert_eq!(
             acc.windows[0].resets_at,
-            DateTime::from_timestamp(1780376627, 0)
+            UtcTimestamp::from_timestamp(1780376627, 0)
         );
     }
 
@@ -665,7 +712,7 @@ mod tests {
         assert_eq!(acc.windows[0].used_percent, 12.0);
         assert_eq!(
             acc.windows[0].resets_at,
-            DateTime::from_timestamp(1780376627, 0)
+            UtcTimestamp::from_timestamp(1780376627, 0)
         );
     }
 
@@ -763,6 +810,57 @@ mod tests {
     }
 
     #[test]
+    fn codex_credits_survive_direct_and_cached_account_readers() {
+        let home = tempfile::tempdir().unwrap();
+        write_auth_fixture(home.path());
+        fs::create_dir(home.path().join("sessions")).unwrap();
+        let rollout = home.path().join("sessions/rollout-credits.jsonl");
+        let mut event = serde_json::json!({
+            "timestamp": now().to_rfc3339(),
+            "payload": {"type":"token_count", "rate_limits": {
+                "primary":{"used_percent":100,"window_minutes":10080},
+                "rate_limit_reached_type":null,
+                "credits":{"has_credits":true,"unlimited":false,"balance":"37669.9"}
+            }}
+        });
+        fs::write(&rollout, event.to_string()).unwrap();
+        let account = read_codex_account(home.path(), now());
+        let mut cache = super::super::cache::UsageCache::default();
+        assert_eq!(
+            cache.codex_account_since(home.path(), now(), auth_modified_at(home.path())),
+            account
+        );
+        assert!(!account.limit_reached);
+        assert_eq!(
+            serde_json::to_value(account).unwrap()["credits"],
+            serde_json::json!({
+                "has_credits":true,"unlimited":false,"balance":37669.9
+            })
+        );
+
+        event["payload"]["rate_limits"]["credits"] = serde_json::json!({
+            "has_credits":false,"unlimited":false,"balance":0
+        });
+        fs::write(&rollout, event.to_string()).unwrap();
+        assert_eq!(
+            serde_json::to_value(read_codex_account(home.path(), now())).unwrap()["credits"],
+            serde_json::json!({"has_credits":false,"unlimited":false,"balance":0.0})
+        );
+        event["payload"]["rate_limits"]["credits"] = serde_json::json!({"balance":200});
+        fs::write(&rollout, event.to_string()).unwrap();
+        assert!(serde_json::to_value(read_codex_account(home.path(), now()))
+            .unwrap()
+            .get("credits")
+            .is_none());
+        event["payload"]["rate_limits"]["credits"] = Value::Null;
+        fs::write(&rollout, event.to_string()).unwrap();
+        assert!(serde_json::to_value(read_codex_account(home.path(), now()))
+            .unwrap()
+            .get("credits")
+            .is_none());
+    }
+
+    #[test]
     fn account_from_jsonl_uses_last_token_count() {
         let jsonl = concat!(
             r#"{"type":"session_meta","payload":{"id":"abc","model":"gpt-5.5"}}"#,
@@ -808,14 +906,15 @@ mod tests {
         let jsonl = concat!(
             r#"{"type":"session_meta","payload":{"id":"abc","model":"gpt-5.5"}}"#,
             "\n",
-            r#"{"payload":{"type":"token_count","rate_limits":null,"info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":160},"last_token_usage":{"input_tokens":80,"cached_input_tokens":10},"model_context_window":400000}}}"#,
+            r#"{"payload":{"type":"token_count","rate_limits":null,"info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":160},"last_token_usage":{"input_tokens":80,"cached_input_tokens":10},"model_context_window":200000}}}"#,
             "\n",
         );
         let s = parse_codex_session("abc", jsonl);
         assert_eq!(s.input_tokens, 100);
         assert_eq!(s.output_tokens, 20);
         assert_eq!(s.total_tokens, 160);
-        assert_eq!(s.context_limit_tokens, Some(400000));
+        // A reported window takes precedence over the model's 400k estimate.
+        assert_eq!(s.context_limit_tokens, Some(200000));
         // input_tokens already includes the cached portion; no double-count.
         assert_eq!(s.context_used_tokens, Some(80));
         assert_eq!(s.model.as_deref(), Some("gpt-5.5"));
@@ -825,6 +924,24 @@ mod tests {
         assert_eq!(wire["cache_read_tokens"], 40);
         assert!(wire["cache_creation_tokens"].is_null());
         assert!(wire["reported_context_left_pct"].is_null());
+    }
+
+    // Issue #3986: when a rollout omits `model_context_window`, the model name
+    // still yields an estimated window through the shared catalog lookup
+    // instead of silently dropping the context-left percentage.
+    #[test]
+    fn session_usage_falls_back_to_model_context_when_window_missing() {
+        let jsonl = concat!(
+            r#"{"type":"session_meta","payload":{"id":"abc","model":"gpt-6-astra"}}"#,
+            "\n",
+            r#"{"payload":{"type":"token_count","rate_limits":null,"info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":160},"last_token_usage":{"input_tokens":80,"cached_input_tokens":10}}}}"#,
+            "\n",
+        );
+        let s = parse_codex_session("abc", jsonl);
+        assert_eq!(s.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(s.context_limit_tokens, Some(400_000));
+        assert_eq!(s.context_used_tokens, Some(80));
+        assert!(s.context_left_pct.is_some());
     }
 
     #[test]

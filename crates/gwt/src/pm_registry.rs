@@ -153,6 +153,11 @@ pub struct PmLaunchProfile {
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// None inherits same-provider Agent Settings; explicit Off disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_speed: Option<gwt_agent::CodexSpeed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
 }
 
 /// The agent a project falls back to when nothing is configured.
@@ -225,6 +230,25 @@ impl PmSettings {
 }
 
 impl PmSettings {
+    /// Resolve NEW tuning identically for the GUI draft and its owner fence.
+    /// The saved PM profile and its CAS revision remain project-specific.
+    pub fn launch_profile_with_agent_defaults(&self, project_root: &Path) -> PmLaunchProfile {
+        let mut profile = self.launch_profile_or_default();
+        if let Some(defaults) = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+        )
+        .ok()
+        .and_then(|prefs| {
+            prefs.launch_profile_pool().into_iter().find(|candidate| {
+                gwt_agent::resolve_agent_id(&candidate.agent_id)
+                    == gwt_agent::resolve_agent_id(&profile.agent_id)
+            })
+        }) {
+            profile = profile.with_agent_defaults(&defaults);
+        }
+        profile.normalized()
+    }
+
     /// The profile to launch with: the configured one when it names an agent
     /// that can resolve `$gwt-pm`, the built-in default otherwise. Falling back
     /// rather than refusing keeps FR-002's "opening a project starts the PM"
@@ -247,6 +271,41 @@ impl PmSettings {
 }
 
 impl PmLaunchProfile {
+    /// Apply configured agent defaults without replacing explicit PM choices.
+    pub fn with_agent_defaults(mut self, defaults: &crate::IssueMonitorLaunchProfile) -> Self {
+        if gwt_agent::resolve_agent_id(&self.agent_id)
+            != gwt_agent::resolve_agent_id(&defaults.agent_id)
+        {
+            return self;
+        }
+        self.model = self.model.or_else(|| defaults.model.clone());
+        self.reasoning = self.reasoning.or_else(|| defaults.reasoning.clone());
+        self.codex_speed = self.codex_speed.or(Some(defaults.codex_speed));
+        self.fast_mode = self.fast_mode.or(Some(defaults.fast_mode));
+        self
+    }
+
+    /// Issue #7647 (SPEC #7007 item 26): the reasoning level and speed of the
+    /// agent serving as Project Manager, mapped to this profile's tool the way
+    /// an implementation session maps them. An unset trait keeps the
+    /// profile's value.
+    pub fn with_traits(mut self, traits: &crate::agent_names::AgentTraits) -> Self {
+        let mut candidate = crate::IssueMonitorLaunchProfile {
+            model: self.model.clone(),
+            reasoning: self.reasoning.clone(),
+            codex_speed: self.codex_speed.unwrap_or_default(),
+            fast_mode: self.fast_mode.unwrap_or(false),
+            ..crate::IssueMonitorLaunchProfile::for_tool(&self.agent_id)
+        };
+        crate::launch_wizard::apply_agent_traits(&mut candidate, traits);
+        self.reasoning = candidate.reasoning;
+        if traits.speed.is_some() {
+            self.codex_speed = Some(candidate.codex_speed);
+            self.fast_mode = Some(candidate.fast_mode);
+        }
+        self
+    }
+
     /// Canonicalize user-entered optional tuning without changing the agent
     /// identity or the legacy optional schema. Blank values mean provider
     /// defaults; non-blank values are persisted and launched without their UI
@@ -356,9 +415,18 @@ pub enum PmStartBlockKind {
     /// PM. The singleton is per repository, and the other store's `pm.json`
     /// is invisible from here.
     AnotherStoreOwnsThePm,
+    /// Issue #7542: the PM launch itself failed. Unlike the others this one
+    /// is not permanent — a Restart starts a new launch, which also discards
+    /// a reservation left by a dead PM.
+    LaunchFailed,
 }
 
 impl PmStartBlockKind {
+    /// Whether pressing Restart can get past this block.
+    pub const fn restart_clears_it(self) -> bool {
+        matches!(self, Self::LaunchFailed)
+    }
+
     /// What the operator has to do. A block is only useful if it names the
     /// next action; "the PM did not start" alone sends people back to the
     /// Restart button that cannot help them.
@@ -373,6 +441,11 @@ impl PmStartBlockKind {
             Self::AnotherStoreOwnsThePm => {
                 "Stop the PM held by the other project store with `pm.stop`, \
                  passing the session id listed in `repository_registrations`."
+            }
+            Self::LaunchFailed => {
+                "Close any Project Manager window that is still open, then press \
+                 Restart Project Manager in Settings. Restarting discards the \
+                 reservation of a Project Manager that is no longer running."
             }
         }
     }
@@ -399,8 +472,8 @@ impl PmStartBlock {
     pub fn new(kind: PmStartBlockKind, reason: impl Into<String>) -> Self {
         Self {
             kind,
-            permanent: true,
-            restart_clears_it: false,
+            permanent: !kind.restart_clears_it(),
+            restart_clears_it: kind.restart_clears_it(),
             reason: reason.into(),
             required_operation: kind.required_operation().to_string(),
             observed_at: pm_refresh_checked_at(),
@@ -412,6 +485,8 @@ impl PmStartBlock {
 pub struct PmPrefs {
     #[serde(default)]
     pub registration: Option<PmRegistration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_activity: Option<crate::pm_activity::PmActivityRecord>,
     #[serde(default)]
     pub settings: PmSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,6 +547,13 @@ pub enum PmDeliveryReceiptStatus {
     Lost,
 }
 
+/// Native Grok turn correlation captured before the prompt can still be blocked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrokPmPromptIdentity {
+    pub native_session_id: String,
+    pub prompt_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmDeliveryReceipt {
     pub operation_id: String,
@@ -481,6 +563,9 @@ pub struct PmDeliveryReceipt {
     pub target_window_id: String,
     pub target_session_id: String,
     pub body_sha256: String,
+    /// Grok pre-turn correlation, not itself evidence that the turn was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_prompt: Option<GrokPmPromptIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -503,11 +588,10 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
         .ok()
         .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
         || body.is_empty()
-        || body.contains(['\r', '\n'])
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "PM delivery prompt identity must be one non-empty line",
+            "PM delivery requires a canonical operation ID and non-empty body",
         ));
     }
     let body_sha256 = pm_delivery_prompt_sha256(body);
@@ -516,7 +600,27 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
     ))
 }
 
+/// Claude Code 2.1.328 hands pasted input to its hooks and native transcript
+/// inside `<pasted_content id="…">`, and gwt delivers every PM notification by
+/// paste (Issue #7785). Returns the pasted text and whatever follows it.
+pub fn split_provider_paste_envelope(text: &str) -> Option<(&str, &str)> {
+    let (id, rest) = text
+        .trim_start()
+        .strip_prefix("<pasted_content id=\"")?
+        .split_once("\">")?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let (pasted, rest) = rest.split_once(&format!("</pasted_content id=\"{id}\">"))?;
+    Some((pasted.trim_matches(['\r', '\n']), rest))
+}
+
 pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, String)> {
+    // Only a paste that is the whole prompt is the delivery itself.
+    let prompt = match split_provider_paste_envelope(prompt) {
+        Some((pasted, rest)) if rest.trim().is_empty() => pasted,
+        _ => prompt,
+    };
     let prompt = prompt.strip_suffix('\r').unwrap_or(prompt);
     let marker_start = prompt.rfind(" [gwt-delivery:")?;
     let body = &prompt[..marker_start];
@@ -626,7 +730,16 @@ fn validated_pm_delivery_operation<'a>(
         ));
     }
     let mut latest = PmDeliveryReceiptStatus::Prepared;
+    let mut latest_grok_prompt = None;
     for receipt in &operation {
+        if receipt.grok_prompt.as_ref().is_some_and(|identity| {
+            identity.native_session_id.trim().is_empty() || identity.prompt_id.trim().is_empty()
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Grok PM correlation has an empty identity",
+            ));
+        }
         if receipt.principal_session_id != prepared.principal_session_id
             || receipt.target_window_id != prepared.target_window_id
             || receipt.target_session_id != prepared.target_session_id
@@ -655,6 +768,20 @@ fn validated_pm_delivery_operation<'a>(
                 PmDeliveryReceiptStatus::Lost,
             ) => true,
             (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => true,
+            // A late/replaced Grok pre-turn observation changes correlation
+            // only; it cannot turn an unconfirmed delivery into success.
+            (previous, current)
+                if previous == current
+                    && matches!(
+                        current,
+                        PmDeliveryReceiptStatus::Ambiguous
+                            | PmDeliveryReceiptStatus::Unconfirmed
+                            | PmDeliveryReceiptStatus::Lost
+                    )
+                    && latest_grok_prompt != receipt.grok_prompt.as_ref() =>
+            {
+                true
+            }
             _ => false,
         };
         if !transition_is_valid {
@@ -664,6 +791,7 @@ fn validated_pm_delivery_operation<'a>(
             ));
         }
         latest = receipt.status;
+        latest_grok_prompt = receipt.grok_prompt.as_ref();
     }
     Ok(operation)
 }
@@ -686,6 +814,7 @@ pub fn prepare_pm_delivery_receipt(
     prepared: &PmDeliveryReceipt,
 ) -> io::Result<PmDeliveryPrepareOutcome> {
     if prepared.status != PmDeliveryReceiptStatus::Prepared
+        || prepared.grok_prompt.is_some()
         || uuid::Uuid::parse_str(&prepared.operation_id)
             .ok()
             .is_none_or(|operation_id| {
@@ -742,69 +871,218 @@ pub fn finish_pm_delivery_receipt(
         ));
     }
     with_pm_prefs_lock(path, || {
-        let receipts = load_pm_delivery_receipts_unlocked(path)?;
-        let operation = validated_pm_delivery_operation(&receipts, operation_id)?;
-        let Some(prepared) = operation.first().copied() else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "PM delivery Prepared receipt is missing",
-            ));
-        };
-        if prepared.target_session_id != target_session_id || prepared.body_sha256 != body_sha256 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "PM delivery acknowledgement does not match its Prepared receipt",
-            ));
-        }
-        if let Some(existing) = operation
-            .iter()
-            .rev()
-            .copied()
-            .find(|receipt| receipt.status != PmDeliveryReceiptStatus::Prepared)
-        {
-            match (existing.status, status) {
-                (existing, requested) if existing == requested => return Ok(existing),
-                (
-                    PmDeliveryReceiptStatus::Lost,
-                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
-                ) => return Ok(PmDeliveryReceiptStatus::Lost),
-                (
-                    PmDeliveryReceiptStatus::Verified,
-                    PmDeliveryReceiptStatus::Ambiguous
-                    | PmDeliveryReceiptStatus::Unconfirmed
-                    | PmDeliveryReceiptStatus::Lost,
-                ) => return Ok(PmDeliveryReceiptStatus::Verified),
-                (
-                    PmDeliveryReceiptStatus::Ambiguous
-                    | PmDeliveryReceiptStatus::Unconfirmed
-                    | PmDeliveryReceiptStatus::Lost,
-                    PmDeliveryReceiptStatus::Verified,
-                ) => {}
-                (
-                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
-                    PmDeliveryReceiptStatus::Lost,
-                ) => {}
-                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "PM delivery already has a different terminal receipt",
-                    ))
-                }
+        finish_pm_delivery_receipt_unlocked(
+            path,
+            operation_id,
+            target_session_id,
+            body_sha256,
+            status,
+            reason,
+        )
+    })
+}
+
+fn finish_pm_delivery_receipt_unlocked(
+    path: &Path,
+    operation_id: &str,
+    target_session_id: &str,
+    body_sha256: &str,
+    status: PmDeliveryReceiptStatus,
+    reason: Option<&str>,
+) -> io::Result<PmDeliveryReceiptStatus> {
+    let receipts = load_pm_delivery_receipts_unlocked(path)?;
+    let operation = validated_pm_delivery_operation(&receipts, operation_id)?;
+    let Some(prepared) = operation.first().copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "PM delivery Prepared receipt is missing",
+        ));
+    };
+    if prepared.target_session_id != target_session_id || prepared.body_sha256 != body_sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "PM delivery acknowledgement does not match its Prepared receipt",
+        ));
+    }
+    if let Some(existing) = operation
+        .iter()
+        .rev()
+        .copied()
+        .find(|receipt| receipt.status != PmDeliveryReceiptStatus::Prepared)
+    {
+        match (existing.status, status) {
+            (existing, requested) if existing == requested => return Ok(existing),
+            (
+                PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+            ) => return Ok(PmDeliveryReceiptStatus::Lost),
+            (
+                PmDeliveryReceiptStatus::Verified,
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+            ) => return Ok(PmDeliveryReceiptStatus::Verified),
+            (
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Verified,
+            ) => {}
+            (
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                PmDeliveryReceiptStatus::Lost,
+            ) => {}
+            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "PM delivery already has a different terminal receipt",
+                ))
             }
         }
-        let terminal = PmDeliveryReceipt {
-            operation_id: operation_id.to_string(),
-            recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            status,
-            principal_session_id: prepared.principal_session_id.clone(),
-            target_window_id: prepared.target_window_id.clone(),
-            target_session_id: prepared.target_session_id.clone(),
-            body_sha256: prepared.body_sha256.clone(),
-            reason: reason.map(str::to_string),
+    }
+    let terminal = PmDeliveryReceipt {
+        operation_id: operation_id.to_string(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
+        status,
+        principal_session_id: prepared.principal_session_id.clone(),
+        target_window_id: prepared.target_window_id.clone(),
+        target_session_id: prepared.target_session_id.clone(),
+        body_sha256: prepared.body_sha256.clone(),
+        grok_prompt: operation
+            .last()
+            .and_then(|receipt| receipt.grok_prompt.clone()),
+        reason: reason.map(str::to_string),
+    };
+    append_pm_delivery_receipt_unlocked(path, &terminal)?;
+    Ok(status)
+}
+
+/// Record Grok's pre-acceptance prompt identity in the existing delivery ledger.
+/// Replacing a queued prompt clears its previous PM correlation.
+pub fn observe_grok_pm_delivery_prompt(
+    path: &Path,
+    target_session_id: &str,
+    identity: Option<&GrokPmPromptIdentity>,
+    prompt: &str,
+) -> io::Result<()> {
+    if identity.is_some_and(|identity| {
+        identity.native_session_id.trim().is_empty() || identity.prompt_id.trim().is_empty()
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Grok PM correlation requires native session and prompt identities",
+        ));
+    }
+    let protected = identity.and_then(|_| parse_protected_pm_delivery_prompt(prompt));
+    with_pm_prefs_lock(path, || {
+        let mut receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let operations = receipts
+            .iter()
+            .filter(|receipt| receipt.target_session_id == target_session_id)
+            .map(|receipt| receipt.operation_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for operation_id in operations {
+            let operation = validated_pm_delivery_operation(&receipts, &operation_id)?;
+            let Some(latest) = operation.last() else {
+                continue;
+            };
+            if matches!(
+                latest.status,
+                PmDeliveryReceiptStatus::Verified | PmDeliveryReceiptStatus::Refused
+            ) {
+                continue;
+            }
+            let Some(observed) = latest.grok_prompt.as_ref() else {
+                continue;
+            };
+            if identity.is_none_or(|identity| identity == observed)
+                && protected
+                    .as_ref()
+                    .is_none_or(|(id, hash)| id != &operation_id || hash != &latest.body_sha256)
+            {
+                let mut cleared = (*latest).clone();
+                cleared.grok_prompt = None;
+                cleared.recorded_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+                append_pm_delivery_receipt_unlocked(path, &cleared)?;
+                receipts.push(cleared);
+            }
+        }
+        let (Some(identity), Some((operation_id, body_sha256))) = (identity, protected) else {
+            return Ok(());
         };
-        append_pm_delivery_receipt_unlocked(path, &terminal)?;
-        Ok(status)
+        let operation = validated_pm_delivery_operation(&receipts, &operation_id)?;
+        let latest = operation.last().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Grok PM observation has no Prepared receipt",
+            )
+        })?;
+        if latest.target_session_id != target_session_id || latest.body_sha256 != body_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Grok PM observation does not match its target and body",
+            ));
+        }
+        if matches!(
+            latest.status,
+            PmDeliveryReceiptStatus::Verified | PmDeliveryReceiptStatus::Refused
+        ) || latest.grok_prompt.as_ref() == Some(identity)
+        {
+            return Ok(());
+        }
+        let mut observed = (*latest).clone();
+        observed.grok_prompt = Some(identity.clone());
+        observed.recorded_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+        append_pm_delivery_receipt_unlocked(path, &observed)
+    })
+}
+
+/// Verify only the exact Grok turn that progressed beyond all prompt hooks.
+pub fn acknowledge_grok_pm_delivery_prompt(
+    path: &Path,
+    target_session_id: &str,
+    identity: &GrokPmPromptIdentity,
+) -> io::Result<()> {
+    with_pm_prefs_lock(path, || {
+        let receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let operations = receipts
+            .iter()
+            .filter(|receipt| receipt.target_session_id == target_session_id)
+            .map(|receipt| receipt.operation_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut candidate = None;
+        for operation_id in operations {
+            let operation = validated_pm_delivery_operation(&receipts, &operation_id)?;
+            let Some(latest) = operation.last() else {
+                continue;
+            };
+            if latest.grok_prompt.as_ref() == Some(identity)
+                && !matches!(
+                    latest.status,
+                    PmDeliveryReceiptStatus::Verified | PmDeliveryReceiptStatus::Refused
+                )
+            {
+                if candidate.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Grok prompt matches multiple PM operations",
+                    ));
+                }
+                candidate = Some((operation_id, latest.body_sha256.clone()));
+            }
+        }
+        if let Some((operation_id, body_sha256)) = candidate {
+            finish_pm_delivery_receipt_unlocked(
+                path,
+                &operation_id,
+                target_session_id,
+                &body_sha256,
+                PmDeliveryReceiptStatus::Verified,
+                None,
+            )?;
+        }
+        Ok(())
     })
 }
 
@@ -919,6 +1197,24 @@ pub fn pm_worktree_for_runtime_dir(runtime: &Path) -> Option<PathBuf> {
     require_pm_runtime_parents(&worktree).ok()?;
     require_real_pm_scratch_directory(runtime, "PM runtime directory").ok()?;
     Some(worktree)
+}
+
+/// The resident PM's `pm/` directory when `cwd` is the canonical PM worktree,
+/// its runtime directory, or anything beneath either (Issue #6989).
+///
+/// The PM's canonical references live under the runtime sibling of its
+/// worktree, so navigation policy that only knew the worktree blocked the PM's
+/// own startup reads. Every PM cwd resolves to the same answer, so the
+/// boundary no longer depends on which of the two directories launched it.
+pub fn pm_session_dir_for_cwd(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors().find_map(|dir| {
+        let worktree = if is_canonical_pm_worktree(dir) {
+            dir.to_path_buf()
+        } else {
+            pm_worktree_for_runtime_dir(dir)?
+        };
+        worktree.parent().map(Path::to_path_buf)
+    })
 }
 
 /// Project-state directory for PM-authored scratch notes.
@@ -2594,7 +2890,7 @@ impl PmWorktreeRefreshOutcome {
 }
 
 fn pm_refresh_checked_at() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()
 }
 
 fn git_sha(repo: &Path, revision: &str) -> io::Result<Option<String>> {
@@ -2686,17 +2982,19 @@ fn resolve_pm_worktree_base(git_root: &Path) -> io::Result<String> {
             }
         }
     }
-    let remote = gwt_core::process::run_git_logged(
+    let remote = run_pm_network_git(
+        git_root,
         &["ls-remote", "--symref", "origin", "HEAD"],
-        Some(git_root),
-    )?;
-    if !remote.status.success() {
+        PM_NETWORK_GIT_TIMEOUT,
+    )
+    .map_err(|error| io::Error::other(format!("resolve PM remote default branch: {error}")))?;
+    if !remote.success() {
         return Err(io::Error::other(format!(
             "resolve PM remote default branch: {}",
-            String::from_utf8_lossy(&remote.stderr).trim()
+            remote.stderr.trim()
         )));
     }
-    for line in String::from_utf8_lossy(&remote.stdout).lines() {
+    for line in remote.stdout.lines() {
         if let Some(branch) = line
             .strip_prefix("ref: refs/heads/")
             .and_then(|line| line.strip_suffix("\tHEAD"))
@@ -2710,21 +3008,57 @@ fn resolve_pm_worktree_base(git_root: &Path) -> io::Result<String> {
     ))
 }
 
+/// Issue #7664 AC-3: the longest one network Git command may run while the
+/// PM worktree refresh holds `pm-refresh.lock`. Every other PM start in this
+/// project waits on that lock, so an unanswered remote (a stalled network or
+/// a credential helper waiting for input after an update) must degrade the
+/// refresh to its cached base instead of holding the lock for minutes.
+const PM_NETWORK_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run one network Git command for the PM refresh under
+/// [`PM_NETWORK_GIT_TIMEOUT`] (or the caller's earlier operation deadline),
+/// with interactive credential prompts disabled.
+fn run_pm_network_git(
+    git_root: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> io::Result<gwt_core::process_console::SpawnOutput> {
+    let bound = std::time::Instant::now() + timeout;
+    let deadline =
+        gwt_core::operation_deadline::current().map_or(bound, |caller| caller.min(bound));
+    gwt_core::process_console::spawn_logged_blocking_with_deadline(
+        &gwt_core::process_console::global(),
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        args,
+        gwt_core::process_console::SpawnOptions::new(format!("git {}", args.join(" ")))
+            .current_dir(git_root)
+            .env("GIT_TERMINAL_PROMPT", "0"),
+        deadline,
+    )
+}
+
 fn fetch_pm_worktree_base(git_root: &Path, base_ref: &str) -> io::Result<()> {
+    fetch_pm_worktree_base_within(git_root, base_ref, PM_NETWORK_GIT_TIMEOUT)
+}
+
+fn fetch_pm_worktree_base_within(
+    git_root: &Path,
+    base_ref: &str,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
     let branch = base_ref
         .strip_prefix("origin/")
         .ok_or_else(|| io::Error::other(format!("PM base {base_ref} is not a remote branch")))?;
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-    let output = gwt_core::process::run_git_logged(
-        &["fetch", "origin", "--prune", &refspec],
-        Some(git_root),
-    )?;
-    if output.status.success() {
+    let output = run_pm_network_git(git_root, &["fetch", "origin", "--prune", &refspec], timeout)
+        .map_err(|error| io::Error::other(format!("fetch PM base {base_ref}: {error}")))?;
+    if output.success() {
         Ok(())
     } else {
         Err(io::Error::other(format!(
             "fetch PM base {base_ref}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )))
     }
 }
@@ -4537,6 +4871,151 @@ pub fn save_pm_loop_state(path: &Path, state: &PmLoopState) -> io::Result<()> {
     fs::rename(&scratch, path)
 }
 
+/// Issue #7694: how many loop intervals a live, unpaused PM may go without a
+/// periodic wake before the stall is recorded.
+pub const PM_WAKE_STALL_REPORT_INTERVALS: u64 = 5;
+
+/// Issue #7694: a resident PM that is alive but has not received a wake for
+/// several loop intervals. `issue.monitor.status` derives it on every read
+/// from the last delivery and the PM's own activity ([`observed_pm_wake_stall`]),
+/// so it shows even when the GUI that owns the wake never evaluates a tick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmWakeStall {
+    /// The last wake delivery or PM activity; nothing reached the PM since.
+    /// In the wake owner's own record: its first undelivered tick.
+    pub since: String,
+    /// Why the latest tick was skipped or its delivery not committed, or
+    /// `not_evaluated` when the wake owner recorded no reason for this stall.
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub interval_secs: u64,
+    pub recorded_at: String,
+}
+
+pub fn pm_wake_stall_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+        .join("project-state/pm-wake-stall.json")
+}
+
+/// A missing or unreadable record reads as "no stall": this is a diagnostic,
+/// never a gate.
+pub fn load_pm_wake_stall(path: &Path) -> Option<PmWakeStall> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+pub fn save_pm_wake_stall(path: &Path, stall: &PmWakeStall) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let scratch = unique_pm_scratch_path(path);
+    fs::write(&scratch, serde_json::to_string_pretty(stall)?)?;
+    fs::rename(&scratch, path)
+}
+
+pub fn clear_pm_wake_stall(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+/// Whether a stall that began at `since` has lasted long enough to record.
+pub fn pm_wake_stall_is_reportable(since: &str, now: &str, interval_secs: u64) -> bool {
+    match (
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(since),
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now),
+    ) {
+        (Ok(since), Ok(now)) => {
+            (now - since).whole_seconds()
+                >= i64::try_from(interval_secs.saturating_mul(PM_WAKE_STALL_REPORT_INTERVALS))
+                    .unwrap_or(i64::MAX)
+        }
+        _ => false,
+    }
+}
+
+/// Issue #7694 AC-4: the reason shown when the wake owner recorded none — its
+/// tick never reached the decision, or the decision could not read the project.
+pub const PM_WAKE_STALL_NOT_EVALUATED: &str = "not_evaluated";
+
+#[derive(Serialize, Deserialize)]
+struct PmWakeDelivered {
+    delivered_at: String,
+}
+
+pub fn pm_wake_delivered_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+        .join("project-state/pm-wake-delivered.json")
+}
+
+/// Stamp the moment a wake of any flavour was committed to the PM pane.
+pub fn record_pm_wake_delivered(repo_path: &Path, now: &str) -> io::Result<()> {
+    let path = pm_wake_delivered_path_for_repo_path(repo_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let scratch = unique_pm_scratch_path(&path);
+    fs::write(
+        &scratch,
+        serde_json::to_string(&PmWakeDelivered {
+            delivered_at: now.to_string(),
+        })?,
+    )?;
+    fs::rename(&scratch, path)
+}
+
+pub fn load_pm_wake_delivered_at(repo_path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(pm_wake_delivered_path_for_repo_path(repo_path)).ok()?;
+    Some(
+        serde_json::from_str::<PmWakeDelivered>(&raw)
+            .ok()?
+            .delivered_at,
+    )
+}
+
+/// Issue #7694 AC-4: whether the live, unpaused PM of `repo_path` has gone
+/// [`PM_WAKE_STALL_REPORT_INTERVALS`] loop intervals without a wake.
+///
+/// The clock starts at the newest of the last delivery, the PM's own activity
+/// and its registration, all of which are written outside the periodic wake
+/// decision. The wake owner's record only contributes the reason, and only
+/// when it belongs to this stall: one left by an earlier process or an earlier
+/// stall is older than the clock and is ignored.
+pub fn observed_pm_wake_stall(repo_path: &Path, pm_alive: bool, now: &str) -> Option<PmWakeStall> {
+    if !pm_alive {
+        return None;
+    }
+    let prefs = load_pm_prefs(&pm_prefs_path_for_repo_path(repo_path)).ok()?;
+    let registration = prefs.registration.filter(|_| !prefs.settings.paused)?;
+    let loop_state =
+        load_pm_loop_state(&pm_loop_state_path_for_repo_path(repo_path)).unwrap_or_default();
+    let parse = |instant: &str| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(instant).ok();
+    let since = [
+        load_pm_wake_delivered_at(repo_path),
+        loop_state.last_continued_at,
+        loop_state.last_user_prompt_at,
+        registration.created_at,
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|instant| Some((parse(&instant)?, instant)))
+    .max_by_key(|(at, _)| *at)?;
+    let interval_secs = prefs.settings.loop_interval_secs_clamped();
+    if !pm_wake_stall_is_reportable(&since.1, now, interval_secs) {
+        return None;
+    }
+    let recorded = load_pm_wake_stall(&pm_wake_stall_path_for_repo_path(repo_path))
+        .filter(|stall| parse(&stall.since).is_some_and(|at| at >= since.0));
+    Some(PmWakeStall {
+        since: since.1,
+        reason: recorded
+            .as_ref()
+            .map_or(PM_WAKE_STALL_NOT_EVALUATED, |stall| stall.reason.as_str())
+            .to_string(),
+        detail: recorded.and_then(|stall| stall.detail),
+        interval_secs,
+        recorded_at: now.to_string(),
+    })
+}
+
 /// Whether `path` is some project's canonical PM worktree.
 ///
 /// Gates PM-only managed assets, so it anchors on the full shape
@@ -4861,8 +5340,107 @@ pub fn load_pm_prefs(path: &Path) -> io::Result<PmPrefs> {
     load_pm_prefs_unlocked(path)
 }
 
+/// Hold the existing PM writer lock while inspecting an exact profile/identity.
+/// Callers that also need the registry always acquire it inside this callback.
+pub fn with_pm_prefs_snapshot<T>(
+    path: &Path,
+    operation: impl FnOnce(&PmPrefs) -> io::Result<T>,
+) -> io::Result<T> {
+    with_pm_prefs_lock(path, || operation(&load_pm_prefs_unlocked(path)?))
+}
+
+/// Content identity of the persisted input, including None and version selectors.
+pub fn pm_profile_revision(prefs: &PmPrefs) -> String {
+    let raw = serde_json::to_vec(&prefs.settings.launch_profile).expect("serializable PM profile");
+    format!("pm-profile-v1:{}", hex::encode(Sha256::digest(raw)))
+}
+
+/// One exact project profile CAS; selection remains fenced until durable save returns.
+pub fn set_selected_pm_profile(
+    root: &Path,
+    member_id: &str,
+    expected_revision: &str,
+    profile: PmLaunchProfile,
+) -> io::Result<PmPrefs> {
+    let path = pm_prefs_path_for_repo_path(root);
+    with_pm_prefs_lock(&path, || {
+        let mut prefs = load_pm_prefs_unlocked(&path)?;
+        crate::agent_registry::with_configured_pm_guard(
+            &gwt_core::paths::project_scope_hash(root),
+            member_id,
+            || {
+                if pm_profile_revision(&prefs) != expected_revision {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "This PM profile changed elsewhere. Reload, review your draft and retry.",
+                    ));
+                }
+                if !pm_agent_is_supported(&profile.agent_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Choose a tool that supports the managed PM skill",
+                    ));
+                }
+                let mut profile = profile.normalized();
+                let previous = prefs.settings.launch_profile_or_default();
+                if previous.agent_id == profile.agent_id {
+                    profile.version = previous.version;
+                }
+                gwt_agent::validate_native_tuning(
+                    &profile.agent_id,
+                    profile.model.as_deref(),
+                    profile.reasoning.as_deref(),
+                )
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                prefs.settings.launch_profile = Some(profile);
+                // A retry of an uncertain prior rename still confirms durability.
+                save_pm_prefs_unlocked(&path, &prefs)?;
+                Ok(prefs.clone())
+            },
+        )
+    })
+}
+
+/// Reliable canonical readback, with the same PM prefs -> registry lock order.
+pub fn selected_pm_profile_snapshot(root: &Path, member_id: &str) -> io::Result<PmPrefs> {
+    with_pm_prefs_snapshot(&pm_prefs_path_for_repo_path(root), |prefs| {
+        crate::agent_registry::with_configured_pm_guard(
+            &gwt_core::paths::project_scope_hash(root),
+            member_id,
+            || Ok(prefs.clone()),
+        )
+    })
+}
+
 pub fn save_pm_prefs(path: &Path, prefs: &PmPrefs) -> io::Result<()> {
     with_pm_prefs_lock(path, || save_pm_prefs_unlocked(path, prefs))
+}
+
+/// Keep worker operations and retired PM sessions out of PM window chrome.
+pub(crate) fn record_pm_title_activity(
+    path: &Path,
+    session_id: &str,
+    activity: crate::pm_activity::PmActivity,
+    updated_at_ms: u64,
+) -> io::Result<bool> {
+    with_pm_prefs_lock(path, || {
+        let mut prefs = load_pm_prefs_unlocked(path)?;
+        if session_id.is_empty()
+            || !prefs
+                .registration
+                .as_ref()
+                .is_some_and(|registration| registration.session_id == session_id)
+        {
+            return Ok(false);
+        }
+        prefs.title_activity = Some(crate::pm_activity::PmActivityRecord {
+            session_id: session_id.to_string(),
+            activity,
+            updated_at_ms,
+        });
+        save_pm_prefs_unlocked(path, &prefs)?;
+        Ok(true)
+    })
 }
 
 /// One cross-process read-modify-write transaction under the stable sibling
@@ -4877,6 +5455,15 @@ pub fn mutate_pm_prefs<T>(
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, result))
     })
+}
+
+/// Set the next project open's auto-start preference while preserving the
+/// current PM registration and loop settings.
+pub fn set_pm_auto_start(repo_path: &Path, enabled: bool) -> io::Result<PmPrefs> {
+    mutate_pm_prefs(&pm_prefs_path_for_repo_path(repo_path), |prefs| {
+        prefs.settings.auto_start = enabled;
+    })
+    .map(|(prefs, ())| prefs)
 }
 
 /// Pause only autonomous PM work. Resume re-arms the existing loop once;
@@ -4942,6 +5529,7 @@ pub fn try_register_pm(
             None => PmRegisterOutcome::Registered,
         };
         prefs.registration = Some(candidate);
+        prefs.title_activity = None;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, outcome))
     })
@@ -4961,6 +5549,7 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
             return Ok((prefs, false));
         }
         prefs.registration = None;
+        prefs.title_activity = None;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, true))
     })
@@ -5087,17 +5676,13 @@ pub fn pm_respawn_allowed(registration: &PmRegistration, now: &str) -> bool {
 }
 
 fn rfc3339_delta_secs(earlier: &str, later: &str) -> Option<i64> {
-    let earlier = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
-    let later = chrono::DateTime::parse_from_rfc3339(later).ok()?;
-    Some((later - earlier).num_seconds())
+    let earlier = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(earlier).ok()?;
+    let later = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(later).ok()?;
+    Some((later - earlier).whole_seconds())
 }
 
 fn rfc3339_plus_secs(now: &str, secs: i64) -> Option<String> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
-    Some(
-        (parsed + chrono::Duration::seconds(secs))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    )
+    gwt_core::timestamp::shift_rfc3339_seconds(now, time::Duration::seconds(secs))
 }
 
 /// Diagnostic snapshot for the `pm.status` JSON operation (FR-001 diagnostic
@@ -5315,6 +5900,43 @@ pub fn clear_pm_start_block(prefs_path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Issue #7664 AC-3: a remote that never answers must not keep the PM
+    /// refresh (and `pm-refresh.lock`) waiting; the fetch fails within its
+    /// bound so the refresh degrades to the cached base.
+    #[cfg(unix)]
+    #[test]
+    fn pm_base_fetch_gives_up_on_an_unanswered_remote() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let repo = temp.path().join("repo");
+        let git = |dir: &Path, args: &[&str]| {
+            let output = gwt_core::process::run_git_logged(args, Some(dir)).expect("git");
+            assert!(output.status.success(), "git {args:?}");
+        };
+        git(
+            temp.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git(temp.path(), &["init", "-q", repo.to_str().unwrap()]);
+        git(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        // The remote side never advertises its refs.
+        git(
+            &repo,
+            &["config", "remote.origin.uploadpack", "sh -c 'sleep 600' --"],
+        );
+
+        let error =
+            fetch_pm_worktree_base_within(&repo, "origin/main", std::time::Duration::from_secs(1))
+                .expect_err("an unanswered fetch fails");
+        assert_eq!(
+            error.to_string(),
+            "fetch PM base origin/main: process deadline expired"
+        );
+    }
+
     /// Issue #3767 AC-2 / AC-3: the terse wake clause and the full Stop-gate
     /// clause name the same ruling channels and the same Monitor boundary, so
     /// the two injected wordings cannot drift into different policies.
@@ -5480,6 +6102,19 @@ mod tests {
             .expect("prior bytes remain in a same-parent recovery file");
         assert_eq!(fs::read(&recovery).expect("recovery bytes"), b"{}\n");
         assert!(error.to_string().contains(&recovery.display().to_string()));
+    }
+
+    /// Issue #7542: a failed PM launch is the one block a Restart clears, so
+    /// it must say so and name Restart as the recovery.
+    #[test]
+    fn a_failed_pm_launch_block_is_cleared_by_restart() {
+        let block = PmStartBlock::new(PmStartBlockKind::LaunchFailed, "launch refused");
+        assert!(block.restart_clears_it);
+        assert!(!block.permanent);
+        assert!(block.required_operation.contains("Restart Project Manager"));
+        let wire = serde_json::to_value(&block).expect("serialize");
+        assert_eq!(wire["kind"], "launch_failed");
+        assert_eq!(wire["restart_clears_it"], true);
     }
 
     /// #4486 AC-7: every block must name a distinct, non-empty next action.
@@ -6251,9 +6886,57 @@ mod tests {
         );
     }
 
-    /// SPEC-3431 FR-026: the profile is optional and additive, so prefs
-    /// written before it existed keep working, and a project that never
-    /// configures one still launches.
+    #[test]
+    fn pm_codex_speed_persists_without_enabling_legacy_fast_mode() {
+        let profile: PmLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "codex_speed": "ultrafast"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&profile).unwrap()["codex_speed"],
+            "ultrafast"
+        );
+        let legacy: PmLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex"
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("codex_speed")
+            .is_none());
+    }
+
+    #[test]
+    fn pm_profile_inherits_same_agent_defaults_but_preserves_explicit_off() {
+        let defaults: crate::IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "model": "gpt-6-astra", "reasoning": "high", "codex_speed": "ultrafast"
+        })).unwrap();
+        let profile = PmLaunchProfile {
+            agent_id: "codex".to_string(),
+            ..Default::default()
+        };
+        let inherited = profile.clone().with_agent_defaults(&defaults);
+        assert_eq!(inherited.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(inherited.reasoning.as_deref(), Some("high"));
+        assert_eq!(
+            inherited.codex_speed,
+            Some(gwt_agent::CodexSpeed::Ultrafast)
+        );
+        let explicit = PmLaunchProfile {
+            codex_speed: Some(gwt_agent::CodexSpeed::Off),
+            model: Some("gpt-6.1-sol".to_string()),
+            ..profile
+        }
+        .with_agent_defaults(&defaults);
+        assert_eq!(explicit.codex_speed, Some(gwt_agent::CodexSpeed::Off));
+        assert_eq!(explicit.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            PmLaunchProfile::default_profile().with_agent_defaults(&defaults),
+            PmLaunchProfile::default_profile()
+        );
+    }
+
+    /// SPEC-3431 FR-026: profiles remain optional and additive for legacy prefs.
     #[test]
     fn launch_profile_defaults_to_none_and_round_trips() {
         let (_dir, path) = temp_prefs_path();
@@ -6269,6 +6952,8 @@ mod tests {
                 model: None,
                 reasoning: None,
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }
         );
 
@@ -6277,6 +6962,8 @@ mod tests {
             model: Some("gpt-5.1-codex-max".to_string()),
             reasoning: Some("high".to_string()),
             version: None,
+            codex_speed: Some(gwt_agent::CodexSpeed::Ultrafast),
+            fast_mode: None,
         };
         let mut prefs = prefs;
         prefs.settings.launch_profile = Some(configured.clone());
@@ -6298,6 +6985,8 @@ mod tests {
             model: Some("grok-4.20-beta".to_string()),
             reasoning: Some("xhigh".to_string()),
             version: None,
+            codex_speed: None,
+            fast_mode: None,
         };
         let prefs = PmPrefs {
             settings: PmSettings {
@@ -6331,6 +7020,8 @@ mod tests {
                 model: None,
                 reasoning: None,
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }
         );
     }
@@ -6343,6 +7034,8 @@ mod tests {
                 model: Some("  gpt-5.6  ".to_string()),
                 reasoning: Some("  xhigh  ".to_string()),
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }),
             ..PmSettings::default()
         };
@@ -6356,6 +7049,8 @@ mod tests {
                 model: Some(" \t ".to_string()),
                 reasoning: Some("  ".to_string()),
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }),
             ..PmSettings::default()
         }
@@ -6369,6 +7064,8 @@ mod tests {
                 model: None,
                 reasoning: Some(" AUTO ".to_string()),
                 version: None,
+                codex_speed: None,
+                fast_mode: None,
             }),
             ..PmSettings::default()
         }
@@ -6477,6 +7174,41 @@ mod tests {
         assert_eq!(
             pm_worktree_for_runtime_dir(&canonical_runtime),
             Some(dunce::canonicalize(&worktree).unwrap())
+        );
+    }
+
+    #[test]
+    fn pm_session_dir_is_the_same_from_every_pm_cwd() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        fs::create_dir_all(&worktree).unwrap();
+        let runtime = ensure_pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+        let references = runtime.join(".claude/skills/gwt-pm/references");
+        fs::create_dir_all(&references).unwrap();
+        let pm_dir = worktree.parent().unwrap().to_path_buf();
+        for cwd in [
+            worktree.clone(),
+            worktree.join("src"),
+            runtime.clone(),
+            references.clone(),
+        ] {
+            assert_eq!(
+                pm_session_dir_for_cwd(&cwd),
+                Some(pm_dir.clone()),
+                "cwd {}",
+                cwd.display()
+            );
+        }
+        assert_eq!(pm_session_dir_for_cwd(&pm_dir), None);
+        assert_eq!(pm_session_dir_for_cwd(home.path()), None);
+        let ordinary = home.path().join("repo/pm/worktree");
+        fs::create_dir_all(ordinary.parent().unwrap().join("runtime")).unwrap();
+        fs::create_dir_all(&ordinary).unwrap();
+        assert_eq!(pm_session_dir_for_cwd(&ordinary), None);
+        assert_eq!(
+            pm_session_dir_for_cwd(&ordinary.parent().unwrap().join("runtime")),
+            None
         );
     }
 
@@ -8361,7 +9093,7 @@ mod tests {
     #[test]
     fn pm_delivery_prompt_identifies_its_source_and_preserves_body_hash() {
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
-        let body = "report exact status";
+        let body = "report exact status\n\ninclude the next step\n";
         let hash = pm_delivery_prompt_sha256(body);
         let prompt = protected_pm_delivery_prompt(operation_id, body).unwrap();
         assert!(prompt.contains("PM delivery"), "{prompt}");
@@ -8374,8 +9106,29 @@ mod tests {
         let legacy = format!("{body} [gwt-delivery:{operation_id}:{hash}]\r");
         assert_eq!(
             parse_protected_pm_delivery_prompt(&legacy),
+            Some((operation_id.to_string(), hash.clone()))
+        );
+        // Issue #7785: Claude Code 2.1.328 reports pasted input in this envelope.
+        let marked = legacy.trim_end_matches('\r');
+        let pasted =
+            format!("\n\n<pasted_content id=\"c676\">\n{marked}\n</pasted_content id=\"c676\">\n");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&pasted),
             Some((operation_id.to_string(), hash))
         );
+        for not_only_the_delivery in [
+            format!("{pasted}これは何？"),
+            format!("これは何？{pasted}"),
+            pasted.replace(
+                "</pasted_content id=\"c676\">",
+                "</pasted_content id=\"other\">",
+            ),
+        ] {
+            assert!(
+                parse_protected_pm_delivery_prompt(&not_only_the_delivery).is_none(),
+                "{not_only_the_delivery}"
+            );
+        }
     }
 
     #[test]
@@ -8388,6 +9141,7 @@ mod tests {
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
         let body = "report exact status";
         let prepared = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.to_string(),
             recorded_at: "2026-08-13T00:00:00Z".to_string(),
             status: PmDeliveryReceiptStatus::Prepared,
@@ -8441,6 +9195,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("receipts.jsonl");
         let prepared = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: "72fc3cd4-ad49-43e3-bf3d-d79135763897".into(),
             recorded_at: "2026-10-22T00:00:00Z".into(),
             status: PmDeliveryReceiptStatus::Prepared,
@@ -8495,6 +9250,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("pm-delivery-receipts.jsonl");
         let receipt = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a4".to_string(),
             recorded_at: "2026-08-13T00:00:00Z".to_string(),
             status: PmDeliveryReceiptStatus::Prepared,
@@ -8522,6 +9278,7 @@ mod tests {
         let path = dir.path().join("pm-delivery-receipts.jsonl");
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a5";
         let prepared = PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.to_string(),
             recorded_at: "2026-08-13T00:00:00Z".to_string(),
             status: PmDeliveryReceiptStatus::Prepared,

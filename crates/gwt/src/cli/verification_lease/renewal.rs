@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gwt_core::error_ledger::{self, ErrorKind, ErrorRecord, ErrorTarget};
 use gwt_core::index_coordinator::{
@@ -114,7 +114,7 @@ impl Renewal {
                         )
                     });
                     let Ok(mut lease) = lease.lock() else { break };
-                    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    let now = epoch_ms();
                     if let Err(error) = renew_observed(&mut lease, activity, now) {
                         tracing::warn!(%error, "verification lease renewal failed");
                     }
@@ -149,7 +149,10 @@ fn renew_observed(
 }
 
 fn epoch_ms() -> u64 {
-    chrono::Utc::now().timestamp_millis().max(0) as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn observe_pressure(
@@ -353,7 +356,7 @@ mod tests {
         assert!(error_ledger::list_since(None).unwrap().is_empty());
         // An explicit past deadline models a job that has outlived its TTL;
         // no wall-clock sleep controls this regression.
-        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let now = epoch_ms();
         lease.extend_until(now - 1).unwrap();
         assert!(coordinator.heavy_lease_status().unwrap().expired);
         renew_observed(&mut lease, Some(activity()), now).unwrap();

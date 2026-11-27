@@ -35,7 +35,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -315,11 +315,11 @@ pub struct NoActionAudit {
     /// When the predecessor generation was launched. Immutable across the
     /// settlement, so it — not the record bytes — is what binds this audit to
     /// its own generation after the projection advances.
-    pub predecessor_launched_at: DateTime<Utc>,
+    pub predecessor_launched_at: UtcTimestamp,
     pub predecessor_status: ExecutionControlStatus,
     /// The integration base that proved the zero source surface.
     pub source_base: String,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     /// Integrity hash over this audit with `content_hash` emptied.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
@@ -617,7 +617,7 @@ pub fn record_no_action(
         predecessor_launched_at: record.launched_at,
         predecessor_status: record.status,
         source_base,
-        recorded_at: Utc::now(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now(),
         content_hash: String::new(),
     };
     audit.content_hash = compute_audit_hash(&audit);
@@ -676,7 +676,7 @@ pub struct DeliveredSettlementAudit {
     pub upstream_ref: String,
     pub remote_tip: String,
     pub owner_updated_at: String,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     pub content_hash: String,
 }
 
@@ -814,7 +814,7 @@ pub fn record_delivered_settlement<E: crate::cli::CliEnv>(
         upstream_ref,
         remote_tip,
         owner_updated_at: snapshot.updated_at.0,
-        recorded_at: Utc::now(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now(),
         content_hash: String::new(),
     };
     audit.content_hash = delivered_settlement_hash(&audit);

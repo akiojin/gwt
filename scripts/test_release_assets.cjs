@@ -517,6 +517,73 @@ run("portable zip extraction installs the windows bundle", () => {
   assert.equal(fs.readFileSync(path.join(binDir, "gwtd.exe"), "utf8"), "windows-daemon");
 });
 
+run("portable zip extraction survives a broken PowerShell Archive module", () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-release-test-"));
+  const sourceDir = path.join(root, "source");
+  const binDir = path.join(root, "bin");
+  const archivePath = path.join(root, "gwt-windows-x86_64.zip");
+  const sourceBinary = path.join(sourceDir, "gwt.exe");
+  const sourceDaemon = path.join(sourceDir, "gwtd.exe");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(sourceBinary, "windows-binary");
+  fs.writeFileSync(sourceDaemon, "windows-daemon");
+
+  execFileSync("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `Compress-Archive -LiteralPath @('${sourceBinary.replace(/'/g, "''")}','${sourceDaemon.replace(/'/g, "''")}') -DestinationPath '${archivePath.replace(/'/g, "''")}' -Force`,
+  ]);
+
+  const moduleRoot = path.join(root, "modules");
+  const moduleDir = path.join(moduleRoot, "Microsoft.PowerShell.Archive");
+  fs.mkdirSync(moduleDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(moduleDir, "Microsoft.PowerShell.Archive.psd1"),
+    [
+      "@{",
+      "  ModuleVersion = '9.9.9'",
+      "  GUID = '11111111-1111-1111-1111-111111111111'",
+      "  RootModule = 'Microsoft.PowerShell.Archive.psm1'",
+      "  FunctionsToExport = @('Expand-Archive')",
+      "}",
+      "",
+    ].join("\n")
+  );
+  fs.writeFileSync(
+    path.join(moduleDir, "Microsoft.PowerShell.Archive.psm1"),
+    [
+      "function Expand-Archive { throw 'stub Expand-Archive should not run' }",
+      "Export-ModuleMember -Function Expand-Archive",
+      "",
+    ].join("\n")
+  );
+
+  const previousModulePath = process.env.PSModulePath;
+  process.env.PSModulePath = moduleRoot;
+  try {
+    installBundleFromArchive({
+      archivePath,
+      asset: path.basename(archivePath),
+      binDir,
+      platform: "win32",
+    });
+  } finally {
+    if (previousModulePath === undefined) {
+      delete process.env.PSModulePath;
+    } else {
+      process.env.PSModulePath = previousModulePath;
+    }
+  }
+
+  assert.equal(fs.readFileSync(path.join(binDir, "gwt.exe"), "utf8"), "windows-binary");
+  assert.equal(fs.readFileSync(path.join(binDir, "gwtd.exe"), "utf8"), "windows-daemon");
+});
+
 if (failed) {
   process.exit(1);
 }

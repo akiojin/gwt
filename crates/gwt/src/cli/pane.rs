@@ -436,7 +436,7 @@ fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<S
         })
         .collect();
     serde_json::to_string(
-        &json!({"schema_version":1,"observed_at":chrono::Utc::now().to_rfc3339(),"panes":panes}),
+        &json!({"schema_version":1,"observed_at":gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),"panes":panes}),
     )
     .map(|value| format!("{value}\n"))
     .map_err(|error| error.to_string())
@@ -619,6 +619,13 @@ async fn send_pm_pane_input(
     let operation_id = requested_operation_id
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string());
+    // PM delivery uses CR as its transport terminator. A trailing LF belongs
+    // to the prompt body, just like any other embedded line break.
+    let payload = if text.ends_with('\r') {
+        text.to_string()
+    } else {
+        format!("{text}\r")
+    };
     let mut expected_window_id = None::<String>;
     let result = tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
         let mut response_loss = None::<String>;
@@ -655,7 +662,7 @@ async fn send_pm_pane_input(
                     "kind": "pm_pane_send_input",
                     "operation_id": operation_id,
                     "window_id": window_id,
-                    "text": ensure_trailing_submit(text),
+                    "text": payload,
                 }),
             )
             .await
@@ -841,9 +848,15 @@ pub(super) fn fleet_windows(project_root: &str) -> Result<Vec<Value>, String> {
                         .ok_or_else(|| {
                             "fleet pane snapshot omitted its project scope".to_string()
                         })?;
+                    // Issue #7350: the backend reports its principal root (a
+                    // workspace home) while the caller resolves the bare main
+                    // root; both are one project when their scope hashes match.
                     let expected_root =
                         gwt_core::paths::resolve_main_worktree_root(Path::new(project_root));
-                    if !same_pane_scope_path(Path::new(observed_root), &expected_root) {
+                    if !same_pane_scope_path(Path::new(observed_root), &expected_root)
+                        && gwt_core::paths::project_scope_hash(Path::new(observed_root))
+                            != gwt_core::paths::project_scope_hash(&expected_root)
+                    {
                         return Err("fleet pane snapshot belongs to a different project".into());
                     }
                     return value["panes"]
@@ -1066,7 +1079,7 @@ async fn read_pane_snapshot_with_timeout(
 
 pub(super) fn parse_recovery_bounds(after: &str, before: &str) -> Result<(i64, i64), String> {
     let parse = |value: &str| {
-        chrono::DateTime::parse_from_rfc3339(value)
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value)
             .map(|time| time.timestamp())
             .map_err(|_| {
                 "pane.recover requires RFC3339 started_after and started_before".to_string()
@@ -1113,7 +1126,7 @@ fn plan_pane_recovery(
                     .filter(|window| window.session_id.as_deref() == Some(&session.session_id))
                     .count()
                     != 1
-                || chrono::DateTime::parse_from_rfc3339(&session.started_at)
+                || gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&session.started_at)
                     .ok()
                     .map(|started| started.timestamp())
                     .is_none_or(|started| started < after || started > before)
@@ -2302,7 +2315,10 @@ fn resolve_pm_send_target<'a>(
 fn pm_window_has_exact_prompt_ack(window: &PersistedWindowState) -> bool {
     matches!(window.preset, WindowPreset::Claude | WindowPreset::Codex)
         || (window.preset == WindowPreset::Agent
-            && matches!(window.agent_id.as_deref(), Some("claude" | "codex")))
+            && matches!(
+                window.agent_id.as_deref(),
+                Some("claude" | "codex" | "grok")
+            ))
 }
 
 fn status_label(status: WindowState) -> &'static str {
@@ -2369,6 +2385,7 @@ mod tests {
             runtime_started_at_ms: None,
             surface_owner: None,
             is_pm: false,
+            pm_activity: None,
         }
     }
 
@@ -2446,9 +2463,7 @@ mod tests {
         runtime.host_started_at = Some(started);
         runtime.child_pid = Some(pid);
         runtime.child_started_at = Some(started);
-        runtime.last_activity_at = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        runtime.last_activity_at = "2000-01-01T00:00:00Z".parse().unwrap();
         runtime.save(&runtime_path).unwrap();
         let mut workspace = crate::persistence::empty_workspace_state();
         let mut pane = window("agent-health", WindowPreset::Codex, Some("codex"));
@@ -2586,7 +2601,8 @@ mod tests {
     fn recovery_plan_selects_only_the_restore_burst_and_prioritizes_missing_worktrees() {
         use crate::session_inventory::SessionObservation;
         use gwt_agent::SessionLaunchOrigin;
-        let after = chrono::DateTime::parse_from_rfc3339("2026-09-14T05:00:00Z").unwrap();
+        let after =
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-09-14T05:00:00Z").unwrap();
         let mut windows = Vec::new();
         let sessions = [
             ("restored", SessionLaunchOrigin::AutomaticRestore, true, 10),
@@ -2612,7 +2628,7 @@ mod tests {
                 host_pid: 1,
                 child_pid: 2,
                 child_started_at: (after.timestamp() + offset) as u64,
-                started_at: (after + chrono::Duration::seconds(offset)).to_rfc3339(),
+                started_at: (after + time::Duration::seconds(offset)).to_rfc3339(),
                 launch_origin: origin,
                 launch_entrypoint: None,
                 restore_source_session_id: Some("source".to_string()),
@@ -3342,6 +3358,19 @@ mod tests {
                 .id,
             "tab-1::agent-2"
         );
+    }
+
+    #[test]
+    fn issue_3706_grok_is_an_exact_prompt_ack_target() {
+        let mut grok = window("tab-1::grok", WindowPreset::Agent, Some("grok"));
+        grok.session_id = Some("grok-session".into());
+        assert!(resolve_pm_send_target(std::slice::from_ref(&grok), "grok").is_ok());
+
+        grok.status = WindowState::Stopped;
+        assert!(resolve_pm_send_target(std::slice::from_ref(&grok), "grok").is_err());
+        grok.status = WindowState::Running;
+        grok.agent_id = Some("unknown".into());
+        assert!(resolve_pm_send_target(&[grok], "grok").is_err());
     }
 
     #[test]
@@ -4579,28 +4608,10 @@ mod tests {
             .is_ok());
     }
 
-    #[test]
-    fn fleet_windows_rejects_foreign_empty_snapshot() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let _runtime = ScopedEnvVar::set(
-            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
-            persist_runtime_evidence(home.path()),
-        );
-        let _token = ScopedEnvVar::set(
-            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
-            "fleet-scope-capability",
-        );
-        let project = tempfile::tempdir().unwrap();
-        let foreign = tempfile::tempdir().unwrap();
-        let snapshots = [
-            json!({"kind":"fleet_pane_list","project_root":foreign.path(),"panes":[]}),
-            json!({"kind":"fleet_pane_list","project_root":project.path(),"panes":[]}),
-        ];
+    /// Serve one scripted `fleet_pane_list` reply per connection.
+    fn serve_fleet_snapshots(
+        snapshots: Vec<Value>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -4627,6 +4638,37 @@ mod tests {
                 }
             });
         });
+        (address, server)
+    }
+
+    fn fleet_scope_env(home: &Path) -> Vec<ScopedEnvVar> {
+        vec![
+            ScopedEnvVar::set("HOME", home),
+            ScopedEnvVar::set("USERPROFILE", home),
+            ScopedEnvVar::set(
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+                persist_runtime_evidence(home),
+            ),
+            ScopedEnvVar::set(
+                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+                "fleet-scope-capability",
+            ),
+        ]
+    }
+
+    #[test]
+    fn fleet_windows_rejects_foreign_empty_snapshot() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _env = fleet_scope_env(home.path());
+        let project = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let (address, server) = serve_fleet_snapshots(vec![
+            json!({"kind":"fleet_pane_list","project_root":foreign.path(),"panes":[]}),
+            json!({"kind":"fleet_pane_list","project_root":project.path(),"panes":[]}),
+        ]);
         let _url = ScopedEnvVar::set(
             GWT_PANE_WS_URL_ENV,
             format!("ws://{address}/internal/pane-ws"),
@@ -4639,6 +4681,72 @@ mod tests {
             "an unrelated empty inventory is not a complete pane observation"
         );
         assert!(own_project.unwrap().is_empty());
+    }
+
+    /// Issue #7350: in the workspace-home layout (`<home>/<repo>.git` bare plus
+    /// worktrees), the caller resolves the bare repository as its main root
+    /// while the backend principal reports the workspace home. Both name the
+    /// same project, so the snapshot must be accepted.
+    #[test]
+    fn fleet_windows_accepts_workspace_home_snapshot_for_bare_main_root() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _env = fleet_scope_env(home.path());
+        let workspace = tempfile::tempdir().unwrap();
+        let seed = workspace.path().join("seed");
+        let bare = workspace.path().join("repo.git");
+        let worktree = workspace.path().join("work/issue-1");
+        let git = |args: &[&str]| {
+            let args = [
+                &["-c", "user.name=t", "-c", "user.email=t@example.com"],
+                args,
+            ]
+            .concat();
+            let output = gwt_core::process::run_git_logged(&args, None).expect("git");
+            assert!(output.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", seed.to_str().unwrap()]);
+        git(&[
+            "-C",
+            seed.to_str().unwrap(),
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        git(&[
+            "clone",
+            "-q",
+            "--bare",
+            seed.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ]);
+        std::fs::remove_dir_all(&seed).unwrap();
+        git(&[
+            "-C",
+            bare.to_str().unwrap(),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/issue-1",
+            worktree.to_str().unwrap(),
+        ]);
+        let (address, server) = serve_fleet_snapshots(vec![json!({
+            "kind":"fleet_pane_list",
+            "project_root":workspace.path(),
+            "panes":[],
+        })]);
+        let _url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let observed = fleet_windows(&worktree.to_string_lossy());
+        server.join().unwrap();
+        assert_eq!(observed, Ok(Vec::new()));
     }
 
     #[test]
@@ -5152,11 +5260,12 @@ mod tests {
                 &format!("ws://{address}/internal/pane-ws"),
                 None,
                 "codex-1",
-                "same operation body",
+                "same operation\nbody\n",
                 None,
             )
             .await;
             let mutations = server.await.expect("PM replay mock task");
+            assert_eq!(mutations[0]["text"], "same operation\nbody\n\r");
 
             let output = result.expect("replayed delivery succeeds");
             assert!(output.contains("pm message delivered to tab::codex-1"));

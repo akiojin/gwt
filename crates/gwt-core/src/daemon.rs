@@ -431,7 +431,9 @@ impl DaemonEndpoint {
             pid,
             bind,
             auth_token,
-            updated_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            updated_at_unix_ms: time::OffsetDateTime::now_utc()
+                .unix_timestamp_nanos()
+                .div_euclid(1_000_000) as i64,
             project_transport_url: None,
         }
     }
@@ -508,7 +510,15 @@ pub enum ClientFrame {
     /// Forward a managed-hook event to the daemon for routing.
     Hook(HookEnvelope),
     /// Subscribe to one or more daemon broadcast channels.
-    Subscribe { channels: Vec<String> },
+    ///
+    /// `gui_window` marks the GUI process's project-window subscriber. It does
+    /// not authorize Issues materialization; that remains
+    /// [`Self::SubscribeMaterializer`].
+    Subscribe {
+        channels: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        gui_window: bool,
+    },
     /// Subscribe as the GUI process that materializes Issues launch
     /// deliveries. Unlike [`Self::Subscribe`], the daemon binds a presence
     /// lease to this IPC connection and releases it on disconnect.
@@ -521,6 +531,8 @@ pub enum ClientFrame {
     Publish { channel: String, payload: Value },
     /// Request a snapshot of the daemon's current runtime stats.
     Status,
+    /// Read back a recent committed Issues control after its ACK was lost.
+    IssueMonitorControlReceipt { id: String },
     /// Launch one verification command from the daemon instead of from the
     /// caller's process tree (Issue #4409).
     ///
@@ -531,6 +543,10 @@ pub enum ClientFrame {
     /// dedicated process group, so escaping the caller's tree never leaves
     /// orphans behind (AC-2 / AC-7, Issue #3845).
     SpawnVerification(VerificationSpawnRequest),
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One verification command, described completely enough that the daemon can

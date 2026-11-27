@@ -1,5 +1,7 @@
 //! Explicit Board reads, separate from automatic prompt injection (Issue #3713).
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{
     collections::BTreeMap,
     fs, io,
@@ -7,15 +9,19 @@ use std::{
     time::Instant,
 };
 
-use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
-use gwt_core::coordination::{BoardAudienceScope, BoardEntry, BoardEntryKind, BoardProjection};
+use gwt_core::coordination::{
+    BoardAudienceScope, BoardEntry, BoardEntryKind, BoardProjection, PromptBoardCursor,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use time::Duration;
 
 use crate::cli::hook::HookOutput;
 
-pub const READ_RECOVERY: &str =
+const PROMPT_READ_RECOVERY: &str =
+    r#"{"schema_version":1,"operation":"board.show","params":{"unread":true,"limit":20}}"#;
+const READ_RECOVERY: &str =
     r#"{"schema_version":1,"operation":"board.show","params":{"all":true}}"#;
 
 pub(crate) fn caller_session_from_env() -> Option<String> {
@@ -35,7 +41,7 @@ struct ReadReceipt {
 
 #[derive(Deserialize, Serialize)]
 struct CompleteCoverage {
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
     total_entries: usize,
     newest_entry_id: Option<String>,
 }
@@ -98,9 +104,9 @@ pub fn record_complete_read(
     repo: &Path,
     session: &str,
     entries: &[BoardEntry],
-    started_at: DateTime<Utc>,
+    started_at: UtcTimestamp,
     hot: &BoardProjection,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let latest = latest_entries(entries.to_vec());
     let covered = hot.entries.iter().all(|entry| {
         latest
@@ -112,7 +118,8 @@ pub fn record_complete_read(
         total_entries: hot.total_entries,
         newest_entry_id: hot.newest_entry_id.clone(),
     });
-    record_read(repo, session, entries, coverage)
+    record_read(repo, session, entries, coverage)?;
+    Ok(covered)
 }
 
 fn record_read(
@@ -179,7 +186,7 @@ fn covered_hot_tail(hot: &BoardProjection, coverage: &CompleteCoverage) -> Optio
 fn observation_entries(
     repo: &Path,
     receipt: &ReadReceipt,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
 ) -> io::Result<Vec<BoardEntry>> {
     if let Some(coverage) = &receipt.complete {
         let hot = crate::board_provider::load_snapshot(repo)
@@ -247,7 +254,7 @@ fn unread_entries(
     repo: &Path,
     session: &str,
     scope: &BoardAudienceScope,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
 ) -> io::Result<Vec<BoardEntry>> {
     gwt_core::operation_deadline::ensure_remaining("Board unread observation")?;
     let receipt = load_receipt(repo, session)?;
@@ -280,12 +287,137 @@ pub(crate) fn registered_pm(repo: &Path, session: &str) -> bool {
 fn pm_unread(repo: &Path, session: &str) -> io::Result<Vec<BoardEntry>> {
     let scope = crate::board_audience::current_session_board_scope(repo, Some(session))
         .map_err(io::Error::other)?;
-    unread_entries(repo, session, &scope, DateTime::<Utc>::MIN_UTC)
+    unread_entries(repo, session, &scope, UtcTimestamp::MIN)
 }
 
 pub fn warning(error: impl std::fmt::Display) -> String {
     format!("Warning: Board read evidence unavailable ({error}); unread state is unknown. \
         This optional coordination check is fail-open. Read Board bodies and retry: {READ_RECOVERY}")
+}
+
+fn prompt_warning(error: impl std::fmt::Display) -> String {
+    format!("Warning: Board read evidence unavailable ({error}); unread state is unknown. \
+        This optional coordination check is fail-open. Read Board bodies and retry: {PROMPT_READ_RECOVERY}")
+}
+
+fn unread_cursor_path(repo: &Path, session: &str) -> PathBuf {
+    receipt_path(repo, session).with_extension("cursor.json")
+}
+
+/// Capture a position represented by the manifest before starting a complete
+/// read. Uncommitted or later appends remain after this position.
+pub fn complete_read_cursor(repo: &Path) -> Option<PromptBoardCursor> {
+    if crate::board_provider::routing_for(repo).provider != "local" {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Manifest {
+        active_segment: String,
+        segments: Vec<Segment>,
+    }
+    #[derive(Deserialize)]
+    struct Segment {
+        file: String,
+        bytes: u64,
+    }
+    let path = gwt_core::coordination::coordination_events_manifest_path(repo);
+    let manifest: Manifest = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let active = manifest
+        .segments
+        .into_iter()
+        .find(|segment| segment.file == manifest.active_segment)?;
+    Some(PromptBoardCursor {
+        segment: Some(active.file),
+        offset: active.bytes,
+    })
+}
+
+pub fn record_complete_cursor(
+    repo: &Path,
+    session: &str,
+    cursor: PromptBoardCursor,
+) -> io::Result<()> {
+    let path = unread_cursor_path(repo, session);
+    let _lock = lock_cursor(&path)?;
+    let previous = read_cursor(&path)?;
+    if (&previous.segment, previous.offset) < (&cursor.segment, cursor.offset) {
+        write_cursor(&path, &cursor)?;
+    }
+    Ok(())
+}
+
+fn lock_cursor(path: &Path) -> io::Result<fs::File> {
+    fs::create_dir_all(path.parent().expect("cursor has a parent"))?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))?;
+    lock.try_lock_exclusive()?;
+    Ok(lock)
+}
+
+fn write_cursor(path: &Path, cursor: &PromptBoardCursor) -> io::Result<()> {
+    gwt_github::cache::write_atomic(path, &serde_json::to_vec(cursor).map_err(io::Error::other)?)
+}
+
+fn read_cursor(path: &Path) -> io::Result<PromptBoardCursor> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(PromptBoardCursor::default()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn render_unread_page(repo: &Path, session: &str, limit: usize) -> io::Result<String> {
+    if crate::board_provider::routing_for(repo).provider != "local" {
+        return Err(io::Error::other(
+            "Cursor-based Board reads require the local provider",
+        ));
+    }
+    let path = unread_cursor_path(repo, session);
+    let _lock = lock_cursor(&path)?;
+    let cursor = read_cursor(&path)?;
+    let page =
+        gwt_core::coordination::load_board_read_page(repo, cursor.clone(), limit.clamp(1, 20))
+            .map_err(io::Error::other)?;
+    // The explicit read returns all entries in this page, as with board.show
+    // all:true. This makes its cursor independent of workspace scope changes.
+    let rendered = serde_json::to_string(&serde_json::json!({
+        "entries": page.entries,
+        "has_more": page.has_more,
+    }))
+    .map_err(io::Error::other)?;
+    // The command output is escaped again in the enclosing JSON envelope.
+    if rendered.len() > 256 * 1024 {
+        return Err(io::Error::other(
+            "Board unread page exceeds the response budget",
+        ));
+    }
+    record_returned_entries(repo, session, &page.entries)?;
+    if page.cursor != cursor {
+        write_cursor(&path, &page.cursor)?;
+    }
+    Ok(rendered)
+}
+
+fn bounded_pm_unread(repo: &Path, session: &str) -> io::Result<(Vec<BoardEntry>, bool)> {
+    if crate::board_provider::routing_for(repo).provider != "local" {
+        return Err(io::Error::other(
+            "Cursor-based Board reads require the local provider",
+        ));
+    }
+    let scope = crate::board_audience::current_session_board_scope(repo, Some(session))
+        .map_err(io::Error::other)?;
+    let cursor = read_cursor(&unread_cursor_path(repo, session))?;
+    let page =
+        gwt_core::coordination::load_board_read_page(repo, cursor, 20).map_err(io::Error::other)?;
+    let mut entries = latest_entries(page.entries);
+    entries.retain(|entry| {
+        gwt_core::coordination::board_entry_visible_for_scope(entry, &scope)
+            && entry.origin_session_id.as_deref() != Some(session)
+    });
+    Ok((entries, page.has_more))
 }
 
 fn bounded_pm_prompt_context_with(
@@ -294,19 +426,25 @@ fn bounded_pm_prompt_context_with(
 ) -> Option<String> {
     use std::sync::mpsc;
 
-    let expired = || Some(warning("PM Board observation deadline expired"));
+    let expired = || Some(prompt_warning("PM Board observation deadline expired"));
     if Instant::now() >= deadline {
         return expired();
     }
     let (sender, receiver) = mpsc::sync_channel(1);
+    #[cfg(test)]
+    let test_home = gwt_core::test_support::gwt_home_override();
     if let Err(error) = std::thread::Builder::new()
         .name("gwt-board-unread".into())
         .spawn(move || {
+            #[cfg(test)]
+            let _test_home = test_home
+                .as_ref()
+                .map(gwt_core::test_support::ScopedGwtHome::set);
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
             let _ = sender.send(observe());
         })
     {
-        return Some(warning(error));
+        return Some(prompt_warning(error));
     }
     // Do not join the decoder: local receipt parsing or filesystem I/O can
     // still be busy after the cooperative event decoder observes its deadline.
@@ -314,7 +452,7 @@ fn bounded_pm_prompt_context_with(
         Ok(context) if Instant::now() < deadline => context,
         Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => expired(),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Some(warning("PM Board observation worker disconnected"))
+            Some(prompt_warning("PM Board observation worker disconnected"))
         }
     }
 }
@@ -332,7 +470,7 @@ pub fn pm_prompt_context(repo: &Path, session: &str) -> Option<String> {
             let repo = repo.to_path_buf();
             let session = session.to_owned();
             bounded_pm_prompt_context_with(deadline, move || {
-                pm_prompt_context_inline(&repo, &session)
+                render_pm_observation(bounded_pm_unread(&repo, &session), PROMPT_READ_RECOVERY)
             })
         }
         None => pm_prompt_context_inline(repo, session),
@@ -340,8 +478,18 @@ pub fn pm_prompt_context(repo: &Path, session: &str) -> Option<String> {
 }
 
 fn pm_prompt_context_inline(repo: &Path, session: &str) -> Option<String> {
-    Some(match pm_unread(repo, session) {
-        Ok(entries) => {
+    render_pm_observation(
+        pm_unread(repo, session).map(|entries| (entries, false)),
+        READ_RECOVERY,
+    )
+}
+
+fn render_pm_observation(
+    result: io::Result<(Vec<BoardEntry>, bool)>,
+    recovery: &str,
+) -> Option<String> {
+    Some(match result {
+        Ok((entries, has_more)) => {
             let mut counts = BTreeMap::<&str, usize>::new();
             for entry in &entries {
                 *counts.entry(entry.kind.as_str()).or_default() += 1;
@@ -351,12 +499,20 @@ fn pm_prompt_context_inline(repo: &Path, session: &str) -> Option<String> {
                 .map(|(kind, count)| format!("{kind}={count}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let count = if has_more {
+                format!(
+                    "Board unread in first page: {} ({kinds}); more history remains.",
+                    entries.len()
+                )
+            } else {
+                format!("Board unread: {} ({kinds}).", entries.len())
+            };
             format!(
-                "Board unread: {} ({kinds}). Prompt injection is not an explicit read. \
-                Read the actual bodies before deciding: {READ_RECOVERY}",
-                entries.len()
+                "{count} Prompt injection is not an explicit read. \
+                Read the actual bodies before deciding: {recovery}"
             )
         }
+        Err(error) if recovery == PROMPT_READ_RECOVERY => prompt_warning(error),
         Err(error) => warning(error),
     })
 }
@@ -409,7 +565,7 @@ pub fn recent_owner_unread(
     caller_session: &str,
     target_session: Option<&str>,
     target_owner: Option<u64>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> io::Result<Vec<BoardEntry>> {
     if target_session.is_none() && target_owner.is_none() {
         return Ok(Vec::new());
@@ -471,6 +627,130 @@ mod tests {
     }
 
     #[test]
+    fn issue_7852_pm_prompt_reads_only_after_cursor_in_large_board() {
+        use gwt_core::coordination::CoordinationEvent;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let repo = tmp.path();
+        let session = "pm-session";
+        register_pm(repo, session);
+        let segment = gwt_core::coordination::coordination_events_segments_dir(repo);
+        fs::create_dir_all(&segment).unwrap();
+        let segment = segment.join("0000000000000001.jsonl");
+        let mut board = io::BufWriter::new(fs::File::create(&segment).unwrap());
+        let mut old = entry(BoardEntryKind::Blocked, "42");
+        old.body = "x".repeat(1500);
+        let old_row =
+            serde_json::to_vec(&CoordinationEvent::MessageAppended { entry: old }).unwrap();
+        for _ in 0..20_000 {
+            board.write_all(&old_row).unwrap();
+            board.write_all(b"\n").unwrap();
+        }
+        board.flush().unwrap();
+        let offset = fs::metadata(&segment).unwrap().len();
+        assert!(offset > 30_000_000);
+        // Persist an explicit read cursor at the end of the historical fixture.
+        record_complete_cursor(
+            repo,
+            session,
+            PromptBoardCursor {
+                segment: Some(segment.file_name().unwrap().to_string_lossy().into_owned()),
+                offset,
+            },
+        )
+        .unwrap();
+        let recent = entry(BoardEntryKind::Handoff, "42");
+        serde_json::to_writer(
+            &mut board,
+            &CoordinationEvent::MessageAppended {
+                entry: recent.clone(),
+            },
+        )
+        .unwrap();
+        board.write_all(b"\n").unwrap();
+        board.flush().unwrap();
+
+        let started = Instant::now();
+        {
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                started + std::time::Duration::from_millis(200),
+            );
+            let context = pm_prompt_context(repo, session).unwrap();
+            assert!(context.contains("Board unread: 1 (handoff=1)"), "{context}");
+        }
+        eprintln!(
+            "PM Board observation: 20,000 historical rows, {offset} bytes, elapsed {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            read_cursor(&unread_cursor_path(repo, session))
+                .unwrap()
+                .offset,
+            offset
+        );
+        let response = render_unread_page(repo, session, 20).unwrap();
+        assert!(response.contains(&recent.id));
+        assert!(bounded_pm_unread(repo, session).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn issue_7852_warning_recovery_bounds_the_read_and_keeps_remaining_pages() {
+        use gwt_core::coordination::CoordinationEvent;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let repo = tmp.path();
+        let session = "pm-session";
+        register_pm(repo, session);
+        let segments = gwt_core::coordination::coordination_events_segments_dir(repo);
+        fs::create_dir_all(&segments).unwrap();
+        let mut file =
+            io::BufWriter::new(fs::File::create(segments.join("0000000000000001.jsonl")).unwrap());
+        for index in 0..45 {
+            let mut item = entry(BoardEntryKind::Status, "42");
+            if index < 3 {
+                item.body = "\"".repeat(21_500);
+            }
+            serde_json::to_writer(
+                &mut file,
+                &CoordinationEvent::MessageAppended { entry: item },
+            )
+            .unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        file.flush().unwrap();
+        let context = {
+            let _deadline =
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now());
+            pm_prompt_context(repo, session).unwrap()
+        };
+        let envelope: serde_json::Value =
+            serde_json::from_str(context.split_once("retry: ").unwrap().1).unwrap();
+        assert_eq!(envelope["operation"], "board.show");
+        assert_eq!(envelope["params"]["unread"], true);
+        let limit = envelope["params"]["limit"].as_u64().unwrap() as usize;
+        assert_eq!(limit, 20);
+        let rendered = render_unread_page(repo, session, limit).unwrap();
+        assert!(
+            serde_json::to_vec(&serde_json::json!({"output": rendered}))
+                .unwrap()
+                .len()
+                < 1_000_000
+        );
+        let page: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert!(page["entries"].as_array().unwrap().len() < limit);
+        assert_eq!(page["has_more"], true);
+        let next: serde_json::Value =
+            serde_json::from_str(&render_unread_page(repo, session, limit).unwrap()).unwrap();
+        assert_ne!(page["entries"][0]["id"], next["entries"][0]["id"]);
+        assert_eq!(next["entries"].as_array().unwrap().len(), limit);
+        assert_eq!(next["has_more"], true);
+    }
+
+    #[test]
     fn issue_3713_receipts_are_session_scoped_and_revisions_need_another_read() {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
@@ -481,7 +761,7 @@ mod tests {
             tmp.path(),
             "reader-a",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC
+            UtcTimestamp::MIN
         )
         .unwrap()
         .is_empty());
@@ -490,7 +770,7 @@ mod tests {
                 tmp.path(),
                 "reader-b",
                 &BoardAudienceScope::All,
-                DateTime::<Utc>::MIN_UTC
+                UtcTimestamp::MIN
             )
             .unwrap()
             .len(),
@@ -505,7 +785,7 @@ mod tests {
                 tmp.path(),
                 "reader-a",
                 &BoardAudienceScope::All,
-                DateTime::<Utc>::MIN_UTC
+                UtcTimestamp::MIN
             )
             .unwrap()
             .len(),
@@ -517,7 +797,7 @@ mod tests {
                 tmp.path(),
                 "reader-a",
                 &BoardAudienceScope::All,
-                DateTime::<Utc>::MIN_UTC
+                UtcTimestamp::MIN
             )
             .unwrap()
             .is_empty(),
@@ -568,7 +848,7 @@ mod tests {
     fn issue_3713_scope_and_exact_target_evidence_exclude_unrelated_and_expired_posts() {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let current = entry(BoardEntryKind::Handoff, "42").with_audience(vec!["workspace-a"]);
         let other = entry(BoardEntryKind::Blocked, "43")
             .with_audience(vec!["workspace-b"])
@@ -583,7 +863,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::Workspace("workspace-a".into()),
-            DateTime::<Utc>::MIN_UTC,
+            UtcTimestamp::MIN,
         )
         .unwrap();
         assert_eq!(scoped.len(), 2);
@@ -592,7 +872,7 @@ mod tests {
             "reader",
             Some("owner-session"),
             Some(42),
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .unwrap();
         assert_eq!(recent, vec![current.clone()]);
@@ -602,19 +882,19 @@ mod tests {
             "reader",
             Some("owner-session"),
             Some(42),
-            Utc::now()
+            UtcTimestamp::now()
         )
         .unwrap()
         .is_empty());
         assert!(
-            recent_owner_unread(tmp.path(), "reader", None, None, Utc::now())
+            recent_owner_unread(tmp.path(), "reader", None, None, UtcTimestamp::now())
                 .unwrap()
                 .is_empty()
         );
         let newer = entry(BoardEntryKind::Status, "42");
         crate::board_provider::post_entry(tmp.path(), newer.clone()).unwrap();
         assert_eq!(
-            recent_owner_unread(tmp.path(), "reader", None, Some(42), Utc::now()).unwrap(),
+            recent_owner_unread(tmp.path(), "reader", None, Some(42), UtcTimestamp::now()).unwrap(),
             vec![newer]
         );
     }
@@ -672,7 +952,7 @@ mod tests {
         let hot = crate::board_provider::post_entry(tmp.path(), first.clone())
             .unwrap()
             .board;
-        let started = Utc::now();
+        let started = UtcTimestamp::now();
         record_complete_read(tmp.path(), "reader", &[first], started, &hot).unwrap();
         assert!(load_receipt(tmp.path(), "reader")
             .unwrap()
@@ -686,7 +966,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC,
+            UtcTimestamp::MIN,
         )
         .unwrap();
         assert_eq!(unread, vec![backdated.clone()]);
@@ -703,7 +983,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC
+            UtcTimestamp::MIN
         )
         .unwrap()
         .is_empty());
@@ -717,7 +997,7 @@ mod tests {
         let hot = crate::board_provider::post_entry(tmp.path(), first.clone())
             .unwrap()
             .board;
-        let started = Utc::now();
+        let started = UtcTimestamp::now();
         record_complete_read(tmp.path(), "reader", &[first], started, &hot).unwrap();
         let coverage = load_receipt(tmp.path(), "reader")
             .unwrap()
@@ -744,7 +1024,7 @@ mod tests {
             tmp.path(),
             "reader",
             &BoardAudienceScope::All,
-            DateTime::<Utc>::MIN_UTC
+            UtcTimestamp::MIN
         )
         .is_err());
     }

@@ -135,6 +135,10 @@
 - develop ブランチへの直接コミット / push は許可する。ただし共有ブランチなので、`origin/develop` を取り込んだ上で fast-forward を維持し、履歴を壊さないこと
 - SPEC 策定・ブレインストーミングは develop 上のエージェントで行える。必要に応じて feature ブランチを使ってもよいが、develop でのコミット / push も禁止しない
 
+### Hook ペイロード契約
+
+- 新しいプロバイダーを launch candidate pool に追加するときは、対応する各 Hook イベントについて実セッションから採取した JSON を `crates/gwt/tests/fixtures/hook_payloads/<provider>/<version>/` に追加し、パーサー入口の契約テストで検証する。セッション ID・絶対パス・トークンなどの秘匿値は採取時に置換する。
+
 ### 📝 設計ガイドライン
 
 - 設計に関するドキュメントには、ソースコードを書かないこと
@@ -147,7 +151,7 @@
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
 - カバレッジの判定・測定義務・報告は、下記「カバレッジの判定と報告」に従う。
-- **GUI / フロントエンドに影響する変更では、必ず Headed ブラウザ（実 Chromium）による E2E テストを実施すること。** headless・linkedom・unit テストのみの検証で完了としない。`browser-check` skill の隔離起動（checkout の `target/debug/gwt` + fresh HOME）を用い、dark / light 両テーマの表示確認と console / page error が無いことまで確認してから完了とする。
+- **GUI / フロントエンドに影響する変更では、必ず Headed ブラウザ（実 Chromium）による E2E テストを実施すること。** 同じ PR の必須 WebView CI が生成した証跡、または `browser-check` の隔離起動（checkout の `target/debug/gwt` + fresh HOME）で、dark / light 両テーマ、変更した挙動、console / page error ゼロを確認する。
 - **完了報告前のセルフチェックリスト（必須）:**
   - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
@@ -172,7 +176,7 @@
 > 🚨 **Draft PR は廃止する（ユーザー裁定 2026-09-16）。PR は常に Ready で作成し、auto-merge を有効にする。**
 
 - **Draft PR を作成しない。** `pr.create` は常に非 draft で行い、既存の Draft を見つけたら `pr.ready` で Ready 化する。「まだ途中だから Draft」という運用は行わない。
-- **すべての PR に `auto-merge` を有効にする。** CI が緑になった時点で着地させる。配信の可否は CI の必須チェック（一覧は下の「Merge queue」節）が判定する。
+- **すべての PR を auto-merge で着地させる。担当 agent は auto-merge を自分で有効にしない（Issue #7697）。** 有効化はリポジトリの merge automation が行う。独立レビュー対象の PR（`auto-merge` ラベル付き Issue の `work/issue-N`）は、head の PASS verdict が記録された後に gwt Issues が有効にする。配信の可否は CI の必須チェック（一覧は下の「Merge queue」節）が判定する。
 - この裁定により、**配信可否の唯一のゲートは CI になる。** 「未完了だから Draft に留める」という緩衝は無くなるので、**PR のスコープを最初から単独で配信可能な大きさに切ること**が以前より重要になる。大きすぎる変更は 1 本の PR に詰めず分割する。
 - 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。残件がある場合は PR 本文に後続タスクとして明記し、**Draft に倒すのではなく follow-up Issue を立てる。**
 - PR 作成前に `gwt-verify --mode pre-pr` の `Overall: PASS` と PR 本文 checklist 完了を確認する。`User Verification Result` は任意の記録欄で、オーナーが明示的に確認を求めた場合のみ必須とする。**これは Ready 化の条件ではなく PR 作成の条件になった。**
@@ -181,8 +185,8 @@
 - **自動実行（`launch_route: autonomous`）では、実装・自動検証・Ready PR Gate を満たしたら Ready PR を作成し、既存の CI 自動マージまで完結させる（Issue #4326）。** ユーザーへ視覚確認を依頼せず、UI surface の有無にかかわらず `User Verification Result: n/a (autonomous)` を記録する。agent 自身の確認を人間の `confirmed` と偽ってはならない。
 - **旧 `deferred (autonomous execution)` は移行互換として扱う。** 既存の自動実行 PR は本文を書き換えず、fresh な検証証跡と他の Ready Gate 条件を満たせば `pr.ready` / 非 draft の `pr.create` を実行できる。`pr.list` の `deferred_user_verification` は新旧の自動実行値では `false`、manual / 一般の deferred では `true` とする。本文を hydrate していない場合はフィールドを省略する。
 - **自動実行では、人間の視覚確認の不在を理由に `execution.blocked` を打ってはならない。** 自動テスト・実 headed E2E・CI の失敗、既知 blocker、他の Ready Gate 未達は解消してから進む。`execution.blocked` は一時停止ではなく terminal であるため、一時的な検証待ちにも使用しない。
-- GUI / フロントエンド変更では、`browser-check` による checkout + fresh HOME の隔離起動を使い、実 Chromium の headed E2E で dark / light 両テーマ、console / page error ゼロ、変更した機能の挙動を検証する。`verify.run` の `params.headed_e2e_commands` に `params.commands` 内の Playwright コマンドを完全一致で指定する。gwtd が `--headed` と組込 reporter を付加し、両テーマの実測 PASS 件数を記録する。script 経由の場合は追加の Playwright 引数を転送できること。
-- 自動実行の UI Ready Gate は、同じ fresh 検証記録にある実測 headed PASS 証跡も必須とする。`Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)` は **`User Verification Result` とは別の行に**記録し、自己申告の pass のみを証跡としない。console / page error と機能 assertion は E2E 自体で確認する。
+- 保護された develop を対象にする新規 PR は、ローカルで headless の `verify.run` を実行し、[必須 WebView CI の証跡](.codex/skills/gwt-verify/references/agent-visual.md)を利用できる。WebView チェックは同じ PR head と実行 attempt の両テーマが PASS し、エージェントが画像を確認するまでマージを止める。
+- ローカル headed を選ぶ場合は `browser-check` の隔離起動を使う。`verify.run` の `params.headed_e2e_commands` に `params.commands` 内の Playwright コマンドを完全一致で指定すると、gwtd が `--headed` と組込 reporter を付加する。`Agent Visual Check` は **`User Verification Result` とは別の行に**記録し、E2E で console / page error と機能 assertion を確認する。
 - Gate を満たさない場合は PR を作成せず、原因を解消して再検証する。Draft への退避は禁止する。既存 Draft は PM が `pr.ready` で Ready 化でき、別 session 所有という理由だけで検証記録を拒否しない。対象 head の CI・レビュー・UI の実測証跡は維持する。
 
 ### Merge queue と post-merge CI（develop の着地経路、Issue #5169）
@@ -319,6 +323,7 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 - このリポジトリのローカル検証・実行は Cargo を使用する
 - checkout のコードを実行する `gwtd` JSON operation（`execution.*` / `workspace.*` / `build.*` / `verify.*` / checkout で追加した operation）は、タスクまたはセッションの初回実行前に checkout root で `cargo build -p gwt --bin gwtd` を実行し、以後は `<checkout-root>/target/debug/gwtd` を明示的に使用する。`GWT_BIN_PATH` や `PATH` 上のバイナリは、version が一致する場合や checkout より新しい場合も checkout source と同じ実装であることを保証しないため、これらの operation には使用しない
 - 読み取りの `issue.*` / `pr.*` / `board.*` / `search` は installed gwtd（`GWT_BIN_PATH` / PATH）で実行してよい。Issue / PR / Board の状態を知るためだけに build や lease を待たない
+- identity 設定が build より先: `pane.name` → `workspace.ensure` → `cargo build -p gwt --bin gwtd`。Workspace identity gate は `workspace.ensure` 成功まで bootstrap build も拒否するため、最初の `pane.name` / `workspace.ensure` は installed gwtd で実行する（Issue #7335）
 - 初回の `cargo build -p gwt --bin gwtd` は lease 不要の bootstrap step であり heavy な検証コマンドではない。順序は build → `verify.plan` → `verify.run` とし、lease を保持・待機したまま build しない（正本は `coordination_guidance.rs` の「gwtd bootstrap order」、生成 gwt-coordination / gwt-verify / gwt-search SKILL.md と同一文面）
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`

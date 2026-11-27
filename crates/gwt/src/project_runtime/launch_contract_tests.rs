@@ -2012,7 +2012,7 @@ mod agent_endpoint_env_tests {
             session_binding_id: uuid::Uuid::new_v4().to_string(),
             initial_session_id: continuation_session_id.clone(),
             entrypoint: "resume".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         crate::cli::execution_state::prepare_successor(
             &predecessor.project,
@@ -2597,10 +2597,7 @@ mod agent_endpoint_env_tests {
             session_before,
             "the failed write must retain the pre-binding Session byte-identically",
         );
-        assert!(durable_launch_recovery_exists(
-            &launch.sessions_dir,
-            &launch.session.id,
-        ));
+        assert!(durable_launch_recovery_exists(&launch.sessions_dir, &launch.session.id,).unwrap());
         assert!(
             gwt_core::workspace_projection::load_workspace_work_items(&launch.project)
                 .expect("read absent Work projection")
@@ -2763,7 +2760,8 @@ mod agent_endpoint_env_tests {
             !crate::session_launch::durable_launch_recovery_exists(
                 &sessions_dir,
                 &genesis.session_id,
-            ),
+            )
+            .unwrap(),
             "the receipt may clear only after exact Session cleanup"
         );
     }

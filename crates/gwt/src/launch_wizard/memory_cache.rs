@@ -90,7 +90,13 @@ impl LaunchWizardMemoryCache {
         gwt_agent::session_ledger::load_sessions(sessions_dir)
             .unwrap_or_default()
             .into_iter()
-            .filter(|session| !durable_launch_recovery_exists(sessions_dir, &session.id))
+            .filter(|session| {
+                !durable_launch_recovery_exists(sessions_dir, &session.id).unwrap_or_else(|error| {
+                    tracing::warn!(session_id = %session.id, error_kind = ?error.kind(), %error,
+                        "excluding Session with unreadable launch recovery receipt");
+                    true
+                })
+            })
             .collect()
     }
 
@@ -317,7 +323,15 @@ impl LaunchWizardMemoryCache {
     pub fn replace_sessions(&mut self, sessions: Vec<gwt_agent::Session>) {
         let sessions: Vec<_> = sessions
             .into_iter()
-            .filter(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id))
+            .filter(|session| {
+                !durable_launch_recovery_exists(&self.sessions_dir, &session.id).unwrap_or_else(
+                    |error| {
+                        tracing::warn!(session_id = %session.id, error_kind = ?error.kind(), %error,
+                        "excluding Session with unreadable launch recovery receipt");
+                        true
+                    },
+                )
+            })
             .collect();
         // A still-running startup load is superseded; dropping it detaches.
         self.pending_sessions = Arc::new(Mutex::new(None));
@@ -350,7 +364,11 @@ impl LaunchWizardMemoryCache {
     }
 
     pub fn record_session(&mut self, session: gwt_agent::Session) {
-        if durable_launch_recovery_exists(&self.sessions_dir, &session.id) {
+        if durable_launch_recovery_exists(&self.sessions_dir, &session.id).unwrap_or_else(|error| {
+            tracing::warn!(session_id = %session.id, error_kind = ?error.kind(), %error,
+                "excluding Session with unreadable launch recovery receipt");
+            true
+        }) {
             self.forget_session(&session.id);
             return;
         }
@@ -462,6 +480,20 @@ mod fr001_capability_cache_tests {
 #[cfg(test)]
 mod lazy_session_ledger_tests {
     use crate::launch_wizard::LaunchWizardMemoryCache;
+
+    #[test]
+    fn issue_3730_unreadable_recovery_receipt_excludes_cached_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("unreadable\0sessions");
+        let mut cache = LaunchWizardMemoryCache::load_with_agent_options(&sessions_dir, Vec::new());
+        let session =
+            gwt_agent::Session::new(dir.path(), "work/example", gwt_agent::AgentId::Codex);
+
+        cache.replace_sessions(vec![session.clone()]);
+        assert!(cache.session_by_id(&session.id).is_none());
+        cache.record_session(session.clone());
+        assert!(cache.session_by_id(&session.id).is_none());
+    }
 
     #[test]
     fn tier_projection_cache_reads_pending_and_ready_snapshots() {

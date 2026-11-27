@@ -6,6 +6,7 @@ use std::{
 use crate::BranchListEntry;
 
 pub mod codex_models;
+mod issue_plan;
 mod launch_request;
 mod memory_cache;
 mod options;
@@ -19,6 +20,7 @@ mod view_model;
 use options::*;
 
 pub use memory_cache::LaunchWizardMemoryCache;
+pub(crate) use options::{apply_agent_traits, default_launch_tuning};
 
 pub use options::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,
@@ -154,6 +156,8 @@ pub struct IssueMonitorAgentChoices {
     pub name: String,
     pub is_custom: bool,
     pub models: Vec<IssueMonitorModelChoices>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_catalog_warning: Option<String>,
     pub model_suggestions: Vec<String>,
     pub default_model: String,
     pub reasoning_options: Vec<LaunchWizardOptionView>,
@@ -212,6 +216,9 @@ pub enum LaunchWizardStartMethodKind {
     ContinueLastSession,
     OpenSessionPicker,
     FocusRunningSession,
+    /// Issue #7771: open a plain shell from a launch that plans an Issue's
+    /// agent in three stages, where the settings form is not shown.
+    OpenShell,
 }
 
 impl LaunchWizardStartMethodKind {
@@ -222,6 +229,7 @@ impl LaunchWizardStartMethodKind {
             LaunchWizardStartMethodKind::ContinueLastSession => "continue_last_session",
             LaunchWizardStartMethodKind::OpenSessionPicker => "open_session_picker",
             LaunchWizardStartMethodKind::FocusRunningSession => "focus_running_session",
+            LaunchWizardStartMethodKind::OpenShell => "open_shell",
         }
     }
 }
@@ -390,6 +398,68 @@ pub struct LaunchWizardProgressStepView {
     pub detail: Option<String>,
 }
 
+/// Issue #7652 (SPEC #7007 items 243 and 251): the execution environment a
+/// launch with the selected tool runs on, where it stands on the project's
+/// list, and why each entry ahead of it is not the one used.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardExecutionEnvironmentView {
+    pub name: String,
+    pub via_tool_name: String,
+    /// Place on the project's list, counted from 1. `None` when the tool is
+    /// not on that list.
+    pub priority: Option<usize>,
+    pub list_len: usize,
+    pub note: String,
+    pub skipped: Vec<LaunchWizardSkippedEnvironmentView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardSkippedEnvironmentView {
+    pub priority: usize,
+    pub name: String,
+    pub reason: String,
+}
+
+/// Issue #7771: a registered agent offered as the assignee of a launch that
+/// starts work on an Issue, with what its sessions start as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchWizardAssigneeCandidate {
+    pub agent_member_id: String,
+    pub name: String,
+    pub traits: crate::agent_names::AgentTraits,
+    /// Why this agent cannot take the launch now. `None` when it can.
+    pub unavailable_reason: Option<String>,
+    /// The tool and tuning the agent starts with: its traits on the
+    /// project's execution environment.
+    pub profile: Option<LaunchWizardPreviousProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardAssigneeView {
+    pub agent_member_id: String,
+    pub name: String,
+    pub selected: bool,
+    pub available: bool,
+    pub status: String,
+    pub reasoning: String,
+    pub speed: String,
+    pub personality: Option<String>,
+}
+
+/// Issue #7771 (SPEC #7007 mock v3): the three stages of a launch that
+/// starts work on an Issue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchWizardIssuePlanView {
+    /// `"assignee"`, `"plan"` or `"confirm"`. `None` while the start method
+    /// is still being chosen.
+    pub stage: Option<String>,
+    pub issue_number: u64,
+    pub assignees: Vec<LaunchWizardAssigneeView>,
+    pub branch: String,
+    pub branch_detail: String,
+    pub permissions: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
     pub title: String,
@@ -425,6 +495,10 @@ pub struct LaunchWizardView {
     pub selected_reasoning: String,
     pub runtime_target_options: Vec<LaunchWizardOptionView>,
     pub selected_runtime_target: String,
+    /// Issue #7652 (item 197): whether the place the session runs is the one
+    /// this project used last or a change made for this launch. `None` until
+    /// the runtime step is shown.
+    pub runtime_target_note: Option<String>,
     pub windows_shell_options: Vec<LaunchWizardOptionView>,
     pub selected_windows_shell: Option<String>,
     pub docker_service_options: Vec<LaunchWizardOptionView>,
@@ -443,6 +517,7 @@ pub struct LaunchWizardView {
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
     pub show_fast_mode: bool,
+    pub show_codex_speed: bool,
     /// SPEC-3152: render the Hermes launch-options section (provider / model /
     /// profile / advanced) in the Settings form.
     pub show_hermes_options: bool,
@@ -467,6 +542,14 @@ pub struct LaunchWizardView {
     /// Monitor settings form, which edits every Agent Settings set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_monitor_pool: Option<LaunchWizardIssueMonitorPoolView>,
+    /// Issue #7652: filled by the app runtime, which knows the project's
+    /// list, for a launch that starts an agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_environment: Option<LaunchWizardExecutionEnvironmentView>,
+    /// Issue #7771: present when this launch plans an Issue's agent in three
+    /// stages. Absent for every other launch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_plan: Option<LaunchWizardIssuePlanView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
@@ -502,6 +585,7 @@ pub struct LaunchWizardView {
     pub primary_action_enabled: bool,
     pub progress_steps: Vec<LaunchWizardProgressStepView>,
     pub fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
@@ -534,6 +618,7 @@ pub struct QuickStartEntry {
     pub live_window_id: Option<String>,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
@@ -549,6 +634,7 @@ pub struct LaunchWizardPreviousProfile {
     /// Issue #4228: Fast Mode for `agent_id`. The wizard restores it only onto
     /// that same agent, so a Codex opt-in can never decide a Claude launch.
     pub fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
@@ -602,6 +688,32 @@ impl LaunchWizardPreviousProfiles {
         self
     }
 
+    /// Agent Settings override model/reasoning/speed defaults; session runtime
+    /// and exact Resume inputs remain owned by their existing paths.
+    pub fn with_agent_defaults(
+        mut self,
+        profiles: impl IntoIterator<Item = LaunchWizardPreviousProfile>,
+    ) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        for profile in profiles {
+            if !seen.insert(profile.agent_id.clone()) {
+                continue;
+            }
+            if self.default_agent_id.is_none() {
+                self.default_agent_id = Some(profile.agent_id.clone());
+            }
+            if let Some(existing) = self.by_agent.get_mut(&profile.agent_id) {
+                existing.model = profile.model;
+                existing.reasoning = profile.reasoning;
+                existing.fast_mode = profile.fast_mode;
+                existing.codex_speed = profile.codex_speed;
+            } else {
+                self.by_agent.insert(profile.agent_id.clone(), profile);
+            }
+        }
+        self
+    }
+
     pub fn preferred_agent_id(&self) -> Option<&str> {
         self.default_agent_id.as_deref()
     }
@@ -634,6 +746,7 @@ struct AgentLaunchDraft {
     resume_session_id: Option<String>,
     skip_permissions: bool,
     codex_fast_mode: bool,
+    codex_speed: gwt_agent::CodexSpeed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1152,6 +1265,9 @@ pub enum LaunchWizardAction {
     SetFastMode {
         enabled: bool,
     },
+    SetCodexSpeed {
+        speed: gwt_agent::CodexSpeed,
+    },
     SetCodexFastMode {
         enabled: bool,
     },
@@ -1229,6 +1345,7 @@ pub struct LaunchWizardState {
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    pub codex_speed: gwt_agent::CodexSpeed,
     /// SPEC-3152: Hermes-specific launch options. Free-text fields map to
     /// `--provider` / `--profile` / `--toolsets` / `--skills` / `--max-turns`;
     /// `hermes_safe_mode` maps to `--safe-mode`. Only consumed for the Hermes
@@ -1290,4 +1407,8 @@ pub struct LaunchWizardState {
     /// SPEC-2359 US-83 / FR-444: eligible existing remote branches offered by the
     /// "open existing branch" picker. Set at hydration / Start Work open.
     pub open_branch_candidates: Vec<String>,
+    /// Issue #7771: registered agents offered as the assignee. Non-empty only
+    /// for a launch that plans an Issue's agent in three stages.
+    assignee_candidates: Vec<LaunchWizardAssigneeCandidate>,
+    selected_assignee_id: Option<String>,
 }

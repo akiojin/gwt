@@ -1,27 +1,12 @@
 import { createUiStateStore } from "./ui-state-store.js";
+import { createIslandContainer, mountIsland } from "./react/islands.js";
 
 // Persistent project-state load diagnostics, cleared only after a successful retry.
+// Rendered by the React surface `WorkspaceStateNotice` (crates/gwt/web-react).
 export function createWorkspaceStateNotice({ document, send, scheduleFrame }) {
   const model = createUiStateStore(null, { scheduleFrame });
-  let banner = null;
-  function render(notice) {
-    banner?.remove();
-    banner = null;
-    if (!notice) return;
-    banner = document.createElement("div");
-    banner.className = "workspace-state-notice";
-    banner.setAttribute("role", "alert");
-    const detail = document.createElement("span");
-    detail.textContent = `${notice.path}: ${notice.message}`;
-    banner.appendChild(detail);
-    const retry = document.createElement("button");
-    retry.type = "button";
-    retry.textContent = "Retry";
-    retry.addEventListener("click", () => send({ kind: "retry_workspace_state_load" }));
-    banner.appendChild(retry);
-    document.getElementById("app").appendChild(banner);
-  }
-  model.subscribeFrame(notice => notice, render);
+  const container = createIslandContainer(document.getElementById("app"));
+  mountIsland("workspace-state-notice", container, { store: model, send });
   function receive(notice) {
     model.update(() => notice);
   }

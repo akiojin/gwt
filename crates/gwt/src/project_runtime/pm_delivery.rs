@@ -18,6 +18,10 @@ use crate::{BackendEvent, PmAgentOption};
 pub const PM_WAKE_DELIVERY_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
     gwt_core::deadline_budget::DeadlineBudget::new("PM_WAKE_DELIVERY", Duration::from_secs(2));
 
+/// Issue #7701: an unconfirmed wake may hold ordinary input for at most this
+/// long. Human input and the next turn boundary release it sooner.
+pub const PM_WAKE_RETAINED_INPUT_LIMIT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PmWakeInput {
     pub operation_id: String,
@@ -118,7 +122,7 @@ pub(crate) fn finish_pm_lifecycle(
             PmLifecycleCause::Deregister => (None, false),
             PmLifecycleCause::Crash => {
                 let mut desired = expected.clone();
-                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
                 let respawn = pm_registry::apply_pm_crash_backoff(&mut desired, &now);
                 (Some(desired), respawn)
             }
@@ -716,6 +720,73 @@ pub(crate) fn release_acknowledged_wake(
     Ok(true)
 }
 
+/// When an unconfirmed wake may stop holding ordinary input (Issue #7701).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedWakeRelease {
+    /// Human input always outranks an automated wake.
+    HumanInput,
+    /// Stop / UserPromptSubmit of this Session ends the turn the wake raced.
+    TurnBoundary,
+    /// Only a retention whose deadline has passed.
+    Expired,
+}
+
+/// Drop the PTY input reservation an unconfirmed wake still retains, so queued
+/// ordinary input reaches the provider. The durable receipt is left as is: a
+/// later attempt of the same operation becomes readback-only.
+pub(crate) fn release_retained_wake(
+    entry: &super::agent_dispatch::PtyWriterEntry,
+    session: Option<&str>,
+    cause: RetainedWakeRelease,
+    now: Instant,
+) -> Result<bool, String> {
+    let released = {
+        let mut guard = entry
+            .pm_delivery_replay
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if guard.as_ref().is_some_and(|guard| {
+            guard.retained_input.is_some()
+                && session.is_none_or(|session| guard.target_session_id == session)
+                && (cause != RetainedWakeRelease::Expired || now >= guard.retained_until)
+        }) {
+            guard.take()
+        } else {
+            None
+        }
+    };
+    let Some(released) = released else {
+        return Ok(false);
+    };
+    tracing::info!(
+        operation_id = %released.operation_id,
+        ?cause,
+        "released input retained by an unconfirmed PM wake"
+    );
+    // Reservation drop flushes queued input on the physical writer; never
+    // hold the replay mutex across that write.
+    drop(released);
+    Ok(true)
+}
+
+/// A Stop / UserPromptSubmit of `session`: release an acknowledged wake, and
+/// also an unconfirmed one, because the turn it raced has ended (Issue #7701).
+pub(crate) fn release_wake_at_turn_boundary(
+    root: &Path,
+    id: &str,
+    session: &str,
+    entry: &super::agent_dispatch::PtyWriterEntry,
+) -> Result<(), String> {
+    release_acknowledged_wake(root, id, session, entry, None)?;
+    release_retained_wake(
+        entry,
+        Some(session),
+        RetainedWakeRelease::TurnBoundary,
+        Instant::now(),
+    )?;
+    Ok(())
+}
+
 /// Resolve current escalation subjects and commit the protected prompt in the
 /// same project owner that holds its exact physical writer.
 pub(crate) fn deliver_pm_wake(
@@ -742,6 +813,7 @@ pub(crate) fn deliver_pm_wake(
     let _operation_budget = (!delivery.idle)
         .then(|| gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_deadline));
     let deadline = operation_deadline - PM_DELIVERY_TERMINAL_MARGIN;
+    release_retained_wake(entry, None, RetainedWakeRelease::Expired, Instant::now())?;
     if let Some(session) = target_session {
         if release_acknowledged_wake(root, id, session, entry, Some(&delivery.operation_id))? {
             return Ok(PmWakeWrite::Injected);
@@ -917,8 +989,9 @@ pub(crate) fn deliver_pm_wake(
                 let body = prompt.trim_end_matches('\r');
                 let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
                 let prepared = pm_registry::PmDeliveryReceipt {
+                    grok_prompt: None,
                     operation_id: operation_id.to_string(),
-                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                    recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     status: pm_registry::PmDeliveryReceiptStatus::Prepared,
                     principal_session_id: format!("gwt-wake:{operation_id}"),
                     target_window_id: id.to_string(),
@@ -1034,6 +1107,12 @@ pub(crate) fn deliver_pm_wake(
                     ordinary_revision,
                     transaction_revision: reservation.transaction_revision(),
                     retained_input: Some((reservation, body_written || continuing)),
+                    // A CR-only retry keeps the first retention deadline.
+                    retained_until: replay
+                        .as_ref()
+                        .filter(|_| continuing)
+                        .map(|guard| guard.retained_until)
+                        .unwrap_or_else(|| Instant::now() + PM_WAKE_RETAINED_INPUT_LIMIT),
                 };
                 let previous = entry
                     .pm_delivery_replay
@@ -1090,7 +1169,7 @@ pub(crate) fn deliver_pm_wake(
         }
         // Reuse the canonical paste/reservation/submit implementation and its
         // actual-commit current-generation fence; no GUI physical writer exists.
-        super::agent_dispatch::write_current_pane_input(writers, id, entry, &prompt)?;
+        super::agent_dispatch::write_current_pane_input(writers, id, entry, &prompt, None)?;
         if delivery.idle {
             let loop_path = pm_registry::pm_loop_state_path_for_repo_path(root);
             let current =
@@ -1100,7 +1179,7 @@ pub(crate) fn deliver_pm_wake(
                     &loop_path,
                     &pm_registry::PmLoopState {
                         last_wake_at: Some(
-                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                         ),
                         last_wake_id: current.last_wake_id,
                         last_user_prompt_at: current.last_user_prompt_at,
@@ -1262,24 +1341,86 @@ pub fn has_open_board_escalations(project_root: &Path) -> bool {
 
 pub fn pm_status_from_launch_prefs(
     sessions_dir: &Path,
+    project_root: &Path,
     prefs: &pm_registry::PmPrefs,
     running: Option<&PmRegistration>,
 ) -> BackendEvent {
-    let configured = prefs.settings.launch_profile_or_default();
+    let fresh = crate::agent_registry::pm_profile_status_snapshot(project_root);
+    let reliable = fresh.is_ok();
+    let prefs = fresh.as_ref().map(|(prefs, _)| prefs).unwrap_or(prefs);
+    let key = gwt_core::paths::project_scope_hash(project_root);
+    let snapshot = fresh.as_ref().ok().map(|(_, snapshot)| snapshot);
+    let configured_member = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.configured_pm_member(&key).ok().flatten());
+    // An async Read may outlive its registration. Retain only the exact captured
+    // registration still saved now; never infer a successor's running identity.
+    let running = running
+        .filter(|registration| reliable && prefs.registration.as_ref() == Some(*registration));
+    let running_session = running.and_then(|registration| {
+        gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", registration.session_id)))
+            .ok()
+    });
+    let configured = reliable.then(|| prefs.settings.launch_profile_or_default());
     let loop_interval_secs = prefs.settings.loop_interval_secs_clamped();
-    let running_profile =
-        running.map(|registration| pm_running_profile_at(sessions_dir, registration));
-    let agent_options = pm_agent_options(&configured.agent_id);
+    let running_profile = running.map(|registration| {
+        running_session
+            .as_ref()
+            .map(|session| {
+                PmLaunchProfile {
+                    agent_id: session.agent_id.command().to_string(),
+                    model: session.model.clone(),
+                    reasoning: session.reasoning_level.clone(),
+                    version: session.tool_version.clone(),
+                    codex_speed: Some(session.codex_speed()),
+                    fast_mode: Some(session.fast_mode_enabled()),
+                }
+                .normalized()
+            })
+            .unwrap_or_else(|| PmLaunchProfile {
+                agent_id: registration.agent_id.clone(),
+                ..Default::default()
+            })
+    });
+    let agent_options = configured
+        .as_ref()
+        .map(|profile| pm_agent_options(&profile.agent_id))
+        .unwrap_or_default();
     BackendEvent::PmStatus {
-        available: true,
+        project_key: key.to_string(),
+        configured_member_id: configured_member
+            .as_ref()
+            .map(|member| member.agent_member_id.clone()),
+        configured_member_name: configured_member.as_ref().map(|member| member.name.clone()),
+        running_member_id: running_session.as_ref().and_then(|session| {
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.resolve_session(session).ok().flatten())
+        }),
+        running_session_id: running.map(|registration| registration.session_id.clone()),
+        roster_revision_decimal: snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.project_snapshot(&key).ok())
+            .and_then(|prefs| prefs.agent_roster.map(|roster| roster.revision.to_string())),
+        profile_revision: reliable.then(|| pm_registry::pm_profile_revision(prefs)),
+        available: reliable,
         auto_start: prefs.settings.auto_start,
         paused: prefs.settings.paused,
         loop_interval_secs,
         loop_interval_secs_decimal: loop_interval_secs.to_string(),
         agent_options,
-        configured_agent_id: configured.agent_id,
-        configured_model: configured.model,
-        configured_reasoning: configured.reasoning,
+        configured_agent_id: configured
+            .as_ref()
+            .map(|profile| profile.agent_id.clone())
+            .unwrap_or_default(),
+        configured_model: configured
+            .as_ref()
+            .and_then(|profile| profile.model.clone()),
+        configured_reasoning: configured
+            .as_ref()
+            .and_then(|profile| profile.reasoning.clone()),
+        configured_codex_speed: configured.as_ref().and_then(|profile| profile.codex_speed),
+        configured_fast_mode: configured.as_ref().and_then(|profile| profile.fast_mode),
         running_agent_id: running_profile
             .as_ref()
             .map(|profile| profile.agent_id.clone()),
@@ -1295,30 +1436,9 @@ pub fn pm_status_from_launch_prefs(
         start_block: running_profile
             .is_none()
             .then(|| prefs.start_block.clone())
-            .flatten(),
+            .flatten()
+            .map(Box::new),
     }
-}
-
-/// Resolve the launch identity of the conversation that is running now.
-/// The registration deliberately stays small; the durable Session already
-/// owns agent/model/reasoning. Legacy or temporarily unreadable Session
-/// records retain the registered agent and expose unknown tuning.
-fn pm_running_profile_at(sessions_dir: &Path, registration: &PmRegistration) -> PmLaunchProfile {
-    let session_path = sessions_dir.join(format!("{}.toml", registration.session_id));
-    gwt_agent::Session::load(&session_path)
-        .map(|session| {
-            PmLaunchProfile {
-                agent_id: session.agent_id.command().to_string(),
-                model: session.model,
-                reasoning: session.reasoning_level,
-                version: session.tool_version,
-            }
-            .normalized()
-        })
-        .unwrap_or_else(|_| PmLaunchProfile {
-            agent_id: registration.agent_id.clone(),
-            ..PmLaunchProfile::default()
-        })
 }
 
 /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to
@@ -1667,8 +1787,9 @@ pub(crate) fn deliver_board_notification(
     let body_sha256 = pm_registry::pm_delivery_prompt_sha256(&body);
     let prompt = format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r");
     let prepared = pm_registry::PmDeliveryReceipt {
+        grok_prompt: None,
         operation_id: operation_id.clone(),
-        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         status: pm_registry::PmDeliveryReceiptStatus::Prepared,
         principal_session_id: format!("gwt-board:{}", notification.entry_id),
         target_window_id: window_id.clone(),
@@ -1710,27 +1831,36 @@ pub(crate) fn deliver_board_notification(
             |bytes| {
                 reservation
                     .write_input_authorized(bytes, |commit| {
-                        let current = writers.read().map_err(|error| {
-                            gwt_terminal::TerminalError::PtyIoError {
-                                details: error.to_string(),
-                            }
-                        })?;
-                        if !current.get(&window_id).is_some_and(|entry| {
-                            Arc::ptr_eq(entry, &expected) && entry.current.load(Ordering::Acquire)
-                        }) {
-                            lost = true;
-                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                details: "Board notification target generation changed".into(),
-                            });
-                        }
-                        if Instant::now() >= deadline {
-                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                details: "Board notification delivery deadline expired".into(),
-                            });
-                        }
-                        reservation.with_unchanged_ordinary_input(ordinary_revision, || {
-                            commit(&mut || attempted = true)
-                        })
+                        super::agent_dispatch::with_current_monitor_prompt_input(
+                            &expected,
+                            None,
+                            || {
+                                let current = writers.read().map_err(|error| {
+                                    gwt_terminal::TerminalError::PtyIoError {
+                                        details: error.to_string(),
+                                    }
+                                })?;
+                                if !current.get(&window_id).is_some_and(|entry| {
+                                    Arc::ptr_eq(entry, &expected)
+                                        && entry.current.load(Ordering::Acquire)
+                                }) {
+                                    lost = true;
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification target generation changed"
+                                            .into(),
+                                    });
+                                }
+                                if Instant::now() >= deadline {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification delivery deadline expired"
+                                            .into(),
+                                    });
+                                }
+                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                    commit(&mut || attempted = true)
+                                })
+                            },
+                        )
                     })
                     .map_err(|error| error.to_string())
             },
@@ -1778,4 +1908,154 @@ pub(crate) fn deliver_board_notification(
         tracing::warn!(%error, operation_id, "Board notification receipt finish failed");
     }
     Ok(())
+}
+
+/// Issue #7701: an unconfirmed PM wake must never keep the PTY input
+/// reservation once a human types, the raced turn ends, or retention expires.
+#[cfg(test)]
+mod retained_wake_tests {
+    use super::*;
+    use crate::project_runtime::agent_dispatch::{PmDeliveryReplayGuard, PtyWriterEntry};
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+
+    const SESSION: &str = "pm-session";
+
+    fn sleeper() -> Arc<gwt_terminal::PtyHandle> {
+        #[cfg(windows)]
+        let (command, args) = (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Start-Sleep -Seconds 60".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = ("/bin/sleep".to_string(), vec!["60".to_string()]);
+        Arc::new(
+            gwt_terminal::PtyHandle::spawn(gwt_terminal::pty::SpawnConfig {
+                command,
+                args,
+                cols: 80,
+                rows: 24,
+                env: Default::default(),
+                remove_env: Vec::new(),
+                cwd: None,
+            })
+            .expect("spawn PM stand-in"),
+        )
+    }
+
+    /// The state the startup-prompt / wake race leaves behind: the wake body
+    /// was written, no exact turn ACK arrived, and its reservation is retained.
+    fn unconfirmed_wake(retained_until: Instant) -> (Arc<PtyWriterEntry>, String) {
+        let handle = sleeper();
+        let reservation = Arc::clone(&handle)
+            .reserve_input_transaction()
+            .expect("wake reservation");
+        let entry = Arc::new(PtyWriterEntry {
+            project_key: gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap(),
+            handle,
+            current: Arc::new(AtomicBool::new(true)),
+            monitor_runtime: None,
+            pm_delivery_replay: Mutex::new(Some(PmDeliveryReplayGuard {
+                operation_id: "wake-op".into(),
+                target_session_id: SESSION.into(),
+                ordinary_revision: 0,
+                transaction_revision: reservation.transaction_revision(),
+                retained_input: Some((reservation, true)),
+                retained_until,
+            })),
+        });
+        (entry, "pm-window".into())
+    }
+
+    fn input_is_retained(entry: &PtyWriterEntry) -> bool {
+        Arc::clone(&entry.handle)
+            .reserve_input_transaction()
+            .is_err()
+    }
+
+    fn finish(entry: &PtyWriterEntry, id: &str) {
+        let _ = crate::session_finalizer::kill_and_reap(&entry.handle, id);
+    }
+
+    #[test]
+    fn startup_prompt_turn_boundary_releases_an_unconfirmed_wake() {
+        let base = Instant::now();
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
+        // The human's input queues behind the wake reservation.
+        entry.handle.write_input(b"human prompt").unwrap();
+        assert!(input_is_retained(&entry));
+
+        // The startup prompt's UserPromptSubmit carries no ACK for the wake.
+        release_acknowledged_wake(&root, &id, SESSION, &entry, None).unwrap();
+        assert!(
+            input_is_retained(&entry),
+            "precondition: an unverified receipt alone keeps the reservation"
+        );
+        // A foreign Session's boundary does not release this PM's wake.
+        release_wake_at_turn_boundary(&root, &id, "other-session", &entry).unwrap();
+        assert!(input_is_retained(&entry));
+
+        release_wake_at_turn_boundary(&root, &id, SESSION, &entry).unwrap();
+        assert!(
+            !input_is_retained(&entry),
+            "turn boundary must release input"
+        );
+        assert!(entry.pm_delivery_replay.lock().unwrap().is_none());
+        finish(&entry, &id);
+    }
+
+    #[test]
+    fn human_input_outranks_an_unconfirmed_wake() {
+        let base = Instant::now();
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
+        assert!(
+            release_retained_wake(&entry, None, RetainedWakeRelease::HumanInput, base).unwrap()
+        );
+        assert!(!input_is_retained(&entry));
+        entry.handle.write_input(b"human prompt").unwrap();
+        finish(&entry, &id);
+    }
+
+    /// A pasted attachment is human input too: it must not be refused while
+    /// an unconfirmed wake still holds the reservation.
+    #[test]
+    fn human_attachment_outranks_an_unconfirmed_wake() {
+        use crate::project_runtime::events::OwnerAttachmentInputOutcome;
+        let base = Instant::now();
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
+        let writers: crate::project_runtime::agent_dispatch::PtyWriterRegistry = Arc::new(
+            std::sync::RwLock::new([(id.clone(), Arc::clone(&entry))].into_iter().collect()),
+        );
+        let outcome = crate::project_runtime::agent_dispatch::write_current_attachment_input(
+            &writers,
+            &id,
+            &entry,
+            &AtomicBool::new(true),
+            b"attachment",
+        );
+        assert!(matches!(outcome, OwnerAttachmentInputOutcome::Written));
+        assert!(entry.pm_delivery_replay.lock().unwrap().is_none());
+        finish(&entry, &id);
+    }
+
+    #[test]
+    fn retention_is_released_only_after_its_deadline() {
+        let base = Instant::now();
+        let (entry, id) = unconfirmed_wake(base + PM_WAKE_RETAINED_INPUT_LIMIT);
+        assert!(!release_retained_wake(&entry, None, RetainedWakeRelease::Expired, base).unwrap());
+        assert!(input_is_retained(&entry));
+        finish(&entry, &id);
+
+        let (entry, id) = unconfirmed_wake(base);
+        assert!(release_retained_wake(&entry, None, RetainedWakeRelease::Expired, base).unwrap());
+        assert!(!input_is_retained(&entry));
+        finish(&entry, &id);
+    }
 }

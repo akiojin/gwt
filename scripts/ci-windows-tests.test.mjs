@@ -5,6 +5,75 @@ import path from "node:path";
 import test from "node:test";
 import { build, run, runCore, targets } from "./ci-windows-tests.mjs";
 
+test("exited fixture PIDs skip inspection without hiding live or uncertain processes", async (t) => {
+  const { inspectLiveFixtureProcess } = await import("../crates/gwt/playwright/tests/_helpers/process-inspection.mjs");
+  let code;
+  let queries = 0;
+  t.mock.method(process, "kill", (pid, signal) => {
+    assert.equal(pid, 42);
+    assert.equal(signal, 0);
+    if (code) throw Object.assign(new Error("process probe"), { code });
+    return true;
+  });
+  const inspect = () => { queries++; return "fixture identity"; };
+  code = "ESRCH";
+  assert.equal(inspectLiveFixtureProcess(42, inspect), "");
+  assert.equal(queries, 0);
+  for (code of [undefined, "EPERM"]) assert.equal(inspectLiveFixtureProcess(42, inspect), "fixture identity");
+  code = "EIO";
+  assert.throws(() => inspectLiveFixtureProcess(42, inspect), /process probe/);
+  assert.equal(queries, 2);
+});
+
+test("Windows fixture process queries outlast a saturated runner's CIM startup", async () => {
+  // Issue #7270: Get-CimInstance took the whole old 10 s budget (10 055 ms
+  // observed) and failed the cold-restart owner capture with ETIMEDOUT.
+  const { queryWindowsProcess } = await import("../crates/gwt/playwright/tests/_helpers/process-inspection.mjs");
+  const calls = [];
+  const result = queryWindowsProcess("$PID", (command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0, stdout: "42\n", stderr: "" };
+  });
+  assert.equal(result.stdout, "42\n");
+  assert.equal(calls[0].command, "powershell.exe");
+  assert.deepEqual(calls[0].args, ["-NoProfile", "-NonInteractive", "-Command", "$PID"]);
+  assert.ok(calls[0].options.timeout >= 30_000, `timeout ${calls[0].options.timeout} must exceed observed CIM latency`);
+  assert.equal(calls[0].options.windowsHide, true);
+  const timedOut = Object.assign(new Error("spawnSync powershell.exe ETIMEDOUT"), { code: "ETIMEDOUT" });
+  assert.throws(() => queryWindowsProcess("$PID", () => ({ error: timedOut })), { code: "ETIMEDOUT" });
+});
+
+test("a refused fixture operation fails with its name and refusal, not a JSON parse error", async () => {
+  // Issue #7752: `JSON.parse(envelope.output)` on a refusal threw `"undefined" is not valid JSON`.
+  const { operationOutput } = await import("../crates/gwt/playwright/tests/_helpers/operation-envelope.mjs");
+  assert.deepEqual(operationOutput("issue.monitor.status", { ok: true, output: '{"inbox":[]}' }), { inbox: [] });
+  assert.deepEqual(operationOutput("issue.monitor.status", { ok: true, output: { inbox: [] } }), { inbox: [] });
+  const refusal = { ok: false, error: "status read timeout after 200ms", error_code: "API_ERROR", operation: "issue.monitor.status" };
+  assert.throws(() => operationOutput("issue.monitor.status", refusal), error =>
+    error.message.startsWith("Fixture issue.monitor.status failed: ")
+      && error.message.includes("status read timeout after 200ms") && error.message.includes("API_ERROR"));
+  assert.throws(() => operationOutput("issue.monitor.status", { ok: true }), /^Error: Fixture issue\.monitor\.status failed: /);
+});
+
+test("a refused fixture read is retried within a bound and every refusal is reported", async () => {
+  const { readOperationOutput } = await import("../crates/gwt/playwright/tests/_helpers/operation-envelope.mjs");
+  const refusal = { ok: false, error: "status read timeout after 200ms" };
+  const replies = [refusal, { ok: true, output: '{"inbox":[1]}' }];
+  const refusals = [];
+  let waits = 0;
+  const options = { attempts: 2, wait: async () => { waits++; }, onRefusal: refusal => refusals.push(refusal) };
+  assert.deepEqual(await readOperationOutput("issue.monitor.status", async () => replies.shift(), options), { inbox: [1] });
+  assert.equal(waits, 1);
+  assert.equal(refusals.length, 1);
+  assert.equal(refusals[0].attempt, 1);
+  assert.match(refusals[0].error, /Fixture issue\.monitor\.status failed: .*status read timeout after 200ms/);
+  let runs = 0;
+  await assert.rejects(readOperationOutput("issue.monitor.status", async () => { runs++; return refusal; }, options),
+    /Fixture issue\.monitor\.status failed: .*status read timeout after 200ms/);
+  assert.equal(runs, 2, "the bound stops the retries");
+  assert.equal(refusals.length, 3);
+});
+
 test("required Windows CI builds and runs the gate lifecycle regressions", () => {
   assert.ok(targets("default").some(([pkg, kind, name]) =>
     pkg === "gwt-terminal" && kind === "test" && name === "pty_start_gate_test"));
@@ -71,18 +140,35 @@ test("library and runtime builds partition every default harness and retain all 
   }
 });
 
-test("each feature set builds once and runs the exact target with Cargo's cwd and failure status", (t) => {
+test("each feature set prepares its artifacts and runs the exact target with Cargo's cwd and failure status", (t) => {
   const root = fixture(t);
-  for (const group of ["default", "default-lib", "default-runtime", "warm"]) {
+  for (const group of ["default", "default-lib", "default-runtime", "warm", "socket"]) {
     let builds = 0;
     const messages = artifacts(root, group);
     assert.equal(build(group, root, (command, args) => {
       builds++;
       assert.equal(command, "cargo");
+      if (group === "socket" && builds === 1) {
+        assert.deepEqual(args, ["build", "-p", "gwt-core", "-p", "gwt", "--example", "gwtd", "--profile", "test", "--message-format=json"]);
+        return { status: 0, stdout: JSON.stringify({ ...messages.at(-1), profile: { test: false },
+          target: { kind: ["example"], name: "gwtd" }, executable: path.join(root, "target", "debug", "examples", "gwtd") }) };
+      }
       assert.equal(args[0], "test");
       assert.ok(args.includes("--no-run"));
       assert.ok(args.includes("--message-format=json"));
       assert.equal(args.includes("--all-features"), group === "warm");
+      if (group === "socket") {
+        assert.deepEqual(targets(group), [
+          ["gwt-core", "lib", "gwt_core"],
+          ["gwt-core", "test", "test_hygiene_test"],
+          ["gwt-core", "test", "daemon_socket_path_limit"],
+          ["gwt", "lib", "gwt"],
+          ["gwt", "example", "socket_fixtures"],
+        ]);
+        assert.deepEqual(args, ["test", "-p", "gwt-core", "-p", "gwt", "--lib",
+          "--test", "test_hygiene_test", "--test", "daemon_socket_path_limit",
+          "--example", "socket_fixtures", "--no-run", "--message-format=json"]);
+      }
       // A normal binary and a different package's same-name harness must not win.
       const decoys = [
         { ...messages[0], profile: { test: false }, executable: "wrong.exe" },
@@ -90,13 +176,15 @@ test("each feature set builds once and runs the exact target with Cargo's cwd an
       ];
       return { status: 0, stdout: [...decoys, ...messages].map(JSON.stringify).join("\n") };
     }), 0);
-    assert.equal(builds, 1);
+    assert.equal(builds, group === "socket" ? 2 : 1);
     const [pkg, kind, name] = targets(group)[0];
     assert.equal(run(group, [pkg, kind, name, "the_filter", "--", "--exact", "--test-threads=1"], root,
       (command, args, options) => {
         assert.equal(command, messages[0].executable);
         assert.deepEqual(args, ["the_filter", "--exact", "--test-threads=1"]);
-        assert.equal(options.cwd, path.join(root, "crates", "gwt"));
+        assert.equal(options.cwd, path.join(root, "crates", pkg));
+        if (group === "socket") assert.equal(options.env.GWT_TEST_GWTD_EXE,
+          path.join(root, "target", "debug", "examples", "gwtd"));
         const pathKey = Object.keys(options.env).find((key) => key.toLowerCase() === "path");
         assert.ok(options.env[pathKey].split(path.delimiter).includes(path.dirname(command)));
         return { status: 37 };
@@ -145,4 +233,18 @@ test("core artifacts include every Cargo harness and run without rebuilding at d
     return { status: executed.length === 2 ? 23 : 0 };
   }), 23);
   assert.deepEqual(executed, messages.slice(0, 2).map((message) => message.executable));
+});
+
+// The socket adapter requires the exact real front door from this build.
+test("socket preparation fails closed without its real gwtd artifact", (t) => {
+  const root = fixture(t);
+  assert.equal(build("socket", root, () => ({ status: 19, stdout: "" })), 19);
+  assert.throws(() => build("socket", root, () => ({ status: 0, stdout: "" })), /missing.*gwtd/i);
+  let builds = 0;
+  assert.equal(build("socket", root, () => {
+    if (++builds === 1) return { status: 0, stdout: JSON.stringify({ ...artifacts(root, "socket").at(-1),
+      profile: { test: false }, target: { kind: ["example"], name: "gwtd" }, executable: "/current/gwtd" }) };
+    return { status: 23, stdout: "" };
+  }), 23);
+  assert.equal(fs.existsSync(path.join(root, "target", "ci-windows-tests-socket.json")), false);
 });

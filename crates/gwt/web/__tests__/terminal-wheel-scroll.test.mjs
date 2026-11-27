@@ -269,16 +269,19 @@ test("swipe over a mouse-tracking fullscreen agent reaches xterm as a wheel even
 });
 
 test("swipe over retained history scrolls xterm lines without application input", () => {
+  const observedScrolls = [];
   const fixture = mountFixture({
     isWindowsHost: () => false,
     applicationScrollFallback: true,
     terminalOptions: { buffer: { active: { baseY: 180 } } },
+    onUserScroll: () => observedScrolls.push(fixture.scrollCalls.at(-1)),
   });
 
   fixture.swipe([100, 132]);
   fixture.swipe([300, 284]);
 
   assert.deepEqual(fixture.scrollCalls, [-2, 1]);
+  assert.deepEqual(observedScrolls, [-2, 1], "each user scroll is observed after xterm moves");
   assert.deepEqual(fixture.inputCalls, []);
   assert.equal(fixture.bubbledWheelCount, 0);
   fixture.dispose();
@@ -420,6 +423,30 @@ test("terminal bindings explain forced selection and enable the macOS modifier",
   const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   assert.match(appSource, /terminalContainer\.title\s*=\s*[\s\S]*?Shift\+drag[\s\S]*?Option\+drag/);
   assert.match(appSource, /macOptionClickForcesSelection:\s*true/);
+  assert.match(appSource, /rightClickSelectsWord:\s*false/, "opening Copy must preserve the dragged range on macOS");
+});
+
+test("vendored xterm uses browser platforms despite the process shim's title", () => {
+  const source = readFileSync(new URL("../vendor/xterm/xterm.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("var Fs=");
+  const end = source.indexOf(",er=class", start);
+  const forceSelection = source.match(/shouldForceSelection\(e\)\{([^}]+)\}/)?.[1];
+  assert.ok(start >= 0 && end > start && forceSelection, "pinned xterm platform and selection logic is present");
+  const evaluate = new Function("k", "navigator", `${source.slice(start, end)};
+    return { isNode: Fs, isMac: Xs, isWindows: Js, isLinux: Zs,
+      forceSelection(e) { ${forceSelection} } };`);
+  for (const platform of ["MacIntel", "Win32", "Linux x86_64"]) {
+    const browser = evaluate({ title: "browser", browser: true }, { platform, userAgent: "Chrome" });
+    assert.equal(browser.isNode, false, platform);
+    assert.equal(browser.isMac, platform === "MacIntel", platform);
+    assert.equal(browser.isWindows, platform === "Win32", platform);
+    assert.equal(browser.isLinux, platform === "Linux x86_64", platform);
+    const selection = { _optionsService: { rawOptions: { macOptionClickForcesSelection: true } } };
+    assert.equal(browser.forceSelection.call(selection, { altKey: true, shiftKey: false }), browser.isMac);
+    assert.equal(browser.forceSelection.call(selection, { altKey: false, shiftKey: true }), !browser.isMac);
+    assert.equal(browser.forceSelection.call(selection, { altKey: false, shiftKey: false }), false);
+  }
+  assert.equal(evaluate({ title: "node" }, undefined).isNode, true);
 });
 
 function mountFixture({
@@ -427,6 +454,7 @@ function mountFixture({
   terminalOptions = {},
   applicationScrollFallback = false,
   isRuntimeStopped,
+  onUserScroll,
 } = {}) {
   const terminalRoot = new FakeTerminalRoot();
   const scrollCalls = [];
@@ -447,6 +475,7 @@ function mountFixture({
     },
     isApplicationScrollFallbackEnabled: () => applicationScrollFallback,
     isRuntimeStopped,
+    onUserScroll,
     sendTerminalInput: (data, options) => {
       inputCalls.push(data);
       inputOptions.push(options);

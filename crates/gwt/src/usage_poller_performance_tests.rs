@@ -98,7 +98,7 @@ fn run_measurements(runtime: &tokio::runtime::Handle) {
 fn incremental_poll(
     runtime: &tokio::runtime::Handle,
     poller: &mut Poller,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     force: bool,
 ) -> (UsageSnapshot, u64) {
     let before = poller.transcripts.bytes_read();
@@ -118,6 +118,22 @@ fn sorted(mut snapshot: UsageSnapshot) -> UsageSnapshot {
     snapshot
         .sessions
         .sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    // The baseline reads only the default Codex and Claude homes. Pool
+    // account ids (Issue #7841) and the rows and descriptors of the other
+    // built-in providers (SPEC #7347) are outside the compared pipeline.
+    snapshot.accounts.retain(|account| {
+        matches!(
+            account.provider,
+            UsageProvider::Codex | UsageProvider::ClaudeCode
+        )
+    });
+    snapshot
+        .accounts
+        .sort_by_key(|account| account.provider.as_str());
+    for account in &mut snapshot.accounts {
+        account.pool_account_id = None;
+    }
+    snapshot.providers.clear();
     snapshot
 }
 
@@ -156,8 +172,8 @@ fn measure(
 struct Fixture {
     codex_home: PathBuf,
     claude_home: PathBuf,
-    now: DateTime<Utc>,
-    authenticated_at: DateTime<Utc>,
+    now: UtcTimestamp,
+    authenticated_at: UtcTimestamp,
     account_id: Option<String>,
     first_codex: PathBuf,
     first_claude: PathBuf,
@@ -167,7 +183,7 @@ struct Fixture {
 
 impl Fixture {
     fn create(root: &Path, codex_home: PathBuf, claude_home: PathBuf) -> Self {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         fs::create_dir_all(codex_home.join("sessions")).unwrap();
         fs::create_dir_all(claude_home.join("projects/benchmark")).unwrap();
         fs::write(
@@ -223,7 +239,7 @@ impl Fixture {
             codex_home,
             claude_home,
             now,
-            authenticated_at: now - chrono::Duration::seconds(60),
+            authenticated_at: now - SignedDuration::seconds(60),
             transcript_bytes,
             account_bytes,
         }
@@ -231,9 +247,12 @@ impl Fixture {
 
     fn poller(&self) -> Poller {
         Poller {
-            codex_auth_observed: true,
-            codex_account_id: self.account_id.clone(),
-            codex_authenticated_at: Some(self.authenticated_at),
+            primary: AccountState {
+                codex_auth_observed: true,
+                codex_account_id: self.account_id.clone(),
+                codex_authenticated_at: Some(self.authenticated_at),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -263,7 +282,7 @@ fn account_source_bytes(home: &Path) -> u64 {
         .sum()
 }
 
-fn transcript(provider: UsageProvider, now: DateTime<Utc>) -> String {
+fn transcript(provider: UsageProvider, now: UtcTimestamp) -> String {
     let padding = format!(
         "{}\n",
         serde_json::json!({"type":"message", "text":"x".repeat(4096)})
@@ -281,7 +300,7 @@ fn transcript(provider: UsageProvider, now: DateTime<Utc>) -> String {
     text
 }
 
-fn usage_line(provider: UsageProvider, now: DateTime<Utc>, appended: bool) -> String {
+fn usage_line(provider: UsageProvider, now: UtcTimestamp, appended: bool) -> String {
     let value = match provider {
         UsageProvider::Codex => serde_json::json!({
             "timestamp": now.to_rfc3339(),
@@ -295,7 +314,7 @@ fn usage_line(provider: UsageProvider, now: DateTime<Utc>, appended: bool) -> St
                 "rate_limits":{"primary":{"used_percent":10,"window_minutes":300,"resets_at":now.timestamp()+3600}}
             }
         }),
-        UsageProvider::ClaudeCode => serde_json::json!({
+        _ => serde_json::json!({
             "timestamp":now.to_rfc3339(), "type":"assistant",
             "message":{"model":"claude-sonnet-4","usage":{"input_tokens":if appended {40} else {20},"output_tokens":10,"cache_read_input_tokens":5}}
         }),
@@ -370,6 +389,7 @@ impl Baseline {
                 accounts,
                 sessions: out,
                 consumption: self.consumption.clone().unwrap(),
+                providers: Vec::new(),
             },
             bytes,
         )

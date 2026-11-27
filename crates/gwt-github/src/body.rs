@@ -9,7 +9,9 @@ use std::{collections::BTreeMap, fmt};
 
 use regex::Regex;
 
-use crate::sections::{extract_sections, SectionName, SectionParseError};
+use crate::sections::{
+    extract_sections, trim_surrounding_newlines, ExtractedSection, SectionName, SectionParseError,
+};
 
 /// Metadata parsed from the body header (e.g. `<!-- gwt-spec id=2001 version=1 -->`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +122,17 @@ pub fn diagnose_index(body: &str, comments: &[Comment]) -> Result<String, ParseE
 impl SpecBody {
     /// Parse a body + comments snapshot into a [`SpecBody`].
     pub fn parse(body: &str, comments: &[Comment]) -> Result<Self, ParseError> {
-        let meta = parse_header(body)?;
+        let legacy_id = legacy_spec_id(body);
+        let meta = match (parse_header(body), legacy_id) {
+            (Err(ParseError::MissingHeader), Some(id)) => {
+                return match parse_index_map(body) {
+                    Err(ParseError::MissingIndex) => Ok(Self::from_legacy(id, comments)),
+                    Err(error) => Err(error),
+                    Ok(_) => Err(ParseError::MissingHeader),
+                };
+            }
+            (result, _) => result?,
+        };
         let sections_index = parse_index_map(body)?;
 
         // Pre-index comments by id for O(1) lookup.
@@ -158,7 +170,11 @@ impl SpecBody {
                                     section: name.0.clone(),
                                     comment_id: cid,
                                 })?;
-                        let sections = extract_sections(&comment.body)?;
+                        let sections = match legacy_id.and_then(|_| legacy_artifact(&comment.body))
+                        {
+                            Some(section) => vec![section],
+                            None => extract_sections(&comment.body)?,
+                        };
                         let matching =
                             sections
                                 .into_iter()
@@ -194,6 +210,36 @@ impl SpecBody {
         })
     }
 
+    fn from_legacy(id: &str, comments: &[Comment]) -> Self {
+        let mut latest = BTreeMap::new();
+        for comment in comments {
+            if let Some(section) = legacy_artifact(&comment.body) {
+                let entry = latest
+                    .entry(section.name)
+                    .or_insert_with(|| (comment.id, String::new()));
+                if comment.id >= entry.0 {
+                    *entry = (comment.id, section.content);
+                }
+            }
+        }
+        let mut sections_index = SectionsIndex::default();
+        let mut sections = BTreeMap::new();
+        for (name, (id, content)) in latest {
+            sections_index
+                .0
+                .insert(name.clone(), SectionLocation::Comments(vec![id]));
+            sections.insert(name, content);
+        }
+        Self {
+            meta: SpecMeta {
+                id: id.into(),
+                version: 1,
+            },
+            sections_index,
+            sections,
+        }
+    }
+
     /// Replace (or insert) a section's raw content.
     ///
     /// Other sections are not touched. The routing index is not recomputed
@@ -213,6 +259,51 @@ impl fmt::Display for SpecMeta {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+pub(crate) fn legacy_spec_id(body: &str) -> Option<&str> {
+    let id = body
+        .trim_start()
+        .lines()
+        .next()?
+        .strip_prefix("<!-- GWT_SPEC_ID:")?
+        .strip_suffix(" -->")?;
+    let number = id.strip_prefix('#').or_else(|| id.strip_prefix("SPEC-"))?;
+    number.parse::<u64>().ok()?;
+    Some(id.strip_prefix('#').unwrap_or(id))
+}
+
+pub(crate) fn legacy_artifact(body: &str) -> Option<ExtractedSection> {
+    let (marker, content) = body.trim_start().split_once('\n')?;
+    let artifact = marker
+        .trim_end_matches('\r')
+        .strip_prefix("<!-- GWT_SPEC_ARTIFACT:")?
+        .strip_suffix(" -->")?;
+    let (kind, path) = artifact.split_once(':')?;
+    if path.is_empty()
+        || !path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
+    {
+        return None;
+    }
+    let name = match kind {
+        "doc" => path.strip_suffix(".md")?.to_string(),
+        "checklist" | "contract" => format!("{kind}/{path}"),
+        _ => return None,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let content = content
+        .split_once('\n')
+        .filter(|(label, _)| label.trim_end_matches('\r') == artifact)
+        .map_or(content, |(_, payload)| payload);
+    Some(ExtractedSection {
+        name: SectionName(name),
+        content: trim_surrounding_newlines(content).into(),
+        part: None,
+    })
+}
 
 /// Fail-closed validation for sections split across comments (SPEC-3248 P7C
 /// / #3284). A section whose chunks carry `part=N/M` markers must be
@@ -273,7 +364,7 @@ fn validate_split_chunks(
     Ok(())
 }
 
-fn parse_header(body: &str) -> Result<SpecMeta, ParseError> {
+pub(crate) fn parse_header(body: &str) -> Result<SpecMeta, ParseError> {
     let re = Regex::new(r"<!--\s*gwt-spec\s+id=(?P<id>\S+)\s+version=(?P<version>\d+)\s*-->")
         .expect("valid header regex");
     let caps = re.captures(body).ok_or(ParseError::MissingHeader)?;

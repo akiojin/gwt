@@ -9,13 +9,13 @@
 //!       the exhausted resource are suppressed instead of re-spawning `gh`.
 //! AC-4: REST-backed invocations stay available while GraphQL is exhausted.
 
-use chrono::{DateTime, TimeZone, Utc};
 use gwt_core::github_quota::{
     self, GitHubQuota, RateLimitBlock, RATE_LIMITED_ERROR_CODE, RATE_LIMIT_PROBE_ARGS,
 };
+use gwt_core::timestamp::UtcTimestamp;
 
-fn at(seconds: i64) -> DateTime<Utc> {
-    Utc.timestamp_opt(seconds, 0).single().expect("timestamp")
+fn at(seconds: i64) -> UtcTimestamp {
+    UtcTimestamp::from_unix_seconds(seconds).expect("timestamp")
 }
 
 // ── AC-4 / gating scope: which quota does an argv consume? ──

@@ -530,7 +530,9 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
         .expect("project state dir");
     gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
         &work_items_path,
-        &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+        &gwt_core::workspace_projection::WorkItemsProjection::empty(
+            gwt_core::timestamp::UtcTimestamp::now(),
+        ),
     )
     .expect("seed cached Work projection");
     let cached_work_items = runtime
@@ -596,7 +598,7 @@ fn issue_3777_first_authoritative_projection_refuses_legacy_only_work() {
     let legacy_root = gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("workspace");
     let legacy_current = legacy_root.join("current.json");
     let legacy_works = legacy_root.join("work_items.json");
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let current_bytes = serde_json::to_vec(
         &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
     )
@@ -763,7 +765,7 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
     let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
     fs::create_dir_all(work_items_path.parent().expect("project-state dir"))
         .expect("project-state dir");
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
     work_items.apply_event(gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,

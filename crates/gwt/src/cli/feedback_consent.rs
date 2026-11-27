@@ -24,6 +24,14 @@ fn bounded_window_size(work_width: i32, work_height: i32) -> Result<WindowSize, 
     Ok(WindowSize { width, height })
 }
 
+/// AppKit reports switching to the policy a process already has as a failure.
+/// A worker launched from an `LSUIElement` bundle (gwtd inside GWT.app) is
+/// already Accessory, so only a real switch attempt can fail.
+#[cfg_attr(all(not(test), not(target_os = "macos")), allow(dead_code))]
+fn accessory_policy_ready(already_accessory: bool, switch: impl FnOnce() -> bool) -> bool {
+    already_accessory || switch()
+}
+
 fn validate_prompt(prompt: &str) -> Result<(), String> {
     if prompt.contains('\0') {
         return Err("Feedback contains a NUL character that cannot be safely previewed; the report remains saved locally".into());
@@ -90,6 +98,15 @@ mod tests {
     #[test]
     fn insufficient_work_area_fails_closed_instead_of_hiding_the_actions() {
         assert!(bounded_window_size(400, 200).is_err());
+    }
+
+    #[test]
+    fn bundled_ui_element_worker_already_accessory_is_ready_without_a_policy_change() {
+        // gwtd inside GWT.app (LSUIElement) starts as Accessory; AppKit then
+        // reports the no-op switch as false. That must not block consent.
+        assert!(accessory_policy_ready(true, || panic!("no switch needed")));
+        assert!(accessory_policy_ready(false, || true));
+        assert!(!accessory_policy_ready(false, || false));
     }
 
     #[test]

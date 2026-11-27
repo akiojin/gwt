@@ -233,22 +233,8 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     .expect("quick issue event");
     assert!(matches!(
         event,
-        FrontendEvent::QuickRegisterIssue { title, launch: true, auto_merge: false }
+        FrontendEvent::QuickRegisterIssue { title, launch: true }
             if title == "Investigate Intake registration"
-    ));
-
-    // SPEC #3885 T-033: the "+ New" popover sends its auto-merge checkbox.
-    let event: FrontendEvent = serde_json::from_str(
-        r#"{"kind":"quick_register_issue","title":"Ship","launch":false,"auto_merge":true}"#,
-    )
-    .expect("quick issue event with auto_merge");
-    assert!(matches!(
-        event,
-        FrontendEvent::QuickRegisterIssue {
-            launch: false,
-            auto_merge: true,
-            ..
-        }
     ));
 }
 
@@ -289,6 +275,8 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            verification_capacity: None,
+            event_history: Vec::new(),
             agent_roster_capacity: None,
             agent_roster_revision: None,
             max_active_agents_scope: "machine".to_string(),
@@ -302,12 +290,14 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             terminal_queue: Vec::new(),
             terminal_queue_auto_refill: false,
             terminal_queue_auto_refill_limit: 0,
+            terminal_queue_refill_hold: None,
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 1,
+            needs_human_count: Some(0),
             max_active_agents: 3,
             total_candidates: 8,
             active_issue_number: Some(42),
@@ -344,6 +334,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);
+    assert_eq!(value["status"]["needs_human_count"], 0);
     assert_eq!(value["status"]["max_active_agents"], 3);
     assert_eq!(value["status"]["total_candidates"], 8);
     assert_eq!(value["status"]["active_issue_number"], 42);
@@ -361,7 +352,9 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         status["tier_facts"]
     );
     status.as_object_mut().unwrap().remove("tier_facts");
+    status.as_object_mut().unwrap().remove("needs_human_count");
     let legacy: IssueMonitorStatusView = serde_json::from_value(status).unwrap();
+    assert_eq!(legacy.needs_human_count, None);
     assert!(serde_json::to_value(legacy)
         .unwrap()
         .get("tier_facts")
@@ -543,6 +536,8 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
         phase: None,
         has_unknown_phase: false,
         is_spec: false,
+        autonomous_target: false,
+        autonomous_target_label: String::new(),
         parent_spec: None,
         monitor_state: Some(MonitorInboxState::SourceExcluded),
         queue_position: Some(3),

@@ -1,14 +1,14 @@
 //! Current PM explanation and independently observed project facts.
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 mod reports;
 mod tasks;
-pub use reports::PmReportsReader;
-pub use tasks::PmTaskOverview;
+pub use reports::{load_decisions, PmReportsReader};
+pub use tasks::{task_detail, PmTaskDetail, PmTaskOverview};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmIssueFact {
@@ -32,10 +32,21 @@ pub struct PmMonitorFacts {
     pub queue_head: Option<PmIssueFact>,
     pub needs_human_count: Option<usize>,
     pub release: Option<PmReleaseFact>,
-    pub release_observed_at: Option<DateTime<Utc>>,
+    pub release_observed_at: Option<UtcTimestamp>,
     pub pending_update: Option<String>,
     pub update_known: bool,
     pub error: Option<String>,
+    /// SPEC #5016 HSV: open PRs whose review is unresolved, from the cached
+    /// `pr.list` observation. `None` means nothing was observed (not zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_attention: Option<Vec<PmReviewAttention>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmReviewAttention {
+    pub pr_number: u64,
+    pub issue_numbers: Vec<u64>,
+    pub reason: String,
 }
 
 fn facts_from_monitor(
@@ -54,7 +65,7 @@ fn facts_from_monitor(
             title: title(*number),
             last_activity_at: None,
         }),
-        needs_human_count: Some(status.needs_human.len()),
+        needs_human_count: status.needs_human_count,
         ..Default::default()
     }
 }
@@ -79,7 +90,7 @@ fn fingerprint_from_prefs(prefs: &crate::IssueMonitorPrefs) -> String {
 
 fn release_from_cache(
     cache: &gwt_git::pr_status::PrInventoryCache,
-) -> (Option<PmReleaseFact>, Option<DateTime<Utc>>) {
+) -> (Option<PmReleaseFact>, Option<UtcTimestamp>) {
     let release = cache
         .rows
         .iter()
@@ -95,6 +106,61 @@ fn release_from_cache(
             })
         });
     (release, cache.fetched_at)
+}
+
+/// SPEC #5016 HSV: reads only what `pr.list` already observed; it never
+/// triggers a GitHub read of its own.
+fn review_attention_from_cache(
+    cache: &gwt_git::pr_status::PrInventoryCache,
+) -> Option<Vec<PmReviewAttention>> {
+    cache.fetched_at?;
+    let items = cache
+        .rows
+        .iter()
+        .filter(|row| {
+            row["state"]
+                .as_str()
+                .is_none_or(|state| state.eq_ignore_ascii_case("OPEN"))
+        })
+        .filter_map(|row| {
+            let pr_number = row["number"].as_u64()?;
+            let threads = cache
+                .heavy
+                .get(&pr_number)
+                .and_then(|heavy| heavy.review_state)
+                .map_or(0, |state| state.unresolved_threads);
+            let reason = if row["reviewDecision"] == "CHANGES_REQUESTED" {
+                "Changes requested".to_owned()
+            } else if threads > 0 {
+                format!(
+                    "{threads} unresolved review thread{}",
+                    if threads == 1 { "" } else { "s" }
+                )
+            } else {
+                return None;
+            };
+            let mut issue_numbers: Vec<u64> = row["closingIssuesReferences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|issue| issue["number"].as_u64())
+                .collect();
+            if issue_numbers.is_empty() {
+                issue_numbers.extend(
+                    row["headRefName"]
+                        .as_str()
+                        .and_then(|name| name.strip_prefix("work/issue-"))
+                        .and_then(|tail| tail.parse::<u64>().ok()),
+                );
+            }
+            Some(PmReviewAttention {
+                pr_number,
+                issue_numbers,
+                reason,
+            })
+        })
+        .collect();
+    Some(items)
 }
 
 fn project_dir(repo: &Path) -> PathBuf {
@@ -141,7 +207,7 @@ pub fn latest_status(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmCurrentSnapshot {
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     pub status: Option<gwt_core::pm_status::PmCurrentStatus>,
     pub stale_minutes: Option<i64>,
     pub facts: PmMonitorFacts,
@@ -155,7 +221,7 @@ pub fn snapshot(
     repo: &Path,
     update: Option<&gwt_core::update::UpdateState>,
 ) -> Result<PmCurrentSnapshot, String> {
-    let observed_at = Utc::now();
+    let observed_at = gwt_core::timestamp::UtcTimestamp::now();
     let inventory =
         crate::session_inventory::observe_sessions(repo, &gwt_core::paths::gwt_sessions_dir());
     snapshot_from_inventory(repo, update, observed_at, &inventory)
@@ -164,7 +230,7 @@ pub fn snapshot(
 fn snapshot_from_inventory(
     repo: &Path,
     update: Option<&gwt_core::update::UpdateState>,
-    observed_at: DateTime<Utc>,
+    observed_at: UtcTimestamp,
     inventory: &crate::session_inventory::SessionInventory,
 ) -> Result<PmCurrentSnapshot, String> {
     let monitor = crate::cli::issue::load_monitor_agent_status(repo, inventory.sessions.len()).map(
@@ -227,8 +293,9 @@ fn snapshot_from_inventory(
     // Reuse pr.list's budget/TTL read, without advancing its escalation history.
     // A failed refresh can still expose the previous observation and its time.
     let _ = gwt_git::pr_status::fetch_pr_inventory_cached(repo, &cache_path, &options);
-    (facts.release, facts.release_observed_at) =
-        release_from_cache(&gwt_git::pr_status::PrInventoryCache::load(&cache_path));
+    let cache = gwt_git::pr_status::PrInventoryCache::load(&cache_path);
+    (facts.release, facts.release_observed_at) = release_from_cache(&cache);
+    facts.review_attention = review_attention_from_cache(&cache);
     if let Some(staged) = gwt_core::update::load_pending_update_manifest() {
         facts.pending_update = Some(staged.version);
         facts.update_known = true;
@@ -248,7 +315,7 @@ fn snapshot_from_inventory(
         .map_err(|error| format!("PM current status could not be loaded: {error}"))?;
     let stale_minutes = status
         .as_ref()
-        .and_then(|status| status.stale_minutes(Utc::now()));
+        .and_then(|status| status.stale_minutes(gwt_core::timestamp::UtcTimestamp::now()));
     Ok(PmCurrentSnapshot {
         observed_at,
         status,
@@ -330,8 +397,10 @@ mod tests {
         let draft = |id: String| TaskDraft {
             title: "界".repeat(300),
             id,
-            purpose: "private purpose".into(),
-            completion_conditions: vec!["original outcome".into()],
+            purpose: "目的".repeat(150),
+            completion_conditions: (0..6)
+                .map(|i| format!("{i}:{}", "条件".repeat(150)))
+                .collect(),
             issue_numbers: vec![],
             goal_ids: vec![],
             assignee: Some("PM".into()),
@@ -341,7 +410,7 @@ mod tests {
             ActorKind::Pm,
             Action::Decompose {
                 source_id: "private-source".into(),
-                root: draft("private-root".into()),
+                root: draft("private-000-root".into()),
                 children: (0..55)
                     .map(|i| draft(format!("private-child-{i:03}")))
                     .collect(),
@@ -354,27 +423,90 @@ mod tests {
                 task_id: "private-child-000".into(),
             },
         );
+        apply(
+            3,
+            ActorKind::Pm,
+            Action::Complete {
+                task_id: "private-child-054".into(),
+                condition_revision: 1,
+                review_generation: 1,
+                evidence: vec!["synthetic:verified-child".into()],
+            },
+        );
+        apply(
+            4,
+            ActorKind::Pm,
+            Action::AddChild {
+                parent_id: "private-child-001".into(),
+                child: draft("private-grandchild".into()),
+            },
+        );
         let (updated, data) = reader.poll(&repo, None, Some(&captured)).unwrap();
         let value = serde_json::to_value(data.current).unwrap();
         let overview = &value["request_tasks"];
         assert_eq!(overview["state"], "ready");
-        assert_eq!(overview["total"], 56);
+        assert_eq!(overview["total"], 57);
         assert_eq!(overview["pending_intake"], 0);
         let rows = overview["tasks"].as_array().unwrap();
         assert_eq!(rows.len(), 50);
-        let beyond_id_limit = format!("{:x}", Sha256::digest(b"private-child-050"));
+        let beyond_id_limit = format!("{:x}", Sha256::digest(b"private-child-049"));
         assert!(rows.iter().any(|row| row["key"] == beyond_id_limit));
         assert!(rows.iter().all(|row| row["status"] != "cancelled"));
         assert_eq!(rows[0]["key"].as_str().unwrap().len(), 64);
+        let source_key = format!("{:x}", Sha256::digest(b"private-source"));
+        assert!(rows.iter().all(|row| row["source_key"] == source_key));
         assert!(rows[0]["title"].as_str().unwrap().chars().count() <= 241);
-        assert!(rows[0]["parent_key"].as_str().is_some());
+        assert!(rows[1]["parent_key"].as_str().is_some());
+        assert_eq!(
+            rows[0]["status"], "pending",
+            "child completion is not parent completion"
+        );
+        assert_eq!(
+            rows[0]["child_progress"],
+            serde_json::json!({
+                "total": 55, "completed": 1, "cancelled": 1,
+            }),
+            "counts include hidden children and exclude the grandchild"
+        );
+        assert_eq!(
+            rows[1]["child_progress"],
+            serde_json::json!({
+                "total": 1, "completed": 0, "cancelled": 0,
+            })
+        );
+        assert!(
+            rows[2].get("child_progress").is_none(),
+            "leaves have no child progress"
+        );
+        let preview = &rows[0]["criteria_preview"];
+        assert_eq!(preview["purpose"], format!("{}…", "目的".repeat(120)));
+        assert_eq!(preview["completion_condition_total"], 6);
+        let conditions = preview["completion_conditions"].as_array().unwrap();
+        assert_eq!(conditions.len(), 5);
+        for (index, condition) in conditions.iter().enumerate() {
+            assert_eq!(
+                condition,
+                &serde_json::json!(format!("{index}:{}…", "条件".repeat(119)))
+            );
+        }
+        let mut legacy = overview.clone();
+        for row in legacy["tasks"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("source_key");
+            row.as_object_mut().unwrap().remove("criteria_preview");
+            row.as_object_mut().unwrap().remove("child_progress");
+        }
+        let legacy: PmTaskOverview = serde_json::from_value(legacy).unwrap();
+        let legacy = serde_json::to_value(legacy).unwrap();
+        assert!(legacy["tasks"][0].get("source_key").is_none());
+        assert!(legacy["tasks"][0].get("criteria_preview").is_none());
+        assert!(legacy["tasks"][0].get("child_progress").is_none());
         let text = overview.to_string();
         for private in [
-            "private-root",
+            "private-000-root",
             "private-child",
             "private-source",
             "PRIVATE ORIGINAL",
-            "private purpose",
+            "5:条件",
             "authority",
             "receipt",
         ] {
@@ -390,13 +522,13 @@ mod tests {
         // PM status and request tracking are independent durable sources.
         std::fs::write(status_path(&repo), "broken PM status").unwrap();
         let (unrelated_error, data) = reader.poll(&repo, None, Some(&updated)).unwrap();
-        assert!(data.error.is_some());
+        assert!(data.error.is_none() && data.current_error.is_some());
         assert_eq!(
             serde_json::to_value(data.current).unwrap()["request_tasks"]["state"],
             "ready"
         );
         apply(
-            3,
+            5,
             ActorKind::Pm,
             Action::Progress {
                 task_id: "private-child-001".into(),
@@ -408,7 +540,7 @@ mod tests {
         let (progressed, data) = reader.poll(&repo, None, Some(&unrelated_error)).unwrap();
         assert_eq!(progressed.revision, unrelated_error.revision + 1);
         assert_eq!(
-            serde_json::to_value(data.current).unwrap()["request_tasks"]["tasks"][0]["wait_reason"],
+            serde_json::to_value(data.current).unwrap()["request_tasks"]["tasks"][1]["wait_reason"],
             "CI verdict"
         );
         std::fs::remove_file(status_path(&repo)).unwrap();
@@ -437,7 +569,7 @@ mod tests {
     fn reports_poll_skips_acknowledged_loads_but_hydrates_independent_cursors() {
         use super::reports::{PmReportsData, PmReportsReader};
         let mut reader = PmReportsReader::default();
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let data = PmReportsData::default();
         let (first, _) = reader
             .poll_with(Some(vec![]), None, now, || data.clone())
@@ -507,11 +639,11 @@ mod tests {
             .poll_with(
                 task_input.clone(),
                 Some(&failed),
-                now + chrono::Duration::seconds(5),
+                now + time::Duration::seconds(5),
                 || changed,
             )
             .is_none());
-        let retry_at = now + chrono::Duration::seconds(10);
+        let retry_at = now + time::Duration::seconds(10);
         let (recovered, _) = reader
             .poll_with(task_input.clone(), Some(&failed), retry_at, || data)
             .expect("task reads recover on the shared retry deadline without a stamp change");
@@ -557,6 +689,7 @@ mod tests {
         let mut status = crate::IssueMonitorState::new(Default::default()).agent_status();
         status.queue = vec![5342, 5341];
         status.needs_human = vec![20, 21];
+        status.refresh_needs_human_count(true);
         let windows = vec![PmIssueFact {
             issue_number: Some(5349),
             title: Some("Current PM".into()),
@@ -603,5 +736,54 @@ mod tests {
         let (release, at) = release_from_cache(&cache);
         assert_eq!(release.unwrap().number, 5352);
         assert_eq!(at, Some(observed));
+    }
+
+    // SPEC #5016 HSV: unresolved reviews come from the cached observation only.
+    #[test]
+    fn review_attention_reads_changes_requested_and_unresolved_threads_from_cache() {
+        let mut cache = gwt_git::pr_status::PrInventoryCache::default();
+        assert_eq!(
+            review_attention_from_cache(&cache),
+            None,
+            "no observation is unknown, never zero"
+        );
+        cache.fetched_at = Some("2026-11-13T09:00:00Z".parse().unwrap());
+        assert_eq!(review_attention_from_cache(&cache), Some(Vec::new()));
+        cache.rows = vec![
+            serde_json::json!({"number": 801, "state": "OPEN", "headRefName": "work/issue-71", "reviewDecision": "CHANGES_REQUESTED", "closingIssuesReferences": [{"number": 70}]}),
+            serde_json::json!({"number": 802, "state": "OPEN", "headRefName": "work/issue-72", "reviewDecision": "APPROVED"}),
+            serde_json::json!({"number": 803, "state": "OPEN", "headRefName": "feature/x", "reviewDecision": "REVIEW_REQUIRED"}),
+            serde_json::json!({"number": 804, "state": "MERGED", "headRefName": "work/issue-74", "reviewDecision": "CHANGES_REQUESTED"}),
+        ];
+        cache.heavy.insert(
+            802,
+            gwt_git::pr_status::PrInventoryHeavy {
+                updated_at: None,
+                head_ref_oid: None,
+                status_check_rollup: None,
+                body: None,
+                hydrated_at: "2026-11-13T09:00:00Z".parse().unwrap(),
+                review_state: Some(gwt_git::pr_status::PrReviewState {
+                    unresolved_threads: 2,
+                    coderabbit_review_complete: true,
+                }),
+            },
+        );
+        let items = review_attention_from_cache(&cache).unwrap();
+        assert_eq!(
+            items,
+            vec![
+                PmReviewAttention {
+                    pr_number: 801,
+                    issue_numbers: vec![70],
+                    reason: "Changes requested".into(),
+                },
+                PmReviewAttention {
+                    pr_number: 802,
+                    issue_numbers: vec![72],
+                    reason: "2 unresolved review threads".into(),
+                },
+            ]
+        );
     }
 }

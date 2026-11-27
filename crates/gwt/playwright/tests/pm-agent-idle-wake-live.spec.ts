@@ -84,6 +84,16 @@ test.describe("Agent idle PM wake (isolated checkout)", () => {
     let hookLog = "";
     const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
     const fixture = await startExactRelaunchFixture(testInfo, {
+      page,
+      // Both launches hold an implementation seat on the Agent roster, which
+      // the fixture sizes to one by default; the second is refused without this.
+      // Issues must be on from the start: the first launch enrolls the project
+      // in the Agent registry, whose committed copy then outranks later edits
+      // to issue-monitor.json. Nothing is launched automatically (launch_auto
+      // stays off and the fixture's gh lists no Issues).
+      monitorPreferences: {
+        enabled: true, max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2,
+      },
       async prepare({ home, bin, project }) {
         inputLog = join(home, "provider-input.jsonl");
         hookLog = join(home, "provider-hooks.jsonl");
@@ -168,8 +178,6 @@ ${marker}
         registration: { session_id: pm, agent_id: "codex", worktree_path: fixture.project },
         settings: { auto_start: false, loop_interval_secs: 10 },
       }));
-      const monitor = JSON.parse(await readFile(join(preferences, "issue-monitor.json"), "utf8"));
-      await writeFile(join(preferences, "issue-monitor.json"), JSON.stringify({ ...monitor, enabled: true }));
       await writeFile(join(preferences, "pm-loop.json"), "{}");
       expect(await wakeReceipts(pm), "initial SessionStart is not an idle edge").toHaveLength(0);
 

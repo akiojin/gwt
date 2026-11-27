@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 const ORPHAN_SCRIPT: &str = "scripts/ci-check-orphan-processes.sh";
 const FLAKE_SCRIPT: &str = "scripts/ci-flake-detect.sh";
-const CHANGES_JOB: &str = "changes";
+const CHANGES_JOB: &str = "source-sync";
 const RUST_TEST_JOB: &str = "test";
 const FLAKE_JOB: &str = "flake-detection";
 const TARGETS_OUTPUT: &str = "flake_targets";
@@ -131,12 +131,45 @@ fn the_change_classifier_publishes_the_changed_test_targets() {
         .get("outputs")
         .and_then(Value::as_mapping)
         .cloned()
-        .expect("the `changes` job must declare outputs");
+        .expect("the classification job must declare outputs");
 
     assert!(
         outputs.contains_key(Value::String(TARGETS_OUTPUT.to_string())),
-        "the `changes` job must publish a `{TARGETS_OUTPUT}` output (SPEC #4551 T-055)"
+        "the classification job must publish a `{TARGETS_OUTPUT}` output (SPEC #4551 T-055)"
     );
+}
+
+/// Issue #5170: GitHub's pull request file listing and `base.sha` stay at the
+/// base tip from when the PR was opened. PR #7413's head had merged a base 52
+/// merges newer, so 491 files (37 under `crates/gwt/src`) were classified
+/// instead of its 3, and the flake job repeated the whole `gwt` library. The
+/// classifier must read the merge commit CI tests, guarded by the event head,
+/// and keep the listing only as the fallback.
+#[test]
+fn the_change_classifier_compares_the_tested_merge_commit_before_the_pr_listing() {
+    let doc = test_workflow();
+    let classifier = job(&doc, CHANGES_JOB);
+    let step = classifier["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("classify"))
+        .expect("the classification job must keep its `classify` step");
+    assert_eq!(
+        step["env"]["PR_HEAD"],
+        "${{ github.event.pull_request.head.sha }}"
+    );
+    let run = step["run"].as_str().unwrap();
+    let guard = run
+        .find("\"$(git rev-parse --verify --quiet 'HEAD^2')\" = \"$PR_HEAD\"")
+        .expect("only the merge commit of this exact PR head may replace the listing");
+    let diff = run
+        .find("git diff --name-only --no-renames 'HEAD^1...HEAD^2'")
+        .expect("pull requests must be compared against the current base tip");
+    let listing = run
+        .find("[ -n \"$files\" ] || files=$(gh api \"repos/$REPO/pulls/$PR_NUMBER/files\"")
+        .expect("the PR file listing may only fill an empty comparison");
+    assert!(guard < diff && diff < listing);
 }
 
 /// T-055 / AC-6: the job exists, is fed by the classifier, and runs the
@@ -329,6 +362,27 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
     assert_eq!(producer["needs"].as_str(), Some("source-sync"));
     assert_eq!(producer["if"].as_str(), Some("${{ !cancelled() }}"));
     let producer_steps = run_steps(&producer);
+    let build_steps = producer["steps"].as_sequence().unwrap();
+    let cache = build_steps
+        .iter()
+        .position(|step| step["uses"].as_str() == Some("Swatinem/rust-cache@v2"))
+        .unwrap();
+    for command in [
+        "node scripts/ci-windows-tests.mjs build core",
+        "cargo test -p gwt-core --all-features --doc",
+    ] {
+        let index = build_steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains(command))
+            })
+            .unwrap();
+        assert!(index > cache, "retain the shared cache configuration");
+        assert_eq!(build_steps[index]["env"]["CARGO_PROFILE_DEV_DEBUG"], "0");
+    }
+    assert!(producer["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
     assert_eq!(
         producer_steps
             .iter()
@@ -537,7 +591,7 @@ fn the_required_windows_check_requires_successful_core_stability() {
     );
     assert_eq!(
         windows.get("runs-on").and_then(Value::as_str),
-        Some("ubuntu-latest")
+        Some("ubuntu-slim")
     );
     let needs: Vec<_> = windows
         .get("needs")

@@ -20,9 +20,10 @@ use std::{
     collections::{BTreeMap, HashSet},
     io::Read,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
+use gwt_core::timestamp::UtcTimestamp;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -33,7 +34,7 @@ use crate::client::{
     MergedPullRequest, OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient,
     RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity,
     RepositoryIssue, RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter,
-    SpecSummary, UpdatedAt,
+    SpecSummary, ThemeIssue, ThemeListing, ThemeSubIssue, UpdatedAt,
 };
 
 /// HTTP method.
@@ -515,7 +516,7 @@ pub struct DiscussionComment {
     pub id: String,
     pub body: String,
     pub author: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 /// One page of top-level comments from a GitHub Discussion.
@@ -655,9 +656,179 @@ pub fn validate_pm_settings(operation: &str, params: &Value) -> Result<(), ApiEr
                 }
             }
         }
+        "repository.branch_protection.update" => {
+            if !matches!(params["branch"].as_str(), Some("develop" | "main"))
+                || fields.len() < 2
+                || fields.iter().any(|(key, value)| {
+                    key != "branch"
+                        && (!BRANCH_PROTECTION_TOGGLES.contains(&key.as_str())
+                            || !value.is_boolean())
+                })
+            {
+                return Err(invalid());
+            }
+        }
         _ => return Err(invalid()),
     }
     Ok(())
+}
+
+/// Issue #7311: the typed protection fields a PM may change. `strict` lives in
+/// `required_status_checks`; the rest are top-level PUT booleans.
+const BRANCH_PROTECTION_TOGGLES: &[&str] = &[
+    "allow_force_pushes",
+    "required_conversation_resolution",
+    "enforce_admins",
+    "strict",
+];
+
+/// `{enabled: bool}` protection flags carried through the full-replacement PUT.
+const BRANCH_PROTECTION_FLAGS: &[&str] = &[
+    "enforce_admins",
+    "required_linear_history",
+    "allow_force_pushes",
+    "allow_deletions",
+    "block_creations",
+    "required_conversation_resolution",
+    "lock_branch",
+    "allow_fork_syncing",
+];
+
+/// Inverse of [`branch_protection_put_body`], used to prove a recorded
+/// snapshot is already in canonical PUT form.
+fn put_body_as_protection(body: &Value) -> Value {
+    let actors = |value: &Value| {
+        if !value.is_object() {
+            return value.clone();
+        }
+        let wrap = |key: &str, field: &str| {
+            value[key].as_array().map_or(Value::Null, |names| {
+                names.iter().map(|name| json!({ field: name })).collect()
+            })
+        };
+        json!({"users":wrap("users","login"),"teams":wrap("teams","slug"),"apps":wrap("apps","slug")})
+    };
+    let mut protection = serde_json::Map::new();
+    for key in BRANCH_PROTECTION_FLAGS {
+        protection.insert((*key).into(), json!({"enabled": body[*key]}));
+    }
+    protection.insert(
+        "required_status_checks".into(),
+        body["required_status_checks"].clone(),
+    );
+    protection.insert("restrictions".into(), actors(&body["restrictions"]));
+    let mut reviews = body["required_pull_request_reviews"].clone();
+    if let Some(fields) = reviews.as_object_mut() {
+        for key in ["dismissal_restrictions", "bypass_pull_request_allowances"] {
+            if let Some(restriction) = fields.get(key).map(actors) {
+                fields.insert(key.into(), restriction);
+            }
+        }
+    }
+    protection.insert("required_pull_request_reviews".into(), reviews);
+    Value::Object(protection)
+}
+
+/// Project a `GET .../branches/{branch}/protection` body into the exact
+/// `PUT` body shape, so a full replacement keeps every unrequested field.
+/// Fails closed on any field that cannot be carried faithfully.
+fn branch_protection_put_body(value: &Value) -> Option<Value> {
+    let names = |value: Option<&Value>, key: &str| -> Option<Value> {
+        let mut names = match value {
+            None | Some(Value::Null) => Vec::new(),
+            Some(list) => list
+                .as_array()?
+                .iter()
+                .map(|item| item[key].as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()?,
+        };
+        names.sort();
+        Some(json!(names))
+    };
+    let actors = |value: &Value| -> Option<Value> {
+        value.as_object()?;
+        Some(json!({
+            "users": names(value.get("users"), "login")?,
+            "teams": names(value.get("teams"), "slug")?,
+            "apps": names(value.get("apps"), "slug")?,
+        }))
+    };
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "required_status_checks".into(),
+        match value.get("required_status_checks") {
+            None | Some(Value::Null) => Value::Null,
+            Some(checks) => {
+                let mut list = checks["checks"]
+                    .as_array()?
+                    .iter()
+                    .map(|check| {
+                        let context = check["context"].as_str().filter(|c| !c.is_empty())?;
+                        let app_id = match &check["app_id"] {
+                            Value::Null => -1,
+                            id => id.as_i64().filter(|id| *id >= -1)?,
+                        };
+                        Some((context.to_owned(), app_id))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                list.sort();
+                json!({
+                    "strict": checks["strict"].as_bool()?,
+                    "checks": list
+                        .into_iter()
+                        .map(|(context, app_id)| json!({"context":context,"app_id":app_id}))
+                        .collect::<Vec<_>>(),
+                })
+            }
+        },
+    );
+    body.insert(
+        "required_pull_request_reviews".into(),
+        match value.get("required_pull_request_reviews") {
+            None | Some(Value::Null) => Value::Null,
+            Some(reviews) => {
+                let mut out = serde_json::Map::new();
+                for key in [
+                    "dismiss_stale_reviews",
+                    "require_code_owner_reviews",
+                    "require_last_push_approval",
+                ] {
+                    out.insert(
+                        key.into(),
+                        Value::Bool(match reviews.get(key) {
+                            None => false,
+                            Some(flag) => flag.as_bool()?,
+                        }),
+                    );
+                }
+                out.insert(
+                    "required_approving_review_count".into(),
+                    json!(reviews["required_approving_review_count"].as_u64()?),
+                );
+                for key in ["dismissal_restrictions", "bypass_pull_request_allowances"] {
+                    if let Some(restriction) = reviews.get(key) {
+                        out.insert(key.into(), actors(restriction)?);
+                    }
+                }
+                Value::Object(out)
+            }
+        },
+    );
+    body.insert(
+        "restrictions".into(),
+        match value.get("restrictions") {
+            None | Some(Value::Null) => Value::Null,
+            Some(restrictions) => actors(restrictions)?,
+        },
+    );
+    for key in BRANCH_PROTECTION_FLAGS {
+        let enabled = match value.get(*key) {
+            None => false,
+            Some(flag) => flag["enabled"].as_bool()?,
+        };
+        body.insert((*key).into(), Value::Bool(enabled));
+    }
+    Some(Value::Object(body))
 }
 
 fn valid_topics(value: &Value) -> bool {
@@ -834,7 +1005,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         let Some((budget, gate)) = &self.budget else {
             return Ok(());
         };
-        let now = chrono::Utc::now();
+        let now = SystemTime::now().into();
         if gwt_core::github_budget::suppressed_spawn_detail(gate, budget, args, now).is_some() {
             let quota = gwt_core::github_quota::classify_gh_args(args);
             let retry_after = budget
@@ -858,7 +1029,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             return result;
         };
         let quota = gwt_core::github_quota::classify_gh_args(args);
-        let now = chrono::Utc::now();
+        let now = SystemTime::now().into();
         match &result {
             Ok(_) => {
                 gate.record_success(quota);
@@ -1445,9 +1616,8 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     return Err(invalid("comment.id is empty"));
                 }
                 let created_at = required_string(node, "createdAt", operation)?;
-                let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
-                    .map_err(|_| invalid("comment.createdAt invalid"))?
-                    .with_timezone(&chrono::Utc);
+                let created_at = UtcTimestamp::parse_rfc3339(&created_at)
+                    .ok_or_else(|| invalid("comment.createdAt invalid"))?;
                 Ok(DiscussionComment {
                     id,
                     body: required_string(node, "body", operation)?,
@@ -1665,6 +1835,10 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             ),
             "repository.settings.set" if params.get("topics").is_some() => format!("{root}/topics"),
             "repository.settings.set" => root,
+            "repository.branch_protection.update" => format!(
+                "{root}/branches/{}/protection",
+                params["branch"].as_str().expect("validated branch")
+            ),
             _ => unreachable!("validated operation"),
         };
         let body = self.workflow_get(
@@ -1684,6 +1858,9 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         before: &Value,
     ) -> Result<Value, ApiError> {
         validate_pm_settings(operation, params)?;
+        if operation == "repository.branch_protection.update" {
+            return self.branch_protection_mutate(params, before);
+        }
         let invalid = || {
             pm_settings_error(operation, "settings identity or requested change was not confirmed; inspect remote state before retrying")
         };
@@ -1817,6 +1994,12 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         };
         let repository = format!("{}/{}", self.owner, self.repo);
         let mut projected = match operation {
+            "repository.branch_protection.update" => {
+                let mut projected = branch_protection_put_body(value).ok_or_else(invalid)?;
+                projected["repository"] = repository.into();
+                projected["branch"] = params["branch"].clone();
+                return Ok(projected);
+            }
             "pr.reopen" | "pr.review.submit" => {
                 let repo = value
                     .pointer("/base/repo/full_name")
@@ -1907,6 +2090,63 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             }
         }
         Ok(projected)
+    }
+
+    /// Issue #7311: rewrite only the requested protection fields through the
+    /// full-replacement PUT, then confirm every field of the response.
+    fn branch_protection_mutate(&self, params: &Value, before: &Value) -> Result<Value, ApiError> {
+        let operation = "repository.branch_protection.update";
+        let unconfirmed = || {
+            pm_settings_error(operation, "branch protection identity or requested change was not confirmed; inspect remote state before retrying")
+        };
+        let branch = params["branch"].as_str().expect("validated branch");
+        let mut desired = before.as_object().cloned().ok_or_else(unconfirmed)?;
+        if desired
+            .remove("repository")
+            .as_ref()
+            .and_then(Value::as_str)
+            != Some(format!("{}/{}", self.owner, self.repo).as_str())
+            || desired.remove("branch").as_ref().and_then(Value::as_str) != Some(branch)
+        {
+            return Err(unconfirmed());
+        }
+        let mut desired = Value::Object(desired);
+        // The authorized snapshot must already be a faithful PUT body.
+        if branch_protection_put_body(&put_body_as_protection(&desired)).as_ref() != Some(&desired)
+        {
+            return Err(unconfirmed());
+        }
+        for (key, value) in params.as_object().expect("validated params") {
+            match key.as_str() {
+                "branch" => {}
+                "strict" => {
+                    let checks = desired["required_status_checks"]
+                        .as_object_mut()
+                        .ok_or_else(|| {
+                            pm_settings_error(
+                                operation,
+                                "strict requires existing required status checks; add a context with repository.required_checks.update first",
+                            )
+                        })?;
+                    checks.insert("strict".into(), value.clone());
+                }
+                _ => desired[key] = value.clone(),
+            }
+        }
+        let path = format!(
+            "/repos/{}/{}/branches/{branch}/protection",
+            self.owner, self.repo
+        );
+        let response = self.rest_put(&path, desired.clone())?;
+        let value: Value = serde_json::from_str(&response.body).map_err(|_| unconfirmed())?;
+        let actual = branch_protection_put_body(&value).ok_or_else(unconfirmed)?;
+        if actual != desired {
+            return Err(unconfirmed());
+        }
+        let mut after = actual;
+        after["repository"] = format!("{}/{}", self.owner, self.repo).into();
+        after["branch"] = branch.into();
+        Ok(after)
     }
 
     fn rest_put(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
@@ -2017,7 +2257,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 budget.record_graphql_response(
                     &gwt_core::github_budget::http_source(&GRAPHQL_BUDGET_ARGS),
                     &rate_limit,
-                    chrono::Utc::now(),
+                    SystemTime::now().into(),
                 );
             }
         }
@@ -2823,6 +3063,46 @@ mod transport_tests {
     }
 }
 
+/// A theme is an Issue that has sub-issues or carries the theme label; any
+/// other node yields `None`.
+fn parse_theme_issue(node: &Value, repository: &str) -> Option<ThemeIssue> {
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_string();
+    let total = node["subIssuesSummary"]["total"].as_u64().unwrap_or(0);
+    let recorded = node["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|label| label["name"].as_str() == Some(super::THEME_LABEL));
+    if total == 0 && !recorded {
+        return None;
+    }
+    let sub_issues = node["subIssues"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|sub| {
+            Some(ThemeSubIssue {
+                number: IssueNumber(sub["number"].as_u64()?),
+                title: text(sub, "title"),
+                state: parse_issue_state(sub["state"].as_str().unwrap_or_default()),
+                url: text(sub, "url"),
+                in_repository: sub["repository"]["nameWithOwner"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(repository)),
+            })
+        })
+        .collect();
+    Some(ThemeIssue {
+        number: IssueNumber(node["number"].as_u64()?),
+        title: text(node, "title"),
+        body: text(node, "body"),
+        url: text(node, "url"),
+        sub_issues_total: total,
+        sub_issues_completed: node["subIssuesSummary"]["completed"].as_u64().unwrap_or(0),
+        sub_issues,
+    })
+}
+
 fn parse_issue_state(s: &str) -> IssueState {
     match s {
         "CLOSED" | "closed" => IssueState::Closed,
@@ -2894,11 +3174,21 @@ fn parse_graphql_issue(issue: &Value) -> Result<IssueSnapshot, ApiError> {
         .unwrap_or_default();
     Ok(IssueSnapshot {
         number: IssueNumber(number),
+        // GraphQL names a bot without the `[bot]` suffix REST gives the same
+        // account. Author trust compares one spelling, so store the REST one.
         author_login: issue
             .pointer("/author/login")
             .and_then(Value::as_str)
             .filter(|login| !login.is_empty())
-            .map(str::to_string),
+            .map(|login| {
+                let bot =
+                    issue.pointer("/author/__typename").and_then(Value::as_str) == Some("Bot");
+                if bot && !login.ends_with("[bot]") {
+                    format!("{login}[bot]")
+                } else {
+                    login.to_string()
+                }
+            }),
         title,
         body,
         labels,
@@ -3099,7 +3389,7 @@ fn parse_owner_comment(value: &Value, operation: &str) -> Result<RepositoryComme
         .and_then(Value::as_str)
         .ok_or_else(|| parse("comment updated_at missing"))?
         .to_string();
-    if chrono::DateTime::parse_from_rfc3339(&updated_at).is_err() {
+    if UtcTimestamp::parse_rfc3339(&updated_at).is_none() {
         return Err(parse("comment updated_at is not RFC3339"));
     }
     let author = value
@@ -3298,7 +3588,7 @@ query($owner:String!,$repo:String!,$number:Int!,$after:String){
     issue: issueOrPullRequest(number:$number){
       __typename
       ... on Issue {
-        number title body state updatedAt author{login}
+        number title body state updatedAt author{login __typename}
         labels(first:50){nodes{name}}
         comments(first:100, after:$after){
           nodes{databaseId body updatedAt}
@@ -3315,6 +3605,26 @@ query($owner:String!,$repo:String!,$number:Int!){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issue: issueOrPullRequest(number:$number){ __typename ... on Issue { updatedAt } }
+  }
+}
+"#;
+
+/// How many pages of open Issues one theme listing reads (100 per page).
+const THEME_LISTING_MAX_PAGES: usize = 10;
+
+const LIST_THEMES_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
+  repository(owner:$owner, name:$repo){
+    issues(states:OPEN, first:100, after:$after, orderBy:{field:UPDATED_AT,direction:DESC}){
+      nodes{
+        number title body url
+        labels(first:20){ nodes{ name } }
+        subIssuesSummary{ total completed }
+        subIssues(first:100){ nodes{ number title state url repository{ nameWithOwner } } }
+      }
+      pageInfo{ hasNextPage endCursor }
+    }
   }
 }
 "#;
@@ -3525,8 +3835,7 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
                     .get("created_at")
                     .and_then(Value::as_str)
                     .ok_or_else(malformed)?;
-                let at =
-                    chrono::DateTime::parse_from_rfc3339(created_at).map_err(|_| malformed())?;
+                let at = UtcTimestamp::parse_rfc3339(created_at).ok_or_else(malformed)?;
                 let key = (at, id);
                 if latest
                     .as_ref()
@@ -3781,6 +4090,28 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("set_state json: {e}")))?;
         parse_rest_issue(&value)
+    }
+
+    fn list_themes(&self) -> Result<ThemeListing, ApiError> {
+        let repository = format!("{}/{}", self.owner, self.repo);
+        let mut listing = ThemeListing::default();
+        let mut after = Value::Null;
+        for _ in 0..THEME_LISTING_MAX_PAGES {
+            let value = self.graphql(
+                LIST_THEMES_QUERY,
+                json!({ "owner": self.owner, "repo": self.repo, "after": after }),
+            )?;
+            let issues = &value["data"]["repository"]["issues"];
+            for node in issues["nodes"].as_array().into_iter().flatten() {
+                listing.themes.extend(parse_theme_issue(node, &repository));
+            }
+            if issues["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                return Ok(listing);
+            }
+            after = issues["pageInfo"]["endCursor"].clone();
+        }
+        listing.truncated = true;
+        Ok(listing)
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {
@@ -4338,11 +4669,13 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
+    use std::time::{Duration, SystemTime};
+
     use serde_json::json;
 
     use super::{
         check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
-        HttpResponse, HttpTransport, ResolutionDeadline,
+        HttpResponse, HttpTransport, ResolutionDeadline, UtcTimestamp,
     };
     use crate::client::{ApiError, IssueClient, SpecListFilter};
 
@@ -4452,15 +4785,15 @@ mod check_status_tests {
         let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
         let gate: &'static gwt_core::github_quota::QuotaGate =
             Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
-        let now = chrono::Utc::now();
+        let now = SystemTime::now();
         ledger.record_block(
             &gwt_core::github_quota::RateLimitBlock {
                 resource: "graphql".to_string(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: now + chrono::Duration::seconds(300),
+                reset_at: (now + Duration::from_secs(300)).into(),
             },
-            now,
+            now.into(),
         );
         let transport = crate::client::http::FakeTransport::new();
         let client = HttpIssueClient::with_transport(transport, "token".to_string(), "octo", "gwt")
@@ -4494,12 +4827,12 @@ mod check_status_tests {
             ledger
                 .active_block(
                     gwt_core::github_quota::GitHubQuota::GraphQl,
-                    chrono::Utc::now()
+                    SystemTime::now().into()
                 )
                 .is_some(),
             "the refusal opens the persisted window"
         );
-        let snapshot = ledger.snapshot(chrono::Utc::now());
+        let snapshot = ledger.snapshot(SystemTime::now().into());
         assert_eq!(
             snapshot.local["graphql"].calls_last_hour, 1,
             "the sent call was counted: {:?}",
@@ -4553,7 +4886,7 @@ mod check_status_tests {
         assert_eq!(page.cursor.as_deref(), Some("full-page-cursor"));
         assert!(page.has_next_page);
         assert_eq!(
-            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            ledger.snapshot(SystemTime::now().into()).local["graphql"].points_last_hour,
             3
         );
         let request: serde_json::Value =
@@ -4570,9 +4903,9 @@ mod check_status_tests {
                 resource: "graphql".into(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                reset_at: (SystemTime::now() + Duration::from_secs(300)).into(),
             },
-            chrono::Utc::now(),
+            SystemTime::now().into(),
         );
         assert!(matches!(
             client.board_discussions(None),
@@ -4635,12 +4968,12 @@ mod check_status_tests {
                 id: "C_1".into(),
                 body: "message".into(),
                 author: "owner".into(),
-                created_at: "2026-10-16T00:00:00Z".parse().unwrap(),
+                created_at: UtcTimestamp::parse_rfc3339("2026-10-16T00:00:00Z").unwrap(),
             }]
         );
         assert_eq!(page.cursor.as_deref(), Some("cursor"));
         assert_eq!(
-            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            ledger.snapshot(SystemTime::now().into()).local["graphql"].points_last_hour,
             3
         );
         client.transport().enqueue(HttpResponse {
@@ -4652,7 +4985,7 @@ mod check_status_tests {
             .add_discussion_comment(&page.discussion_id, "message")
             .unwrap();
         assert_eq!(
-            ledger.snapshot(chrono::Utc::now()).local["graphql"].calls_last_hour,
+            ledger.snapshot(SystemTime::now().into()).local["graphql"].calls_last_hour,
             2
         );
         let requests = client.transport().recorded();
@@ -4673,9 +5006,9 @@ mod check_status_tests {
                 resource: "graphql".into(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                reset_at: (SystemTime::now() + Duration::from_secs(300)).into(),
             },
-            chrono::Utc::now(),
+            SystemTime::now().into(),
         );
         assert!(matches!(
             client.discussion_comments(42, None),
@@ -4826,6 +5159,40 @@ mod check_status_tests {
 }
 
 #[cfg(test)]
+mod issue_author_tests {
+    use super::*;
+
+    /// Issue #7632: GraphQL names a bot without the `[bot]` suffix REST uses.
+    /// One Issue must carry one author spelling whichever endpoint read it.
+    #[test]
+    fn graphql_and_rest_report_the_same_bot_author() {
+        assert!(FETCH_ISSUE_QUERY.contains("author{login __typename}"));
+        let graphql = |login: &str, kind: &str| {
+            parse_graphql_issue(&json!({
+                "number": 1, "updatedAt": "2026-11-18T00:00:00Z",
+                "author": {"login": login, "__typename": kind},
+            }))
+            .unwrap()
+            .author_login
+        };
+        let rest = parse_rest_issue(&json!({
+            "number": 1, "updated_at": "2026-11-18T00:00:00Z",
+            "user": {"login": "github-actions[bot]"},
+        }))
+        .unwrap()
+        .author_login;
+
+        assert_eq!(graphql("github-actions", "Bot"), rest);
+        assert_eq!(graphql("github-actions[bot]", "Bot"), rest);
+        assert_eq!(
+            graphql("github-actions", "User").as_deref(),
+            Some("github-actions"),
+            "a user account must never be promoted to the trusted bot spelling"
+        );
+    }
+}
+
+#[cfg(test)]
 mod label_assignment_tests {
     use super::*;
 
@@ -4880,6 +5247,24 @@ mod label_assignment_tests {
         assert!(requests.iter().all(|r| r.method == HttpMethod::Get
             && r.headers
                 .contains(&("Authorization".into(), "Bearer token".into()))));
+    }
+
+    #[test]
+    fn label_assignment_keeps_leap_seconds_in_order_and_on_the_wire() {
+        let mut normal = event(3, "labeled", "urgent", "first");
+        normal["created_at"] = json!("2016-12-31T23:59:59.999999999Z");
+        let mut leap = event(2, "labeled", "urgent", "second");
+        leap["created_at"] = json!("2017-01-01T00:59:60.125+01:00");
+
+        let transport = FakeTransport::new();
+        transport.enqueue(response(vec![normal, leap], false));
+        let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+        let assignment = client
+            .fetch_label_assignment(IssueNumber(7), "urgent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(assignment.actor.as_deref(), Some("second"));
+        assert_eq!(assignment.created_at, "2017-01-01T00:59:60.125+01:00");
     }
 
     #[test]

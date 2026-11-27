@@ -16,6 +16,8 @@
 //! second liveness definition.
 
 mod ancestry;
+#[cfg(unix)]
+pub(crate) mod verification_source;
 pub mod windows_recovery;
 
 fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> String {
@@ -45,8 +47,58 @@ pub fn current_claim_owner() -> String {
     format!("{}:{}:{}", hostname, current_username(), std::process::id())
 }
 
+/// The source is explicit so CLI and daemon cannot silently choose different
+/// macOS names. The network hostname can change with DHCP; LocalHostName is
+/// the configured machine name. A deliberate rename needs queue adoption.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HostIdentity {
+    pub host_id: String,
+    pub source: &'static str,
+    pub system_hostname: String,
+    pub hostname_difference_reason: Option<String>,
+}
+
+fn resolve_host_identity(local_host_name: Option<&str>, hostname: Option<&str>) -> HostIdentity {
+    let system_hostname = normalize_hostname(hostname);
+    let local = local_host_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let host_id = local
+        .map(|value| normalize_hostname(Some(value)))
+        .unwrap_or_else(|| system_hostname.clone());
+    HostIdentity {
+        hostname_difference_reason: (local.is_some() && host_id != system_hostname)
+            .then(|| "network_hostname_differs_from_local_host_name".into()),
+        host_id,
+        source: if local.is_some() {
+            "macos_local_host_name"
+        } else {
+            "whoami_hostname"
+        },
+        system_hostname,
+    }
+}
+
+pub fn current_host_identity() -> &'static HostIdentity {
+    static IDENTITY: std::sync::OnceLock<HostIdentity> = std::sync::OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        let local = gwt_core::process::resolved_command(
+            gwt_core::process::ProcessPlanRequest::new("/usr/sbin/scutil")
+                .args(["--get", "LocalHostName"]),
+        )
+        .ok()
+        .and_then(|mut command| command.output().ok())
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok());
+        #[cfg(not(target_os = "macos"))]
+        let local: Option<String> = None;
+        resolve_host_identity(local.as_deref(), whoami::hostname().ok().as_deref())
+    })
+}
+
 pub fn current_hostname() -> String {
-    normalize_hostname(whoami::hostname().ok().as_deref())
+    current_host_identity().host_id.clone()
 }
 
 /// Issue #4852 AC-2: the `hostname:user` prefix of a claim owner minted by
@@ -184,7 +236,8 @@ pub fn is_descendant_of(pid: u32, ancestor: u32) -> Result<bool, sysinfo::Error>
 }
 
 /// Runtime callers include the exact process, ordinary descendants, and a
-/// Windows recovery worker positively linked by its original caller's Job.
+/// Windows recovery worker linked by its caller's Job, or a daemon verification
+/// command authenticated by its original caller's local broker.
 pub fn is_runtime_descendant_of(pid: u32, ancestor: u32) -> bool {
     checked_runtime_descendant_of(pid, ancestor, windows_recovery::capture_source())
         .unwrap_or(false)
@@ -202,6 +255,10 @@ pub fn checked_runtime_descendant_of(
     }
     if pid == ancestor || is_descendant_of(pid, ancestor).map_err(std::io::Error::other)? {
         return Ok(true);
+    }
+    #[cfg(unix)]
+    if let Some(source) = verification_source::capture_source() {
+        return verification_source::checked_descendant_of(pid, ancestor, source);
     }
     match source {
         Some(source) => windows_recovery::checked_recovered_descendant_of(pid, ancestor, source),
@@ -440,6 +497,23 @@ pub fn exact_pty_process_tree_is_alive(child_pid: u32, child_started_at: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_host_identity_prefers_local_host_name_over_network_hostname() {
+        let first = super::resolve_host_identity(Some("Akiojin"), Some("Mac"));
+        let second = super::resolve_host_identity(Some("Akiojin"), Some("akiojin.local"));
+        assert_eq!(first.host_id, "akiojin");
+        assert_eq!(first.host_id, second.host_id);
+        assert_eq!(first.source, "macos_local_host_name");
+        assert_eq!(
+            first.hostname_difference_reason.as_deref(),
+            Some("network_hostname_differs_from_local_host_name")
+        );
+        assert!(second.hostname_difference_reason.is_none());
+        let fallback = super::resolve_host_identity(None, Some("Mac.local"));
+        assert_eq!(fallback.host_id, "mac");
+        assert_eq!(fallback.source, "whoami_hostname");
+    }
 
     #[test]
     fn username_resolution_prefers_whoami_then_env_then_unknown() {

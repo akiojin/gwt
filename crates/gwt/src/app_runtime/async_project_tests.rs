@@ -101,7 +101,7 @@ fn stale_project_launch_completion_cleans_exact_genesis_without_touching_reopene
     let source = captured.session.as_ref().unwrap();
     assert!(captured.pty.is_none());
     assert!(runtime.sessions_dir.join(format!("{}.toml", source.id)).exists());
-    assert!(durable_launch_recovery_exists(&runtime.sessions_dir, &source.id));
+    assert!(durable_launch_recovery_exists(&runtime.sessions_dir, &source.id).unwrap());
     // A missing executable is rejected before spawn on Windows. On other
     // platforms an exec attempt is ambiguous, so cancel at the existing
     // materialization barrier to establish a real pre-child rollback instead.
@@ -214,7 +214,7 @@ fn stale_project_launch_completion_cleans_exact_genesis_without_touching_reopene
     assert!(!durable_launch_recovery_exists(
         &runtime.sessions_dir,
         &source.id
-    ));
+    ).unwrap());
     assert_eq!(fs::read(replacement_path).unwrap(), replacement_bytes);
     let current = executor.block_on(owner.probe(&replacement.id, replacement.incarnation)).unwrap();
     assert_eq!(current.session.as_ref().unwrap().id, replacement_session.id);

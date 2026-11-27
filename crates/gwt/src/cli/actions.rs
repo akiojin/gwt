@@ -732,7 +732,7 @@ pub(super) fn fetch_queued_actions_via_gh(
             format!("queued Actions response is missing or has invalid {field}"),
         )
     };
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut runs = Vec::new();
     for page in pages {
         for run in page["workflow_runs"]
@@ -776,11 +776,11 @@ pub(super) fn fetch_queued_actions_via_gh(
             let created_at = run["created_at"]
                 .as_str()
                 .ok_or_else(|| invalid("created_at"))?;
-            let created = chrono::DateTime::parse_from_rfc3339(created_at)
+            let created = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(created_at)
                 .map_err(|_| invalid("created_at"))?;
             runs.push(serde_json::json!({
                 "run_id": run_id, "name": run["name"], "head_branch": run["head_branch"],
-                "created_at": created_at, "age_seconds": now.signed_duration_since(created).num_seconds().max(0),
+                "created_at": created_at, "age_seconds": now.signed_duration_since(created).whole_seconds().max(0),
             }));
         }
     }

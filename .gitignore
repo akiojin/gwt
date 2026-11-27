@@ -112,6 +112,8 @@ __pycache__/
 /specs/
 tasks/spec-*/
 package-lock.json
+# SPEC #6943 AC-2: the React layer builds from a committed, pinned lockfile.
+!crates/gwt/web-react/package-lock.json
 
 # Playwright MCP automation artifacts
 .playwright-mcp/

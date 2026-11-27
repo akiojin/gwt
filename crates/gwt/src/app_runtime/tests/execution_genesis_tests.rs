@@ -270,6 +270,7 @@ fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
     let project = temp.path().join("project");
     pane_control_tests::control_init_repo(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     let owner = Arc::new(
         owner_fixture_block_on(
             gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&project),
@@ -376,6 +377,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
     fs::create_dir_all(&project).unwrap();
     init_repo_with_initial_commit(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     let executor = tokio::runtime::Runtime::new().unwrap();
     executor.block_on(async {
         let owner = production_owner_fixture(&project).await;
@@ -453,13 +455,26 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
         );
         let sessions = gwt_core::paths::gwt_sessions_dir();
         assert!(!sessions.join(format!("{}.toml", source.id)).exists());
-        let retained_after_failure = durable_launch_recovery_exists(&sessions, &source.id);
+        let retained_after_failure = durable_launch_recovery_exists(&sessions, &source.id).unwrap();
         owner.shutdown().await;
         let mut retained_during_startup_fault = None;
         if roster_read_fails {
-            let failed_retry = production_owner_fixture(&project).await;
+            let failed_retry =
+                gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project)
+                    .await
+                    .expect("the owner stays reachable to report registry recovery");
+            let health = failed_retry.command(OwnerCommand::Health).await.unwrap();
+            assert_eq!(health["reconciliation_required"], true, "{health}");
+            assert!(
+                health["agent_registry_initialization_error"]
+                    .as_str()
+                    .is_some_and(
+                        |error| error.contains("Shared Agent registry initialization failed")
+                    ),
+                "{health}"
+            );
             retained_during_startup_fault =
-                Some(durable_launch_recovery_exists(&sessions, &source.id));
+                Some(durable_launch_recovery_exists(&sessions, &source.id).unwrap());
             failed_retry.shutdown().await;
             fs::remove_dir(&prefs_path).unwrap();
             fs::rename(&prefs_backup, &prefs_path).unwrap();
@@ -497,7 +512,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
             session_binding_id: "genesis-pty-retry-binding".into(),
             initial_session_id: "genesis-pty-retry-session".into(),
             entrypoint: "$gwt-execute #2359".into(),
-            requested_at: Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
             &source.worktree_path,
@@ -518,7 +533,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
                 "roster recovery failure must retain its durable retry receipt"
             );
         }
-        assert!(!durable_launch_recovery_exists(&sessions, &source.id));
+        assert!(!durable_launch_recovery_exists(&sessions, &source.id).unwrap());
         let assignment = member_before.assignment.as_ref().unwrap();
         assert!(!assignment.reservation_id.is_empty());
         assert_eq!(assignment.session_id.as_deref(), Some(source.id.as_str()));
@@ -527,7 +542,6 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
             "failed genesis must not strand its member assignment"
         );
         assert_eq!(member_after.name, member_before.name);
-        assert_eq!(member_after.enabled, member_before.enabled);
         assert_eq!(member_after.agent_id, member_before.agent_id);
     });
 }
@@ -864,7 +878,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         &existing.board_refs,
         existing.execution_containers.first().cloned(),
         Some(&prior.session_id),
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .expect("pause prior Session");
     gwt_core::workspace_projection::mark_workspace_agent_stopped(&repo, &prior.session_id, None)
@@ -899,7 +913,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         session_binding_id: "genesis-late-cleanup-binding".to_string(),
         initial_session_id: "genesis-late-cleanup-session".to_string(),
         entrypoint: "$gwt-execute #2359".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
         &repo, owner, &successor,
@@ -1165,10 +1179,7 @@ fn startup_genesis_receipt_imports_flat_authority_and_terminalizes_crash_window(
         ledger.current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
     );
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
 }
 
 #[cfg(unix)]
@@ -1297,10 +1308,7 @@ fn startup_genesis_recovery_retains_dangling_session_entry_without_mutation() {
             .current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
     );
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
 }
 
 #[test]
@@ -1384,10 +1392,7 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
         fs::read(&session_path).expect("read retained replacement Session"),
         replacement_before,
     );
-    assert!(durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
     assert_optional_files_unchanged(&authority_before);
     assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
     session
@@ -1425,10 +1430,7 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
         .sessions_dir
         .join(format!("{session_id}.toml"))
         .exists());
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(!durable_launch_recovery_exists(&runtime.sessions_dir, session_id,).unwrap());
 }
 
 #[test]
@@ -1913,7 +1915,8 @@ fn continue_work_ready_timeout_hands_off_a_live_pane_instead_of_killing_it() {
     assert!(durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         &fixture.pending.binding.session_id
-    ));
+    )
+    .unwrap());
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
             &fixture.repo,
@@ -1980,7 +1983,8 @@ fn continue_work_ready_timeout_late_session_start_still_activates_after_a_handof
     assert!(!durable_launch_recovery_exists(
         &gwt_core::paths::gwt_sessions_dir(),
         &fixture.pending.binding.session_id
-    ));
+    )
+    .unwrap());
     fixture.shutdown();
 }
 

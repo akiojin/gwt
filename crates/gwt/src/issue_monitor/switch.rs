@@ -1,13 +1,40 @@
 //! Durable, fail-closed safe-switch intentions; execution belongs to the Host.
 use super::*;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSwitchDisposition {
+    #[default]
+    SwitchToTarget,
+    SaveAndReturn,
+}
+
+impl AgentSwitchDisposition {
+    fn is_switch_to_target(&self) -> bool {
+        *self == Self::SwitchToTarget
+    }
+
+    pub(crate) fn permits_target(self, target: Option<u64>) -> bool {
+        match self {
+            Self::SwitchToTarget => target.is_some_and(|number| number > 0),
+            Self::SaveAndReturn => target.is_none(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSwitchRequest {
     pub operation_id: String,
     pub member_id: String,
     pub expected_roster_revision: u64,
-    pub target_issue_number: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentSwitchDisposition::is_switch_to_target"
+    )]
+    pub disposition: AgentSwitchDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,7 +48,13 @@ pub enum AgentSwitchAction {
         operation_id: String,
         member_id: String,
         expected_roster_revision: u64,
-        target_issue_number: u64,
+        #[serde(
+            default,
+            skip_serializing_if = "AgentSwitchDisposition::is_switch_to_target"
+        )]
+        disposition: AgentSwitchDisposition,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_issue_number: Option<u64>,
     },
     Cancel {
         operation_id: String,
@@ -36,6 +69,8 @@ pub enum AgentSwitchStage {
     CheckpointVerified,
     StoppingCurrent,
     LaunchingNext,
+    Returned,
+    Resuming,
     Completed,
     Cancelled,
     Failed,
@@ -58,6 +93,14 @@ pub struct AgentSwitchCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchResumeCondition {
+    pub blocker_numbers: Vec<u64>,
+    pub reason: String,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSwitchIntent {
     pub request: AgentSwitchRequest,
     pub source: AgentSwitchSource,
@@ -70,6 +113,12 @@ pub struct AgentSwitchIntent {
     pub runtime_stop: Option<IssueMonitorRuntimeStopRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<AgentSwitchCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_condition: Option<AgentSwitchResumeCondition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_exit_confirmed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,7 +132,13 @@ pub struct AgentSwitchView {
     pub member_id: String,
     pub source_issue_number: u64,
     pub source_session_id: String,
-    pub target_issue_number: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentSwitchDisposition::is_switch_to_target"
+    )]
+    pub disposition: AgentSwitchDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_issue_number: Option<u64>,
     pub stage: AgentSwitchStage,
     pub created_at: String,
     pub reason: Option<String>,
@@ -107,6 +162,7 @@ impl AgentSwitchIntent {
             self.stage,
             AgentSwitchStage::StoppingCurrent
                 | AgentSwitchStage::LaunchingNext
+                | AgentSwitchStage::Resuming
                 | AgentSwitchStage::Unknown
         )
     }
@@ -119,7 +175,7 @@ impl AgentSwitchIntent {
     ) -> Option<String> {
         let selected_member = member == Some(self.request.member_id.as_str());
         let source = number.is_some() && number == self.source.assignment.issue_number;
-        let target = number == Some(self.request.target_issue_number);
+        let target = number.is_some() && number == self.request.target_issue_number;
         if !self.has_admission_pin() || (!source && !target && !selected_member) {
             return None;
         }
@@ -137,6 +193,9 @@ impl IssueMonitorState {
     /// Plan against existing candidate observations without publishing source absence.
     /// Normal claim and materialization gates run again after physical exit.
     pub fn agent_switch_target_exclusions(&self, intent: &AgentSwitchIntent) -> Vec<String> {
+        let Some(target) = intent.request.target_issue_number else {
+            return vec!["Switch has no target Issue".into()];
+        };
         let mut proposed = self.clone();
         if let Some(member) = proposed.agent_roster.as_mut().and_then(|roster| {
             roster
@@ -157,9 +216,8 @@ impl IssueMonitorState {
                 .agent_switch_intents
                 .remove(&intent.request.operation_id);
         }
-        let mut reasons = proposed.claim_candidate_exclusions(intent.request.target_issue_number);
-        let target = intent.request.target_issue_number;
-        let now = chrono::Utc::now().to_rfc3339();
+        let mut reasons = proposed.claim_candidate_exclusions(target);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         if proposed.issue_is_closed(target)
             || proposed
                 .inbox_item(target)
@@ -194,11 +252,30 @@ impl IssueMonitorState {
     }
 }
 
-/// Shared UI/CLI transaction. Runtime and Session observations happen before the writer lock.
+/// The Host UI retains the target-switch controls. Targetless writes belong
+/// to the registered PM CLI and cannot be requested through the canvas.
 pub fn mutate_project_agent_switch(
     root: &Path,
     sessions_dir: &Path,
     action: AgentSwitchAction,
+) -> Result<AgentSwitchSnapshot, String> {
+    mutate_project_agent_switch_inner(root, sessions_dir, action, false)
+}
+
+/// The CLI authenticates the registered PM before calling this entry point.
+pub(crate) fn mutate_project_agent_switch_as_pm(
+    root: &Path,
+    sessions_dir: &Path,
+    action: AgentSwitchAction,
+) -> Result<AgentSwitchSnapshot, String> {
+    mutate_project_agent_switch_inner(root, sessions_dir, action, true)
+}
+
+fn mutate_project_agent_switch_inner(
+    root: &Path,
+    sessions_dir: &Path,
+    action: AgentSwitchAction,
+    pm_authorized: bool,
 ) -> Result<AgentSwitchSnapshot, String> {
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let project = gwt_core::paths::project_scope_hash(root).to_string();
@@ -217,11 +294,13 @@ pub fn mutate_project_agent_switch(
             operation_id,
             member_id,
             expected_roster_revision,
+            disposition,
             target_issue_number,
         } => Some(AgentSwitchRequest {
             operation_id: operation_id.clone(),
             member_id: member_id.clone(),
             expected_roster_revision: *expected_roster_revision,
+            disposition: *disposition,
             target_issue_number: *target_issue_number,
         }),
         _ => None,
@@ -231,10 +310,30 @@ pub fn mutate_project_agent_switch(
         | AgentSwitchAction::Cancel { operation_id } => operation_id,
         AgentSwitchAction::Read { .. } => unreachable!("read returned before mutation"),
     };
+    if !pm_authorized
+        && request
+            .as_ref()
+            .is_some_and(|request| request.disposition == AgentSwitchDisposition::SaveAndReturn)
+    {
+        return Err("Save-and-return requires the registered project PM".into());
+    }
     let prepared = if let Some(request) = &request {
         let mut observed = load_issue_monitor_prefs(&path).map_err(|error| error.to_string())?;
         let existing = observed.agent_switch_intents.contains_key(operation);
-        let preview = observed.request_agent_switch(request.clone(), &host)?;
+        let return_observations =
+            if !existing && request.disposition == AgentSwitchDisposition::SaveAndReturn {
+                let source = observed.resolve_agent_switch_source(&request.member_id, &host)?;
+                Some(refresh_agent_switch_return_dependencies(root, &source)?)
+            } else {
+                None
+            };
+        let preview = observed.request_agent_switch(
+            request.clone(),
+            &host,
+            return_observations
+                .as_ref()
+                .map(|observations| (root, observations)),
+        )?;
         if existing {
             // Retries are about the original operation, never a new Session incarnation.
             None
@@ -280,7 +379,12 @@ pub fn mutate_project_agent_switch(
             if stop.execution_identity != identity || !stop_matches_source(&preview.source, &stop) {
                 return Err("Source runtime changed before switch request".into());
             }
-            Some((preview, stop))
+            Some((
+                preview,
+                stop,
+                session.agent_id.command().to_owned(),
+                return_observations,
+            ))
         }
     } else {
         None
@@ -289,10 +393,18 @@ pub fn mutate_project_agent_switch(
         if let Some(request) = request {
             let existing = prefs.agent_switch_intents.contains_key(operation);
             let accepted = prefs
-                .request_agent_switch(request, &host)
+                .request_agent_switch(
+                    request,
+                    &host,
+                    prepared.as_ref().and_then(|(_, _, _, observations)| {
+                        observations
+                            .as_ref()
+                            .map(|observations| (root, observations))
+                    }),
+                )
                 .map_err(io::Error::other)?;
             if !existing {
-                let (preview, stop) = prepared
+                let (preview, stop, source_agent_id, _) = prepared
                     .as_ref()
                     .ok_or_else(|| io::Error::other("Switch operation changed before commit"))?;
                 if accepted.source != preview.source || !stop_matches_source(&accepted.source, stop)
@@ -301,13 +413,28 @@ pub fn mutate_project_agent_switch(
                         "Source assignment changed before switch commit",
                     ));
                 }
-                prefs
+                let intent = prefs
                     .agent_switch_intents
                     .get_mut(operation)
-                    .expect("request inserted operation")
-                    .runtime_stop = Some(stop.clone());
+                    .expect("request inserted operation");
+                intent.runtime_stop = Some(stop.clone());
+                if intent.request.disposition == AgentSwitchDisposition::SaveAndReturn {
+                    intent.source_agent_id = Some(source_agent_id.clone());
+                }
             }
         } else {
+            if !pm_authorized
+                && prefs
+                    .agent_switch_intents
+                    .get(operation)
+                    .is_some_and(|intent| {
+                        intent.request.disposition == AgentSwitchDisposition::SaveAndReturn
+                    })
+            {
+                return Err(io::Error::other(
+                    "Save-and-return cancellation requires the registered project PM",
+                ));
+            }
             prefs
                 .cancel_agent_switch(operation)
                 .map_err(io::Error::other)?;
@@ -337,6 +464,50 @@ fn stop_matches_source(source: &AgentSwitchSource, stop: &IssueMonitorRuntimeSto
         && stop.child_started_at > 0
 }
 
+pub(crate) fn refresh_agent_switch_return_dependencies(
+    root: &Path,
+    source: &AgentSwitchSource,
+) -> Result<BTreeMap<u64, IssueMonitorDependencyObservation>, String> {
+    let owner = source
+        .assignment
+        .issue_number
+        .ok_or("Source Issue is unavailable")?;
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(root)
+        .ok_or("Source Issue repository is unavailable")?;
+    let issues = crate::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates(
+        &cache_root,
+        owner,
+        |number| {
+            crate::issue_cache::refresh_issue_cache_entry_from_remote(
+                root,
+                &cache_root,
+                IssueNumber(number),
+            )
+        },
+    )?;
+    let (account, repo) = crate::issue_monitor_worker::github_remote_owner_and_repo(root)
+        .map_err(|error| error.to_string())?;
+    issues
+        .iter()
+        .map(|issue| {
+            let completed = if issue.number == owner {
+                None
+            } else {
+                Some(
+                    crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
+                        &account, &repo, issue,
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+            };
+            Ok((
+                issue.number,
+                IssueMonitorDependencyObservation::new(issue, completed),
+            ))
+        })
+        .collect()
+}
+
 impl IssueMonitorPrefs {
     fn resolve_agent_switch_source(
         &self,
@@ -351,7 +522,7 @@ impl IssueMonitorPrefs {
         let member = roster
             .members
             .iter()
-            .find(|member| member.agent_member_id == member_id && member.enabled)
+            .find(|member| member.agent_member_id == member_id && member.implementation_eligible())
             .ok_or_else(unavailable)?;
         let assignment = member.assignment.as_ref().ok_or_else(unavailable)?;
         let session = assignment
@@ -364,6 +535,10 @@ impl IssueMonitorPrefs {
             .filter(|number| *number > 0)
             .ok_or_else(unavailable)?;
         if host.is_empty()
+            || assignment
+                .project_key
+                .as_deref()
+                .is_some_and(|key| self.agent_registry_project_key.as_deref() != Some(key))
             || assignment.host_id != host
             || assignment.host_pid == 0
             || assignment.host_started_at.is_none()
@@ -378,7 +553,10 @@ impl IssueMonitorPrefs {
                 .filter(|member| {
                     member.assignment.as_ref().is_some_and(|other| {
                         other.session_id.as_deref() == Some(session)
-                            || other.issue_number == Some(issue)
+                            || (other.issue_number == Some(issue)
+                                && other.project_key.as_deref().is_none_or(|key| {
+                                    self.agent_registry_project_key.as_deref() == Some(key)
+                                }))
                     })
                 })
                 .count()
@@ -430,7 +608,14 @@ impl IssueMonitorPrefs {
         &mut self,
         request: AgentSwitchRequest,
         host: &str,
+        return_observations: Option<(&Path, &BTreeMap<u64, IssueMonitorDependencyObservation>)>,
     ) -> Result<AgentSwitchIntent, String> {
+        if !request
+            .disposition
+            .permits_target(request.target_issue_number)
+        {
+            return Err("Invalid switch disposition and target Issue combination".into());
+        }
         if !uuid::Uuid::parse_str(&request.operation_id)
             .is_ok_and(|id| id.hyphenated().to_string() == request.operation_id)
         {
@@ -466,15 +651,32 @@ impl IssueMonitorPrefs {
             request,
             source,
             stage: AgentSwitchStage::Requested,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             reason: None,
             runtime_stop: None,
             checkpoint: None,
+            resume_condition: None,
+            resume_delivery_id: None,
+            source_agent_id: None,
             runtime_exit_confirmed: false,
             source_input_revision: None,
         };
-        if !self.agent_switch_target_available(&intent, host) {
-            return Err("Switch target is no longer queued and reserved to this member, or is already in flight".into());
+        match intent.request.disposition {
+            AgentSwitchDisposition::SwitchToTarget => {
+                if !self.agent_switch_target_available(&intent, host) {
+                    return Err("Switch target is no longer queued and reserved to this member, or is already in flight".into());
+                }
+            }
+            AgentSwitchDisposition::SaveAndReturn => {
+                let (root, observations) = return_observations
+                    .ok_or("Save-and-return requires current dependency observations")?;
+                self.validate_agent_switch_return_condition(
+                    root,
+                    &intent,
+                    None,
+                    Some(observations),
+                )?
+            }
         }
         self.agent_switch_intents
             .insert(intent.request.operation_id.clone(), intent.clone());
@@ -489,9 +691,11 @@ impl IssueMonitorPrefs {
     }
 
     pub fn agent_switch_target_available(&self, intent: &AgentSwitchIntent, host: &str) -> bool {
-        let target = intent.request.target_issue_number;
+        let Some(target) = intent.request.target_issue_number else {
+            return false;
+        };
         target > 0 && intent.source.assignment.issue_number != Some(target)
-            && self.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| member.agent_member_id == intent.request.member_id && member.enabled && member.assignment.as_ref().is_some_and(|assignment| assignment.host_id == host)))
+            && self.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| member.agent_member_id == intent.request.member_id && member.implementation_eligible() && member.assignment.as_ref().is_some_and(|assignment| assignment.host_id == host && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key)))))
             && self.agent_issue_schedule.validate().is_ok()
             && self.agent_issue_schedule.reservations.iter().any(|reservation| reservation.host_id == host && reservation.agent_member_id == intent.request.member_id && reservation.issue_number == target)
             && self.terminal_queues.get(host).is_some_and(|queue| queue.entries.iter().filter(|entry| entry.number == target).count() == 1)
@@ -500,14 +704,185 @@ impl IssueMonitorPrefs {
             && !self.pending_launch_deliveries.iter().any(|entry| entry.issue_number == target)
             && !self.launched_issues.iter().any(|entry| entry.issue_number == target)
             && !self.launch_bindings.values().any(|number| *number == target)
-            && !self.agent_roster.iter().flat_map(|roster| &roster.members).any(|member| member.assignment.as_ref().is_some_and(|assignment| assignment.issue_number == Some(target)))
+            && !self.agent_roster.iter().flat_map(|roster| &roster.members).any(|member| member.assignment.as_ref().is_some_and(|assignment| assignment.issue_number == Some(target) && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))))
+    }
+
+    pub fn agent_switch_destination_available(
+        &self,
+        root: &Path,
+        intent: &AgentSwitchIntent,
+        host: &str,
+    ) -> bool {
+        if !intent
+            .request
+            .disposition
+            .permits_target(intent.request.target_issue_number)
+        {
+            return false;
+        }
+        match intent.request.disposition {
+            AgentSwitchDisposition::SwitchToTarget => {
+                self.agent_switch_target_available(intent, host)
+            }
+            AgentSwitchDisposition::SaveAndReturn => self
+                .validate_agent_switch_return_condition(
+                    root,
+                    intent,
+                    intent.resume_condition.as_ref(),
+                    None,
+                )
+                .is_ok(),
+        }
+    }
+
+    fn validate_agent_switch_return_condition(
+        &self,
+        root: &Path,
+        intent: &AgentSwitchIntent,
+        proposed: Option<&AgentSwitchResumeCondition>,
+        observations: Option<&BTreeMap<u64, IssueMonitorDependencyObservation>>,
+    ) -> Result<(), String> {
+        use gwt_github::issue_auto_claim::{
+            claim_is_active, claim_is_queued, extract_claim_comments,
+        };
+
+        let owner = intent
+            .source
+            .assignment
+            .issue_number
+            .ok_or("Source Issue is unavailable")?;
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(root)
+            .ok_or("Source Issue repository is unavailable")?;
+        let cache = gwt_github::Cache::new(cache_root.clone());
+        let initial = cache
+            .load_entry(IssueNumber(owner))
+            .ok_or("Source Issue is not observed")?;
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
+        let claim_owner = crate::process::current_claim_owner();
+        if !self.enabled
+            || initial.snapshot.state != gwt_github::IssueState::Open
+            || initial
+                .snapshot
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case("hold"))
+            || self
+                .failed_issues
+                .iter()
+                .any(|failed| failed.issue_number == owner)
+            || self
+                .open_pr_observations
+                .get(&owner)
+                .is_some_and(|observation| observation.hold.is_some())
+            || self
+                .agent_issue_schedule
+                .reservations
+                .iter()
+                .any(|reservation| {
+                    reservation.issue_number == owner
+                        && reservation.reason == AgentScheduleReason::AssignedByYou
+                        && (reservation.host_id != intent.source.assignment.host_id
+                            || reservation.agent_member_id != intent.request.member_id)
+                })
+            || extract_claim_comments(&initial.snapshot.comments)
+                .iter()
+                .any(|claim| {
+                    claim.issue_number == owner
+                        && claim.claim_id != intent.source.claim_id
+                        && !crate::process::same_host_and_user(&claim.owner, &claim_owner)
+                        && (claim_is_active(claim, &now) || claim_is_queued(claim, &now))
+                })
+        {
+            return Err("Source Issue is held or no longer eligible for save-and-return".into());
+        }
+        let mut generations = BTreeMap::new();
+        let issues = crate::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates(
+            &cache_root,
+            owner,
+            |number| {
+                let number = IssueNumber(number);
+                let generation = cache
+                    .current_generation(number)
+                    .map_err(|error| error.to_string())?;
+                generations.insert(number, generation);
+                Ok(())
+            },
+        )?;
+        if generations.into_iter().any(|(number, expected)| {
+            !cache
+                .current_generation(number)
+                .is_ok_and(|current| current == expected)
+        }) || cache
+            .load_entry(IssueNumber(owner))
+            .is_none_or(|latest| latest.snapshot != initial.snapshot)
+        {
+            return Err("Issue cache changed while observing return dependencies".into());
+        }
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), self.clone());
+        monitor.observe_dependency_candidates(&issues);
+        if let Some(observations) = observations {
+            if !monitor.dependency_facts.get(&owner).is_some_and(|facts| {
+                observations
+                    .get(&owner)
+                    .is_some_and(|observed| facts.source_hash == observed.source_hash)
+            }) {
+                return Err("Source Issue changed after dependency review".into());
+            }
+            monitor.observe_dependency_completions(observations);
+        }
+        if monitor.issue_is_closed(owner) {
+            return Err("Source Issue closure has not been reconciled".into());
+        }
+        let status = monitor
+            .dependency_status(owner, None)
+            .filter(|status| !status.cycle && !status.blocked_by.is_empty())
+            .ok_or("Save-and-return requires at least one observed unfinished blocker")?;
+        let unfinished = status
+            .blocked_by
+            .iter()
+            .filter_map(|blocker| {
+                monitor
+                    .dependency_facts
+                    .get(&blocker.number)
+                    .filter(|facts| {
+                        facts.state == IssueMonitorIssueState::Open
+                            && (observations.is_none()
+                                || monitor.dependency_outcome(blocker.number, None)
+                                    == Some(Some(false)))
+                    })
+                    .map(|_| blocker.number)
+            })
+            .collect::<BTreeSet<_>>();
+        if unfinished.is_empty() {
+            return Err("Save-and-return requires at least one observed unfinished blocker".into());
+        }
+        if let Some(proposed) = proposed {
+            let saved = proposed
+                .blocker_numbers
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if saved.is_empty()
+                || saved.len() != proposed.blocker_numbers.len()
+                || !saved.is_subset(&unfinished)
+                || (observations.is_some() && saved != unfinished)
+                || proposed.reason.trim().is_empty()
+                || proposed.next_action.trim().is_empty()
+            {
+                return Err("Saved resume condition must match the currently unfinished blockers and include a reason and next action".into());
+            }
+        }
+        Ok(())
     }
 
     fn can_resume_agent_switch_source(&self, intent: &AgentSwitchIntent, host: &str) -> bool {
         // Continue Work keeps its existing authority and liveness checks.
         matches!(
             intent.stage,
-            AgentSwitchStage::Unknown | AgentSwitchStage::LaunchingNext
+            AgentSwitchStage::Unknown
+                | AgentSwitchStage::LaunchingNext
+                | AgentSwitchStage::Returned
         ) && intent.checkpoint.is_some()
             && intent.source.assignment.host_id == host
             && intent
@@ -515,12 +890,14 @@ impl IssueMonitorPrefs {
                 .assignment
                 .issue_number
                 .is_some_and(|number| number > 0)
-            && !self.scheduled_issue_has_pending_claim(intent.request.target_issue_number)
-            && !self.scheduled_issue_in_flight(intent.request.target_issue_number)
-            && !self
-                .launch_bindings
-                .values()
-                .any(|number| *number == intent.request.target_issue_number)
+            && intent.request.target_issue_number.is_none_or(|target| {
+                !self.scheduled_issue_has_pending_claim(target)
+                    && !self.scheduled_issue_in_flight(target)
+                    && !self
+                        .launch_bindings
+                        .values()
+                        .any(|number| *number == target)
+            })
     }
 
     pub(crate) fn agent_switch_admission_exclusion(
@@ -530,10 +907,24 @@ impl IssueMonitorPrefs {
         inherited: bool,
         host: &str,
     ) -> Option<String> {
-        self.agent_switch_intents.values().find_map(|intent| {
-            let source_resume = inherited && self.can_resume_agent_switch_source(intent, host);
-            intent.admission_exclusion(number, Some(member), source_resume)
-        })
+        self.agent_switch_admission_exclusion_except(number, member, inherited, host, None)
+    }
+
+    pub(crate) fn agent_switch_admission_exclusion_except(
+        &self,
+        number: Option<u64>,
+        member: &str,
+        inherited: bool,
+        host: &str,
+        except_operation: Option<&str>,
+    ) -> Option<String> {
+        self.agent_switch_intents
+            .iter()
+            .filter(|(operation, _)| except_operation != Some(operation.as_str()))
+            .find_map(|(_, intent)| {
+                let source_resume = inherited && self.can_resume_agent_switch_source(intent, host);
+                intent.admission_exclusion(number, Some(member), source_resume)
+            })
     }
 
     /// Called only at the end of a successful explicit source reservation transaction.
@@ -602,10 +993,27 @@ impl IssueMonitorPrefs {
         if current != next
             && !(matches!(
                 (current, next),
-                (Requested, Checkpointing)
-                    | (CheckpointVerified, StoppingCurrent)
-                    | (StoppingCurrent, LaunchingNext)
-                    | (LaunchingNext, Completed)
+                (Requested, Checkpointing) | (CheckpointVerified, StoppingCurrent)
+            ) || matches!(
+                (intent.request.disposition, current, next),
+                (
+                    AgentSwitchDisposition::SwitchToTarget,
+                    StoppingCurrent,
+                    LaunchingNext
+                ) | (
+                    AgentSwitchDisposition::SwitchToTarget,
+                    LaunchingNext,
+                    Completed
+                ) | (
+                    AgentSwitchDisposition::SaveAndReturn,
+                    StoppingCurrent,
+                    Returned
+                ) | (AgentSwitchDisposition::SaveAndReturn, Returned, Resuming)
+                    | (
+                        AgentSwitchDisposition::SaveAndReturn,
+                        Resuming,
+                        Returned | Completed
+                    )
             ) || (matches!(next, Failed | Unknown)
                 && !matches!(current, Completed | Cancelled | Failed | Unknown)))
         {
@@ -620,13 +1028,25 @@ impl IssueMonitorPrefs {
             && (intent.checkpoint.is_none()
                 || intent.runtime_stop.is_none()
                 || !self.agent_switch_source_unchanged(intent, &intent.source.assignment.host_id)
-                || !self.agent_switch_target_available(intent, &intent.source.assignment.host_id))
+                || match intent.request.disposition {
+                    AgentSwitchDisposition::SwitchToTarget => !self
+                        .agent_switch_target_available(intent, &intent.source.assignment.host_id),
+                    AgentSwitchDisposition::SaveAndReturn => intent.resume_condition.is_none(),
+                })
         {
             return Err("Switch checkpoint, source, or target changed before stop".into());
         }
-        if next == LaunchingNext && (!intent.runtime_exit_confirmed || intent.checkpoint.is_none())
+        if matches!(next, LaunchingNext | Returned | Resuming)
+            && (!intent.runtime_exit_confirmed || intent.checkpoint.is_none())
         {
             return Err("Current runtime exit has not been physically confirmed".into());
+        }
+        if matches!(next, Returned | Resuming)
+            && (intent.request.disposition != AgentSwitchDisposition::SaveAndReturn
+                || intent.runtime_stop.is_none()
+                || intent.resume_condition.is_none())
+        {
+            return Err("Save-and-return has no verified continuation condition".into());
         }
         let intent = self
             .agent_switch_intents
@@ -644,6 +1064,11 @@ impl IssueMonitorPrefs {
         checkpoint: AgentSwitchCheckpoint,
         stop: IssueMonitorRuntimeStopRequest,
         host: &str,
+        resume: Option<(
+            AgentSwitchResumeCondition,
+            &Path,
+            &BTreeMap<u64, IssueMonitorDependencyObservation>,
+        )>,
     ) -> Result<AgentSwitchIntent, String> {
         let intent = self
             .agent_switch_intents
@@ -651,6 +1076,8 @@ impl IssueMonitorPrefs {
             .ok_or("Unknown switch operation")?;
         if intent.stage == AgentSwitchStage::CheckpointVerified {
             return if intent.checkpoint.as_ref() == Some(&checkpoint)
+                && intent.resume_condition.as_ref()
+                    == resume.as_ref().map(|(condition, _, _)| condition)
                 && intent.runtime_stop.as_ref() == Some(&stop)
                 && intent.source.assignment.host_id == host
                 && stop_matches_source(&intent.source, &stop)
@@ -663,7 +1090,6 @@ impl IssueMonitorPrefs {
         if intent.stage != AgentSwitchStage::Checkpointing
             || intent.runtime_stop.as_ref() != Some(&stop)
             || !self.agent_switch_source_unchanged(intent, host)
-            || !self.agent_switch_target_available(intent, host)
             || !stop_matches_source(&intent.source, &stop)
             || !matches!(checkpoint.verified_head.len(), 40 | 64)
             || !checkpoint
@@ -677,11 +1103,35 @@ impl IssueMonitorPrefs {
                 "Checkpoint does not match the saved source and exact runtime identity".into(),
             );
         }
+        let resume_condition = match intent.request.disposition {
+            AgentSwitchDisposition::SwitchToTarget
+                if resume.is_none() && self.agent_switch_target_available(intent, host) =>
+            {
+                None
+            }
+            AgentSwitchDisposition::SwitchToTarget => {
+                return Err(
+                    "Target switch requires an eligible target and no resume condition".into(),
+                );
+            }
+            AgentSwitchDisposition::SaveAndReturn => {
+                let (condition, root, observations) =
+                    resume.ok_or("Save-and-return requires a resume condition")?;
+                self.validate_agent_switch_return_condition(
+                    root,
+                    intent,
+                    Some(&condition),
+                    Some(observations),
+                )?;
+                Some(condition)
+            }
+        };
         let intent = self
             .agent_switch_intents
             .get_mut(operation)
             .expect("operation was checked");
         intent.checkpoint = Some(checkpoint);
+        intent.resume_condition = resume_condition;
         intent.stage = AgentSwitchStage::CheckpointVerified;
         intent.reason = None;
         Ok(intent.clone())
@@ -725,6 +1175,7 @@ impl IssueMonitorPrefs {
                     .clone()
                     .unwrap_or_default(),
                 target_issue_number: intent.request.target_issue_number,
+                disposition: intent.request.disposition,
                 stage: intent.stage,
                 created_at: intent.created_at.clone(),
                 reason: intent.reason.clone(),
@@ -757,7 +1208,7 @@ mod tests {
         value["agent_switch_intents"] = serde_json::json!({
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
                 "request": {"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "member_id":"member", "expected_roster_revision":1, "target_issue_number":42},
-                "source": {"assignment":{"reservation_id":"reservation", "session_id":"session", "issue_number":41, "spec_number":null, "delivery_id":"delivery", "host_id":"host", "host_pid":1, "host_started_at":2}, "window_id":"window", "claim_id":"claim", "confirmation":{"window_id":"window", "claim_id":"claim", "delivery_id":"delivery", "confirmed_at":"2026-10-25T00:00:00Z"}},
+                "source": {"assignment":{"role":"implementation", "reservation_id":"reservation", "session_id":"session", "issue_number":41, "spec_number":null, "delivery_id":"delivery", "host_id":"host", "host_pid":1, "host_started_at":2}, "window_id":"window", "claim_id":"claim", "confirmation":{"window_id":"window", "claim_id":"claim", "delivery_id":"delivery", "confirmed_at":"2026-10-25T00:00:00Z"}},
                 "stage":"requested", "source_input_revision":7
             }
         });
@@ -771,15 +1222,19 @@ mod tests {
             schema_version: 1,
             revision: 1,
             members: vec![crate::agent_names::AgentMember {
+                pm_eligible: false,
+                pm_project_key: None,
                 agent_id: None,
                 agent_member_id: "member".into(),
                 name: "Member".into(),
-                enabled: true,
                 created_at: "2026-10-25T00:00:00Z".into(),
                 origin_session_id: None,
                 last_issue_number: Some(41),
                 last_spec_number: None,
+                last_owner_project_key: None,
                 assignment: Some(intent.source.assignment.clone()),
+                traits: Default::default(),
+                avatar: Default::default(),
             }],
         });
         prefs.launched_issues.push(IssueMonitorLaunchedIssue {
@@ -826,6 +1281,74 @@ mod tests {
     }
 
     #[test]
+    fn foreign_project_owner_numbers_do_not_block_local_switch() {
+        let (mut prefs, request, mut intent) = fixture();
+        prefs.agent_registry_project_key = Some("bbbbbbbbbbbbbbbb".into());
+        let roster = prefs.agent_roster.as_mut().unwrap();
+        roster.schema_version = 2;
+        roster.members[0].assignment.as_mut().unwrap().project_key =
+            Some("bbbbbbbbbbbbbbbb".into());
+        intent.source.assignment.project_key = Some("bbbbbbbbbbbbbbbb".into());
+        let mut foreign = roster.members[0].clone();
+        foreign.agent_member_id = "foreign-member".into();
+        foreign.name = "Foreign member".into();
+        let assignment = foreign.assignment.as_mut().unwrap();
+        assignment.project_key = Some("aaaaaaaaaaaaaaaa".into());
+        assignment.reservation_id = "foreign-reservation".into();
+        assignment.session_id = Some("foreign-session".into());
+        assignment.delivery_id = Some("foreign-delivery".into());
+        roster.members.push(foreign);
+        assert!(
+            prefs.agent_switch_source_unchanged(&intent, "host"),
+            "the same source number in another project is not an ambiguous local source"
+        );
+
+        prefs.agent_roster.as_mut().unwrap().members[1]
+            .assignment
+            .as_mut()
+            .unwrap()
+            .issue_number = Some(42);
+        let foreign_assignment = prefs.agent_roster.as_ref().unwrap().members[1]
+            .assignment
+            .clone();
+        assert!(
+            prefs.agent_switch_target_available(&intent, "host"),
+            "another project's Issue 42 does not occupy the local switch target"
+        );
+        assert!(prefs
+            .clone()
+            .request_agent_switch(request.clone(), "host", None)
+            .is_ok());
+        assert_eq!(
+            prefs.agent_roster.as_ref().unwrap().members[1].assignment,
+            foreign_assignment
+        );
+
+        let mut local_target_busy = prefs.clone();
+        local_target_busy.agent_roster.as_mut().unwrap().members[1]
+            .assignment
+            .as_mut()
+            .unwrap()
+            .project_key = Some("bbbbbbbbbbbbbbbb".into());
+        assert!(
+            !local_target_busy.agent_switch_target_available(&intent, "host"),
+            "a true local Issue 42 assignment still blocks the target"
+        );
+        let mut foreign_source = prefs;
+        foreign_source.agent_roster.as_mut().unwrap().members[0]
+            .assignment
+            .as_mut()
+            .unwrap()
+            .project_key = Some("aaaaaaaaaaaaaaaa".into());
+        assert!(
+            foreign_source
+                .request_agent_switch(request, "host", None)
+                .is_err(),
+            "the current project cannot switch a member assigned to another project"
+        );
+    }
+
+    #[test]
     fn agent_switch_intents_survive_preferences_and_state_roundtrip() {
         let value = stored_prefs();
         let expected = value["agent_switch_intents"].clone();
@@ -843,18 +1366,22 @@ mod tests {
     fn agent_switch_request_is_idempotent_and_conflicts_preserve_current() {
         let (mut prefs, request, _) = fixture();
         let before = prefs.clone();
-        let intent = prefs.request_agent_switch(request.clone(), "host").unwrap();
+        let intent = prefs
+            .request_agent_switch(request.clone(), "host", None)
+            .unwrap();
         assert_eq!(intent.stage, AgentSwitchStage::Requested);
         assert_eq!(
-            prefs.request_agent_switch(request.clone(), "host").unwrap(),
+            prefs
+                .request_agent_switch(request.clone(), "host", None)
+                .unwrap(),
             intent
         );
         let mut changed = request.clone();
-        changed.target_issue_number = 43;
-        assert!(prefs.request_agent_switch(changed, "host").is_err());
+        changed.target_issue_number = Some(43);
+        assert!(prefs.request_agent_switch(changed, "host", None).is_err());
         let mut another = request;
         another.operation_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into();
-        assert!(prefs.request_agent_switch(another, "host").is_err());
+        assert!(prefs.request_agent_switch(another, "host", None).is_err());
         prefs.agent_switch_intents.clear();
         assert_eq!(
             prefs, before,
@@ -872,7 +1399,9 @@ mod tests {
             let mut request = request.clone();
             request.operation_id = noncanonical;
             let mut unchanged = prefs.clone();
-            assert!(unchanged.request_agent_switch(request, "host").is_err());
+            assert!(unchanged
+                .request_agent_switch(request, "host", None)
+                .is_err());
             assert_eq!(unchanged, prefs);
         }
     }
@@ -1057,11 +1586,10 @@ mod tests {
         let (prefs, request, _) = fixture();
         assert!(prefs
             .clone()
-            .request_agent_switch(request.clone(), "host")
+            .request_agent_switch(request.clone(), "host", None)
             .is_ok());
-        let changes: [fn(&mut IssueMonitorPrefs); 7] = [
+        let changes: [fn(&mut IssueMonitorPrefs); 6] = [
             |p| p.agent_roster.as_mut().unwrap().revision += 1,
-            |p| p.agent_roster.as_mut().unwrap().members[0].enabled = false,
             |p| {
                 p.agent_roster.as_mut().unwrap().members[0]
                     .assignment
@@ -1079,13 +1607,13 @@ mod tests {
             change(&mut changed);
             let before = changed.clone();
             assert!(changed
-                .request_agent_switch(request.clone(), "host")
+                .request_agent_switch(request.clone(), "host", None)
                 .is_err());
             assert_eq!(changed, before);
         }
         assert!(prefs
             .clone()
-            .request_agent_switch(request.clone(), "remote")
+            .request_agent_switch(request.clone(), "remote", None)
             .is_err());
         let mut raw = serde_json::to_value(request).unwrap();
         raw["session_id"] = "caller-session".into();
@@ -1119,7 +1647,7 @@ mod tests {
     fn agent_switch_cancels_before_stop_and_never_replays_after_restart() {
         let (mut prefs, request, mut intent) = fixture();
         let operation = request.operation_id.clone();
-        prefs.request_agent_switch(request, "host").unwrap();
+        prefs.request_agent_switch(request, "host", None).unwrap();
         assert_eq!(
             prefs.cancel_agent_switch(&operation).unwrap().stage,
             AgentSwitchStage::Cancelled
@@ -1281,12 +1809,18 @@ mod tests {
         let mut successor = stop.clone();
         successor.runtime_incarnation += 1;
         assert!(prefs
-            .verify_agent_switch_checkpoint(&operation, receipt.clone(), successor, "host")
+            .verify_agent_switch_checkpoint(&operation, receipt.clone(), successor, "host", None)
             .is_err());
         assert_eq!(prefs, before);
         assert_eq!(
             prefs
-                .verify_agent_switch_checkpoint(&operation, receipt.clone(), stop.clone(), "host")
+                .verify_agent_switch_checkpoint(
+                    &operation,
+                    receipt.clone(),
+                    stop.clone(),
+                    "host",
+                    None
+                )
                 .unwrap()
                 .checkpoint,
             Some(receipt.clone())
@@ -1294,7 +1828,13 @@ mod tests {
         let verified = prefs.clone();
         assert_eq!(
             prefs
-                .verify_agent_switch_checkpoint(&operation, receipt.clone(), stop.clone(), "host")
+                .verify_agent_switch_checkpoint(
+                    &operation,
+                    receipt.clone(),
+                    stop.clone(),
+                    "host",
+                    None
+                )
                 .unwrap(),
             verified.agent_switch_intents[&operation]
         );
@@ -1302,7 +1842,7 @@ mod tests {
         let mut changed = receipt;
         changed.work_id = "other-work".into();
         assert!(prefs
-            .verify_agent_switch_checkpoint(&operation, changed, stop.clone(), "host")
+            .verify_agent_switch_checkpoint(&operation, changed, stop.clone(), "host", None)
             .is_err());
         let mut successor = stop.clone();
         successor.runtime_incarnation += 1;
@@ -1314,7 +1854,8 @@ mod tests {
                     .clone()
                     .unwrap(),
                 successor,
-                "host"
+                "host",
+                None,
             )
             .is_err());
         assert_eq!(prefs, verified);
@@ -1350,6 +1891,55 @@ mod tests {
             "intent transitions do not enqueue stop effects"
         );
         assert_eq!(prefs.launched_issues, before.launched_issues);
+    }
+
+    #[test]
+    fn agent_switch_return_requires_exit_and_only_pins_during_resume() {
+        let (mut prefs, _, mut intent) = fixture();
+        intent.request.disposition = AgentSwitchDisposition::SaveAndReturn;
+        intent.request.target_issue_number = None;
+        intent.stage = AgentSwitchStage::StoppingCurrent;
+        intent.runtime_stop = Some(stop_fixture());
+        intent.checkpoint = Some(AgentSwitchCheckpoint {
+            verified_head: "a".repeat(40),
+            work_id: "saved-work".into(),
+            board_entry_id: "board".into(),
+        });
+        intent.resume_condition = Some(AgentSwitchResumeCondition {
+            blocker_numbers: vec![42],
+            reason: "Waiting for dependency".into(),
+            next_action: "Resume saved work".into(),
+        });
+        let operation = intent.request.operation_id.clone();
+        prefs.agent_switch_intents.insert(operation.clone(), intent);
+        assert!(prefs
+            .transition_agent_switch(&operation, AgentSwitchStage::Returned, None)
+            .is_err());
+        prefs
+            .agent_switch_intents
+            .get_mut(&operation)
+            .unwrap()
+            .runtime_exit_confirmed = true;
+        assert!(prefs
+            .transition_agent_switch(&operation, AgentSwitchStage::LaunchingNext, None)
+            .is_err());
+        let returned = prefs
+            .transition_agent_switch(&operation, AgentSwitchStage::Returned, None)
+            .unwrap();
+        assert!(!returned.has_admission_pin());
+        assert!(prefs.can_resume_agent_switch_source(&returned, "host"));
+        assert!(prefs.cancel_agent_switch(&operation).is_err());
+        let resuming = prefs
+            .transition_agent_switch(&operation, AgentSwitchStage::Resuming, None)
+            .unwrap();
+        assert!(resuming.has_admission_pin());
+        assert!(resuming
+            .admission_exclusion(Some(41), Some("member"), false)
+            .is_some());
+        assert!(prefs
+            .recover_agent_switches_after_restart("host")
+            .is_empty());
+        assert_eq!(prefs.agent_switch_intents[&operation], resuming);
     }
 
     #[test]
@@ -1401,6 +1991,47 @@ mod tests {
             fs::read(&path).unwrap(),
             before,
             "read never reconciles or writes preferences"
+        );
+    }
+
+    #[test]
+    fn agent_switch_host_cannot_request_or_cancel_save_and_return() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let (mut prefs, request, mut intent) = fixture();
+        intent.request.disposition = AgentSwitchDisposition::SaveAndReturn;
+        intent.request.target_issue_number = None;
+        prefs
+            .agent_switch_intents
+            .insert(request.operation_id.clone(), intent);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        save_issue_monitor_prefs(&path, &prefs).unwrap();
+        for action in [
+            AgentSwitchAction::Request {
+                operation_id: request.operation_id.clone(),
+                member_id: request.member_id,
+                expected_roster_revision: request.expected_roster_revision,
+                disposition: AgentSwitchDisposition::SaveAndReturn,
+                target_issue_number: None,
+            },
+            AgentSwitchAction::Cancel {
+                operation_id: request.operation_id,
+            },
+        ] {
+            let error = mutate_project_agent_switch(&root, &sessions_dir, action).unwrap_err();
+            assert!(error.contains("registered project PM"), "{error}");
+        }
+        assert_eq!(
+            load_issue_monitor_prefs(&path)
+                .unwrap()
+                .agent_switch_intents,
+            prefs.agent_switch_intents
         );
     }
 }

@@ -1,6 +1,64 @@
 use super::ClientScope;
 
 #[test]
+fn owner_inventory_only_dispatches_changed_panes() {
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+
+    runtime.queue_owner_inventory(&context, Some(1), None, None);
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture");
+    };
+    drain_queued_blocking_tasks(&Arc::clone(tasks));
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("stub fixture");
+    };
+    let mut completion = recorded
+        .lock()
+        .unwrap()
+        .drain(..)
+        .find_map(|event| match event {
+            UserEvent::RemoteOwnerInventoryComplete(completion) => Some(*completion),
+            _ => None,
+        })
+        .expect("inventory completion");
+
+    runtime.handle_remote_owner_inventory_complete(completion.clone());
+    assert!(runtime
+        .handle_remote_owner_inventory_complete(completion.clone())
+        .is_empty());
+
+    completion.result.as_mut().unwrap()[0].0.purpose_title = Some("Changed purpose".into());
+    let events = runtime.handle_remote_owner_inventory_complete(completion.clone());
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
+    assert_eq!(
+        runtime
+            .tab(&context.tab_id)
+            .unwrap()
+            .workspace
+            .window("agent")
+            .unwrap()
+            .purpose_title
+            .as_deref(),
+        Some("Changed purpose")
+    );
+    assert!(!events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalSnapshot { id: pane, .. } if pane == &id
+    )));
+    assert!(runtime
+        .handle_remote_owner_inventory_complete(completion)
+        .is_empty());
+}
+
+#[test]
 fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     use super::{RemoteRuntimeCommandCompletion, RemoteRuntimeCommandKind};
     use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
@@ -22,13 +80,14 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
         incarnation: probe.incarnation,
         kind,
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id: None,
         result: Err("project command timed out".into()),
     };
     let mut wire = Vec::new();
     for (kind, operation) in [
         (
-            RemoteRuntimeCommandKind::Input { reply_client: None },
+            RemoteRuntimeCommandKind::Input { reply_client: None, request_id: None },
             "input",
         ),
         (RemoteRuntimeCommandKind::Resize, "resize"),
@@ -53,8 +112,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     }
     let ack = runtime.handle_remote_runtime_command_complete(completion(
         RemoteRuntimeCommandKind::Input {
-            reply_client: Some("origin".into()),
-        },
+            reply_client: Some("origin".into()), request_id: None },
     ));
     assert!(matches!(&ack[0].target, DispatchTarget::Client(client) if client == "origin"));
     assert!(matches!(
@@ -107,6 +165,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
         2,
         Some(identity.clone()),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -130,7 +189,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     assert_eq!(runtime.runtimes[&id].owner_pane_id, pane_id);
     assert_eq!(runtime.runtimes[&id].owner_identity, identity);
     assert!(runtime
-        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n")
+        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n", None)
         .is_empty());
     let ack = drain_browser_owner_input(&mut runtime);
     assert!(ack
@@ -197,13 +256,14 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
                 2,
                 None,
                 ProjectOwnerHealthView {
+                    recovery_id: None,
                     project_key: context.project_key.to_string(),
                     state: ProjectOwnerHealthState::Degraded,
                     detail: Some("fixture reconnect".into()),
                 },
             );
         }
-        let events = runtime.pane_send_input_to_window_events("origin".into(), &id, "recover\n");
+        let events = runtime.pane_send_input_to_window_events("origin".into(), &id, "recover\n", Some(74));
         assert!(
             events.is_empty(),
             "owner drift must defer, not refuse: {events:?}"
@@ -213,6 +273,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
             3,
             Some(identity),
             ProjectOwnerHealthView {
+                recovery_id: None,
                 project_key: context.project_key.to_string(),
                 state: ProjectOwnerHealthState::Healthy,
                 detail: None,
@@ -224,7 +285,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
                 .iter()
                 .filter(|event| matches!(
                     event.event,
-                    BackendEvent::PaneSendResult { ok: true, .. }
+                    BackendEvent::PaneSendResult { ok: true, request_id: Some(74), .. }
                 ))
                 .count(),
             1
@@ -242,6 +303,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
 
 #[test]
 fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
+    use super::RemoteRuntimeCommandKind;
     let _env = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -255,15 +317,28 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
         2,
         None,
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Degraded,
             detail: None,
         },
     );
     assert!(runtime
-        .pane_send_input_to_window_events("origin".into(), &id, "expire\n")
+        .pane_send_input_to_window_events("origin".into(), &id, "expire\n", None)
         .is_empty());
+    assert!(runtime.queue_remote_runtime_command(
+        &id,
+        gwt::project_runtime::events::OwnerCommand::Resize {
+            id: String::new(),
+            incarnation: runtime.runtimes[&id].incarnation,
+            cols: 90,
+            rows: 30,
+        },
+        RemoteRuntimeCommandKind::Resize,
+    ).is_empty());
     let start = Instant::now();
+    // Commands are queued independently and need not have equal wait times.
+    runtime.runtimes.get_mut(&id).unwrap().pending_owner_commands.front_mut().unwrap().queued_at -= Duration::from_secs(1);
     assert!(runtime.next_runtime_output_deadline().is_some());
     // Drive the existing event-loop clock directly; no wall-clock sleep.
     let events = runtime.flush_runtime_output_batches(start + Duration::from_secs(11));
@@ -276,19 +351,27 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
             _ => None,
         })
         .expect("expired command outcome");
-    assert!(error.contains("Degraded"), "{error}");
-    assert!(error.contains("identity mismatch"), "{error}");
-    assert!(error.contains("owner pane unset"), "{error}");
-    assert!(error.contains("Automatic recovery"), "{error}");
-    assert!(error.contains("ms") && error.contains("attempt"), "{error}");
-    assert!(
-        !error.contains("Refresh") && !error.contains("try again"),
-        "{error}"
-    );
+    let resize_error = events.iter().find_map(|event| match &event.event {
+        BackendEvent::WindowCommandError { operation, message, .. } if operation == "resize" => Some(message),
+        _ => None,
+    }).expect("expired resize outcome");
+    for error in [error, resize_error] {
+        assert!(error.contains("background process connection is interrupted"), "{error}");
+        assert!(error.contains("background process connection changed"), "{error}");
+        assert!(error.contains("target window is unavailable"), "{error}");
+        assert!(!error.contains("Some(") && !error.contains("Degraded"), "{error}");
+        assert!(error.contains("not delivered to the window"), "{error}");
+        assert!(error.contains("Reopen the window and check its state"), "{error}");
+        assert!(error.contains("Automatic recovery"), "{error}");
+        assert!(error.contains("ms") && error.contains("attempt"), "{error}");
+        assert!(!error.contains("Refresh") && !error.contains("try again"), "{error}");
+    }
     assert!(
         !runtime.pane_has_unsent_user_input(&id),
         "expired input must clear its speculative busy hint"
     );
+    let wire = events.iter().map(|event| serde_json::to_value(&event.event).unwrap()).collect::<Vec<_>>();
+    println!("ISSUE7523_EVENTS={}", serde_json::to_string(&wire).unwrap());
 }
 
 #[test]
@@ -306,7 +389,7 @@ fn remote_command_recovery_rejects_a_successor_session() {
         .unwrap()
         .project_owner_identity = None;
     assert!(runtime
-        .pane_send_input_to_window_events("origin".into(), &id, "old session input\n")
+        .pane_send_input_to_window_events("origin".into(), &id, "old session input\n", None)
         .is_empty());
     // An owner restart may reuse a pane ID and incarnation for another Session.
     runtime
@@ -453,6 +536,34 @@ fn project_aggregate_counts_hidden_agents_and_scopes_changes() {
             .unwrap()
             .error_count,
         1
+    );
+}
+
+#[test]
+fn project_aggregate_is_the_single_definition_of_run_block_idle_error() {
+    let statuses: std::collections::HashMap<String, WindowProcessStatus> = [
+        WindowProcessStatus::Running,
+        WindowProcessStatus::Starting,
+        WindowProcessStatus::Waiting,
+        WindowProcessStatus::Stopped,
+        WindowProcessStatus::Interrupted,
+        WindowProcessStatus::Error,
+        WindowProcessStatus::Idle,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, status)| (format!("agent-{index}"), status))
+    .collect();
+    let aggregate = AppRuntime::aggregate_counts(&statuses);
+    assert_eq!(
+        (
+            aggregate.running_count,
+            aggregate.block_count,
+            aggregate.idle_count,
+            aggregate.error_count
+        ),
+        (2, 4, 1, 1),
+        "RUN counts launching agents, BLOCK includes stopped and errored agents, IDLE is waiting for work"
     );
 }
 
@@ -779,6 +890,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     let a = runtime.project_context("a").unwrap();
     let b = runtime.project_context("b").unwrap();
     let health = gwt::protocol::ProjectOwnerHealthView {
+        recovery_id: None,
         project_key: a.project_key.to_string(),
         state: gwt::protocol::ProjectOwnerHealthState::Degraded,
         detail: Some("Project connection lost".into()),
@@ -805,7 +917,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         .unwrap()
         .owner_health
         .is_none());
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     assert!(runtime
         .issue_monitor_window_snapshot_for_tab("b", &now)
         .is_some());
@@ -934,6 +1046,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         detail: Some("owner exit".into()),
         exit_confirmed: true,
         exit_code: Some(0),
+        hook_status: None,
     };
     assert!(!runtime
         .handle_project_owner_event(&a, 2, &identity, status)
@@ -1146,5 +1259,60 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
             .handle_project_owner_event(&a, 2, &identity, output(7))
             .is_empty(),
         "closed ProjectContext generation"
+    );
+}
+
+#[test]
+fn wedged_owner_restart_requires_current_project_observation_and_confirmation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let a = runtime.project_context("a").unwrap();
+    let b = runtime.project_context("b").unwrap();
+    let (spawner, queued) = super::BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.handle_project_owner_health(
+        &a,
+        1,
+        None,
+        gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: Some("current".into()),
+            project_key: a.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Wedged,
+            detail: None,
+        },
+    );
+    for (context, confirmed, recovery_id) in [
+        (&a, false, "current"),
+        (&a, true, "old"),
+        (&b, true, "current"),
+    ] {
+        let events = runtime.handle_frontend_event_for_project(
+            context,
+            "client".into(),
+            FrontendEvent::RestartWedgedOwner {
+                confirmed,
+                recovery_id: recovery_id.into(),
+            },
+        );
+        assert!(!events.is_empty(), "refusal is visible");
+        assert!(
+            queued.lock().unwrap().is_empty(),
+            "no process worker may start"
+        );
+    }
+    let events = runtime.handle_frontend_event_for_project(
+        &a,
+        "client".into(),
+        FrontendEvent::RestartWedgedOwner {
+            confirmed: true,
+            recovery_id: "current".into(),
+        },
+    );
+    assert!(events.is_empty());
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "only the exact confirmed project starts recovery"
     );
 }

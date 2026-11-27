@@ -227,7 +227,6 @@ fn collect_mention_audience(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use gwt_core::workspace_projection::{
         save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceStatusCategory,
     };
@@ -254,7 +253,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: affiliation,
             workspace_id: workspace_id.map(str::to_string),
-            updated_at: Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         }
     }
 
@@ -349,7 +348,7 @@ mod tests {
 
     #[test]
     fn duplicate_session_mentions_use_latest_workspace() {
-        let older = Utc::now();
+        let older = gwt_core::timestamp::UtcTimestamp::now();
         let mut stale = agent(
             "duplicate-session",
             WorkspaceAgentAffiliationStatus::Assigned,
@@ -362,7 +361,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
             Some("ws-current"),
         );
-        current.updated_at = older + chrono::Duration::seconds(1);
+        current.updated_at = older + time::Duration::seconds(1);
         current.branch = Some("work/current".to_string());
         let projection = projection_with("", vec![stale, current]);
 
@@ -466,10 +465,13 @@ mod tests {
         )
         .unwrap();
         assert!(shown.contains("branch handoff delivery"), "{shown}");
-        let reminder =
-            crate::cli::hook::board_reminder::compute_plan("SessionStart", &recipient, Utc::now())
-                .unwrap()
-                .unwrap();
+        let reminder = crate::cli::hook::board_reminder::compute_plan(
+            "SessionStart",
+            &recipient,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )
+        .unwrap()
+        .unwrap();
         let mut output = Vec::new();
         reminder.output.serialize_to(&mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
@@ -575,7 +577,7 @@ mod tests {
         let (_home, _home_guard, _userprofile_guard) = isolate_gwt_home();
         let dir = tempdir().unwrap();
         let repo = dir.path();
-        let older = Utc::now();
+        let older = gwt_core::timestamp::UtcTimestamp::now();
         let mut stale = agent(
             "duplicate-session",
             WorkspaceAgentAffiliationStatus::Assigned,
@@ -587,7 +589,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Unassigned,
             None,
         );
-        current.updated_at = older + chrono::Duration::seconds(1);
+        current.updated_at = older + time::Duration::seconds(1);
         save_workspace_projection(repo, &projection_with("ws-stale", vec![stale, current]))
             .unwrap();
 

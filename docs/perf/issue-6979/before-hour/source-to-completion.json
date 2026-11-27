@@ -1,0 +1,171 @@
+[
+  {
+    "event": 0,
+    "source_changed_at_ms": 1794430431663,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 1,
+    "source_changed_at_ms": 1794430701941,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 2,
+    "source_changed_at_ms": 1794430971935,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 3,
+    "source_changed_at_ms": 1794431242038,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 4,
+    "source_changed_at_ms": 1794431512574,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 5,
+    "source_changed_at_ms": 1794431782495,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 6,
+    "source_changed_at_ms": 1794432052397,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 7,
+    "source_changed_at_ms": 1794432321714,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 8,
+    "source_changed_at_ms": 1794432591855,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 9,
+    "source_changed_at_ms": 1794432861851,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 10,
+    "source_changed_at_ms": 1794433132134,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 11,
+    "source_changed_at_ms": 1794433402337,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  },
+  {
+    "event": 12,
+    "source_changed_at_ms": 1794433672262,
+    "bindings": {},
+    "required_scope_coverage": {
+      "issues": false,
+      "file_view": false
+    },
+    "all_observed_targets_complete": false,
+    "source_change_to_final_observed_ms": null,
+    "quiet_period_ms": 30000,
+    "completion_semantics": "completion of bound epoch or a later superseding epoch; all raw snapshots retained"
+  }
+]

@@ -410,7 +410,7 @@ fn seed_active_owner(repo: &Path, session: &str) {
             start_evidence: None,
             active: true,
             owner_spec: Some(5630),
-            started_at: chrono::Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             phase: Some("verify".into()),
             session_id: session.into(),
         },
@@ -516,15 +516,15 @@ fn admitted_waiter_notifies_once_after_its_busy_pane_becomes_idle() {
         received.try_recv().is_err(),
         "busy panes must not be notified"
     );
+    // #5993: the busy caller already received the completed result. A pane
+    // that becomes idle afterwards is finishing its task, so the admitted
+    // notice must not reopen it. Observe several 5s companion poll cycles.
     idle.store(true, Ordering::Release);
-    let (session, text) = received
-        .recv_timeout(Duration::from_secs(30))
-        .expect("live admission must notify when the original pane becomes idle");
-    assert_eq!(session, "live-waiter");
-    assert!(text.contains("Do not start another verify.run"), "{text}");
+    // test-hygiene: allow-wall-clock-deadline Absence of a pane notice has no completion event to await.
+    let silent = received.recv_timeout(Duration::from_secs(16)).is_err();
     assert!(
-        received.try_recv().is_err(),
-        "notify the original attempt once"
+        silent,
+        "a completed attempt must not send the admitted resume notice"
     );
 }
 

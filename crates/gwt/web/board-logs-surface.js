@@ -566,6 +566,10 @@ export function createBoardLogsSurface({
             requestLogs(windowId);
           }
         }
+        const projectRoot = activeProjectTab()?.project_root;
+        if (projectRoot && windowIds.some(windowId => boardStateMap.has(windowId))) {
+          send({ kind: "get_project_board_config", project_root: projectRoot });
+        }
       }
 
       function requestOlderBoardEntries(windowId) {

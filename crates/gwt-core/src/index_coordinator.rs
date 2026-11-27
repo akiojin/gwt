@@ -446,7 +446,14 @@ pub struct HeavyLeaseStatus {
     /// exists, or it published a terminal job status. Such a ticket is
     /// residue, so `held` is false and no TTL is worth waiting out.
     pub holder_stale: bool,
+    /// Issue #7630 AC-2: the id of a held lock that no readable ticket
+    /// describes, so it has no lease_id, project, owner or TTL of its own.
+    /// [`IndexCoordinator::release_untracked_heavy_holder`] accepts it.
+    pub untracked_lease_id: Option<String>,
 }
+
+/// Prefix of [`HeavyLeaseStatus::untracked_lease_id`].
+pub const UNTRACKED_HEAVY_LEASE_PREFIX: &str = "untracked:";
 
 impl HeavyLeaseStatus {
     /// Preserve an observed overrun before an external reclaim ends the holder.
@@ -1335,6 +1342,7 @@ impl IndexCoordinator {
                 held: true,
                 pending,
                 queue,
+                untracked_lease_id: Some(self.untracked_heavy_lease_id(storage)),
                 ..HeavyLeaseStatus::default()
             });
         };
@@ -1380,6 +1388,7 @@ impl IndexCoordinator {
                 holder_alive,
                 holder_job_status,
                 holder_stale,
+                untracked_lease_id: None,
             });
         }
         let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
@@ -1440,6 +1449,7 @@ impl IndexCoordinator {
             holder_alive,
             holder_job_status,
             holder_stale,
+            untracked_lease_id: None,
         })
     }
 
@@ -1590,6 +1600,82 @@ impl IndexCoordinator {
 
     pub fn lease_event_log_path(&self) -> PathBuf {
         self.root.join(LEASE_EVENT_LOG_NAME)
+    }
+
+    fn untracked_heavy_lease_id(&self, storage: &Path) -> String {
+        match storage
+            .strip_prefix(self.root.join("slots"))
+            .ok()
+            .and_then(Path::to_str)
+        {
+            Some(slot) => format!("{UNTRACKED_HEAVY_LEASE_PREFIX}slot-{slot}"),
+            None => format!("{UNTRACKED_HEAVY_LEASE_PREFIX}root"),
+        }
+    }
+
+    fn untracked_heavy_storage(&self, lease_id: &str) -> Option<PathBuf> {
+        let slot = lease_id.strip_prefix(UNTRACKED_HEAVY_LEASE_PREFIX)?;
+        if slot == "root" {
+            return Some(self.root.clone());
+        }
+        let slot: usize = slot.strip_prefix("slot-")?.parse().ok()?;
+        Some(self.root.join("slots").join(slot.to_string()))
+    }
+
+    /// Whether `lease_id` still names a held lock that no ticket describes.
+    pub fn untracked_heavy_holder_present(&self, lease_id: &str) -> Result<bool, CoordinatorError> {
+        let Some(storage) = self.untracked_heavy_storage(lease_id) else {
+            return Ok(false);
+        };
+        if !storage.join("heavy.lock").exists() {
+            return Ok(false);
+        }
+        Ok(self
+            .heavy_storage_status(&storage)?
+            .untracked_lease_id
+            .as_deref()
+            == Some(lease_id))
+    }
+
+    /// Issue #7630 AC-2: detach a held lock that no ticket describes.
+    ///
+    /// Without a ticket there is no owner to observe or end, so the lock file
+    /// itself is moved aside under the allocator lock: the unknown holder
+    /// keeps its descriptor on the old file, and the next claimant locks a
+    /// fresh one. Returns `false` when the slot no longer holds an untracked
+    /// lock (it settled, or a ticketed holder took it). The release is
+    /// recorded in the lease ledger with `reason`.
+    pub fn release_untracked_heavy_holder(
+        &self,
+        lease_id: &str,
+        reason: &str,
+    ) -> Result<bool, CoordinatorError> {
+        let Some(storage) = self.untracked_heavy_storage(lease_id) else {
+            return Ok(false);
+        };
+        let allocator = open_lock_file(&self.root.join(VERIFICATION_ALLOCATOR_LOCK))?;
+        fs2::FileExt::lock_exclusive(&allocator)?;
+        let result = (|| {
+            if !self.untracked_heavy_holder_present(lease_id)? {
+                return Ok(false);
+            }
+            let lock = storage.join("heavy.lock");
+            let detached = storage.join(format!("heavy.lock.untracked-{}", now_ms()));
+            fs::rename(&lock, &detached)?;
+            let _ = fs::remove_file(&detached);
+            self.record_lease_reclaimed(
+                lease_id,
+                "unknown",
+                OwnerIdentity::current(),
+                &format!(
+                    "untracked holder detached by pid {}: {reason}",
+                    std::process::id()
+                ),
+            );
+            Ok(true)
+        })();
+        let _ = fs2::FileExt::unlock(&allocator);
+        result
     }
 
     /// Record that the lease `lease_id`, held by `owner` for `target`, was
@@ -2035,32 +2121,40 @@ fn acquire_heavy_at(
                 }
             }
             if started.elapsed() >= timeout {
-                // A deferred retry resumes its existing place in the queue.
-                match enroll_in_heavy_queue_for_attempt(
-                    &pending_dir,
-                    &target,
-                    priority,
-                    mode,
-                    attempt,
-                ) {
+                let refreshed = if key.is_verification() {
+                    // The live waiter still owns its arrival even if its
+                    // durable entry expired while it was polling.
+                    let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
+                    check_heavy_attempt_locked(&pending_dir, &target, attempt)?;
+                    let now = now_ms();
+                    let mut entry = registration;
+                    entry.registered_at_ms = now;
+                    entry.disk_budgets = None;
+                    entry.position_until_ms =
+                        Some(now.saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
+                    entry.reserved_until_ms =
+                        Some(now.saturating_add(VERIFICATION_RESERVATION_TTL.as_millis() as u64));
+                    let path = heavy_queue_entry_path(&pending_dir, &target);
+                    // A contended reservation may still belong to a live
+                    // claimant. Refresh it only after a successful read.
+                    read_registration(&path).and_then(|existing| {
+                        entry.reason = existing.and_then(|existing| existing.reason);
+                        write_json_atomic(&path, &entry).map_err(CoordinatorError::Io)
+                    })
+                } else {
+                    enroll_in_heavy_queue_for_attempt(
+                        &pending_dir,
+                        &target,
+                        priority,
+                        mode,
+                        attempt,
+                    )
+                    .map(|_| ())
+                };
+                match refreshed {
                     Err(CoordinatorError::Io(err)) if is_contended(&err) => {}
                     Err(err) if attempt.is_some() => return Err(err),
                     _ => {}
-                }
-                if key.is_verification() {
-                    // Preserve #4169's reservation before ending this poll so a
-                    // later claimant cannot overtake the deferred verification.
-                    let path = heavy_queue_entry_path(&pending_dir, &target);
-                    let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
-                    check_heavy_attempt_locked(&pending_dir, &target, attempt)?;
-                    if let Ok(mut entry) = heavy_queue_entry(&pending_dir, &target, priority) {
-                        entry.attempt_id = attempt.map(|attempt| attempt.id.to_string());
-                        entry.reserved_until_ms = Some(
-                            now_ms()
-                                .saturating_add(VERIFICATION_RESERVATION_TTL.as_millis() as u64),
-                        );
-                        let _ = write_json_atomic(&path, &entry);
-                    }
                 }
                 return Err(CoordinatorError::Timeout {
                     waited_ms: started.elapsed().as_millis() as u64,
@@ -5932,6 +6026,61 @@ mod tests {
             .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
             .expect("clearing the reservation lets the next claimant proceed");
         lease.release().unwrap();
+    }
+
+    #[test]
+    fn verification_waiter_keeps_fifo_when_its_reservation_expires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let holder = own(
+            &coordinator,
+            &TargetKey::verification("holder-repo", "holder"),
+            JobPriority::ManualRebuild,
+        );
+        let lease = holder.acquire_heavy(Duration::ZERO).unwrap();
+        let early = TargetKey::verification("early-repo", "early");
+        let later = TargetKey::verification("later-repo", "later");
+        let waiter = own(&coordinator, &early, JobPriority::ManualRebuild);
+        let path = coordinator.heavy_reservation_path(&early);
+        enroll_in_heavy_queue(
+            &coordinator.heavy_pending_dir(),
+            &early.file_stem(),
+            JobPriority::ManualRebuild,
+        )
+        .unwrap();
+        let mut entry = read_registration(&path).unwrap().unwrap();
+        entry.queued_at_ms = Some(1);
+        write_json_atomic(&path, &entry).unwrap();
+        let arrival = (entry.queued_at(), entry.queue_seq);
+        coordinator
+            .reserve_heavy(&later, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+
+        // Simulate the durable position expiring after the live waiter joins.
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                let mut entry = read_registration(&path).unwrap().unwrap();
+                entry.position_until_ms = Some(0);
+                write_json_atomic(&path, &entry).unwrap();
+            }));
+        });
+        assert!(matches!(
+            waiter.acquire_heavy_with_disk_budgets(Duration::ZERO, HANG_GUARD, &[]),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        let queue = coordinator.heavy_pool_status().unwrap().queue;
+        assert_eq!(queue[0].target.as_deref(), Some(early.file_stem().as_str()));
+        let reservation = read_registration(&coordinator.heavy_reservation_path(&early))
+            .unwrap()
+            .unwrap();
+        assert_eq!((reservation.queued_at(), reservation.queue_seq), arrival);
+        assert_eq!(queue[1].target.as_deref(), Some(later.file_stem().as_str()));
+        lease.release().unwrap();
+        waiter
+            .acquire_heavy_with_disk_budgets(Duration::ZERO, HANG_GUARD, &[])
+            .unwrap()
+            .release()
+            .unwrap();
     }
 
     #[test]

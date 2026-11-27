@@ -173,6 +173,8 @@ pub struct ProcessOutput {
     pub stdout: String,
     /// Captured stderr (lossy UTF-8). Empty unless [`ExecutionMode::Capture`].
     pub stderr: String,
+    /// PID returned by a successful fire-and-forget spawn.
+    pub spawned_pid: Option<u32>,
 }
 
 impl ProcessOutput {
@@ -184,6 +186,7 @@ impl ProcessOutput {
             status_display: "exit status: 0".to_string(),
             stdout: String::new(),
             stderr: String::new(),
+            spawned_pid: None,
         }
     }
 
@@ -195,6 +198,7 @@ impl ProcessOutput {
             status_display: format!("exit status: {code}"),
             stdout: String::new(),
             stderr: String::new(),
+            spawned_pid: None,
         }
     }
 
@@ -206,6 +210,7 @@ impl ProcessOutput {
             status_display: "spawned".to_string(),
             stdout: String::new(),
             stderr: String::new(),
+            spawned_pid: None,
         }
     }
 
@@ -269,8 +274,11 @@ impl ProcessExecutor for SystemProcessExecutor {
 
         match mode {
             ExecutionMode::Spawn => {
-                command.spawn().map_err(|e| e.to_string())?;
-                Ok(ProcessOutput::spawned())
+                let child = command.spawn().map_err(|e| e.to_string())?;
+                Ok(ProcessOutput {
+                    spawned_pid: Some(child.id()),
+                    ..ProcessOutput::spawned()
+                })
             }
             ExecutionMode::Status => {
                 let status = command.status().map_err(|e| e.to_string())?;
@@ -314,6 +322,7 @@ fn output_from_status(
         status_display: status.to_string(),
         stdout,
         stderr,
+        spawned_pid: None,
     }
 }
 

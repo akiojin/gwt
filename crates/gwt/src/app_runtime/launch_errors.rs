@@ -113,6 +113,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetLinkedIssue { .. } => "set_linked_issue",
             gwt::LaunchWizardAction::ClearLinkedIssue => "clear_linked_issue",
             gwt::LaunchWizardAction::SetSkipPermissions { .. } => "set_skip_permissions",
+            gwt::LaunchWizardAction::SetCodexSpeed { .. } => "set_codex_speed",
             gwt::LaunchWizardAction::SetFastMode { .. } => "set_fast_mode",
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
             gwt::LaunchWizardAction::SetHermesOption { .. } => "set_hermes_option",

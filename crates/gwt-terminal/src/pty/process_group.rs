@@ -92,6 +92,15 @@ mod imp {
             Ok(())
         }
 
+        pub fn disarm_termination(&mut self) -> Result<(), String> {
+            if let Some(job) = self.job.as_mut() {
+                job.try_release_without_termination()
+                    .map_err(|error| format!("disarm PTY process Job: {error}"))?;
+                self.job = None;
+            }
+            Ok(())
+        }
+
         /// Request termination without consuming the captured Job handle.
         pub fn terminate(&mut self) -> Result<(), String> {
             if self.termination_requested {
@@ -238,6 +247,11 @@ mod imp {
             _holder_pids: &[u32],
         ) -> Result<bool, String> {
             Ok(false)
+        }
+
+        pub fn disarm_termination(&mut self) {
+            self.pgid = None;
+            self.session_id = None;
         }
 
         /// Signal every process in the group without waiting for reap.

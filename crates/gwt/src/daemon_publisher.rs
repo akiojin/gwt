@@ -55,7 +55,7 @@ use crate::runtime_daemon_events::{
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Normal controls keep the hot-path default; outcome fixtures may pin it.
-const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+pub const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
     gwt_core::deadline_budget::DeadlineBudget::new("ISSUE_MONITOR_CONTROL", DEFAULT_TIMEOUT);
 
 /// Durable controls wait for the daemon's actual commit. Outcome fixtures pin
@@ -723,7 +723,7 @@ fn read_issue_monitor_status_from_endpoint(
 
 fn publish_issue_monitor_control_to_endpoint(
     endpoint: DaemonEndpoint,
-    payload: Value,
+    mut payload: Value,
     timeout: Duration,
     started: std::time::Instant,
 ) -> Result<(), IssueMonitorControlPublishError> {
@@ -745,6 +745,12 @@ fn publish_issue_monitor_control_to_endpoint(
         .build()
         .map_err(|error| OutcomeUnknown(format!("tokio runtime build failed: {error}")))?;
     let remaining = remaining_budget()?;
+    let control = &payload["payload"];
+    let receipt_id = (control.get("wait").is_some() || control.get("review_verdict").is_some())
+        .then(|| uuid::Uuid::new_v4().to_string());
+    if let Some(id) = &receipt_id {
+        payload["ack_receipt_id"] = Value::String(id.clone());
+    }
     runtime.block_on(async move {
         let deadline = tokio::time::Instant::now() + remaining;
         let mut busy_backoff = Duration::from_millis(5);
@@ -768,15 +774,38 @@ fn publish_issue_monitor_control_to_endpoint(
                     ))
                 })?
                 .map_err(|error| OutcomeUnknown(format!("publish send failed: {error}")))?;
-            let response: DaemonFrame = tokio::time::timeout_at(deadline, client.read_frame())
+            let response = tokio::time::timeout_at(deadline, client.read_frame())
                 .await
                 .map_err(|_| {
                     OutcomeUnknown(format!(
                         "publish ack timeout after {}ms",
                         timeout.as_millis()
                     ))
-                })?
-                .map_err(OutcomeUnknown)?;
+                })
+                .and_then(|frame| frame.map_err(OutcomeUnknown));
+            let response = match response {
+                Ok(frame) => frame,
+                Err(error) => {
+                    // This single read goes back to the exact authenticated daemon.
+                    // An unavailable or missing receipt still leaves the outcome unknown.
+                    let Some(id) = receipt_id else {
+                        return Err(error);
+                    };
+                    let receipt = tokio::time::timeout(timeout, async {
+                        let mut observer = DaemonClient::connect(&endpoint).await?;
+                        observer
+                            .send_frame(&ClientFrame::IssueMonitorControlReceipt { id })
+                            .await?;
+                        observer.read_frame::<DaemonFrame>().await
+                    })
+                    .await;
+                    return if matches!(receipt, Ok(Ok(DaemonFrame::Ack))) {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    };
+                }
+            };
             match response {
                 DaemonFrame::Ack => return Ok(()),
                 DaemonFrame::Error { message }
@@ -1032,6 +1061,106 @@ mod persistent_event_publish_tests {
 
     use super::{CachedEndpointError, PersistentEventPublisher, MAX_CACHED_PROJECT_ROOTS};
     use crate::cli::daemon::transport::IpcListener;
+
+    #[tokio::test]
+    async fn committed_wait_and_review_verdict_survive_ack_timeout() {
+        let temp = gwt_core::test_support::socket_tempdir().unwrap();
+        let scope = RuntimeScope::from_project_root(temp.path(), RuntimeTarget::Host).unwrap();
+        let bind = temp.path().join("control-receipt.sock");
+        #[cfg(windows)]
+        let bind = std::path::PathBuf::from(gwt_core::daemon::windows_pipe_name_for(
+            &bind.to_string_lossy(),
+        ));
+        let mut listener =
+            IpcListener::bind(gwt_core::test_support::checked_socket_path(&bind)).unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            bind.to_string_lossy().into_owned(),
+            "test-token".into(),
+            "test-daemon".into(),
+        );
+        let server = tokio::spawn(async move {
+            for committed in [true, true, false] {
+                let mut request_id = Value::Null;
+                let mut publish_connection = None;
+                for publish in [true, false] {
+                    let (reader, mut writer) = listener.accept().await.unwrap().into_split();
+                    let mut lines = BufReader::new(reader).lines();
+                    let _: IpcHandshakeRequest =
+                        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                    let handshake = IpcHandshakeResponse {
+                        protocol_version: DAEMON_PROTOCOL_VERSION,
+                        daemon_version: "test-daemon".into(),
+                        accepted: true,
+                        rejection_reason: None,
+                    };
+                    writer
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    let frame: Value =
+                        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                    if publish {
+                        assert_eq!(frame["type"], "publish");
+                        request_id = frame["payload"]["ack_receipt_id"].clone();
+                        // Keep the connection open without an ACK until the read-only query.
+                        publish_connection = Some((lines, writer));
+                    } else {
+                        assert_eq!(frame["type"], "issue_monitor_control_receipt");
+                        assert!(request_id.is_string());
+                        assert_eq!(frame["id"], request_id);
+                        let reply = if committed {
+                            DaemonFrame::Ack
+                        } else {
+                            DaemonFrame::Error {
+                                message: "no commit receipt".into(),
+                            }
+                        };
+                        writer
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+                drop(publish_connection);
+            }
+        });
+
+        for (command, committed) in [
+            (json!({"wait": {"issue_number": 42}}), true),
+            (json!({"review_verdict": {"issue_number": 42}}), true),
+            (json!({"wait": {"issue_number": 43}}), false),
+        ] {
+            let payload =
+                crate::runtime_daemon_events::issue_monitor_payload("control", command, 1);
+            let endpoint = endpoint.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                super::publish_issue_monitor_control_to_endpoint(
+                    endpoint,
+                    payload,
+                    Duration::from_secs(2),
+                    std::time::Instant::now(),
+                )
+            })
+            .await
+            .unwrap();
+            if committed {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(super::IssueMonitorControlPublishError::OutcomeUnknown(message))
+                        if message.contains("publish ack timeout")
+                ));
+            }
+        }
+        server.await.unwrap();
+    }
 
     #[test]
     fn persistent_event_publisher_reuses_connection_without_resolving_each_frame() {

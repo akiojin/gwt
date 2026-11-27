@@ -46,6 +46,8 @@ test.describe("Status Strip runtime telemetry", () => {
     });
     await expect(page.locator("#op-strip-running")).toHaveText("0");
     await expect(page.locator("#op-strip-idle")).toHaveText("0");
+    // SPEC #5016 AC-HS1: stopped agents need the operator, so BLOCK counts them.
+    await expect(page.locator("#op-strip-waiting")).toHaveText("3");
     await expect(page.locator("#op-strip-mission, .op-status-strip__cell--complete")).toHaveCount(0);
     await expect(page.locator("#op-strip-branches")).toBeVisible();
     await info.attach("stopped-status-strip", {
@@ -131,6 +133,16 @@ async function installPhase2Backend(page) {
     }
 
     let socketRef = null;
+    // SPEC #5016 AC-HS1: like the backend, publish the RUN / BLOCK / IDLE /
+    // ERROR aggregate the status strip renders after each status change.
+    let aggregateRevision = 0;
+    function aggregateMsg() {
+      const count = (...states) => windows.filter((w) => states.includes(w.status)).length;
+      return { kind: "project_agent_aggregate", aggregate: {
+        running_count: count("running", "starting"), block_count: count("waiting", "stopped", "interrupted", "error"),
+        idle_count: count("idle"), error_count: count("error"), unread: false, revision: ++aggregateRevision,
+      } };
+    }
 
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -147,6 +159,7 @@ async function installPhase2Backend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(stateMsg());
+          this.emit(aggregateMsg());
           this.emit({ kind: "active_work_projection", projection: {
             id: "running-census", active_works: [], local_agent_activity: {
               project_key: location.pathname.split("/").filter(Boolean).at(-1),
@@ -183,6 +196,11 @@ async function installPhase2Backend(page) {
           this.dispatchEvent(
             new MessageEvent("message", { data: JSON.stringify(payload) }),
           );
+          if (payload.kind === "window_state") {
+            const target = windows.find((w) => w.id === payload.window_id);
+            if (target) target.status = payload.state;
+            this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(aggregateMsg()) }));
+          }
         }, 0);
       }
     }

@@ -73,6 +73,7 @@ fn frontend_step(name: &str) -> String {
 
 const INSTALLER: &str = "scripts/install-playwright-browsers.sh";
 const VERSION_FILE: &str = "scripts/playwright-version.txt";
+const HEADED_WEBVIEW_STEP: &str = "Measure headed WebView E2E";
 
 // ---------------------------------------------------------------------------
 // Workflow contracts
@@ -87,7 +88,7 @@ fn frontend_runs_only_browser_specs_in_the_pinned_official_image() {
         !job.contains("\n    container:"),
         "host regressions need the hosted runner's Git/Rust toolchain"
     );
-    let browser = frontend_step("Run WebView E2E (embedded Playwright specs)");
+    let browser = frontend_step(HEADED_WEBVIEW_STEP);
     assert!(browser.contains(VERSION_FILE));
     assert!(browser.contains("docker run --rm"));
     assert!(browser.contains("mcr.microsoft.com/playwright:v${version}-noble"));
@@ -137,22 +138,47 @@ fn frontend_uses_image_browsers_without_a_bootstrap_or_browser_cache() {
     );
 }
 
+/// Bound file-level parallelism without moving host tests into the browser image.
+#[test]
+fn frontend_unit_files_run_with_bounded_concurrency_on_the_host() {
+    let unit = frontend_step("Run frontend unit tests");
+    assert!(unit.contains("bash scripts/run-frontend-unit-tests.sh --test-concurrency=2"));
+    assert!(unit.contains("git fetch --no-tags --depth=1 origin \"$GWT_PULL_RENDER_BASE_SHA\""));
+    assert!(
+        unit.contains("github.event.pull_request.base.sha || github.event.merge_group.base_sha")
+    );
+    assert!(unit.contains("timeout-minutes: 10"));
+    assert!(!unit.contains("docker run"));
+    assert!(!unit.contains("continue-on-error:"));
+}
+
 /// Replacing browser bootstrap must retain the embedded E2E suite itself.
 #[test]
 fn the_frontend_job_runs_the_embedded_e2e_suite() {
+    let step = frontend_step(HEADED_WEBVIEW_STEP);
     assert!(
-        frontend_step("Run WebView E2E (embedded Playwright specs)")
-            .contains("run-visual-tests.sh"),
-        "the frontend job must retain the embedded Playwright specs"
+        step.contains("xvfb-run -a bash scripts/run-visual-tests.sh")
+            && step.contains("--workers=1 --retries=0 --headed")
+            && step.contains("headed_e2e_reporter.cjs"),
+        "the frontend job must give the whole headed suite exclusive use of the display"
     );
 }
 
-/// Test execution keeps its own deadline after browser bootstrap is removed.
+/// The serial two-theme suite measured 14.7 minutes before image/bootstrap
+/// overhead. Keep a finite deadline with headroom for the full suite and retries.
 #[test]
 fn the_embedded_e2e_step_is_time_bounded() {
+    let minutes = frontend_step(HEADED_WEBVIEW_STEP)
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("timeout-minutes:")
+                .and_then(|value| value.trim().parse::<u64>().ok())
+        })
+        .expect("the embedded Playwright step must declare its own finite timeout");
     assert!(
-        frontend_step("Run WebView E2E (embedded Playwright specs)").contains("timeout-minutes:"),
-        "the embedded Playwright step must declare its own timeout"
+        minutes >= 25,
+        "the full serial Playwright suite needs at least 25 minutes including setup and retry headroom; got {minutes}"
     );
 }
 

@@ -1,3 +1,5 @@
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::io;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
@@ -27,6 +29,8 @@ use crate::{
 pub enum BoardCommand {
     /// Best-effort Discussion synchronization, independent of local reads/writes.
     Sync,
+    /// Explicitly acknowledge one bounded page from the caller's read cursor.
+    ShowUnread { limit: usize },
     /// `board.show` with optional audience filters and latest-entry limit.
     /// `unresolved` keeps only `blocked` entries whose escalation is still open
     /// (Issue #4609).
@@ -46,6 +50,7 @@ pub enum BoardCommand {
     RecoveryPost {
         intent_id: String,
         command: Box<BoardPostCommand>,
+        manual_recovery: bool,
     },
     /// `board.config.show` — print this repo's resolved Board routing (provider /
     /// channel / tenant) so per-project separation can be confirmed by running
@@ -141,6 +146,18 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             0
         }
+        BoardCommand::ShowUnread { limit } => {
+            let session =
+                crate::board_read_receipts::caller_session_from_env().ok_or_else(|| {
+                    io_as_spec_ops_error(io::Error::other("Board unread requires a caller Session"))
+                })?;
+            let rendered =
+                crate::board_read_receipts::render_unread_page(env.repo_path(), &session, limit)
+                    .map_err(io_as_spec_ops_error)?;
+            out.push_str(&rendered);
+            out.push('\n');
+            0
+        }
         BoardCommand::Show {
             json,
             workspace,
@@ -171,15 +188,18 @@ pub(super) fn run<E: CliEnv>(
                 load_snapshot_for_scope(env.repo_path(), &scope)
                     .map_err(gwt_error_to_spec_ops_error)?
             };
-            let complete_read = (all && limit.is_none() && !unresolved)
-                .then(|| (chrono::Utc::now(), snapshot.board.clone()));
+            let complete_read = (all && limit.is_none() && !unresolved).then(|| {
+                (
+                    UtcTimestamp::now(),
+                    snapshot.board.clone(),
+                    crate::board_read_receipts::complete_read_cursor(env.repo_path()),
+                )
+            });
             // all:true is the recovery path for unread posts older than the hot projection.
             if all {
-                snapshot.board.entries = crate::board_provider::load_entries_since(
-                    env.repo_path(),
-                    chrono::DateTime::<chrono::Utc>::MIN_UTC,
-                )
-                .map_err(gwt_error_to_spec_ops_error)?;
+                snapshot.board.entries =
+                    crate::board_provider::load_entries_since(env.repo_path(), UtcTimestamp::MIN)
+                        .map_err(gwt_error_to_spec_ops_error)?;
                 snapshot.board.has_more_before = false;
             }
             snapshot.board.entries.retain(|entry| {
@@ -232,13 +252,25 @@ pub(super) fn run<E: CliEnv>(
             }
             if let Some(session_id) = crate::board_read_receipts::caller_session_from_env() {
                 let recorded = match complete_read {
-                    Some((started_at, hot)) => crate::board_read_receipts::record_complete_read(
-                        env.repo_path(),
-                        &session_id,
-                        &snapshot.board.entries,
-                        started_at,
-                        &hot,
-                    ),
+                    Some((started_at, hot, cursor)) => {
+                        crate::board_read_receipts::record_complete_read(
+                            env.repo_path(),
+                            &session_id,
+                            &snapshot.board.entries,
+                            started_at,
+                            &hot,
+                        )
+                        .and_then(|covered| {
+                            match cursor.filter(|_| covered) {
+                                Some(cursor) => crate::board_read_receipts::record_complete_cursor(
+                                    env.repo_path(),
+                                    &session_id,
+                                    cursor,
+                                ),
+                                None => Ok(()),
+                            }
+                        })
+                    }
                     None => crate::board_read_receipts::record_returned_entries(
                         env.repo_path(),
                         &session_id,
@@ -403,7 +435,11 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        BoardCommand::RecoveryPost { intent_id, command } => {
+        BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery,
+        } => {
             let BoardPostCommand {
                 kind,
                 body,
@@ -454,12 +490,17 @@ pub(super) fn run<E: CliEnv>(
                 env.repo_path(),
                 &intent_id,
                 input,
+                manual_recovery,
             );
             let rendered = serde_json::to_string(&report)
                 .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
             out.push_str(&rendered);
             out.push('\n');
-            0
+            i32::from(
+                manual_recovery
+                    && report.state
+                        != crate::recovery_delivery::RecoveryDeliveryState::Acknowledged,
+            )
         }
         BoardCommand::ConfigShow => {
             let routing = routing_for(env.repo_path());
@@ -503,6 +544,9 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
     ) {
         return;
     }
+    if is_done_work_refusal(operation, error) {
+        return;
+    }
     let Some(kind) = classify_operation_refusal(operation, error) else {
         return;
     };
@@ -511,6 +555,20 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
         operation,
         render_operation_refusal_body(operation, error, kind),
     );
+}
+
+/// Issue #7339 (#6419): a typed `terminal_work` refusal for Done Work reports a
+/// completed record, not a blocker. Its "is terminal" wording must not turn a
+/// retried Done update or a follow-up `workspace.ensure` into a fresh-launch
+/// escalation; Discarded Work still escalates.
+fn is_done_work_refusal(operation: &str, error: &str) -> bool {
+    operation.starts_with("workspace.")
+        && serde_json::from_str::<crate::AgentWorkspaceUpdateError>(error).is_ok_and(|error| {
+            error.code == crate::AgentWorkspaceUpdateErrorCode::TerminalWork
+                && error.details.is_some_and(|details| {
+                    details.terminal_kind == gwt_core::workspace_projection::WorkEventKind::Done
+                })
+        })
 }
 
 /// File an escalation from operation-local refusal facts.
@@ -1032,7 +1090,11 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         broadcast,
     });
     Ok(match intent_id {
-        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        Some(intent_id) => BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery: false,
+        },
         None => BoardCommand::Post(command),
     })
 }
@@ -1317,6 +1379,7 @@ mod tests {
             BoardCommand::RecoveryPost {
                 intent_id: "test-intent".into(),
                 command: post,
+                manual_recovery: false,
             }
         } else {
             BoardCommand::Post(post)
@@ -1455,7 +1518,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status,
             workspace_id: workspace_id.map(str::to_string),
-            updated_at: chrono::Utc::now(),
+            updated_at: UtcTimestamp::now(),
         }
     }
 
@@ -3685,6 +3748,7 @@ mod tests {
                     resolves: vec!["blocked-entry-1974".to_string()],
                     ..Default::default()
                 }),
+                manual_recovery: false,
             },
             &mut out,
         );
@@ -3718,7 +3782,12 @@ mod tests {
             s("stable-intent-1"),
         ])
         .expect("recovery board post");
-        let BoardCommand::RecoveryPost { intent_id, command } = recovery else {
+        let BoardCommand::RecoveryPost {
+            intent_id,
+            command,
+            manual_recovery: false,
+        } = recovery
+        else {
             panic!("--intent-id must select the recovery route");
         };
         assert_eq!(intent_id, "stable-intent-1");

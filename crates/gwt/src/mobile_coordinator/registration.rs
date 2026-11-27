@@ -17,9 +17,18 @@ use super::{
 use gwt_core::repo_hash::ProjectKey;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const MAX_REGISTRATIONS: usize = 64;
+/// One Host cannot hold the whole gate. Matches the per-Host pending invite
+/// cap, and leaves room for a restarted Host while its old leases expire.
+/// Counted by host_id, so registrations of a rotated-away credential keep
+/// counting until their next check or lease expiry (at most 30 seconds).
+const MAX_REGISTRATIONS_PER_HOST: usize = 8;
 const LEASE_SECS: u64 = 30;
+/// Live reconnect connections of approved devices, which need no invite record.
+const MAX_RECONNECTS: usize = 64;
+const MAX_HOST_RECONNECTS: usize = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistrationError {
@@ -29,7 +38,7 @@ pub enum RegistrationError {
         "registration is foreign, closed or expired; authenticate a fresh registration and invite"
     )]
     DeadRegistration,
-    #[error("64 live registrations are retained; close one or wait for its lease before authenticating again")]
+    #[error("live registrations are full (64 in total or 8 per Host); close one or wait for its lease before authenticating again")]
     Capacity,
     #[error("trusted registration clock moved backwards or is unavailable; repair the clock and explicitly reopen the store and gate")]
     ClockRollback,
@@ -50,9 +59,17 @@ pub struct RegistrationHandle {
     generation: Uuid,
 }
 
+impl RegistrationHandle {
+    /// Non-secret correlation value the Host's lease matches replies against.
+    pub fn generation(&self) -> Uuid {
+        self.generation
+    }
+}
+
+/// The retained bearer is wiped whenever a registration is retired or dropped.
 struct Registration {
     identity: CredentialIdentity,
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
     scope: InviteScope,
     credential_expires_at: u64,
     deadline: Instant,
@@ -64,6 +81,8 @@ pub struct CoordinatorSessions {
     store: CoordinatorStore,
     invites: InviteRegistry,
     registrations: Vec<Registration>,
+    /// Live reconnect connections: (registration generation, connection ID).
+    reconnects: Vec<(Uuid, Uuid)>,
     owner: Uuid,
     last_instant: Instant,
     last_wall: u64,
@@ -76,6 +95,7 @@ impl CoordinatorSessions {
             store,
             invites: InviteRegistry::new(now),
             registrations: Vec::new(),
+            reconnects: Vec::new(),
             owner: Uuid::new_v4(),
             last_instant: now,
             last_wall: wall,
@@ -104,7 +124,13 @@ impl CoordinatorSessions {
                 .map_err(StoreError::from)
         });
         let expiry = result.map_err(|error| self.auth_error(error, now))?;
-        if self.registrations.len() >= MAX_REGISTRATIONS {
+        let same_host = self
+            .registrations
+            .iter()
+            .filter(|r| r.identity.host_id == identity.host_id)
+            .count();
+        if self.registrations.len() >= MAX_REGISTRATIONS || same_host >= MAX_REGISTRATIONS_PER_HOST
+        {
             return Err(RegistrationError::Capacity);
         }
         let generation = Uuid::new_v4();
@@ -113,9 +139,11 @@ impl CoordinatorSessions {
         let deadline = self.deadline(expiry, now, wall)?;
         self.registrations.push(Registration {
             identity: *identity,
-            secret: secret
-                .try_into()
-                .map_err(|_| RegistrationError::Credential(CredentialError::Unauthorized))?,
+            secret: Zeroizing::new(
+                secret
+                    .try_into()
+                    .map_err(|_| RegistrationError::Credential(CredentialError::Unauthorized))?,
+            ),
             scope,
             credential_expires_at: expiry,
             deadline,
@@ -172,6 +200,78 @@ impl CoordinatorSessions {
         self.invite_result(result, now)
     }
 
+    /// Browser claims carry only the secret. The routing actor finds the live
+    /// registration from the invite's saved scope (never a browser destination)
+    /// and claims through it; `claim_invite` re-verifies the credential and the
+    /// exact scope. A missing invite is `Unauthorized`; adapters must not tell
+    /// the browser which refusal occurred.
+    pub fn claim_invite_by_secret(
+        &mut self,
+        secret: &[u8],
+        connection_id: Uuid,
+        now: Instant,
+        wall: u64,
+    ) -> Result<(RegistrationHandle, InviteClaim), RegistrationError> {
+        self.observe(now, wall)?;
+        let result = self.invites.pending_scope(secret, now);
+        let unauthorized = RegistrationError::Invite(InviteError::Unauthorized);
+        let scope = self.invite_result(result, now)?.ok_or(unauthorized)?;
+        let handle = RegistrationHandle {
+            owner: self.owner,
+            generation: scope.registration_generation(),
+        };
+        let claim = self.claim_invite(&handle, secret, connection_id, now, wall)?;
+        Ok((handle, claim))
+    }
+
+    /// Routes an approved device's reconnect to the one live registration of
+    /// this Host and Project, re-verifying its credential. The browser-named
+    /// Host, Project and device are not authority: no live or more than one
+    /// live registration is `DeadRegistration` (adapters must not tell the
+    /// browser which), and the Host verifies the device itself. At most 8
+    /// reconnects per Host and 64 in total; `close_connection` frees one.
+    pub fn request_reconnect(
+        &mut self,
+        host_id: Uuid,
+        project: &ProjectKey,
+        connection_id: Uuid,
+        now: Instant,
+        wall: u64,
+    ) -> Result<RegistrationHandle, RegistrationError> {
+        self.observe(now, wall)?;
+        let mut matching = self
+            .registrations
+            .iter()
+            .filter(|r| r.identity.host_id == host_id && r.scope.project() == project);
+        let (Some(registration), None) = (matching.next(), matching.next()) else {
+            return Err(RegistrationError::DeadRegistration);
+        };
+        let handle = RegistrationHandle {
+            owner: self.owner,
+            generation: registration.scope.registration_generation(),
+        };
+        self.check(&handle, now, wall)?;
+        if connection_id.is_nil() || self.reconnects.iter().any(|(_, id)| *id == connection_id) {
+            return Err(RegistrationError::Invite(InviteError::InvalidConnection));
+        }
+        let host_reconnects = self
+            .reconnects
+            .iter()
+            .filter(|(generation, _)| {
+                self.registrations.iter().any(|r| {
+                    r.identity.host_id == host_id
+                        && r.scope.registration_generation() == *generation
+                })
+            })
+            .count();
+        if self.reconnects.len() >= MAX_RECONNECTS || host_reconnects >= MAX_HOST_RECONNECTS {
+            return Err(RegistrationError::Capacity);
+        }
+        self.reconnects.push((handle.generation, connection_id));
+        Ok(handle)
+    }
+
+    /// Closes a claimed or reconnected connection of this registration.
     pub fn close_connection(
         &mut self,
         handle: &RegistrationHandle,
@@ -180,6 +280,12 @@ impl CoordinatorSessions {
         wall: u64,
     ) -> Result<(), RegistrationError> {
         let index = self.check(handle, now, wall)?;
+        let before = self.reconnects.len();
+        self.reconnects
+            .retain(|entry| *entry != (handle.generation, connection_id));
+        if self.reconnects.len() != before {
+            return Ok(());
+        }
         let result = self.invites.close_scoped_connection(
             &self.registrations[index].scope,
             connection_id,
@@ -201,6 +307,18 @@ impl CoordinatorSessions {
             self.retire(index, now)?;
         }
         Ok(())
+    }
+
+    /// Read-only: the current coordinator lease deadline of a live handle. It
+    /// never extends or validates the lease; operations still re-verify.
+    pub fn lease_deadline(&self, handle: &RegistrationHandle) -> Option<Instant> {
+        self.index(handle)
+            .map(|index| self.registrations[index].deadline)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn live_registrations(&self) -> usize {
+        self.registrations.len()
     }
 
     fn index(&self, handle: &RegistrationHandle) -> Option<usize> {
@@ -229,7 +347,7 @@ impl CoordinatorSessions {
                 .verify(
                     &registration.identity,
                     registration.scope.project(),
-                    &registration.secret,
+                    &*registration.secret,
                     wall,
                 )
                 .map_err(StoreError::from)
@@ -279,6 +397,8 @@ impl CoordinatorSessions {
             .invites
             .invalidate_registration(&self.registrations[index].scope, now);
         self.invite_result(result, now)?;
+        let generation = self.registrations[index].scope.registration_generation();
+        self.reconnects.retain(|(owner, _)| *owner != generation);
         self.registrations.swap_remove(index);
         Ok(())
     }
@@ -319,6 +439,7 @@ impl CoordinatorSessions {
     fn stop(&mut self, error: RegistrationError, now: Instant) -> RegistrationError {
         self.failed = true;
         self.registrations.clear();
+        self.reconnects.clear();
         self.invites = InviteRegistry::new(now);
         error
     }
@@ -735,22 +856,75 @@ mod tests {
             .unwrap();
     }
 
+    /// Issue another Host's credential into the same store, for multi-Host tests.
+    fn other_host(sessions: &mut CoordinatorSessions, expiry: u64) -> LoadedHostCredential {
+        let project = ProjectKey::parse("0123456789abcdef").unwrap();
+        let issued = sessions
+            .store
+            .issue(
+                "https://mobile.example",
+                Uuid::new_v4(),
+                std::slice::from_ref(&project),
+                expiry,
+                100,
+            )
+            .unwrap();
+        let binding = HostBinding::new(
+            &issued.identity.host_id.to_string(),
+            "https://mobile.example",
+        )
+        .unwrap();
+        load_host_credential(&issued.path, &binding, &project, 100).unwrap()
+    }
+
+    fn try_register(
+        sessions: &mut CoordinatorSessions,
+        credential: &LoadedHostCredential,
+        now: Instant,
+    ) -> Result<RegistrationHandle, RegistrationError> {
+        sessions.register(
+            credential.identity(),
+            credential.project(),
+            credential.secret_bytes(),
+            Uuid::new_v4(),
+            now,
+            100,
+        )
+    }
+
     #[test]
-    fn registration_capacity_recovers_by_close_and_expiry() {
+    fn one_host_cannot_hold_more_than_its_registration_share() {
         let (_directory, mut sessions, credential) = fixture(200);
+        let other = other_host(&mut sessions, 200);
         let now = sessions.last_instant;
-        let handles: Vec<_> = (0..64)
+        let handles: Vec<_> = (0..8)
             .map(|_| register(&mut sessions, &credential, now, 100))
             .collect();
         assert!(matches!(
-            sessions.register(
-                credential.identity(),
-                credential.project(),
-                credential.secret_bytes(),
-                Uuid::new_v4(),
-                now,
-                100
-            ),
+            try_register(&mut sessions, &credential, now),
+            Err(RegistrationError::Capacity)
+        ));
+        register(&mut sessions, &other, now, 100);
+        sessions.close(&handles[0], now, 100).unwrap();
+        register(&mut sessions, &credential, now, 100);
+        assert_eq!(sessions.live_registrations(), 9);
+    }
+
+    #[test]
+    fn registration_capacity_recovers_by_close_and_expiry() {
+        let (_directory, mut sessions, credential) = fixture(200);
+        let hosts: Vec<_> = (0..7).map(|_| other_host(&mut sessions, 200)).collect();
+        let now = sessions.last_instant;
+        let mut handles = Vec::new();
+        for host in std::iter::once(&credential).chain(&hosts) {
+            for _ in 0..8 {
+                handles.push(register(&mut sessions, host, now, 100));
+            }
+        }
+        assert_eq!(handles.len(), 64);
+        let spare = other_host(&mut sessions, 200);
+        assert!(matches!(
+            try_register(&mut sessions, &spare, now),
             Err(RegistrationError::Capacity)
         ));
         sessions.close(&handles[0], now, 100).unwrap();
@@ -768,5 +942,99 @@ mod tests {
         sessions
             .register_invite(&recovered, &[12; 32], 300, later, 130)
             .unwrap();
+    }
+
+    #[test]
+    fn reconnects_route_to_one_live_registration_within_their_bounds() {
+        let (_directory, mut sessions, credential) = fixture(200);
+        let now = sessions.last_instant;
+        let host = credential.identity().host_id;
+        let project = credential.project().clone();
+        let reconnect = |sessions: &mut CoordinatorSessions, host: Uuid, id: Uuid| {
+            sessions.request_reconnect(host, &project, id, now, 100)
+        };
+        // No live registration, a foreign Host or Project, and a nil ID route nowhere.
+        assert!(matches!(
+            reconnect(&mut sessions, host, Uuid::new_v4()),
+            Err(RegistrationError::DeadRegistration)
+        ));
+        let handle = register(&mut sessions, &credential, now, 100);
+        assert!(matches!(
+            reconnect(&mut sessions, Uuid::new_v4(), Uuid::new_v4()),
+            Err(RegistrationError::DeadRegistration)
+        ));
+        let foreign = ProjectKey::parse("fedcba9876543210").unwrap();
+        assert!(matches!(
+            sessions.request_reconnect(host, &foreign, Uuid::new_v4(), now, 100),
+            Err(RegistrationError::DeadRegistration)
+        ));
+        assert!(reconnect(&mut sessions, host, Uuid::nil()).is_err());
+
+        // One Host holds at most 8 reconnects; closing one frees its place.
+        let ids: Vec<_> = (0..8).map(|_| Uuid::new_v4()).collect();
+        for id in &ids {
+            let routed = reconnect(&mut sessions, host, *id).unwrap();
+            assert_eq!(routed.generation(), handle.generation());
+        }
+        assert!(reconnect(&mut sessions, host, ids[0]).is_err());
+        assert!(matches!(
+            reconnect(&mut sessions, host, Uuid::new_v4()),
+            Err(RegistrationError::Capacity)
+        ));
+        sessions
+            .close_connection(&handle, ids[0], now, 100)
+            .unwrap();
+        reconnect(&mut sessions, host, Uuid::new_v4()).unwrap();
+
+        // Two live registrations of the same Host and Project are ambiguous.
+        let second = register(&mut sessions, &credential, now, 100);
+        assert!(matches!(
+            reconnect(&mut sessions, host, Uuid::new_v4()),
+            Err(RegistrationError::DeadRegistration)
+        ));
+        sessions.close(&second, now, 100).unwrap();
+
+        // Closing the registration forgets its reconnects.
+        sessions.close(&handle, now, 100).unwrap();
+        assert_eq!(sessions.reconnects.len(), 0);
+        let fresh = register(&mut sessions, &credential, now, 100);
+        for _ in 0..8 {
+            reconnect(&mut sessions, host, Uuid::new_v4()).unwrap();
+        }
+        assert!(sessions.close_connection(&fresh, ids[1], now, 100).is_err());
+
+        // At most 64 reconnects in total.
+        for _ in 0..7 {
+            let other = other_host(&mut sessions, 200);
+            register(&mut sessions, &other, now, 100);
+            for _ in 0..8 {
+                reconnect(&mut sessions, other.identity().host_id, Uuid::new_v4()).unwrap();
+            }
+        }
+        sessions.close(&fresh, now, 100).unwrap();
+        let spare = other_host(&mut sessions, 200);
+        register(&mut sessions, &spare, now, 100);
+        for _ in 0..8 {
+            reconnect(&mut sessions, spare.identity().host_id, Uuid::new_v4()).unwrap();
+        }
+        assert!(matches!(
+            reconnect(&mut sessions, host, Uuid::new_v4()),
+            Err(RegistrationError::DeadRegistration)
+        ));
+        let last = other_host(&mut sessions, 200);
+        register(&mut sessions, &last, now, 100);
+        assert!(matches!(
+            reconnect(&mut sessions, last.identity().host_id, Uuid::new_v4()),
+            Err(RegistrationError::Capacity)
+        ));
+    }
+
+    #[test]
+    fn retained_bearers_are_zeroized_when_a_registration_is_dropped() {
+        fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+        let (_directory, mut sessions, credential) = fixture(200);
+        let now = sessions.last_instant;
+        register(&mut sessions, &credential, now, 100);
+        zeroizes_on_drop(&sessions.registrations[0].secret);
     }
 }

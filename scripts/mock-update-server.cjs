@@ -24,6 +24,7 @@
  * stage="Persist pending").
  */
 
+const { createHash } = require("node:crypto");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -101,25 +102,26 @@ function pickAssetName(platform, arch) {
   return "gwt-update.tar.gz";
 }
 
+const tag = `v${String(opts.version).replace(/^v/, "")}`;
+const digest = `sha256:${createHash("sha256").update(assetBuffer).digest("hex")}`;
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   console.log(`[mock] ${req.method} ${url.pathname}`);
 
   if (
     url.pathname.startsWith("/repos/") &&
-    url.pathname.endsWith("/releases/latest")
+    (url.pathname.endsWith("/releases/latest") ||
+      url.pathname.endsWith(`/releases/tags/${tag}`))
   ) {
     const baseUrl = `http://127.0.0.1:${opts.port}`;
-    // Strip a single leading `v` from --version so passing either `9.26.0` or
-    // `v9.26.0` yields the canonical `vN.N.N` tag the updater's
-    // `parse_tag_version` accepts (it tolerates exactly one `v` prefix).
-    const normalizedVersion = String(opts.version).replace(/^v/, "");
     const release = {
-      tag_name: `v${normalizedVersion}`,
+      tag_name: tag,
       html_url: `${baseUrl}/release-page`,
       assets: [
         {
           name: assetName,
+          digest,
           browser_download_url: `${baseUrl}/assets/${assetName}`,
         },
       ],
@@ -143,11 +145,10 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(opts.port, "127.0.0.1", () => {
-  const advertisedTag = `v${String(opts.version).replace(/^v/, "")}`;
   console.log(
     `[mock] update server listening on http://127.0.0.1:${opts.port}`,
   );
-  console.log(`[mock] advertising tag ${advertisedTag} (asset: ${assetName})`);
+  console.log(`[mock] advertising tag ${tag} (asset: ${assetName})`);
   console.log("[mock] run gwt with:");
   console.log(
     `  GWT_UPDATE_API_BASE_URL=http://127.0.0.1:${opts.port} ./target/release/gwt`,

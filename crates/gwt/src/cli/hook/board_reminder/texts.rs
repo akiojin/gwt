@@ -13,7 +13,7 @@
 //! user-facing reports follow the setting while the injected instructions
 //! stay in one language.
 
-use chrono::Duration;
+use time::Duration;
 
 pub(super) const SESSION_START_CAP: usize = 20;
 pub(super) const USER_PROMPT_DIFF_CAP: usize = 20;
@@ -156,7 +156,7 @@ pub(super) const PM_REMINDER: &str = "# Project Manager\n\
 \n\
 You are this project's resident PM. Your operating contract is the `gwt-pm` skill; it outranks generic agent guidance.\n\
 \n\
-Report to the user in conversation, at milestones, as a digest (`needs_human` and fatal failures immediately). Use `board.post` with mentions only to address another agent, and `board.show` to read what agents reported about themselves. Do not narrate your own work phases to the Board.\n\
+Send routine milestones through Reports as a digest. Use conversation for human replies and the key points of judgments, decisions, and completions. Report `needs_human` and fatal failures immediately. Use `board.post` with mentions only to address another agent, and `board.show` to read what agents reported about themselves. Do not narrate your own work phases to the Board.\n\
 \n\
 Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running. Steer them before you judge the cycle unchanged: a launch that is stalled, drifting out of scope, or waiting for its next action gets a directive through `board.post` with a mention or `pm.message.send`; never inject launch instructions past Issues.\n\
 \n\

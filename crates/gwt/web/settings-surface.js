@@ -22,15 +22,16 @@
 //   imported as a sibling module.
 // - getIndexStatus: per-project shared index status snapshot owned by the
 //   Project Index surface instance created in app.js (E3).
-import { createInteractionGuard } from "/interaction-guard.js";
-import { renderIndexSettingsPanel } from "/index-settings-panel.js";
-import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
-import { renderHookCenterPanel, hookRepairUnavailableReason } from "/hook-center-panel.js";
+import { createInteractionGuard } from "./interaction-guard.js";
+import { renderIndexSettingsPanel } from "./index-settings-panel.js";
+import { renderCustomAgentEnvEditor } from "./custom-agent-env-editor.js";
+import { renderHookCenterPanel, hookRepairUnavailableReason } from "./hook-center-panel.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { createRepositoryLabelChip } from "./ui-content.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "./first-run-setup.js";
 
-function renderUpdateSettingsStatus(panel, status) {
+function renderUpdateSettingsStatus(panel, status, send) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   const values = document.createElement("p");
@@ -38,6 +39,10 @@ function renderUpdateSettingsStatus(panel, status) {
   const configured = status.auto_apply_updates;
   values.textContent = `Saved: ${configured == null ? "Default (Off)" : configured ? "On" : "Off"} · Effective: ${status.auto_apply_updates_effective ? "On" : "Off"}`;
   panel.appendChild(values);
+  // Issue #7248 AC-2: the last settled apply (outcome, target, expected /
+  // observed version, time) and this session's last apply error, whatever the
+  // update CTA status was when it arrived.
+  renderApplyOutcome();
   const drain = status.update_drain;
   const pending = document.createElement("p");
   pending.className = "settings-help";
@@ -60,6 +65,44 @@ function renderUpdateSettingsStatus(panel, status) {
   }
   if (!list.children.length) pending.textContent += " · waiting for quiet observations";
   panel.appendChild(list);
+
+  function renderApplyOutcome() {
+    const result = status.last_apply_result;
+    const line = document.createElement("p");
+    line.className = "settings-help";
+    line.dataset.updateLastApplyResult = "true";
+    if (!result) {
+      line.textContent = "Last update: none recorded";
+    } else if (result.outcome === "failure") {
+      line.setAttribute("role", "alert");
+      line.textContent = `Last update: Failed · v${result.from_version} → v${result.to_version} · expected v${result.to_version}, observed v${result.observed_version} · ${result.recorded_at}`
+        + (result.message ? ` · ${result.message}` : "");
+    } else {
+      line.textContent = `Last update: Succeeded · v${result.from_version} → v${result.to_version} · observed v${result.observed_version} · ${result.recorded_at}`;
+    }
+    panel.appendChild(line);
+    const error = status.last_apply_error;
+    if (error) {
+      const errorLine = document.createElement("p");
+      errorLine.className = "settings-help";
+      errorLine.dataset.updateLastApplyError = "true";
+      errorLine.setAttribute("role", "alert");
+      errorLine.textContent = `Last apply error: ${error.stage || "Update"} — ${error.reason || "Unknown reason"} · ${error.at}`;
+      panel.appendChild(errorLine);
+    }
+    if (!error && result?.outcome !== "failure") return;
+    const openLog = document.createElement("button");
+    openLog.type = "button";
+    openLog.className = "wizard-button is-compact";
+    openLog.dataset.updateOpenLog = "true";
+    openLog.textContent = "Open update log";
+    openLog.addEventListener("click", () => {
+      const message = { kind: "open_update_log" };
+      if (error?.log_path) message.log_path = error.log_path;
+      send?.(message);
+    });
+    panel.appendChild(openLog);
+  }
 }
 
 function settingsTabId(windowId, tabId) {
@@ -116,9 +159,9 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   const help = document.createElement("p");
   help.className = "settings-help";
   help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
-    + "Updates require no open agent windows or pending launches, including the Project Manager. "
-    + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
-    + "close them and retry. Update failures leave launches available.";
+    + "A tool is skipped while an agent window, including the Project Manager, is running it. "
+    + "Nothing is installed automatically. Manual installs and updates of a tool are refused while an agent window "
+    + "is running that tool; close those windows and retry. Update failures leave launches available.";
   panel.appendChild(help);
   const globalResult = maintenance.get("");
   if (globalResult?.message) {
@@ -190,15 +233,16 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const result = maintenance.get(agent.id);
     if (result?.message) {
       const status = document.createElement("p");
-      status.className = "settings-status";
+      status.className = "settings-status settings-agent-maintenance-result";
+      status.dataset.agentMaintenanceId = agent.id;
       status.setAttribute("role", result.success === false ? "alert" : "status");
-      status.textContent = result.message;
+      status.textContent = `${agent.name}: ${result.message}`;
       if (result.before_version || result.after_version) {
         status.textContent += ` Before: ${result.before_version || "Unknown (version unavailable)"}. `
           + `After: ${result.after_version || "Unknown (version unavailable)"}.`;
       }
       status.title = status.textContent;
-      actions.appendChild(status);
+      panel.appendChild(status);
     }
     row.appendChild(actions);
   }
@@ -215,28 +259,10 @@ function scopeSettingsControlIds(panel) {
   }
 }
 
-export function mountProjectManagerSettingsPanel(
-  document,
-  parent,
-  pmSettingsPanel,
-  windowId = "shared",
-) {
-  const panel = document.createElement("section");
-  panel.className = "settings-panel hidden";
-  panel.setAttribute("role", "tabpanel");
-  panel.dataset.settingsPanel = "project-manager";
-  panel.id = `settings-${windowId}-panel-project-manager`;
-  panel.setAttribute(
-    "aria-labelledby",
-    `settings-${windowId}-tab-project-manager`,
-  );
-  parent.appendChild(panel);
-  pmSettingsPanel?.mount?.(panel);
-  return panel;
-}
+
 
 function renderIssuesSettingsPanel(panel, options) {
-  const { project, status, send, launchControls = [], catalog = {} } = options;
+  const { project, status, send, launchControls = [], catalog = {}, autonomyControl = null } = options;
   const document = panel.ownerDocument;
   const labelsScrollTop = panel.querySelector(".settings-label-options")?.scrollTop ?? 0;
   const focusedLabel = panel.dataset.pendingLabelFocus ?? (panel.contains(document.activeElement) ? document.activeElement?.dataset.repositoryLabel : undefined);
@@ -282,9 +308,20 @@ function renderIssuesSettingsPanel(panel, options) {
     return input;
   };
   const launch = group("Launch control");
+  // Issue #7728: monitoring has no switch of its own. It follows the one
+  // project stop/start, shared with the Hub project list.
+  if (autonomyControl) {
+    const field = document.createElement("div");
+    field.className = "settings-field";
+    field.dataset.settingsLaunchAction = "project-autonomy";
+    const caption = document.createElement("span");
+    caption.textContent = "Project";
+    field.append(caption, autonomyControl.element);
+    setControlExplanation(autonomyControl.element, "Stop or start this project. Stopping halts new Issue assignments and the Project Manager patrol together; agents already working finish first.", "settings-project-autonomy");
+    launch.appendChild(field);
+  }
   for (const [action, name, key, kind] of [
     ["monitor-autonomous", "Autonomous", "autonomous_mode", "set_issue_monitor_autonomous_mode"],
-    ["monitor-toggle", "Monitoring", "enabled", "set_issue_monitor_enabled"],
   ]) {
     const slot = document.createElement("span");
     let control = launchControls.find(control => control.dataset.action === action);
@@ -303,9 +340,7 @@ function renderIssuesSettingsPanel(panel, options) {
     control.checked = status?.[key] === true;
     control.dataset.confirmed = String(control.checked);
     control.disabled = !status;
-    setControlExplanation(control, action === "monitor-autonomous"
-      ? "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent."
-      : "Start or pause monitoring for queued issues.", `settings-${action}`);
+    setControlExplanation(control, "Allow eligible issues to run without waiting for human approval. Also send structured gwt feedback without a dialog; free text is excluded. This is separate from Auto capacity. Feedback needs existing GH_TOKEN/GITHUB_TOKEN credentials; GitHub CLI sign-in alone keeps it unsent.", `settings-${action}`);
     slot.appendChild(control);
     row(launch, name, slot).dataset.settingsLaunchAction = action;
   }
@@ -407,7 +442,7 @@ function renderCandidateSaveError(panel, event) {
     feedback.textContent = event.message;
     feedback.dataset.kind = "error";
     feedback.setAttribute("role", "alert");
-    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|docker_lifecycle_intent|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
     const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
     const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
     const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
@@ -444,11 +479,13 @@ function reconcileCandidateSave(panel, event) {
       // Even a successful normalization must not move a live text cursor.
       if (input === focused) continue;
       const key = input.dataset.profileField;
+      if (key === "model" || key === "reasoning") continue;
       if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited && profile[key] == null) continue;
       if (input.type === "checkbox") input.checked = profile[key] === true;
       else {
         const saved = key === "prefer_for" ? (profile[key] || []).join(", ")
-          : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+          : key === "runtime_target" && profile.runtime_inherit ? "Inherit"
+            : String(profile[key] ?? ({ session_mode: "Normal", runtime_target: "Host", docker_lifecycle_intent: "Connect" }[key] || ""));
         if (input.localName === "select") {
           if (![...input.options].some(option => option.value === saved)) {
             const option = panel.ownerDocument.createElement("option");
@@ -471,13 +508,189 @@ function reconcileCandidateSave(panel, event) {
   }
 }
 
+export function renderMemberTuningControls(host, options) {
+  const { target, choices = null, available = true, launchFields = true, onEdit = () => {}, onRetry = () => {}, onReload = null, onReloadCatalog = null } = options;
+  const editable = available && target?.available !== false;
+  const document = host.ownerDocument;
+  host.dataset.memberTuningHost = "";
+  const identity = target ? `${target.canonical.role}:${target.canonical.member_id}` : "unavailable";
+  if (host.memberTuningIdentity !== identity) {
+    host.replaceChildren(); host.memberTuningIdentity = identity;
+    const owns = control => host.memberTuningIdentity === identity && host.isConnected && control.isConnected && host.contains(control);
+    const title = document.createElement("h4"); title.textContent = target?.canonical.role === "pm" ? "Saved Project Manager profile" : "Saved implementation settings"; host.append(title);
+    // Issue #7647: the agent ledger offers no tool, model or reasoning for a
+    // member; those controls stay in the document, unshown, for the shared
+    // state below.
+    const launchHost = launchFields ? host : host.appendChild(Object.assign(document.createElement("div"), { hidden: true }));
+    if (!launchFields) launchHost.dataset.memberTuningLaunch = "";
+    for (const [key, caption] of [["agent_id", "Tool"], ["model", "Model"], ["reasoning", "Reasoning"]]) {
+      const label = document.createElement("label"); label.className = "settings-field";
+      const text = document.createElement("span"); text.textContent = caption;
+      const selectTool = key === "agent_id" && target?.canonical.role === "implementation";
+      const input = document.createElement(selectTool ? "select" : "input");
+      if (!selectTool) input.type = "text";
+      input.className = selectTool ? "settings-select" : "settings-input";
+      input.dataset.memberTuningField = key; input.setAttribute("aria-label", caption);
+      if (selectTool) {
+        input.addEventListener("change", () => {
+          if (!owns(input) || input.disabled || ![...input.options].some(option => option.value === input.value && !option.disabled)) return;
+          if (input.value !== host.memberTuningAgentId) for (const field of host.querySelectorAll('input[data-member-tuning-field]')) { field.memberComposing = false; field.value = ""; }
+          host.memberTuningOptions.onEdit({ agent_id: input.value });
+        });
+        label.append(text, input); launchHost.append(label); continue;
+      }
+      const list = document.createElement("datalist"); list.id = `member-tuning-${key}-${Math.random().toString(36).slice(2)}`;
+      input.setAttribute("list", list.id); label.append(text, input, list); launchHost.append(label);
+      const edit = composing => { if (owns(input) && !input.disabled) host.memberTuningOptions.onEdit({ [key]: input.value }, { composing }); };
+      input.addEventListener("compositionstart", () => { input.memberComposing = owns(input); if (input.memberComposing) edit(true); });
+      input.addEventListener("compositionend", () => { const completed = input.memberComposing && owns(input); input.memberComposing = false; if (completed) edit(false); });
+      input.addEventListener("input", event => edit(input.memberComposing || event.isComposing === true));
+    }
+    if (target?.canonical.role === "implementation") {
+      for (const [key, caption, choices] of [
+        ["runtime_target", "Runtime", [["", "Inherit launch runtime"], ["Host", "Host"], ["Docker", "Docker"]]],
+        ["skip_permissions", "Permissions", [["", "Inherit launch permissions"], ["false", "Require permission prompts"], ["true", "Skip permission prompts"]]],
+      ]) {
+        const label = document.createElement("label"); label.className = "settings-field";
+        const text = document.createElement("span"); text.textContent = caption;
+        const control = document.createElement("select"); control.className = "settings-select";
+        control.dataset.memberTuningField = key; control.setAttribute("aria-label", caption);
+        for (const [value, name] of choices) { const option = document.createElement("option"); option.value = value; option.textContent = name; control.append(option); }
+        control.addEventListener("change", () => {
+          if (!owns(control) || control.disabled || [...control.options].some(option => option.value === control.value && option.disabled)) return;
+          host.memberTuningOptions.onEdit({ [key]: control.value === "" ? null : key === "skip_permissions" ? control.value === "true" : control.value });
+        });
+        label.append(text, control); host.append(label);
+      }
+      const support = document.createElement("p"); support.className = "settings-help"; support.dataset.permissionsSupport = ""; support.setAttribute("role", "status"); host.append(support);
+      const scope = document.createElement("p"); scope.className = "settings-help";
+      scope.textContent = "Saved member settings apply to new saved-profile candidate launches. Launch Agent uses its current form and keeps its prompt-free permission policy; Auto uses tier settings. Current work, history and resumed conversations keep their recorded settings. Inherit uses each route's existing defaults; Docker availability is checked at launch."; host.append(scope);
+      const tools = document.createElement("button"); tools.type = "button"; tools.className = "wizard-button"; tools.dataset.action = "manage-tools"; tools.textContent = "Manage tools";
+      tools.title = "Open supported tools to manage installation and updates.";
+      tools.addEventListener("click", () => { if (owns(tools) && !tools.disabled) document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { target: "supported-agents" } })); });
+      host.append(tools);
+      const signIn = document.createElement("button"); signIn.type = "button"; signIn.className = "wizard-button"; signIn.dataset.action = "sign-in-shell"; signIn.textContent = "Open shell for sign-in";
+      signIn.title = "Open a shell and use your tool's native sign-in command. No command runs automatically.";
+      signIn.addEventListener("click", () => { if (owns(signIn) && !signIn.disabled) document.dispatchEvent(new document.defaultView.CustomEvent("op:command", { detail: { id: "spawn-shell" } })); });
+      host.append(signIn);
+    }
+    if (target?.canonical.role === "pm") {
+      const label = document.createElement("label"); label.className = "settings-field";
+      const caption = document.createElement("span"); caption.textContent = "Speed";
+      const speed = document.createElement("select"); speed.className = "settings-select";
+      speed.dataset.memberTuningField = "speed"; speed.setAttribute("aria-label", "Speed");
+      setControlExplanation(speed, "Ultrafast requires an eligible Codex account and supported model. Provider warnings explain unavailable service tiers. Changes apply after restart.", "pm-speed");
+      speed.addEventListener("change", () => { if (owns(speed) && !speed.disabled) host.memberTuningOptions.onEdit({ speed: speed.value }); });
+      label.append(caption, speed); host.append(label);
+    }
+    const modelUnavailable = document.createElement("p");
+    modelUnavailable.className = "settings-help";
+    modelUnavailable.setAttribute("role", "status");
+    modelUnavailable.dataset.modelUnavailable = "";
+    launchHost.append(modelUnavailable);
+    const catalogStatus = document.createElement("p");
+    catalogStatus.className = "settings-help"; catalogStatus.setAttribute("role", "status");
+    catalogStatus.dataset.modelCatalogStatus = ""; launchHost.append(catalogStatus);
+    const retryCatalog = document.createElement("button"); retryCatalog.type = "button"; retryCatalog.className = "wizard-button";
+    retryCatalog.textContent = "Retry model catalog"; retryCatalog.dataset.action = "retry-model-catalog";
+    retryCatalog.addEventListener("click", () => { if (owns(retryCatalog) && !retryCatalog.disabled) host.memberTuningOptions.onReloadCatalog?.(); });
+    launchHost.append(retryCatalog);
+    const revision = document.createElement("p"); revision.className = "settings-help"; revision.dataset.memberTuningRevision = ""; host.append(revision);
+    const status = document.createElement("p"); status.className = "settings-status"; status.dataset.memberTuningStatus = ""; status.setAttribute("role", "status"); host.append(status);
+    const retry = document.createElement("button"); retry.type = "button"; retry.className = "wizard-button"; retry.textContent = "Retry profile"; retry.dataset.action = "retry-tuning";
+    retry.addEventListener("click", () => { if (owns(retry) && !retry.disabled) host.memberTuningOptions.onRetry(); }); host.append(retry);
+    const reload = document.createElement("button"); reload.type = "button"; reload.className = "wizard-button"; reload.textContent = "Reload profile"; reload.dataset.action = "reload-tuning";
+    reload.addEventListener("click", () => { if (owns(reload) && !reload.disabled) host.memberTuningOptions.onReload?.(); }); host.append(reload);
+  }
+  host.memberTuningOptions = { onEdit, onRetry, onReload, onReloadCatalog };
+  host.memberTuningAgentId = target?.draft.agent_id;
+  const catalog = Array.isArray(choices) ? choices : choices?.agents || [];
+  const agentChoices = target?.canonical.role === "pm" && target.canonical.agent_options
+    ? target.canonical.agent_options.map(option => catalog.find(agent => agent.id === option.id) || option) : catalog;
+  const entry = agentChoices.find(agent => agent.id === target?.draft.agent_id);
+  const selectedModel = entry?.models?.find(model => model.value === target?.draft.model);
+  for (const input of host.querySelectorAll("input[data-member-tuning-field]")) {
+    const key = input.dataset.memberTuningField, value = target?.draft[key] ?? "";
+    if (!input.memberComposing && input.value !== value) input.value = value;
+    input.disabled = !target || !editable;
+    input.setAttribute("aria-invalid", String(!!target?.error && (!target.field || target.field === key)));
+    const suggestions = key === "agent_id" ? agentChoices.map(agent => agent.id)
+      : key === "model" ? [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]
+        : (selectedModel?.reasoning_options || entry?.reasoning_options || []).map(option => typeof option === "string" ? option : option.value);
+    const list = input.parentElement.querySelector("datalist"); list.replaceChildren();
+    for (const value of suggestions) {
+      const option = document.createElement("option"); option.value = value;
+      if (key === "model") option.label = entry?.models?.find(model => model.value === value)?.label || value;
+      list.append(option);
+    }
+  }
+  const tool = host.querySelector('select[data-member-tuning-field="agent_id"]');
+  if (tool) {
+    const current = target?.draft.agent_id || "";
+    tool.replaceChildren();
+    for (const agent of agentChoices) { const option = document.createElement("option"); option.value = agent.id; option.textContent = agent.name || agent.id; tool.append(option); }
+    if (!agentChoices.some(agent => agent.id === current)) {
+      const option = document.createElement("option"); option.value = current; option.textContent = `${current || "Tool"} · Catalog unavailable`; option.selected = true; option.disabled = true; tool.append(option);
+    }
+    const selectedTool = [...tool.options].find(option => option.value === current);
+    if (selectedTool) selectedTool.selected = true;
+    tool.disabled = !target || !editable || !agentChoices.length;
+    tool.setAttribute("aria-invalid", String(!!target?.error && (!target.field || target.field === "agent_id")));
+    for (const key of ["runtime_target", "skip_permissions"]) {
+      const control = host.querySelector(`[data-member-tuning-field="${key}"]`), value = target?.draft[key];
+      for (const option of control.options) option.disabled = key === "skip_permissions" && option.value === "true" && entry?.supports_skip_permissions !== true;
+      const selected = [...control.options].find(option => option.value === (value == null ? "" : String(value)));
+      if (selected) selected.selected = true;
+      control.disabled = !target || !editable;
+      control.setAttribute("aria-invalid", String(!!target?.error && (!target.field || target.field === key)));
+    }
+    const support = host.querySelector('[data-permissions-support]');
+    support.textContent = entry?.supports_skip_permissions === true ? "" : entry ? "This tool does not support skipping permission prompts. Use inherited settings or require prompts." : "Permission support is unavailable until the tool catalog loads. Inherited settings and required prompts remain available.";
+    support.hidden = !support.textContent;
+  }
+  const speed = host.querySelector('[data-member-tuning-field="speed"]');
+  if (speed) {
+    const agentId = target?.draft.agent_id;
+    speed.parentElement.hidden = !["codex", "claude"].includes(agentId);
+    speed.disabled = !target || !editable;
+    const selected = agentId === "codex" ? target?.draft.codex_speed || ""
+      : typeof target?.draft.fast_mode === "boolean" ? target.draft.fast_mode ? "fast" : "off" : "";
+    speed.replaceChildren();
+    for (const value of agentId === "codex" ? ["", "off", "fast", "ultrafast"] : ["", "off", "fast"]) {
+      const option = document.createElement("option"); option.value = value;
+      option.textContent = value === "" ? "Agent Settings default" : value === "ultrafast" ? "Ultrafast" : value === "fast" ? "Fast" : "Off";
+      option.selected = value === selected; speed.append(option);
+    }
+    speed.setAttribute("aria-invalid", String(!!target?.error && (!target.field || ["codex_speed", "fast_mode"].includes(target.field))));
+  }
+  const model = target?.draft.model;
+  const unlisted = Boolean(entry && (entry.id === "codex" || entry.models?.length) && model && !selectedModel);
+  const modelUnavailable = host.querySelector("[data-model-unavailable]");
+  modelUnavailable.textContent = unlisted
+    ? `Model ${model} is not listed in the current ${entry.name} catalog. Your value is kept and not replaced; an unlisted model may still be supported.`
+    : "";
+  modelUnavailable.hidden = !unlisted;
+  const catalogStatus = host.querySelector("[data-model-catalog-status]");
+  catalogStatus.textContent = entry?.model_catalog_warning || "";
+  catalogStatus.hidden = !catalogStatus.textContent;
+  const retryCatalog = host.querySelector('[data-action="retry-model-catalog"]');
+  retryCatalog.hidden = !catalogStatus.textContent || !onReloadCatalog;
+  retryCatalog.disabled = !onReloadCatalog;
+  host.querySelector("[data-member-tuning-revision]").textContent = target ? `Revision: ${target.canonical.revision}` : "Settings unavailable. Reload registered members.";
+  host.querySelector("[data-member-tuning-status]").textContent = !editable ? "Settings unavailable. Reload the current profile; your draft is retained." : target?.error || ({ saving: "Saving…", queued: "Saving…", saved: "Saved" }[target?.status] || "");
+  const retry = host.querySelector('[data-action="retry-tuning"]'); retry.hidden = !target?.blocked; retry.disabled = !editable || !!target?.composing || !!target?.pending;
+  host.querySelector('[data-action="reload-tuning"]').disabled = !onReload;
+}
+
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, send, availableMembers = null, choices = null } = options;
+  const { project, profiles, send, availableMembers = null, choices = null, tuningController = null, onReloadProfile = null } = options;
   const document = panel.ownerDocument;
+  for (const unsubscribe of panel.candidateTuningUnsubscribers || []) unsubscribe();
+  panel.candidateTuningUnsubscribers = [];
   panel.replaceChildren();
   panel.dataset.dirty = "false";
-  panel.oninput = () => {
-    panel.dataset.dirty = "true";
+  panel.oninput = event => {
+    if (!event.target.closest("[data-member-tuning-host]")) panel.dataset.dirty = "true";
   };
   const heading = document.createElement("h3");
   heading.className = "settings-section-heading";
@@ -513,6 +726,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     const id = String(agentId ?? "").trim().replace(/[A-Z]/g, character => character.toLowerCase());
     return providerAliases.get(id) || id;
   };
+  const implementationEligible = member => !member.is_pm && !member.pm_project_key && member.assignment?.role !== "pm";
   const rows = [];
   const setChoices = (input, options, value) => {
     input.replaceChildren();
@@ -552,17 +766,27 @@ export function renderAgentsSettingsPanel(panel, options) {
     });
     return input;
   };
-  const draft = () => rows.map(({ row, profile }) => {
-    const next = { ...profile };
+  const draft = (repair = false) => rows.map(({ row, profile, staleTool }) => {
+    const { model: _model, reasoning: _reasoning, ...next } = profile;
     for (const input of row.querySelectorAll("[data-profile-field]")) {
       const key = input.dataset.profileField;
+      if (key === "model" || key === "reasoning") continue;
       if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited) continue;
       next[key] = input.type === "checkbox" ? input.checked
         : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
           : input.value.trim() || null;
     }
+    // Issue #7729 AC-4: "Inherit" is a choice of its own, not a third place.
+    // The place the candidate last named stays saved under it.
+    next.runtime_inherit = next.runtime_target === "Inherit";
+    if (next.runtime_inherit) next.runtime_target = profile.runtime_target || "Host";
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === next.agent_member_id);
     if (member) next.agent_id = member.agent_id;
+    if (repair && staleTool) {
+      // Sparse writes otherwise inherit these settings from the old tool by member ID.
+      Object.assign(next, { model: null, reasoning: null, version: null, session_mode: "Normal", fast_mode: false, codex_speed: "off" });
+      if (!choices?.agents.find(tool => provider(tool.id) === provider(next.agent_id))?.supports_skip_permissions) next.skip_permissions = false;
+    }
     return next;
   });
   const submit = (next, input = null) => {
@@ -575,6 +799,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     panel.candidateDisabledControls = new Map();
     if (panel.candidateStructuralSave) {
       for (const control of panel.querySelectorAll("input, select, button")) {
+        if (control.closest("[data-member-tuning-host]")) continue;
         panel.candidateDisabledControls.set(control, control.disabled);
         control.disabled = true;
       }
@@ -608,10 +833,12 @@ export function renderAgentsSettingsPanel(panel, options) {
     legend.textContent = `${index + 1}. ${savedMember?.name || profile.agent_member_id || "Unavailable member"}`;
     row.appendChild(legend);
     panel.appendChild(row);
-    rows.push({ row, profile });
-    const memberChoices = (availableMembers || []).map(member => ({ value: member.member_id || member.agent_member_id,
-      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})${member.enabled ? "" : " · Resting"}` }));
-    if (!savedMember && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
+    const staleTool = savedMember?.agent_id && implementationEligible(savedMember)
+      && provider(savedMember.agent_id) !== provider(profile.agent_id);
+    rows.push({ row, profile, staleTool });
+    const memberChoices = (availableMembers || []).filter(implementationEligible).map(member => ({ value: member.member_id || member.agent_member_id,
+      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})` }));
+    if ((!savedMember || !implementationEligible(savedMember)) && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
     const agent = field(row, "Agent", "agent_member_id", profile.agent_member_id || "", "text", memberChoices);
     agent.disabled = availableMembers === null;
     const toolField = document.createElement("label"); toolField.className = "settings-field";
@@ -623,29 +850,38 @@ export function renderAgentsSettingsPanel(panel, options) {
     let previousTool = provider(profile.agent_id);
     const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(selectedMember()?.agent_id || profile.agent_id));
     const initial = capabilities();
-    let model = field(row, "Model", "model", profile.model ?? initial?.default_model ?? "", "text", []);
-    const initialModel = initial?.models.find(option => option.value === model.value);
-    const initialReasoning = initialModel ? initialModel.default_reasoning : initial?.default_reasoning;
-    const reasoning = field(row, "Reasoning", "reasoning", profile.reasoning ?? initialReasoning ?? "", "text", []);
+    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
+    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
+    // Issue #7729 AC-4 (SPEC #7007 item 197): where the candidate runs. Docker
+    // is offered only in a project that has a Docker setup; a saved Docker
+    // choice stays visible, and the launch falls back to the host.
+    const dockerAvailable = (choices?.docker_services || []).length > 0;
+    const runtime = field(row, "Runs on", "runtime_target", profile.runtime_inherit ? "Inherit" : profile.runtime_target || "Host", "text", [
+      { value: "Inherit", label: "Inherit (this project's last launch)" }, "Host", ...(dockerAvailable ? ["Docker"] : []),
+    ]);
     const docker = field(row, "Docker service", "docker_service", profile.docker_service ?? "", "text", [
       { value: "", label: choices?.default_docker_service ? `Auto (${choices.default_docker_service})` : "Auto" },
       ...(choices?.docker_services || []),
     ]);
-    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
-    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
-    const runtime = field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
+    const lifecycle = field(row, "Docker lifecycle", "docker_lifecycle_intent", profile.docker_lifecycle_intent || "Connect", "text", [
+      { value: "Connect", label: "Connect only" }, { value: "Start", label: "Start then launch" },
+      { value: "Restart", label: "Restart then launch" }, { value: "Recreate", label: "Recreate then launch" },
+      { value: "CreateAndStart", label: "Create and start then launch" },
+    ]);
+    const runtimeNote = document.createElement("p"); runtimeNote.className = "settings-help"; runtimeNote.dataset.profileRuntimeNote = "";
+    runtimeNote.setAttribute("role", "status"); row.append(runtimeNote);
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
-    // Issue #6933 AC-3: say so when the saved model left the tool's list; never swap it.
-    const modelUnavailable = document.createElement("p");
-    modelUnavailable.className = "settings-help";
-    modelUnavailable.setAttribute("role", "status");
-    modelUnavailable.dataset.modelUnavailable = "";
-    row.append(modelUnavailable);
-    const modelSuggestions = document.createElement("datalist");
-    modelSuggestions.id = `candidate-models-${Math.random().toString(36).slice(2)}`;
-    row.appendChild(modelSuggestions);
+    const tuning = document.createElement("section"); row.append(tuning);
+    const syncTuning = () => {
+      const memberId = agent.value, role = "implementation";
+      renderMemberTuningControls(tuning, { onReload: onReloadProfile, target: tuningController?.model.read().targets[`${role}:${memberId}`], choices,
+        onEdit: (patch, options) => tuningController?.editTuning(role, memberId, patch, options),
+        onRetry: () => tuningController?.retryTuning(role, memberId) });
+    };
+    panel.candidateTuningUnsubscribers ||= [];
+    if (tuningController) panel.candidateTuningUnsubscribers.push(tuningController.model.subscribeFrame(state => state, syncTuning));
     row.updateCandidateChoices = changed => {
       const entry = capabilities();
       const member = selectedMember();
@@ -670,55 +906,27 @@ export function renderAgentsSettingsPanel(panel, options) {
       toolValue.textContent = entry?.name || tool;
       memberStatus.textContent = availableMembers === null ? "Loading registered members…" : !member
         ? "Selected member is unavailable. Choose a registered member; no substitute will be launched."
-        : !member.enabled ? "Resting member. Future launches wait until this member is enabled." : "";
+        : !implementationEligible(member) ? "This member holds a Project Manager role and is unavailable for implementation launches." : "";
       memberStatus.hidden = !memberStatus.textContent;
       if (!changed || agentChanged) {
-        const value = agentChanged ? entry?.default_model ?? "" : model.value;
-        const freeText = Boolean(entry?.supports_model_input && !entry.models.length);
-        if (freeText !== (model.localName === "input")) {
-          const previous = model.closest("label");
-          model = field(row, "Model", "model", value, "text", freeText ? null : []);
-          previous.replaceWith(model.closest("label"));
-        }
-        if (freeText) model.value = value;
-        else setChoices(model, entry?.models || [], value);
-        modelSuggestions.replaceChildren();
-        for (const value of freeText ? entry?.model_suggestions || [] : []) {
-          const option = document.createElement("option");
-          option.value = value;
-          modelSuggestions.appendChild(option);
-        }
-        if (modelSuggestions.children.length) model.setAttribute("list", modelSuggestions.id);
-        else model.removeAttribute("list");
-        if (agentChanged) model.dataset.profileEdited = "true";
-        model.disabled = !entry || (!freeText && !entry.models.length);
         setChoices(mode, entry?.session_modes || ["Normal"], agentChanged ? "Normal" : mode.value);
         mode.disabled = !entry || entry.session_modes.length <= 1;
         if (agentChanged) fast.checked = false;
         if (agentChanged && !entry?.supports_skip_permissions) skip.checked = false;
       }
-      const selectedModel = entry?.models.find(option => option.value === model.value);
-      const unlisted = Boolean(entry && (entry.id === "codex" || entry.models.length)
-        && model.value && !selectedModel);
-      modelUnavailable.textContent = unlisted
-        ? `Saved model ${model.value} is no longer offered by ${entry.name}. It is kept as saved and not replaced; choose a listed model before launching.`
-        : "";
-      modelUnavailable.hidden = !unlisted;
-      const levels = selectedModel?.reasoning_options || entry?.reasoning_options || [];
-      const defaultReasoning = selectedModel ? selectedModel.default_reasoning : entry?.default_reasoning;
-      const level = agentChanged || changed === "model"
-        ? defaultReasoning ?? "" : reasoning.value;
-      if (agentChanged || changed === "model") reasoning.dataset.profileEdited = "true";
-      setChoices(reasoning, levels, level);
-      reasoning.disabled = levels.length === 0;
+      syncTuning();
       skip.disabled = !entry?.supports_skip_permissions;
       fast.disabled = !entry?.supports_fast_mode;
-      docker.disabled = runtime.value !== "Docker";
-      shell.disabled = runtime.value === "Docker" || !choices?.windows_shell_supported;
+      const onDocker = runtime.value === "Docker";
+      docker.disabled = lifecycle.disabled = !onDocker;
+      docker.closest("label").hidden = lifecycle.closest("label").hidden = !onDocker;
+      runtimeNote.textContent = runtime.value === "Inherit"
+        ? "Runs where this project's last launch ran. With no earlier launch, it runs on the host."
+        : onDocker && !dockerAvailable ? "This project has no Docker setup, so launches run on the host." : "";
+      runtimeNote.hidden = !runtimeNote.textContent;
+      shell.disabled = onDocker || !choices?.windows_shell_supported;
     };
     row.updateCandidateChoices();
-    if (profile.model == null) model.dataset.inheritedDefault = model.value;
-    if (profile.reasoning == null) reasoning.dataset.inheritedDefault = reasoning.value;
     for (const [direction, offset] of [["up", -1], ["down", 1]]) {
       const move = button(row, `Move ${direction} ${row.dataset.profileLabel}`, direction, () => {
         const next = draft();
@@ -730,12 +938,16 @@ export function renderAgentsSettingsPanel(panel, options) {
     const remove = button(row, `Remove ${row.dataset.profileLabel}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
     remove.disabled = profiles.length <= 1;
   }
+  if (rows.some(({ staleTool }) => staleTool)) {
+    const repair = button(panel, "Use registered profiles", "repair-candidates", () => submit(draft(true)));
+    poolHeading.after(repair);
+  }
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  const remaining = (availableMembers || []).filter(member => !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
+  const remaining = (availableMembers || []).filter(member => implementationEligible(member) && !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
   const candidate = field(add, "Add candidate", "new", "", "text", [{ value: "", label: "Select a registered member…" },
-    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})${member.enabled ? "" : " · Resting"}` }))]);
+    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})` }))]);
   const addButton = button(add, "Add candidate", "add-candidate", () => {
     const memberId = candidate.value.trim(), next = draft();
     const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === memberId);
@@ -790,6 +1002,10 @@ export function installSettingsOpenHandler(options) {
     const target = event?.detail?.section || event?.detail?.target || "system";
     const projectRoot = event?.detail?.project_root || activeProjectTab?.()?.project_root || "";
     const surfaceOwner = event?.detail?.surface_owner === "pm" ? "pm" : null;
+    if (target === "project-manager") {
+      (options.onOpenAgents || (() => focusOrSpawnPreset("agents")))();
+      return;
+    }
     if (target === "index") {
       focusOrSpawnPreset("index");
       return;
@@ -817,8 +1033,16 @@ export function createSettingsSurface({
   focusOrSpawnPreset,
   renderUsagePanel,
   getIndexStatus,
-  pmSettingsPanel,
+  onOpenAgents,
   rosterModel,
+  tuningController,
+  onReloadProfile,
+  renderProjectEnvironments = null,
+  renderPmEnvironments = null,
+  projectEnvironmentSetsModel = createUiStateStore({}),
+  // Issue #7728: the PM half of the project stop/start state.
+  projectAutonomyPmModel = createUiStateStore({ paused: null }),
+  createProjectAutonomyControl = null,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1011,9 +1235,27 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
+      function renderProjectEnvironmentSet(body, snapshots = projectEnvironmentSetsModel.read()) {
+        const event = snapshots[body.dataset.settingsProjectRoot];
+        const select = body.querySelector("[data-project-environment-set]");
+        if (!event || !select) return;
+        const names = event.names || [];
+        const options = [createNode("option", "", "None"), ...names.map(name => createNode("option", "", name))];
+        options[0].value = "";
+        select.replaceChildren(...options);
+        select.value = event.assigned || "";
+        select.disabled = Boolean(event.error && !names.length);
+        body.querySelector("[data-project-environment-set-status]").textContent =
+          event.error || "Applies to new agent sessions in this project.";
+      }
+      projectEnvironmentSetsModel.subscribe(state => state, state => {
+        for (const body of settingsWindowBodies) {
+          renderProjectEnvironmentSet(body, state);
+        }
+      });
       const hookDoctorModel = createUiStateStore({}, { scheduleFrame });
       let nextHookDoctorRequest = 0;
-      function requestHookDoctor(projectRoot, repair = false, recovering = false) {
+      function requestHookDoctor(projectRoot, repair = false, recovering = false, userHookChange = null) {
         if (!projectRoot || projectRoot !== activeProjectTab()?.project_root) return;
         const current = hookDoctorModel.read()[projectRoot];
         if (repair && hookRepairUnavailableReason(current)) return;
@@ -1023,10 +1265,14 @@ export function createSettingsSurface({
           report: null, error: null, requestId, pending: true, repairRequested: repair,
           lastRepairOutcome: repair ? "unknown" : current?.lastRepairOutcome ?? null,
         } }));
-        const result = send({ kind: "get_hook_doctor", request_id: requestId, repair });
-        if (repair && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
+        const result = send(userHookChange
+          ? { kind: "update_user_hooks", request_id: requestId, change: userHookChange }
+          : { kind: "get_hook_doctor", request_id: requestId, repair });
+        if ((repair || userHookChange) && result === "unavailable") hookDoctorModel.update(state => ({ ...state, [projectRoot]: {
           ...state[projectRoot], pending: false,
-          error: "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically.",
+          error: repair
+            ? "Repair could not be confirmed on this connection. Reconnect and refresh the audit; the repair will not be retried automatically."
+            : "The hook change could not be confirmed on this connection. Reconnect and refresh the audit; the change will not be retried automatically.",
         } }));
       }
       function applyHookDoctorEvent(event) {
@@ -1050,6 +1296,7 @@ export function createSettingsSurface({
           renderHookCenterPanel(panel, {
             projectRoot: root, state: state[root], available: Boolean(root && root === activeProjectTab()?.project_root),
             onRefresh: () => requestHookDoctor(root), onRepair: () => requestHookDoctor(root, true),
+            onChangeUserHook: change => requestHookDoctor(root, false, false, change),
           });
         }
       }
@@ -1089,8 +1336,10 @@ export function createSettingsSurface({
         const previous = renderedUpdateStatuses.get(panel);
         if (previous && previous.auto_apply_updates === state.auto_apply_updates
           && previous.auto_apply_updates_effective === state.auto_apply_updates_effective
+          && previous.last_apply_result === state.last_apply_result
+          && previous.last_apply_error === state.last_apply_error
           && previous.drains[root] === state.drains[root]) return;
-        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null });
+        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null }, send);
         renderedUpdateStatuses.set(panel, state);
       }
       // Preserve synchronous control reconciliation, including same-value save errors.
@@ -1117,17 +1366,40 @@ export function createSettingsSurface({
           drains: { ...state.drains, [event.project_root || ""]: event.status.update_drain },
         }));
       }
+      function applyUpdateApplyFailure(failure) {
+        if (!failure) return;
+        globalUpdateModel.update(state => ({ ...state,
+          last_apply_error: { ...failure, at: new Date().toISOString() } }));
+      }
       function projectSettingsSnapshot(body) {
         const root = body.dataset.settingsProjectRoot || "";
         return issueSettingsModel.read()[root] || {};
       }
+      // Issue #7728: one control per Settings window, re-rendered in place.
+      function projectAutonomyControl(body, status, dispatch) {
+        if (!createProjectAutonomyControl) return null;
+        body.projectAutonomyControl ??= createProjectAutonomyControl({
+          projectTitle: () => body.dataset.settingsProjectName || "",
+          send: running => body.projectAutonomyDispatch?.({ kind: "set_project_autonomy", running }),
+        });
+        body.projectAutonomyDispatch = dispatch;
+        const pmPaused = projectAutonomyPmModel.read().paused;
+        body.projectAutonomyControl.update(status ? {
+          monitor_enabled: status.enabled === true, pm_paused: pmPaused, active_agents: status.active_count ?? 0,
+        } : null);
+        return body.projectAutonomyControl;
+      }
+      projectAutonomyPmModel.subscribe(state => state.paused, () => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
       function renderProjectSettings(body) {
         const root = body.dataset.settingsProjectRoot || "";
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
-        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"]')];
         for (const control of launchControls) {
-          control.checked = current.status?.[control.dataset.action === "monitor-autonomous" ? "autonomous_mode" : "enabled"] === true;
+          control.checked = current.status?.autonomous_mode === true;
           control.dataset.confirmed = String(control.checked);
           control.disabled = !current.status;
         }
@@ -1158,6 +1430,16 @@ export function createSettingsSurface({
           }
           send(message);
         };
+        // Issue #7741: the project's available execution environments.
+        const environmentsPanel = body.querySelector("[data-settings-environments]");
+        if (environmentsPanel) renderProjectEnvironments?.(environmentsPanel, {
+          view: current.environments || null, error: current.environmentsError || null,
+          send: message => {
+            if (!root || activeProjectTab()?.project_root !== root) return;
+            issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], environmentsPending: true, environmentsError: null } }));
+            send(message);
+          },
+        });
         const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
@@ -1167,7 +1449,8 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, catalog: current.catalog, labelsPending: Array.isArray(current.labelsExpected), profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
-            availableMembers,
+            autonomyControl: section === "issues" ? projectAutonomyControl(body, current.status, dispatch) : null,
+            availableMembers, tuningController, onReloadProfile,
           });
         }
         focusedLaunchControl?.focus({ preventScroll: true });
@@ -1199,6 +1482,46 @@ export function createSettingsSurface({
             labelsRequestId: confirmed ? null : current.labelsRequestId,
           } };
         });
+      }
+      // Issue #7741: `execution_environments` carries the list of the project
+      // the reply was scoped to.
+      // Issue #7732: the Project Manager's own list is saved with this
+      // machine, so every reply carries it, with or without a project.
+      const pmEnvironmentsModel = createUiStateStore({ view: null, pending: false, error: null }, { scheduleFrame });
+      function renderPmEnvironmentsPanel(body, state = pmEnvironmentsModel.read()) {
+        const panel = body.querySelector("[data-settings-pm-environments]");
+        if (panel) renderPmEnvironments?.(panel, {
+          view: state.view, error: state.error,
+          send: message => {
+            pmEnvironmentsModel.update(current => ({ ...current, pending: true, error: null }));
+            send(message);
+          },
+        });
+      }
+      pmEnvironmentsModel.subscribe(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderPmEnvironmentsPanel(body, state);
+      });
+      function applyExecutionEnvironments(view) {
+        if (view) pmEnvironmentsModel.update(() => ({ view, pending: false, error: null }));
+        const root = view?.project?.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => ({ ...state, [root]: {
+          ...state[root], environments: view, environmentsPending: false, environmentsError: null,
+        } }));
+      }
+      // Only a save this window sent is answered here; other refusals belong
+      // to the Execution environments screen.
+      function applyExecutionEnvironmentError(event) {
+        if (pmEnvironmentsModel.read().pending) {
+          pmEnvironmentsModel.update(state => ({ ...state, pending: false, error: event.message }));
+          return;
+        }
+        const root = event.project_root;
+        if (!root) return;
+        issueSettingsModel.update(state => state[root]?.environmentsPending ? { ...state, [root]: {
+          ...state[root], environmentsPending: false, environmentsError: event.message,
+        } } : state);
       }
       function applyIssueMonitorProfiles(event) {
         const root = event.project_root;
@@ -1334,10 +1657,14 @@ export function createSettingsSurface({
 
       function requestSettingsSnapshots(recovering = false) {
         if (activeProjectTab()?.project_root) {
+          send({ kind: "get_project_environment_set" });
           send({ kind: "list_issue_monitor" });
           send({ kind: "get_repository_labels", refresh: false });
           send({ kind: "get_issue_monitor_profiles" });
+          send({ kind: "get_execution_environments" });
           send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+        } else {
+          send({ kind: "get_execution_environments" });
         }
         send({ kind: "list_supported_agents" });
         send({ kind: "get_system_settings" });
@@ -1393,11 +1720,22 @@ export function createSettingsSurface({
         return el;
       }
 
+      function disposeSettingsBody(body) {
+        if (!body) return;
+        body.settingsExplanations?.dispose();
+        body.projectAutonomyControl?.unmount?.();
+        body.projectAutonomyControl = null;
+        for (const panel of body.querySelectorAll("[data-settings-candidates]")) {
+          for (const unsubscribe of panel.candidateTuningUnsubscribers || []) unsubscribe();
+          panel.candidateTuningUnsubscribers = [];
+        }
+        settingsWindowBodies.delete(body);
+      }
+
       function purgeDetachedSettingsBodies() {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
-            body.settingsExplanations?.dispose();
-            settingsWindowBodies.delete(body);
+            disposeSettingsBody(body);
           }
         }
       }
@@ -1410,6 +1748,7 @@ export function createSettingsSurface({
         // Sweep detached bodies up-front so repeated open/close cycles do
         // not accumulate references.
         purgeDetachedSettingsBodies();
+        disposeSettingsBody(body);
         while (body.firstChild) body.removeChild(body.firstChild);
         const project = activeProjectTab();
         body.dataset.settingsSection = "system";
@@ -1419,7 +1758,6 @@ export function createSettingsSurface({
         body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
         const root = createDiv("settings-root");
-        body.settingsExplanations?.dispose();
         body.settingsExplanations = bindControlExplanations({ document, root, id: `settings-control-explanation-${windowData.id}` });
 
         const toolbar = document.createElement("header");
@@ -1440,14 +1778,6 @@ export function createSettingsSurface({
           buildSettingsTab("supported-agents", "Supported Agents", false, windowData.id),
         );
         tabs.appendChild(
-          buildSettingsTab(
-            "project-manager",
-            "Project Manager",
-            false,
-            windowData.id,
-          ),
-        );
-        tabs.appendChild(
           buildSettingsTab("custom-agents", "Custom Agents", false, windowData.id),
         );
         // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends tab is the
@@ -1464,8 +1794,6 @@ export function createSettingsSurface({
         tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
         tabs.appendChild(buildSettingsTab("issues", "Issues execution settings", false, windowData.id));
         tabs.appendChild(buildSettingsTab("hooks", "Hook Center", false, windowData.id));
-        // PM settings are also project-owned; keep all project tabs together.
-        tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
         toolbar.appendChild(heading);
 
@@ -1495,6 +1823,35 @@ export function createSettingsSurface({
         updateStatus.setAttribute("role", "status");
         updateSection.appendChild(updateStatus);
         panelSystem.appendChild(updateSection);
+        // Issue #7646: members, their order and deletion live in the agent
+        // ledger. Settings only links there.
+        const ledgerSection = createDiv("settings-section");
+        ledgerSection.appendChild(createNode("p", "settings-help", "Agent members, their order and deletion are managed in the agent ledger."));
+        const ledgerLink = createNode("button", "wizard-button", "Open agent ledger");
+        ledgerLink.type = "button";
+        ledgerLink.dataset.action = "open-agent-ledger";
+        ledgerLink.addEventListener("click", () => document.dispatchEvent(new document.defaultView.CustomEvent("agents:open")));
+        ledgerSection.appendChild(ledgerLink);
+        panelSystem.appendChild(ledgerSection);
+        // Issue #7732: the Project Manager's execution environments.
+        const pmEnvironments = createDiv();
+        pmEnvironments.dataset.settingsPmEnvironments = "";
+        panelSystem.appendChild(pmEnvironments);
+        // Issue #7731: every step of the first-run setup stays reachable
+        // from here. The setup lives on the Hub page.
+        const setupSection = createDiv("settings-section");
+        setupSection.dataset.firstRunSetupReview = "";
+        setupSection.appendChild(createNode("h4", "settings-section-heading", "Review first-run setup"));
+        setupSection.appendChild(createNode("p", "settings-help", "Open any step of the setup again. It shows this machine's current state."));
+        const setupLinks = createDiv("settings-link-row");
+        for (const { step, label } of SETUP_REVIEW_STEPS) {
+          const link = createNode("a", "wizard-button", label);
+          link.href = firstRunSetupUrlPath(step);
+          link.dataset.setupStep = step;
+          setupLinks.appendChild(link);
+        }
+        setupSection.appendChild(setupLinks);
+        panelSystem.appendChild(setupSection);
         const systemContent = createDiv();
         systemContent.id = `${panelSystem.id}-content`;
         systemContent.dataset.systemSettingsContent = "";
@@ -1531,12 +1888,6 @@ export function createSettingsSurface({
 
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelSupportedAgents);
-        mountProjectManagerSettingsPanel(
-          document,
-          bodyEl,
-          pmSettingsPanel,
-          windowData.id,
-        );
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
@@ -1555,6 +1906,30 @@ export function createSettingsSurface({
         const controls = createDiv();
         controls.dataset.settingsIssuesControls = "";
         panelIssues.appendChild(controls);
+        if (project?.project_root) {
+          const environmentSet = createNode("fieldset", "settings-section");
+          environmentSet.appendChild(createNode("legend", "", "Environment variables"));
+          const field = createNode("label", "settings-field");
+          field.appendChild(createNode("span", "", "Environment variable set"));
+          const select = createNode("select", "settings-select");
+          select.dataset.projectEnvironmentSet = "";
+          select.disabled = true;
+          field.appendChild(select);
+          environmentSet.appendChild(field);
+          const status = createNode("p", "settings-help", "Loading environment variable sets…");
+          status.setAttribute("role", "status");
+          status.dataset.projectEnvironmentSetStatus = "";
+          environmentSet.appendChild(status);
+          select.addEventListener("change", () => {
+            if (activeProjectTab()?.project_root !== project.project_root) return;
+            select.disabled = true;
+            send({ kind: "set_project_environment_set", name: select.value || null });
+          });
+          panelIssues.appendChild(environmentSet);
+        }
+        const environments = createDiv();
+        environments.dataset.settingsEnvironments = "";
+        panelIssues.appendChild(environments);
         const candidates = createDiv();
         candidates.dataset.settingsCandidates = "";
         panelIssues.appendChild(candidates);
@@ -1586,6 +1961,9 @@ export function createSettingsSurface({
         settingsWindowBodies.add(body);
         body.addEventListener("settings:section-changed", event => {
           if (event.detail.section === "hooks") requestHookDoctor(body.dataset.settingsProjectRoot);
+          if (event.detail.section === "issues" && body.dataset.settingsProjectRoot) {
+            send({ kind: "get_project_environment_set" });
+          }
         });
         renderHookCenterPanels();
         renderUpdateStatus(body, globalUpdateModel.read());
@@ -1594,6 +1972,7 @@ export function createSettingsSurface({
           const candidates = event.target.closest?.("[data-settings-candidates]");
           if (candidates && event.relatedTarget?.closest?.("[data-settings-candidates]") === candidates) return;
           queueMicrotask(() => {
+            if (!body.isConnected || !settingsWindowBodies.has(body)) return;
             if (body.dataset.issuesRenderDeferred === "true") {
               delete body.dataset.issuesRenderDeferred;
               renderProjectSettings(body);
@@ -1601,6 +1980,8 @@ export function createSettingsSurface({
           });
         });
         renderProjectSettings(body);
+        renderProjectEnvironmentSet(body);
+        renderPmEnvironmentsPanel(body);
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
@@ -1699,7 +2080,7 @@ export function createSettingsSurface({
       function renderAgentBackendsPanelInAllSettingsWindows(state = agentBackendsModel.read()) {
         for (const settingsBody of Array.from(settingsWindowBodies)) {
           if (!settingsBody.isConnected) {
-            settingsWindowBodies.delete(settingsBody);
+            disposeSettingsBody(settingsBody);
             continue;
           }
           const panel = settingsBody.querySelector(
@@ -1712,7 +2093,7 @@ export function createSettingsSurface({
       function renderIndexPanelInAllSettingsWindows() {
         for (const settingsBody of Array.from(settingsWindowBodies)) {
           if (!settingsBody.isConnected) {
-            settingsWindowBodies.delete(settingsBody);
+            disposeSettingsBody(settingsBody);
             continue;
           }
           const panel = settingsBody.querySelector(
@@ -1732,6 +2113,7 @@ export function createSettingsSurface({
         document,
         send,
         settingsWindowBodies,
+        onOpenAgents,
         focusOrSpawnPreset,
         activeProjectTab,
         setPendingTarget: (target, surfaceOwner) => {
@@ -2561,7 +2943,7 @@ export function createSettingsSurface({
         let deferred;
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
-            settingsWindowBodies.delete(body);
+            disposeSettingsBody(body);
             continue;
           }
           const panel = body.querySelector("[data-system-settings-content]");
@@ -2599,7 +2981,7 @@ export function createSettingsSurface({
       function renderSettingsAgentList(state = customAgentsModel.read()) {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
-            settingsWindowBodies.delete(body);
+            disposeSettingsBody(body);
             continue;
           }
           const scroll = body.querySelector("[data-role='settings-scroll']");
@@ -2798,9 +3180,12 @@ export function createSettingsSurface({
         hookDoctorModel,
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
+        applyUpdateApplyFailure,
         applyIssueSettingsStatus,
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,
+        applyExecutionEnvironments,
+        applyExecutionEnvironmentError,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
@@ -2821,6 +3206,7 @@ export function createSettingsSurface({
         resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
+        disposeSettingsBody,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,

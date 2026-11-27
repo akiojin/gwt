@@ -30,6 +30,8 @@ test.beforeEach(async ({ page }, info) => {
     inboxFirst: info.title.startsWith("Issue #5287"),
     includeAgent: info.title.startsWith("AC-M1/M2:") || info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
+    includeTheme: info.title.startsWith("Issue #7645"),
+    holdMonitorStatus: info.title.startsWith("Issue #7988"),
   });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
@@ -45,6 +47,204 @@ const column = (page: Page, phase: string) => page.locator(`[data-queue-column="
 const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-issue-number="${number}"]`);
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
+
+test.describe("Issues touch navigation", () => {
+  test.use({ hasTouch: true });
+  test("Issues mode and preview tabs are 44px tap targets on a phone", async ({ page }, info) => {
+    const root = page.locator(".issue-bridge-root");
+    const detail = root.locator(".knowledge-detail-pane");
+    // The async detail reply can replace the preview tabs. Select and measure
+    // in a single browser task so the measurements refer to the current DOM.
+    const controlSizes = () => page.evaluate(() =>
+      Array.from(document.querySelectorAll(".issue-bridge-root .knowledge-state-filter button"))
+        .filter(node => node.checkVisibility())
+        .map(node => {
+          const { width, height, left, right } = node.getBoundingClientRect();
+          return { label: node.textContent, width, height, left, right };
+        }));
+    const controls = root.locator(".knowledge-state-filter button:visible");
+    const heights = async () => (await controlSizes()).map(size => size.height);
+    await row(page, 1).locator(".knowledge-row-select").click();
+    await expect(detail).toContainText("Description for #1");
+    await expect(controls).toHaveCount(5);
+    const desktopHeights = await heights();
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await heights(), "601px retains desktop control heights").toEqual(desktopHeights);
+    await detail.locator('[data-action="close-issue-preview"]').tap();
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await root.locator('[data-issue-view="split"]').tap();
+      await expect(root).toHaveAttribute("data-view-mode", "split");
+      await expect(root.locator('[data-issue-view="split"]')).toHaveAttribute("aria-pressed", "true");
+      await root.locator('[data-issue-view="list"]').tap();
+      await expect(root).toHaveAttribute("data-view-mode", "list");
+      await row(page, 1).locator(".knowledge-row-select").tap();
+      await expect(detail).toContainText("Description for #1");
+      await expect(controls).toHaveCount(5);
+      const main = (await root.locator(".workspace-toolbar-main").boundingBox())!;
+      const actions = (await root.locator(".workspace-toolbar-actions").boundingBox())!;
+      expect(actions.y, "toolbar actions do not cover the mode tabs").toBeGreaterThanOrEqual(main.y + main.height);
+      expect(await root.locator(".issue-filter-hint").evaluate(node => node.scrollWidth <= node.clientWidth),
+        "the existing view hint fits its column").toBe(true);
+      const sizes = await controlSizes();
+      expect(sizes).toHaveLength(5);
+      for (const size of sizes) {
+        expect(size.width, `${size.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(size.height, `${size.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(size.left, `${size.label} left edge at ${width}px`).toBeGreaterThanOrEqual(0);
+        expect(size.right, `${size.label} right edge at ${width}px`).toBeLessThanOrEqual(width);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await detail.locator('[data-issue-detail-view="output"]').tap();
+      await expect(detail.locator('[data-issue-detail-view="output"]')).toHaveAttribute("aria-pressed", "true");
+      await expect(detail).toContainText("No agent is running for this issue.");
+      await detail.locator('[data-issue-detail-view="issue"]').tap();
+      await expect(detail.locator('[data-issue-detail-view="issue"]')).toHaveAttribute("aria-pressed", "true");
+      await expect(detail).toContainText("Description for #1");
+      await page.screenshot({ path: info.outputPath(`issues-tabs-${width}.png`) });
+      await detail.locator('[data-action="close-issue-preview"]').tap();
+      await expect(detail).toBeHidden();
+    }
+  });
+
+  // SPEC #6476 T-005q: the monitor row, search and New/Refresh measured
+  // 30-42px tall on a phone. Below 601px they are 44px tap targets.
+  test("Issues monitor controls, search and actions are 44px tap targets on a phone", async ({ page }, info) => {
+    const root = page.locator(".issue-bridge-root");
+    const controls = root.locator(".knowledge-monitor-controls :is(button, input):visible, .knowledge-search:visible, .workspace-toolbar-actions button:visible");
+    const sizes = () => controls.evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { label: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30) || node.className, width: rect.width, height: rect.height };
+    }));
+    const minHeights = () => controls.evaluateAll(nodes => nodes.map(node => getComputedStyle(node).minHeight));
+    expect((await sizes()).some(control => control.height < 44), "the fixture starts with desktop-sized controls").toBe(true);
+    const desktop = await minHeights();
+    expect(desktop).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await minHeights(), "601px retains desktop control sizes").toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const measured = await sizes();
+      expect(measured.map(control => control.label)).toEqual(expect.arrayContaining(["Auto-refill", "Autonomous mode", "Agent limit", "Issues settings", "Refresh cached work items"]));
+      // Issue #7728: the Start/Stop button left with the project stop/start.
+      expect(measured).toHaveLength(8);
+      for (const control of measured) {
+        expect(control.width, `${control.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.height, `${control.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await page.screenshot({ path: info.outputPath(`issues-controls-${width}.png`) });
+    }
+    const toggle = root.getByRole("switch", { name: "Auto-refill", exact: true });
+    await toggle.scrollIntoViewIfNeeded();
+    await toggle.tap();
+    await expect.poll(() => messages(page)).toEqual([expect.objectContaining({ kind: "set_issue_monitor_auto_refill", enabled: true })]);
+  });
+
+  // SPEC #6476 T-005ic: card controls measured 13-36px on a phone (selection
+  // 19px with a 13px box, card 35px, actions 36px, menu 28px, items 31px).
+  test("Issues card selection, actions and menu are 44px tap targets on a phone", async ({ page }, info) => {
+    const board = page.locator(".issue-queue-board");
+    const cardControls = ".issue-queue-select:visible, .knowledge-row-select:visible, .knowledge-row-actions button:visible, .knowledge-row-menu-trigger:visible, .knowledge-row-menu-item:visible";
+    const sizes = () => board.locator(cardControls).evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { name: `${node.className.split(" ").at(-1)} ${node.getAttribute("data-action") ?? ""}`.trim(), width: rect.width, height: rect.height };
+    }));
+    const minHeights = () => board.locator(cardControls).evaluateAll(nodes => nodes.map(node =>
+      `${node.className.split(" ").at(-1)} ${node.getAttribute("data-action") ?? ""} ${getComputedStyle(node).minHeight}`));
+    const menu = row(page, 3).locator(".knowledge-row-menu");
+    await menu.locator("summary").click();
+    await expect(menu).toHaveAttribute("open", "");
+    const desktop = await minHeights();
+    expect(desktop.length, "desktop card controls, including open menu items, are present").toBeGreaterThan(5);
+    expect(desktop.join("\n")).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await minHeights(), "601px retains each desktop card control size").toEqual(desktop);
+    await menu.locator("summary").click();
+    await expect(menu).not.toHaveAttribute("open", "");
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const card = row(page, 3);
+      await card.scrollIntoViewIfNeeded();
+      await card.locator(".knowledge-row-menu-trigger").tap();
+      await expect(card.locator(".knowledge-row-menu")).toHaveAttribute("open", "");
+      const measured = await sizes();
+      expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(
+        ["issue-queue-select", "knowledge-row-select", "knowledge-row-action queue-push", "knowledge-row-menu-trigger", "knowledge-row-menu-item move-down"]));
+      for (const control of measured) {
+        expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await page.screenshot({ path: info.outputPath(`issues-cards-${width}.png`) });
+      await card.locator(".knowledge-row-menu-trigger").tap();
+      await expect(card.locator(".knowledge-row-menu")).not.toHaveAttribute("open", "");
+      const select = card.locator(".issue-queue-select");
+      const box = (await select.boundingBox())!;
+      // Tap the label's enlarged lower-right area, away from the 13px box itself.
+      await select.tap({ position: { x: box.width - 4, y: box.height - 4 } });
+      await expect(select.locator("input")).toBeChecked();
+      await select.locator("input").uncheck();
+    }
+  });
+});
+
+test("Issue #6994 merged work awaits measurement in Backlog with an explicit requeue action", async ({ page }) => {
+  const reason = "Waiting for one day of production observations: AC-4";
+  await page.evaluate(reason => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 6994, title: "Merged work awaiting production observations",
+      state: "open", labels: [], related_work_refs: [] }]);
+    fixture.__queueConfirm([6994]);
+    fixture.__queueInbox([{ issue: { number: 6994 }, state: "awaiting_measurement", exclusion_reason: reason }]);
+  }, reason);
+  const waiting = column(page, "backlog").locator('[data-issue-number="6994"]');
+  await expect(waiting).toBeVisible();
+  const badge = waiting.locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Awaiting measurement");
+  await expect(badge).toHaveAttribute("data-issue-explanation", /Only measurement evidence remains/);
+  await expect(waiting).toContainText(reason);
+  await expect(waiting).not.toContainText(/Needs human|Agent failed/);
+  await expect(column(page, "queued").locator('[data-issue-number="6994"]')).toHaveCount(0);
+  await waiting.locator('[data-action="requeue-issue"]').click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([
+    { kind: "issue_monitor_requeue", issue_number: 6994 },
+  ]);
+});
+
+test("Issue #7536 merged work awaits external verification without taking attention or an active slot", async ({ page }) => {
+  const reason = "Only release, main or another host verification remains: AC-4";
+  await page.evaluate(reason => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 7536, title: "Merged work awaiting release verification",
+      state: "open", labels: [], related_work_refs: [] }]);
+    fixture.__queueConfirm([7536], { state: "idle", active_count: 0, max_active_agents: 2,
+      autonomous_issues: [{ issue_number: 7536, phase: "implementing", needs_human: false,
+        review_dispatch_hold: { reason: "Old dispatch hold" }, steering: { reason: "Old steering request" } }] });
+    fixture.__queueInbox([{ issue: { number: 7536 }, state: "awaiting_verification", exclusion_reason: reason }]);
+  }, reason);
+  const waiting = column(page, "backlog").locator('[data-issue-number="7536"]');
+  await expect(waiting).toBeVisible();
+  const badge = waiting.locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Awaiting verification");
+  await expect(badge).toHaveAttribute("data-issue-explanation", /Only release, main or another host verification remains/);
+  await expect(waiting).toContainText(reason);
+  await expect(waiting).not.toContainText(/Needs human|Agent failed|Old dispatch hold|Old steering request/);
+  await expect(page.locator(".knowledge-monitor-pill")).toHaveAttribute("title", /Awaiting attention 0/);
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
+  await expect(column(page, "queued").locator('[data-issue-number="7536"]')).toHaveCount(0);
+  await waiting.locator('[data-action="requeue-issue"]').click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([
+    { kind: "issue_monitor_requeue", issue_number: 7536 },
+  ]);
+});
 
 test("Issue #6880 artifact diagnostics recover to queued without a requeue request", async ({ page }, info) => {
   const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6880_PROJECTION;
@@ -275,6 +475,9 @@ test("Issue #5400 unchanged entry revisions retain the list and current detail",
 });
 
 test("Issue #5401 replays retain focus and only changed Issue keys replace rows", async ({ page }, info) => {
+  // The initial census moves Issue 5 independently of the entries response.
+  // Finish that move before counting mutations caused by entry replays.
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
   const select = row(page, 2).locator(".knowledge-row-select");
   await select.focus();
   await page.evaluate(() => {
@@ -512,6 +715,50 @@ test("Issue #5396 lazy preview retains DOM across unchanged list and detail repl
   await expect(detail.locator(".knowledge-detail-title")).toHaveText("Refreshed issue");
 });
 
+// Issue #7728 AC-1/AC-2: Settings stops and starts the project through the
+// same confirmation and the same operation as the Hub project list.
+test("Issue #7728 Settings stops and starts the project through the shared confirmation", async ({ page }, info) => {
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  const pm = (paused: boolean) => ({ kind: "pm_status", project_key: new URL(page.url()).pathname.split("/").filter(Boolean).at(-1),
+    available: true, paused, auto_start: true, configured_agent_id: "claude", loop_interval_secs: 60, is_running: true });
+  const sent = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) => message.kind === "set_project_autonomy"));
+  await page.locator('.issue-bridge-root [data-action="monitor-settings"]').click();
+  await expect(settings).toBeVisible();
+  const controls = settings.locator("[data-settings-issues-controls]");
+  const project = controls.locator('[data-settings-launch-action="project-autonomy"]');
+  const state = project.locator("[data-project-autonomy-state]");
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toHaveCount(0);
+  await page.evaluate(event => { (window as any).__queueStatus({ enabled: true, active_count: 1 }); (window as any).__queueEvent(event); }, pm(false));
+  await expect(state).toHaveText("Running");
+
+  const dialog = page.getByRole("dialog", { name: "Stop this project?" });
+  await project.getByRole("button", { name: "Stop…" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("New assignments and the Project Manager patrol stop now");
+  await expect(dialog).toContainText("A stop cannot be cancelled");
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  const path = info.outputPath(`project-stop-settings-${info.project.name}.png`);
+  await page.screenshot({ path });
+  await info.attach(`project-stop-settings-${info.project.name}`, { path, contentType: "image/png" });
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  expect(await sent()).toEqual([]);
+  await project.getByRole("button", { name: "Stop…" }).click();
+  await dialog.getByRole("button", { name: "Stop project" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await sent()).toEqual([{ kind: "set_project_autonomy", running: false }]);
+
+  // Stop pending is one-way; the project settles as Stopped once agents finish.
+  await page.evaluate(event => { (window as any).__queueStatus({ enabled: false, active_count: 1 }); (window as any).__queueEvent(event); }, pm(true));
+  await expect(state).toHaveText("Stop pending · 1 agent finishing");
+  await expect(project.getByRole("button")).toHaveCount(0);
+  await page.evaluate(() => (window as any).__queueStatus({ enabled: false, active_count: 0 }));
+  await expect(state).toHaveText("Stopped");
+  await project.getByRole("button", { name: "Start" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect((await sent()).at(-1)).toEqual({ kind: "set_project_autonomy", running: true });
+});
+
 test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280px and 400px", async ({ page }, info) => {
   const issues = page.locator('.workspace-window[data-preset="issue"]');
   const root = issues.locator(".issue-bridge-root");
@@ -555,7 +802,8 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
     await expect(controls.getByLabel(name, { exact: true })).toHaveCount(0);
   }
   await expect(controls.getByLabel("Autonomous", { exact: true })).toBeVisible();
-  await expect(controls.getByLabel("Monitoring", { exact: true })).toBeVisible();
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toHaveCount(0);
+  await expect(controls.locator('[data-settings-launch-action="project-autonomy"]')).toBeVisible();
   await expect(settings.locator('[data-settings-panel="system"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
   await expect(settings.locator('[data-settings-panel="issues"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
@@ -771,7 +1019,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0 · 0 issues · PM 0");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle Q1 A0/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle · 1 queued · 0 of 2 active");
   await expect(row(page, 42).locator(".knowledge-row-badge")).toHaveText("Needs human");
   await expect(row(page, 42).locator('[data-key="reason"]')).toHaveText(reason);
   await row(page, 42).locator(".knowledge-row-select").click();
@@ -794,7 +1042,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(column(page, "active").locator('[data-issue-number="44"]')).toBeVisible();
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
-  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Running · 1 queued · 1 of 2 active");
 });
 
 test("Issue #6141 closed issues follow live sessions and explain cleanup, counts and errors", async ({ page }) => {
@@ -858,6 +1106,25 @@ test("Issue #6141 closed issues follow live sessions and explain cleanup, counts
   await expect(popup).toBeVisible();
   await expect(popup).not.toContainText(cause);
   await expect(popup).toContainText(/no.*(?:cause|detail|reason)|not.*reported/i);
+
+  // Issue #7507: a delivered slice can release its execution while the parent
+  // SPEC remains open. The operator stop must not ask for a human decision.
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueAgentState("stopped");
+    fixture.__queueSetEntries([{ number: 5, title: "Open SPEC with a delivered slice", state: "open", labels: [] }]);
+    fixture.__queueInbox([{ issue: { number: 5, state: "open" }, state: "released" }]);
+  });
+  await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
+  await expect(activeMetric).toHaveText("Active 0 · 0 issues · PM 0");
+  await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText("Released");
+  await expect(row(page, 5).locator('[data-key="closed"]')).toHaveCount(0);
+  await expect(row(page, 5)).not.toContainText(/Needs human|Session cleanup pending/);
+  await row(page, 5).locator(".knowledge-row-badge").hover();
+  await expect(popup).toContainText("confirmed delivery");
+  await expect(popup).toContainText("GitHub issue may remain open");
 });
 
 test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
@@ -955,7 +1222,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
   await expect(status.locator('[data-metric="capacity"]')).toHaveText("1 of 3");
   await expect(status.locator('[data-metric="backlog"]')).toHaveText("7");
   await expect(status.locator('[data-metric="last-scan"]')).toHaveText("00:00:00 UTC");
-  await expect(status.locator('[data-metric="verification"]')).toHaveText("Not reported");
+  await expect(status.locator('[data-metric="verification"]')).toHaveText("Unavailable");
   const boxes=await Promise.all([status,controls,filter].map(node=>node.boundingBox()));
   expect(boxes[0]!.y+boxes[0]!.height).toBeLessThanOrEqual(boxes[1]!.y);
   expect(boxes[1]!.y+boxes[1]!.height).toBeLessThanOrEqual(boxes[2]!.y);
@@ -1060,6 +1327,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
   await page.keyboard.press("Tab");
+  const verification = page.locator('[data-metric="verification"]');
+  await expect(verification).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveText("Host verification capacity is unavailable.");
+  await expect(verification).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await page.keyboard.press("Tab");
   const refill = page.getByRole("switch", { name: "Auto-refill", exact: true });
   await expect(refill).toBeFocused();
   await expect(popup).toBeVisible();
@@ -1135,7 +1408,7 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await page.mouse.move(1590, 1090);
   for (const selector of [
     '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
-    '[data-action="monitor-settings"]', '[data-action="monitor-toggle"]',
+    '[data-action="monitor-settings"]',
     '[data-action="monitor-autonomous"]',
   ]) {
     const target = page.locator(selector);
@@ -1469,6 +1742,33 @@ test("card selection keeps issue body, acceptance and provenance beside switchab
   await expect(page.locator(".issue-queue-board")).toBeVisible();
 });
 
+test("Issue #7645 shows delayed theme progress and edits issue subtasks", async ({ page }) => {
+  const detail = page.locator(".knowledge-detail-pane");
+  await row(page, 3).locator(".knowledge-row-select").click();
+  const parent = detail.getByRole("link", { name: "Project theme (#70)" });
+  await expect(parent).toHaveCount(0);
+  const title = detail.getByLabel("Subtask title");
+  await title.fill("Verify the change");
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__queueShowTheme)).toBe("function");
+  await page.evaluate(() => (window as any).__queueShowTheme());
+  await expect(row(page, 3)).toContainText("In theme Project theme");
+  await expect(parent).toHaveAttribute("href", "https://github.com/example/repo/issues/70");
+  const theme = detail.getByRole("progressbar", { name: "Theme progress done" });
+  await expect(theme).toHaveAttribute("aria-valuenow", "1");
+  await expect(theme).toHaveAttribute("aria-valuemax", "4");
+  await expect(title).toHaveValue("Verify the change");
+  await expect(title).toBeFocused();
+  await detail.getByRole("button", { name: "Add subtask" }).click();
+  await expect(detail.getByText("Verify the change", { exact: true })).toBeVisible();
+  const progress = detail.getByRole("progressbar", { name: "Subtasks done" });
+  await expect(progress).toHaveAttribute("aria-valuemax", "2");
+  await expect(progress).toHaveAttribute("aria-valuenow", "1");
+  await expect(title).toHaveValue("");
+  await detail.getByRole("button", { name: "Remove subtask Verify the change" }).click();
+  await expect(detail.getByText("Verify the change", { exact: true })).toHaveCount(0);
+  await expect(progress).toHaveAttribute("aria-valuemax", "1");
+});
+
 test("T-F2: tier raise is per-Issue, server-confirmed and retained beside body and Output", async ({page}) => {
   const facts = { issue_number: 3, tier_count: 3, next_minimum_tier: 0,
     next_launch: { tier: 1, agent_id: "claude", model: "sonnet", reasoning: "medium" } };
@@ -1535,7 +1835,7 @@ test("T-F2: exact running profile stays distinct from the next override in both 
 
 test("urgent priority, cap fallback and PM demotion preserve assignment provenance", async ({page}) => {
   await confirm(page, [3, 4, 1], { terminal_queue: [
-    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
+    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
     {number: 4, queued_by: "auto-refill", priority: "normal", priority_reason: "urgent_limit_reached"},
     {number: 1, queued_by: "operator", priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z"},
   ]});
@@ -1681,6 +1981,7 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   const controls = page.getByRole("group", {name:"Issues controls",exact:true});
   const toggle=controls.getByRole("switch",{name:"Auto-refill",exact:true});
   await confirm(page,[3,4],{terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:3});
+  await expect(toggle).toHaveAttribute("aria-disabled","false");
   await expect(toggle).toHaveAttribute("aria-checked","false");
   await expect(toggle).toContainText("Off");
   await toggle.click();
@@ -1699,6 +2000,38 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
   await expect.poll(async()=>(await messages(page)).at(-1)).toEqual({kind:"set_issue_monitor_auto_refill",enabled:true,limit:5});
   await confirm(page,[3,4],{terminal_queue_auto_refill_limit:5});
   await expect(issues.getByLabel("Refill limit",{exact:true})).toHaveValue("5");
+});
+
+test("Issue #7988: Issues switches send nothing until the first status confirms their values", async ({ page }) => {
+  const controls = page.getByRole("group", {name:"Issues controls",exact:true});
+  const refill = controls.getByRole("switch",{name:"Auto-refill",exact:true});
+  const autonomous = controls.getByRole("switch",{name:"Autonomous mode",exact:true});
+  const sent = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
+    ["set_issue_monitor_auto_refill", "set_issue_monitor_autonomous_mode"].includes(message.kind)));
+  await expect(refill).toHaveAttribute("aria-disabled","true");
+  await expect(autonomous).toHaveAttribute("aria-disabled","true");
+  await refill.dispatchEvent("click");
+  await autonomous.dispatchEvent("click");
+  expect(await sent()).toEqual([]);
+  await page.evaluate(() => (window as any).__queueStatus({terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:0}));
+  await expect(refill).toHaveAttribute("aria-disabled","false");
+  await refill.click();
+  await expect.poll(sent).toEqual([{kind:"set_issue_monitor_auto_refill",enabled:true,limit:0}]);
+});
+
+test("Issue #7813: empty Queued column names the Auto-refill hold", async ({ page }) => {
+  const queued = column(page,"queued");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4});
+  await expect(queued.locator(".knowledge-row")).toHaveCount(0);
+  await expect(queued).toContainText("Auto-refill adds eligible Backlog issues on the next Issues scan.");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,
+    terminal_queue_refill_hold:"limit_reached"});
+  await expect(queued).toContainText("Auto-refill is at its refill limit (4).");
+  await expect(queued).not.toContainText("next Issues scan");
+  await confirm(page,[],{enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,
+    terminal_queue_refill_hold:"no_candidates"});
+  await expect(queued).toContainText("The last Issues scan found no eligible Backlog issue to add.");
+  await expect(queued).not.toContainText("next Issues scan");
 });
 
 test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
@@ -1747,9 +2080,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false } = {}) {
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false, narrowSettings = false, includeTheme = false, holdMonitorStatus = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme, holdMonitorStatus})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -1876,7 +2209,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
             profiles:[{agent_member_id:"queue-member",agent_id:"codex",model:"gpt-6-sol",prefer_for:[]}],usage_threshold_percent:80});
         }
         else if(message.kind==="list_issue_monitor") {
-          this.emit({kind:"issue_monitor_status",status});
+          if (!holdMonitorStatus) this.emit({kind:"issue_monitor_status",status});
           if (inboxFirst) this.emit({kind:"issue_monitor_inbox",items:entries.map(issue=>({issue,
             state:issue.number===5?"launched":issue.number===6?"released":"queued"}))});
         }
@@ -1885,13 +2218,32 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
           if (message.kind==="load_knowledge_bridge") fixture.__queueBaseLoad=fixture.__queueLoad;
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
-        else if(message.kind==="select_knowledge_bridge_entry") {
+        else if(message.kind==="load_themes") {
+          const reply = {kind:"themes",request_id:message.request_id,view:{themes:includeTheme ? [{
+            number:70,title:"Project theme",url:"https://github.com/example/repo/issues/70",
+            issues_total:4,issues_completed:1,issues:[{number:3,in_repository:true}],
+          }] : []}};
+          if (includeTheme) fixture.__queueShowTheme = () => this.emit(reply);
+          else this.emit(reply);
+        }
+        else if(message.kind==="select_knowledge_bridge_entry" || message.kind==="edit_issue_subtask") {
           fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
+          if (includeTheme && message.number === 3) {
+            const detail = fixture.__queueLastDetail.detail;
+            fixture.__queueSubtasks ??= [{ text: "Confirm the issue", done: true, remove_at: 25 }];
+            if (message.change?.kind === "add") {
+              fixture.__queueSubtasks.push({ text: message.change.title, done: false, remove_at: 50 });
+            } else if (message.change?.kind === "remove") {
+              fixture.__queueSubtasks = fixture.__queueSubtasks.filter(item =>
+                item.remove_at !== message.change.start || item.text !== message.change.text);
+            }
+            detail.subtasks = fixture.__queueSubtasks;
+          }
           this.emit(fixture.__queueLastDetail);
         }
       }
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings});
+  },{projectKey, includeAgent, observeSkipped, inboxFirst, narrowSettings, includeTheme, holdMonitorStatus});
 }

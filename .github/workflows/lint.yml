@@ -39,6 +39,14 @@ jobs:
           tool: cargo-deny@0.19.4
       - name: Run cargo deny (advisories + sources)
         run: cargo deny check advisories sources
+      # SPEC #6943 AC-9: keep npm policy in this existing required check.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Test frontend dependency gate
+        run: node --test scripts/check-frontend-deps.test.mjs
+      - name: Check frontend licenses and production advisories
+        run: node scripts/check-frontend-deps.mjs
   lint:
     name: Clippy & Rustfmt
     # Issue #5173: coverage / Rust Coverage is required independently, so
@@ -159,7 +167,7 @@ jobs:
   # gwt-core` would leave the macOS-gated code in gwt-agent, gwt-config and
   # gwt-clipboard unlinted here while still failing the local gate, which is
   # the same divergence in a smaller shape. The repository is public, so the
-  # macOS runner costs queue time rather than billed minutes; `macos-workspace`
+  # macOS runner costs queue time rather than billed minutes; `macos-workspace-v2`
   # is warmed for it by cache-warm.yml.
   lint-macos:
     name: Clippy (macOS)
@@ -183,11 +191,12 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
-          shared-key: macos-workspace
+          # Clippy must not win the immutable cache key with metadata-only artifacts.
+          save-if: 'false'
+          shared-key: macos-workspace-v2
         continue-on-error: true
       # 45 and not the Windows job's 30: `Check (macOS)` runs 1-2 min warm, and
-      # the ubuntu clippy gate runs ~4.5 min warm, but `macos-workspace` is
+      # the ubuntu clippy gate runs ~4.5 min warm, but `macos-workspace-v2` is
       # warmed from this commit onward and the first runs restore a scope built
       # for `cargo check -p gwt-core -p gwt` alone. The cap is the outer net for
       # that cold start, not the expected duration.

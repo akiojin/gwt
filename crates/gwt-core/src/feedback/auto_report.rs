@@ -1,6 +1,6 @@
 //! Closed public vocabulary for unattended feedback. No caller text belongs here.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::FeedbackState;
@@ -180,7 +180,11 @@ pub enum AutoReason {
     PolicyUnavailable,
     PolicyRevoked,
     WorkerUnavailable,
+    /// No usable non-interactive credential (GH_TOKEN / GITHUB_TOKEN) or the
+    /// client could not be initialized; nothing was sent to GitHub.
     AuthUnavailable,
+    /// GitHub answered and rejected the presented credential (HTTP 401).
+    AuthRejected,
     PreSubmitFailed,
     RemoteOutcomeUnknown,
     SenderInterrupted,
@@ -304,7 +308,7 @@ impl SafeAutoSnapshot {
 pub struct AutoFeedbackRecord {
     mode: AutoMode,
     pub snapshot: SafeAutoSnapshot,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     pub state: FeedbackState,
     pub issue_number: Option<u64>,
     pub error: Option<AutoReason>,
@@ -318,7 +322,7 @@ pub struct AutoFeedbackRecord {
 }
 
 impl AutoFeedbackRecord {
-    pub(super) fn new(report: SafeAutoReport, created_at: DateTime<Utc>) -> Self {
+    pub(super) fn new(report: SafeAutoReport, created_at: UtcTimestamp) -> Self {
         let sendable = report.sendable();
         Self {
             mode: AutoMode::Auto,

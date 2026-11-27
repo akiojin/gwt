@@ -3,10 +3,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
 use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
 use gwt_core::github_quota::{GitHubQuota, RATE_LIMITED_ERROR_CODE};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{GwtError, Result};
+use pulldown_cmark::{Event, Parser, Tag};
 use serde::{Deserialize, Serialize};
 
 /// Pull Request state.
@@ -38,7 +39,7 @@ pub struct PrStatus {
     pub title: String,
     pub state: PrState,
     pub url: String,
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<UtcTimestamp>,
     /// Overall CI status: "SUCCESS", "FAILURE", "PENDING", or "UNKNOWN".
     pub ci_status: String,
     /// Raw `mergeable` field from GitHub: "MERGEABLE", "CONFLICTING", "UNKNOWN".
@@ -361,11 +362,11 @@ pub struct PrInventoryFields {
     /// PR base branch (`baseRefName`). The ref a conflict or a behind-count is
     /// measured against (SPEC #3835 AC-4).
     pub base_ref_name: String,
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     /// When the PR was opened. Unlike `updated_at`, no bookkeeping action moves
     /// it, so it is the only sound basis for "how long has this been waiting"
     /// (Issue #4836).
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<UtcTimestamp>,
     pub mergeable: String,
     pub merge_state_status: String,
     pub ci_status: String,
@@ -452,9 +453,9 @@ pub struct PrInventoryItem {
     pub is_cross_repository: Option<bool>,
     #[serde(default)]
     pub base_ref_name: String,
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<UtcTimestamp>,
     pub mergeable: String,
     pub merge_state_status: String,
     pub ci_status: String,
@@ -570,11 +571,11 @@ pub struct PrInventoryHistory {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrInventoryHistoryEntry {
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     pub lifecycle: String,
     pub default_action: String,
     pub unchanged_cycles: u32,
-    pub last_seen_at: DateTime<Utc>,
+    pub last_seen_at: UtcTimestamp,
 }
 
 impl PrInventoryHistory {
@@ -603,7 +604,7 @@ impl PrInventoryHistory {
     pub fn observe(
         &mut self,
         items: &mut [PrInventoryItem],
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         options: &PrInventoryOptions,
     ) {
         let mut next: BTreeMap<u64, PrInventoryHistoryEntry> = BTreeMap::new();
@@ -750,11 +751,55 @@ impl PrInventoryItem {
 }
 
 fn looks_superseded(title: &str, body: &str) -> bool {
-    let mut haystack = String::with_capacity(title.len() + body.len() + 1);
-    haystack.push_str(title);
-    haystack.push('\n');
-    haystack.push_str(body);
-    haystack.to_ascii_lowercase().contains("superseded")
+    let title = title.trim().to_ascii_lowercase();
+    let title_suffix = title
+        .strip_suffix(')')
+        .and_then(|title| title.rsplit_once(" ("))
+        .map(|(_, suffix)| suffix);
+
+    names_superseding_pr(&title)
+        || title_suffix.is_some_and(names_superseding_pr)
+        || body_declares_supersession(body)
+}
+
+fn body_declares_supersession(body: &str) -> bool {
+    let is_declaration = |text: &str| {
+        let text = text.trim().trim_end_matches('.').to_ascii_lowercase();
+        let declaration = text
+            .strip_prefix("this pr is ")
+            .or_else(|| text.strip_prefix("this pr was "));
+        declaration == Some("superseded") || names_superseding_pr(declaration.unwrap_or(&text))
+    };
+    if !body.lines().any(is_declaration) {
+        return false;
+    }
+
+    // Check top-level paragraphs so examples in code blocks and quotes do not
+    // count as statements about this PR.
+    let mut depth = 0;
+    Parser::new(body)
+        .into_offset_iter()
+        .any(|(event, range)| match event {
+            Event::Start(tag) => {
+                let matches = depth == 0 && tag == Tag::Paragraph && is_declaration(&body[range]);
+                depth += 1;
+                matches
+            }
+            Event::End(_) => {
+                depth -= 1;
+                false
+            }
+            _ => false,
+        })
+}
+
+fn names_superseding_pr(declaration: &str) -> bool {
+    declaration
+        .strip_prefix("superseded by #")
+        .is_some_and(|number| {
+            number.bytes().all(|byte| byte.is_ascii_digit())
+                && number.parse::<u64>().is_ok_and(|number| number > 0)
+        })
 }
 
 fn owner_issue_is_closed(issues: &[PrClosingIssue]) -> bool {
@@ -771,8 +816,8 @@ fn owner_issue_is_closed(issues: &[PrClosingIssue]) -> bool {
 
 /// Whole hours between `since` and `now`, floored at zero. Used for both
 /// `dwell_hours` (from `updated_at`) and `age_hours` (from `created_at`).
-fn pr_dwell_hours(since: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<i64> {
-    since.map(|instant| (now - instant).num_hours().max(0))
+fn pr_dwell_hours(since: Option<UtcTimestamp>, now: UtcTimestamp) -> Option<i64> {
+    since.map(|instant| now.signed_duration_since(instant).whole_hours().max(0))
 }
 
 fn mergeability_unknown(fields: &PrInventoryFields) -> bool {
@@ -834,11 +879,9 @@ pub fn ready_to_promote_blocker(fields: &PrInventoryFields) -> Option<&'static s
         Some(0) => {}
         Some(_) => return Some("unresolved_review_threads"),
     }
-    match fields.coderabbit_review_complete {
-        None => return Some("coderabbit_review_unknown"),
-        Some(false) => return Some("coderabbit_review_pending"),
-        Some(true) => {}
-    }
+    // Issue #7810 AC-1b (owner ruling 2026-11-23): a CodeRabbit review is
+    // not a merge condition. Branch-protection checks and the independent
+    // review verdict decide; `coderabbit_review_complete` is informational.
     match agent_visual_check(&fields.body) {
         AgentVisualCheck::Fail => return Some("agent_visual_check_failed"),
         AgentVisualCheck::Absent => return Some("agent_visual_check_unknown"),
@@ -848,17 +891,14 @@ pub fn ready_to_promote_blocker(fields: &PrInventoryFields) -> Option<&'static s
 }
 
 /// Classify one open PR into the PM inventory taxonomy with default thresholds.
-pub fn classify_pr_lifecycle(
-    fields: &PrInventoryFields,
-    now: DateTime<Utc>,
-) -> PrLifecycleDecision {
+pub fn classify_pr_lifecycle(fields: &PrInventoryFields, now: UtcTimestamp) -> PrLifecycleDecision {
     classify_pr_lifecycle_with(fields, now, &PrInventoryOptions::default())
 }
 
 /// Classify one open PR into the PM inventory taxonomy.
 pub fn classify_pr_lifecycle_with(
     fields: &PrInventoryFields,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> PrLifecycleDecision {
     let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues)
@@ -1030,7 +1070,7 @@ fn default_action_operation(class: PrLifecycleClass, is_draft: bool) -> Option<&
 
 fn inventory_item_from_fields(
     fields: PrInventoryFields,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> PrInventoryItem {
     let decision = classify_pr_lifecycle_with(&fields, now, options);
@@ -1120,7 +1160,7 @@ fn parse_closing_issues(value: &serde_json::Value) -> Vec<PrClosingIssue> {
 
 fn inventory_item_from_value(
     value: &serde_json::Value,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> Result<PrInventoryItem> {
     let single_json = serde_json::to_string(value).map_err(|e| GwtError::Other(e.to_string()))?;
@@ -1198,14 +1238,14 @@ fn inventory_item_from_value(
 }
 
 /// Parse `gh pr list --json` output into classified inventory rows.
-pub fn parse_pr_inventory_json(json: &str, now: DateTime<Utc>) -> Result<Vec<PrInventoryItem>> {
+pub fn parse_pr_inventory_json(json: &str, now: UtcTimestamp) -> Result<Vec<PrInventoryItem>> {
     parse_pr_inventory_json_with(json, now, &PrInventoryOptions::default())
 }
 
 /// Parse `gh pr list --json` output with explicit thresholds.
 pub fn parse_pr_inventory_json_with(
     json: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> Result<Vec<PrInventoryItem>> {
     let arr: Vec<serde_json::Value> =
@@ -1276,12 +1316,12 @@ const GWT_STRICT_STATUS_CHECKS_KEY: &str = "gwtRequiresStrictStatusChecks";
 /// Heavy fields of one PR, keyed by the `updated_at` they were fetched for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrInventoryHeavy {
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub head_ref_oid: Option<String>,
     pub status_check_rollup: Option<serde_json::Value>,
     pub body: Option<String>,
-    pub hydrated_at: DateTime<Utc>,
+    pub hydrated_at: UtcTimestamp,
     /// SPEC #3835 AC-6: review state, probed only for a promotion candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_state: Option<PrReviewState>,
@@ -1297,7 +1337,7 @@ pub struct PrReviewState {
 /// The persisted `pr.list` snapshot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrInventoryCache {
-    pub fetched_at: Option<DateTime<Utc>>,
+    pub fetched_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub include: PrInventoryInclude,
     #[serde(default)]
@@ -1322,16 +1362,16 @@ impl PrInventoryCache {
         gwt_core::atomic_file::write_atomic(path, rendered.as_bytes())
     }
 
-    fn age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+    fn age_secs(&self, now: UtcTimestamp) -> Option<i64> {
         self.fetched_at
-            .map(|fetched_at| (now - fetched_at).num_seconds())
+            .map(|fetched_at| now.whole_seconds_since(fetched_at))
     }
 
     /// Classified rows from the snapshot, exposing only the heavy fields the
     /// caller asked for.
     fn items(
         &self,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         options: &PrInventoryOptions,
     ) -> Result<Vec<PrInventoryItem>> {
         self.rows
@@ -1375,7 +1415,7 @@ pub struct PrInventoryRead {
     /// `github` (fetched now), `cache` (inside the TTL), or `stale-cache`
     /// (served because the budget throttled the fetch).
     pub source: &'static str,
-    pub fetched_at: Option<DateTime<Utc>>,
+    pub fetched_at: Option<UtcTimestamp>,
     pub cache_age_secs: Option<i64>,
     /// Why the live fetch was skipped, when it was.
     pub throttled: Option<String>,
@@ -1408,7 +1448,7 @@ const UNLANDED_BATCH_SIZE: usize = 15;
 pub struct UnlandedBranchProbe {
     pub branch: String,
     pub ahead: usize,
-    pub last_commit_at: Option<DateTime<Utc>>,
+    pub last_commit_at: Option<UtcTimestamp>,
     /// Whether a projected merge changes files outside `.gwt`. `None` means
     /// the local probe could not reach a safe conclusion.
     pub has_non_gwt_changes: Option<bool>,
@@ -1426,7 +1466,7 @@ pub struct UnlandedBranch {
     /// Issue named by the launch ref, when the branch is one.
     pub owner_issue: Option<u64>,
     pub ahead: usize,
-    pub last_commit_at: Option<DateTime<Utc>>,
+    pub last_commit_at: Option<UtcTimestamp>,
     pub has_open_pr: bool,
     /// `false` identifies residue confined to gwt's bookkeeping. Unknown
     /// results stay visible to avoid hiding potentially unlanded source.
@@ -1556,20 +1596,14 @@ pub fn branch_has_non_gwt_changes(
 
 /// Parse `git for-each-ref --format=%(refname:short)%09%(committerdate:iso-strict)`
 /// output into branch names stripped of their `origin/` prefix.
-pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<DateTime<Utc>>)> {
+pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<UtcTimestamp>)> {
     stdout
         .lines()
         .filter_map(|line| {
             let (reference, date) = line.split_once('\t')?;
             let branch = reference.trim().strip_prefix("origin/")?;
-            (!branch.is_empty()).then(|| {
-                (
-                    branch.to_string(),
-                    DateTime::parse_from_rfc3339(date.trim())
-                        .ok()
-                        .map(|value| value.with_timezone(&Utc)),
-                )
-            })
+            (!branch.is_empty())
+                .then(|| (branch.to_string(), UtcTimestamp::parse_rfc3339(date.trim())))
         })
         .collect()
 }
@@ -1642,9 +1676,7 @@ pub fn collect_unlanded_work_branches(
             has_non_gwt_changes: None,
             branch: branch.to_string(),
             ahead: 0,
-            last_commit_at: DateTime::parse_from_rfc3339(fields[1])
-                .ok()
-                .map(|date| date.with_timezone(&Utc)),
+            last_commit_at: UtcTimestamp::parse_rfc3339(fields[1]),
         });
     }
     // At most 1950 bytes of stdin even with SHA256 OID pairs. The existing
@@ -1881,7 +1913,7 @@ pub fn fetch_pr_inventory_cached(
         repo_path,
         cache_path,
         &BudgetLedger::global(),
-        Utc::now(),
+        UtcTimestamp::now(),
         options,
         run_gh_command,
     )
@@ -1897,7 +1929,7 @@ pub fn fetch_pr_inventory_tracked(
     cache_path: &Path,
     options: &PrInventoryOptions,
 ) -> Result<PrInventoryRead> {
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut read = fetch_pr_inventory_cached_with(
         repo_path,
         cache_path,
@@ -1951,7 +1983,7 @@ fn track_pr_inventory(
     read: &mut PrInventoryRead,
     repo_path: &Path,
     history_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> Result<()> {
     // Issue #5735: neither lifecycle progress nor absence of an open PR can
@@ -2000,7 +2032,7 @@ fn fetch_pr_inventory_cached_with<F>(
     repo_path: &Path,
     cache_path: &Path,
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
     mut run_gh: F,
 ) -> Result<PrInventoryRead>
@@ -2183,7 +2215,7 @@ fn probe_ready_candidates<F>(
     repo_path: &Path,
     rows: &[serde_json::Value],
     heavy: &mut BTreeMap<u64, PrInventoryHeavy>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
     run_gh: &F,
 ) -> u32
@@ -2222,9 +2254,7 @@ where
         // its review threads read.
         if !matches!(
             item.ready_to_promote_blocker.as_deref(),
-            Some("review_threads_unknown")
-                | Some("coderabbit_review_unknown")
-                | Some("agent_visual_check_unknown")
+            Some("review_threads_unknown") | Some("agent_visual_check_unknown")
         ) {
             continue;
         }
@@ -2291,7 +2321,7 @@ fn hydrate_fallback_owners<F>(
     repo_path: &Path,
     rows: &mut [serde_json::Value],
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     run_gh: &mut F,
 ) -> Result<usize>
 where
@@ -2408,7 +2438,7 @@ fn probe_merge_queue<F>(
     repo_path: &Path,
     rows: &mut [serde_json::Value],
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     run_gh: &mut F,
 ) -> usize
 where
@@ -2524,7 +2554,7 @@ where
 fn periodic_read_throttle<F>(
     repo_path: &Path,
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     run_gh: &mut F,
 ) -> Option<String>
 where
@@ -2550,10 +2580,10 @@ where
 /// entry still answers: unchanged data, no running checks due, body already held.
 fn hydration_needed(
     previous: Option<&PrInventoryHeavy>,
-    updated_at: Option<DateTime<Utc>>,
+    updated_at: Option<UtcTimestamp>,
     head_ref_oid: Option<&str>,
     options: &PrInventoryOptions,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<PrInventoryInclude> {
     let wanted = options.include;
     if wanted.is_empty() {
@@ -2570,7 +2600,7 @@ fn hydration_needed(
             None => true,
             Some(rollup) => {
                 ci_status_from_rollup(Some(rollup)) == "PENDING"
-                    && (now - previous.hydrated_at).num_seconds().max(0) as u64
+                    && now.whole_seconds_since(previous.hydrated_at).max(0) as u64
                         >= options.checks_refresh_secs
             }
         };
@@ -2856,7 +2886,7 @@ fn parse_inventory_rows(json: &str) -> Result<Vec<serde_json::Value>> {
 #[cfg(test)]
 fn fetch_pr_inventory_with<F>(
     repo_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
     mut run_gh: F,
 ) -> Result<Vec<PrInventoryItem>>
@@ -3069,10 +3099,8 @@ pub fn check_counts_from_rollup(rollup: Option<&serde_json::Value>) -> Option<Pr
     Some(counts)
 }
 
-fn parse_github_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
+fn parse_github_timestamp(value: Option<&str>) -> Option<UtcTimestamp> {
+    value.and_then(UtcTimestamp::parse_rfc3339)
 }
 
 pub fn latest_pr_by_created_at(prs: impl IntoIterator<Item = PrStatus>) -> Option<PrStatus> {
@@ -3469,13 +3497,13 @@ pub(crate) fn run_cached_list_command(repo_path: &Path, args: &[&str]) -> Result
 pub(crate) fn run_cached_list_command_with_observed_at(
     repo_path: &Path,
     args: &[&str],
-) -> Result<(DateTime<Utc>, GhCliOutput)> {
+) -> Result<(UtcTimestamp, GhCliOutput)> {
     let cache_dir =
         gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("rest-list-pages");
     let (observed_at, stdout) = crate::gh_rest::cached_list_response_at_with(
         &cache_dir,
         &args.join(" "),
-        chrono::Utc::now(),
+        UtcTimestamp::now(),
         crate::gh_rest::monitor_list_cache_ttl_secs(),
         || {
             let output = run_gh_command(repo_path, args).map_err(|error| error.to_string())?;
@@ -3810,8 +3838,49 @@ pub fn try_fetch_open_pr_numbers_by_branch_for_monitor(
 
 fn try_fetch_open_pr_numbers_by_branch_with<F>(
     repo_path: &Path,
-    mut run_gh: F,
+    run_gh: F,
 ) -> Result<std::collections::HashMap<String, u64>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    Ok(open_pr_numbers_by_branch(&try_fetch_open_pr_rows_with(
+        repo_path, run_gh,
+    )?))
+}
+
+/// Issue #7697: the open-PR inventory with the auto-merge state of each row.
+///
+/// `auto_merge_requested` holds the numbers whose REST row carries a non-null
+/// `auto_merge`, so a scan can tell that something armed a PR without a
+/// request per candidate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenPrInventory {
+    pub numbers_by_branch: std::collections::HashMap<String, u64>,
+    pub auto_merge_requested: std::collections::BTreeSet<u64>,
+}
+
+/// [`try_fetch_open_pr_numbers_by_branch_for_monitor`] plus the auto-merge
+/// state, from the same single read.
+pub fn try_fetch_open_pr_inventory_for_monitor(repo_path: &Path) -> Result<OpenPrInventory> {
+    try_fetch_open_pr_inventory_with(repo_path, run_cached_list_command)
+}
+
+fn try_fetch_open_pr_inventory_with<F>(repo_path: &Path, run_gh: F) -> Result<OpenPrInventory>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let rows = try_fetch_open_pr_rows_with(repo_path, run_gh)?;
+    Ok(OpenPrInventory {
+        numbers_by_branch: open_pr_numbers_by_branch(&rows),
+        auto_merge_requested: rows
+            .iter()
+            .filter(|row| row.get("auto_merge").is_some_and(|value| !value.is_null()))
+            .filter_map(|row| row.get("number").and_then(serde_json::Value::as_u64))
+            .collect(),
+    })
+}
+
+fn try_fetch_open_pr_rows_with<F>(repo_path: &Path, mut run_gh: F) -> Result<Vec<serde_json::Value>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
@@ -3827,7 +3896,7 @@ where
         }
     })
     .map_err(|error| GwtError::Git(format!("gh api pulls open inventory: {error}")))?;
-    Ok(open_pr_numbers_by_branch(&pages.rows))
+    Ok(pages.rows)
 }
 
 fn open_pr_numbers_by_branch(rows: &[serde_json::Value]) -> std::collections::HashMap<String, u64> {
@@ -3875,6 +3944,23 @@ pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<Str
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
 }
 
+/// Discovery for a held review reuses the same open-pulls pages as the
+/// Monitor inventory. Explicit scans stay live. Actual review dispatch must
+/// still use [`try_fetch_pr_head_sha`] rather than this bounded discovery.
+pub fn try_fetch_pr_head_sha_for_monitor(repo_path: &Path, number: u64) -> Result<Option<String>> {
+    if crate::gh_rest::monitor_read_max_age_secs().is_none() {
+        return try_fetch_pr_head_sha(repo_path, number);
+    }
+    let rows = try_fetch_open_pr_rows_with(repo_path, run_cached_list_command)?;
+    Ok(rows
+        .iter()
+        .find(|row| row.get("number").and_then(serde_json::Value::as_u64) == Some(number))
+        .and_then(|row| row.pointer("/head/sha"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string))
+}
+
 /// Fresh lifecycle evidence for Issues' launch decision, without
 /// the completion gate's review-thread and body hydration.
 pub fn try_fetch_pr_lifecycle_for_monitor(
@@ -3893,7 +3979,7 @@ where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number_arg = number.to_string();
-    let fields = "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup";
+    let fields = "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest";
     let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
     if !output.success {
         return Err(GwtError::Git(format!(
@@ -3937,7 +4023,7 @@ where
             "PR identity, Draft status or checks are unknown".into(),
         ));
     }
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let options = PrInventoryOptions::default();
     let mut inventory = inventory_item_from_value(&value, now, &options)?;
     // A non-strict base makes failed CI actionable even while BEHIND. Other
@@ -4070,6 +4156,39 @@ fn pinned_pr_command_args(repository: Option<&str>, args: &[&str]) -> Vec<String
     args
 }
 
+/// GitHub can return concurrent workflow attempts together for the same head.
+fn remove_superseded_cancellations(rollup: &mut serde_json::Value) {
+    fn check_run(node: &serde_json::Value) -> Option<((&str, &str), UtcTimestamp)> {
+        if node.get("__typename")?.as_str()? != "CheckRun" {
+            return None;
+        }
+        let workflow = node.get("workflowName")?.as_str()?;
+        let name = node.get("name")?.as_str()?;
+        let started_at = parse_github_timestamp(node.get("startedAt")?.as_str())?;
+        (!workflow.is_empty() && !name.is_empty()).then_some(((workflow, name), started_at))
+    }
+
+    let Some(checks) = rollup.as_array_mut() else {
+        return;
+    };
+    let mut latest = BTreeMap::<_, UtcTimestamp>::new();
+    for (key, started_at) in checks.iter().filter_map(check_run) {
+        latest
+            .entry(key)
+            .and_modify(|previous| *previous = (*previous).max(started_at))
+            .or_insert(started_at);
+    }
+    let mut keep = checks
+        .iter()
+        .map(|node| {
+            node.get("conclusion").and_then(serde_json::Value::as_str) != Some("CANCELLED")
+                || check_run(node).is_none_or(|(key, started_at)| latest[&key] == started_at)
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+    checks.retain(|_| keep.next().unwrap_or(true));
+}
+
 fn fetch_pr_completion_snapshot_with<F>(
     repository: Option<&str>,
     repo_path: &Path,
@@ -4120,8 +4239,11 @@ where
         ));
     }
     let state = parse_pr_status_json(&output.stdout)?.state;
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     if state == PrState::Open {
+        if let Some(rollup) = value.get_mut("statusCheckRollup") {
+            remove_superseded_cancellations(rollup);
+        }
         let url = value
             .get("url")
             .and_then(serde_json::Value::as_str)
@@ -4219,6 +4341,18 @@ pub fn try_fetch_pr_diff(
     try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
 }
 
+pub fn try_fetch_pr_diff_in_repository(
+    repo_path: &Path,
+    repository: &str,
+    number: u64,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, |path, args| {
+        let args = pinned_pr_command_args(Some(repository), args);
+        run_gh_command(path, &args.iter().map(String::as_str).collect::<Vec<_>>())
+    })
+}
+
 fn try_fetch_pr_diff_with<F>(
     repo_path: &Path,
     number: u64,
@@ -4252,6 +4386,76 @@ where
     try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh)
         .ok()
         .flatten()
+}
+
+/// Issue #7300: `gh pr diff` answers HTTP 406 for a pull request that changes
+/// more than 300 files. That is a property of the head, not an outage, so a
+/// retry of the same call can never succeed.
+pub fn pr_diff_exceeds_github_limit(detail: &str) -> bool {
+    detail.contains("HTTP 406")
+        && (detail.contains("maximum number of files") || detail.contains("too_large"))
+}
+
+/// Issue #7300: the diff of a pull request too large for `gh pr diff`, rebuilt
+/// from the paged pull-request files API (`core` budget, 100 files a request).
+/// The read stops at the shared page cap and says so in the text, so a reader
+/// never mistakes a capped listing for the whole change.
+pub fn try_fetch_pr_files_diff(repo_path: &Path, number: u64, max_bytes: usize) -> Result<String> {
+    try_fetch_pr_files_diff_with(repo_path, number, max_bytes, run_gh_command)
+}
+
+fn try_fetch_pr_files_diff_with<F>(
+    repo_path: &Path,
+    number: u64,
+    max_bytes: usize,
+    mut run_gh: F,
+) -> Result<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{number}/files");
+    let pages = crate::gh_rest::read_pages_with(&endpoint, |path| {
+        let output =
+            run_gh(repo_path, &["api", path, "--include"]).map_err(|error| error.to_string())?;
+        if output.success {
+            Ok(output.stdout)
+        } else {
+            Err(output.stderr.trim().to_string())
+        }
+    })
+    .map_err(|error| GwtError::Git(format!("gh api pulls files: {error}")))?;
+    let text = |file: &serde_json::Value, key: &str| {
+        file.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut diff = String::new();
+    for file in &pages.rows {
+        let name = text(file, "filename");
+        let previous = match text(file, "previous_filename") {
+            previous if previous.is_empty() => name.clone(),
+            previous => previous,
+        };
+        diff.push_str(&format!(
+            "diff --git a/{previous} b/{name}\n# status: {}\n",
+            text(file, "status")
+        ));
+        match text(file, "patch") {
+            patch if patch.is_empty() => diff.push_str("# patch not provided by GitHub\n"),
+            patch => {
+                diff.push_str(&patch);
+                diff.push('\n');
+            }
+        }
+    }
+    if pages.capped {
+        diff.push_str(&format!(
+            "... [file list capped at {} files] ...\n",
+            pages.rows.len()
+        ));
+    }
+    Ok(truncate_diff(&diff, max_bytes))
 }
 
 fn truncate_diff(diff: &str, max_bytes: usize) -> String {
@@ -4435,6 +4639,7 @@ where
         return AutoMergeMutationOutcome::AlreadyTargetState;
     }
 
+    let method = permitted_auto_merge_method(repository, repo_path, &mut run_gh);
     let number = number.to_string();
     let args = pinned_pr_command_args(
         repository,
@@ -4443,13 +4648,56 @@ where
             "merge",
             &number,
             "--auto",
-            "--squash",
+            method,
             "--match-head-commit",
             reviewed_head_sha,
         ],
     );
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     classify_auto_merge_command(run_gh(repo_path, &args))
+}
+
+/// Issue #7697: the merge method flag for an auto-merge arm.
+///
+/// A repository that forbids squash merges rejects `--squash`, so the arm
+/// reads which methods the repository allows and takes the first of squash,
+/// merge commit, rebase. An unreadable setting keeps the squash default; the
+/// read is not a mutation, so its failure never becomes the arm's outcome.
+fn permitted_auto_merge_method<F>(
+    repository: Option<&str>,
+    repo_path: &Path,
+    run_gh: &mut F,
+) -> &'static str
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    let pinned = repository.and_then(|repository| repository.split_once('/'));
+    let path = pinned.map_or_else(
+        || "repos/{owner}/{repo}".to_string(),
+        |(_host, slug)| format!("repos/{slug}"),
+    );
+    let mut args = vec!["api", path.as_str()];
+    if pinned.is_some() {
+        args.extend(["--hostname", "github.com"]);
+    }
+    let settings = run_gh(repo_path, &args)
+        .ok()
+        .filter(|output| output.success)
+        .and_then(|output| serde_json::from_str::<serde_json::Value>(&output.stdout).ok());
+    [
+        ("allow_squash_merge", "--squash"),
+        ("allow_merge_commit", "--merge"),
+        ("allow_rebase_merge", "--rebase"),
+    ]
+    .into_iter()
+    .find(|(setting, _)| {
+        settings
+            .as_ref()
+            .and_then(|settings| settings.get(setting))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    })
+    .map_or("--squash", |(_, flag)| flag)
 }
 
 fn merge_pr_auto_with<F>(
@@ -4485,17 +4733,25 @@ pub fn disarm_pr_auto_merge(
     number: u64,
     remote: &PrAutoMergeRemoteState,
 ) -> AutoMergeMutationOutcome {
-    disarm_pr_auto_merge_with(repo_path, number, remote, run_auto_merge_command)
+    disarm_pr_auto_merge_with(repo_path, number, remote, run_auto_merge_command, || {
+        fetch_pr_auto_merge_remote_state(repo_path, number)
+    })
 }
 
-fn disarm_pr_auto_merge_with<F>(
+/// Issue #7697 AC-6: a disarm is `Confirmed` only once a fresh readback shows
+/// GitHub no longer has auto-merge requested. `gh` exiting zero is not that
+/// proof, and a `gh` that ran and left the request in place is a definite
+/// failure the caller must hand to a human before required CI merges the PR.
+fn disarm_pr_auto_merge_with<F, R>(
     repo_path: &Path,
     number: u64,
     remote: &PrAutoMergeRemoteState,
     mut run_gh: F,
+    mut read_back: R,
 ) -> AutoMergeMutationOutcome
 where
     F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+    R: FnMut() -> Option<PrAutoMergeRemoteState>,
 {
     match remote {
         PrAutoMergeRemoteState::Open {
@@ -4517,10 +4773,42 @@ where
     }
 
     let number = number.to_string();
-    classify_auto_merge_command(run_gh(
-        repo_path,
-        &["pr", "merge", &number, "--disable-auto"],
-    ))
+    let command = run_gh(repo_path, &["pr", "merge", &number, "--disable-auto"]);
+    let failure = match command {
+        Err(AutoMergeCommandError::PreSubmit(message)) => {
+            return AutoMergeMutationOutcome::PreSubmit(message);
+        }
+        Err(AutoMergeCommandError::RemoteOutcomeUnknown(message)) => {
+            return AutoMergeMutationOutcome::RemoteOutcomeUnknown(message);
+        }
+        Ok(output) if output.success => None,
+        Ok(output) => Some(output.stderr.trim().to_string()),
+    };
+    match read_back() {
+        Some(
+            PrAutoMergeRemoteState::Open {
+                auto_merge_requested: false,
+                ..
+            }
+            | PrAutoMergeRemoteState::Closed { .. },
+        ) => AutoMergeMutationOutcome::Confirmed,
+        Some(PrAutoMergeRemoteState::Merged { .. }) => AutoMergeMutationOutcome::AuthorityMismatch(
+            "pull request merged before kill-switch disarm was confirmed".to_string(),
+        ),
+        Some(PrAutoMergeRemoteState::Open {
+            auto_merge_requested: true,
+            ..
+        }) => AutoMergeMutationOutcome::AuthorityMismatch(match failure {
+            Some(stderr) => {
+                format!("auto-merge is still requested on GitHub; the disarm failed: {stderr}")
+            }
+            None => "auto-merge is still requested on GitHub after the disarm reported success"
+                .to_string(),
+        }),
+        None => AutoMergeMutationOutcome::RemoteOutcomeUnknown(
+            "auto-merge readback unavailable after the disarm".to_string(),
+        ),
+    }
 }
 
 fn classify_auto_merge_command(
@@ -4538,7 +4826,32 @@ fn classify_auto_merge_command(
     }
 }
 
+/// Issue #7697 AC-6: run from the same directory as every other `gh` call.
+///
+/// A workspace home is not a Git repository (the bare repository is its
+/// child), so `gh pr merge` started there exited before reaching GitHub and
+/// no arm or disarm ever applied.
 fn run_auto_merge_command(
+    repo_path: &Path,
+    args: &[&str],
+) -> std::result::Result<GhCliOutput, AutoMergeCommandError> {
+    run_auto_merge_command_with(repo_path, args, spawn_auto_merge_command)
+}
+
+fn run_auto_merge_command_with<F>(
+    repo_path: &Path,
+    args: &[&str],
+    mut spawn_gh: F,
+) -> std::result::Result<GhCliOutput, AutoMergeCommandError>
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    let command_root =
+        crate::worktree::main_worktree_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    spawn_gh(&command_root, args)
+}
+
+fn spawn_auto_merge_command(
     repo_path: &Path,
     args: &[&str],
 ) -> std::result::Result<GhCliOutput, AutoMergeCommandError> {
@@ -4722,9 +5035,110 @@ where
         .ok_or_else(|| GwtError::Other("gh pr view mergeable JSON: unparseable".to_string()))
 }
 
+/// The Reviewing gate's PR evidence — CI rollup, head SHA and mergeability —
+/// read in one `gh pr view` (Issue #6877 AC-2: one spawn per scan, not three).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrGateReadback {
+    /// `statusCheckRollup` array JSON (`"[]"` when absent, fail-closed).
+    pub status_check_rollup: String,
+    pub head_sha: Option<String>,
+    pub merge: PrMergeReadback,
+    /// Issue #7810: the PR's base branch, whose protection the gate applies.
+    pub base_ref: Option<String>,
+}
+
+pub fn try_fetch_pr_gate_readback(repo_path: &Path, number: u64) -> Result<PrGateReadback> {
+    try_fetch_pr_gate_readback_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_gate_readback_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<PrGateReadback>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    let output = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "view",
+            &number,
+            "--json",
+            "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName",
+        ],
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view gate readback: {}",
+            output.stderr.trim()
+        )));
+    }
+    let merge = parse_pr_merge_readback(&output.stdout)
+        .ok_or_else(|| GwtError::Other("gh pr view gate readback JSON: unparseable".to_string()))?;
+    Ok(PrGateReadback {
+        status_check_rollup: extract_status_check_rollup(&output.stdout),
+        head_sha: parse_pr_head_sha(&output.stdout),
+        merge,
+        base_ref: serde_json::from_str::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("baseRefName")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|base| !base.is_empty())
+                    .map(str::to_string)
+            }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::shift_test_timestamp;
+    use time::Duration;
+
     use super::*;
+
+    #[test]
+    fn gate_readback_reads_rollup_head_and_mergeability_in_one_call() {
+        let mut calls = 0;
+        let readback = try_fetch_pr_gate_readback_with(Path::new("/repo"), 7, |_, args| {
+            calls += 1;
+            assert_eq!(
+                args,
+                [
+                    "pr",
+                    "view",
+                    "7",
+                    "--json",
+                    "statusCheckRollup,headRefOid,state,mergeable,mergeStateStatus,baseRefName"
+                ]
+            );
+            Ok(GhCliOutput {
+                success: true,
+                stdout: r#"{"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS"}],"headRefOid":"abc","state":"open","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","baseRefName":"develop"}"#.to_string(),
+                stderr: String::new(),
+            })
+        })
+        .expect("gate readback");
+        assert_eq!(calls, 1);
+        assert!(readback.status_check_rollup.contains("\"build\""));
+        assert_eq!(readback.head_sha.as_deref(), Some("abc"));
+        // Issue #7810: the gate reads the protection of the PR's own base.
+        assert_eq!(readback.base_ref.as_deref(), Some("develop"));
+        assert_eq!(readback.merge.state, "OPEN");
+        assert!(
+            try_fetch_pr_gate_readback_with(Path::new("/repo"), 7, |_, _| Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "boom".to_string(),
+            }))
+            .is_err()
+        );
+    }
 
     /// Issue #4726 AC-1: the two states an armed auto-merge cannot get past on
     /// its own are told apart from the ones that resolve themselves.
@@ -5069,9 +5483,11 @@ mod tests {
             }
             let json = serde_json::json!({"number":number,"isDraft":true,
                 "statusCheckRollup":checks});
-            let inventory =
-                parse_pr_inventory_json(&serde_json::json!([json]).to_string(), Utc::now())
-                    .unwrap();
+            let inventory = parse_pr_inventory_json(
+                &serde_json::json!([json]).to_string(),
+                UtcTimestamp::now(),
+            )
+            .unwrap();
             assert_eq!(inventory[0].ci_status, "SUCCESS", "PR #{number}");
             assert_eq!(
                 parse_pr_check_report_json(&json.to_string()).unwrap().ci,
@@ -5866,6 +6282,15 @@ mod tests {
                 auto_merge_requested: false,
             },
             |_p, args| {
+                if args.first() == Some(&"api") {
+                    // Issue #7697: the settings read is pinned like the arm.
+                    assert_eq!(args, ["api", "repos/o/r", "--hostname", "github.com"]);
+                    return Ok(GhCliOutput {
+                        success: true,
+                        stdout: r#"{"allow_squash_merge":false,"allow_merge_commit":true,"allow_rebase_merge":true}"#.to_string(),
+                        stderr: String::new(),
+                    });
+                }
                 calls += 1;
                 assert_eq!(
                     args,
@@ -5874,7 +6299,7 @@ mod tests {
                         "merge",
                         "7",
                         "--auto",
-                        "--squash",
+                        "--merge",
                         "--match-head-commit",
                         "abc123",
                         "--repo",
@@ -5891,6 +6316,85 @@ mod tests {
         assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
         assert!(confirmed.is_success());
         assert_eq!(calls, 1);
+    }
+
+    /// Issue #7697: squash stays the method wherever it is allowed or the
+    /// setting cannot be read; otherwise the first allowed method is used.
+    #[test]
+    fn arm_pr_auto_merge_uses_a_merge_method_the_repository_allows() {
+        let remote = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: false,
+        };
+        let method_for = |settings: Option<&str>| {
+            let mut method = String::new();
+            let outcome = arm_pr_auto_merge_with(
+                None,
+                Path::new("/tmp/repo"),
+                7,
+                "abc123",
+                &remote,
+                |_p, args| {
+                    if args.first() == Some(&"api") {
+                        assert_eq!(args, ["api", "repos/{owner}/{repo}"]);
+                        return Ok(GhCliOutput {
+                            success: settings.is_some(),
+                            stdout: settings.unwrap_or_default().to_string(),
+                            stderr: String::new(),
+                        });
+                    }
+                    method = args[4].to_string();
+                    Ok(GhCliOutput {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                },
+            );
+            assert_eq!(outcome, AutoMergeMutationOutcome::Confirmed);
+            method
+        };
+        assert_eq!(
+            method_for(Some(
+                r#"{"allow_squash_merge":true,"allow_merge_commit":true}"#
+            )),
+            "--squash"
+        );
+        assert_eq!(
+            method_for(Some(
+                r#"{"allow_squash_merge":false,"allow_merge_commit":false,"allow_rebase_merge":true}"#
+            )),
+            "--rebase"
+        );
+        assert_eq!(method_for(Some("{}")), "--squash", "settings not exposed");
+        assert_eq!(method_for(None), "--squash", "settings read failed");
+    }
+
+    /// Issue #7697: the inventory names the open PRs that have auto-merge
+    /// requested, from the same single read as the branch index.
+    #[test]
+    fn open_pr_inventory_reports_which_prs_have_auto_merge_requested() {
+        let mut calls = 0;
+        let inventory = try_fetch_open_pr_inventory_with(Path::new("/repo"), |_, _| {
+            calls += 1;
+            Ok(GhCliOutput {
+                success: true,
+                stdout: "HTTP/2.0 200 OK\n\r\n".to_owned()
+                    + r#"[{"number":7,"head":{"ref":"work/issue-43"},"auto_merge":{"merge_method":"merge"}},{"number":8,"head":{"ref":"work/issue-44"},"auto_merge":null},{"number":9,"head":{"ref":"work/issue-45"}}]"#,
+                stderr: String::new(),
+            })
+        })
+        .expect("open PR inventory");
+        assert_eq!(calls, 1);
+        assert_eq!(inventory.numbers_by_branch.get("work/issue-44"), Some(&8));
+        assert_eq!(
+            inventory
+                .auto_merge_requested
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [7]
+        );
     }
 
     #[test]
@@ -5943,6 +6447,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(
             already_disarmed,
@@ -5965,6 +6470,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(closed, AutoMergeMutationOutcome::AlreadyTargetState);
         assert!(closed.is_success());
@@ -5984,6 +6490,7 @@ mod tests {
                     stderr: String::new(),
                 })
             },
+            || unreachable!("no disarm was submitted, so nothing is read back"),
         );
         assert_eq!(
             merged,
@@ -5998,35 +6505,178 @@ mod tests {
             head_sha: "abc123".to_string(),
             auto_merge_requested: true,
         };
-        let confirmed = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, args| {
-            calls += 1;
-            assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
-            Ok(GhCliOutput {
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
+        let disarmed = || {
+            Some(PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: false,
             })
-        });
+        };
+        let gh_exit = |success: bool, stderr: &str| {
+            Ok(GhCliOutput {
+                success,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+            })
+        };
+        let confirmed = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, args| {
+                calls += 1;
+                assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
+                gh_exit(true, "")
+            },
+            disarmed,
+        );
         assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
         assert_eq!(calls, 1);
 
-        let pre_submit = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
-            Err(AutoMergeCommandError::PreSubmit("not started".to_string()))
-        });
+        let pre_submit = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, _args| Err(AutoMergeCommandError::PreSubmit("not started".to_string())),
+            || unreachable!("gh never started, so nothing is read back"),
+        );
         assert_eq!(
             pre_submit,
             AutoMergeMutationOutcome::PreSubmit("not started".to_string())
         );
 
-        let ambiguous = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
-            Err(AutoMergeCommandError::RemoteOutcomeUnknown(
-                "response lost".to_string(),
-            ))
-        });
+        let ambiguous = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &armed,
+            |_p, _args| {
+                Err(AutoMergeCommandError::RemoteOutcomeUnknown(
+                    "response lost".to_string(),
+                ))
+            },
+            || unreachable!("the next attempt starts from its own readback"),
+        );
         assert_eq!(
             ambiguous,
             AutoMergeMutationOutcome::RemoteOutcomeUnknown("response lost".to_string())
         );
+    }
+
+    /// Issue #7697 AC-6: `gh` exiting zero does not prove the disarm. Only a
+    /// readback showing auto-merge no longer requested does, and a `gh` that
+    /// ran and left it requested is a failure a human has to resolve.
+    #[test]
+    fn issue_7697_disarm_is_confirmed_only_by_a_github_readback() {
+        let repo = Path::new("/tmp/repo");
+        let armed = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: true,
+        };
+        let gh_exit = |success: bool, stderr: &str| {
+            Ok(GhCliOutput {
+                success,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+            })
+        };
+        let disarm =
+            |success: bool, stderr: &'static str, after: Option<PrAutoMergeRemoteState>| {
+                disarm_pr_auto_merge_with(
+                    repo,
+                    7,
+                    &armed,
+                    |_p, _args| gh_exit(success, stderr),
+                    || after.clone(),
+                )
+            };
+
+        let still_armed = disarm(true, "", Some(armed.clone()));
+        assert_eq!(
+            still_armed,
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "auto-merge is still requested on GitHub after the disarm reported success"
+                    .to_string()
+            )
+        );
+        assert!(!still_armed.is_success());
+
+        // The production failure: `gh` exited 1 without reaching GitHub.
+        assert_eq!(
+            disarm(false, "fatal: not a git repository\n", Some(armed.clone())),
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "auto-merge is still requested on GitHub; the disarm failed: fatal: not a git repository"
+                    .to_string()
+            )
+        );
+
+        // A non-zero exit whose mutation did apply is still a disarm.
+        assert_eq!(
+            disarm(
+                false,
+                "warning",
+                Some(PrAutoMergeRemoteState::Closed {
+                    head_sha: "abc123".to_string(),
+                })
+            ),
+            AutoMergeMutationOutcome::Confirmed
+        );
+
+        assert_eq!(
+            disarm(
+                true,
+                "",
+                Some(PrAutoMergeRemoteState::Merged {
+                    head_sha: "abc123".to_string(),
+                })
+            ),
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "pull request merged before kill-switch disarm was confirmed".to_string()
+            )
+        );
+
+        assert_eq!(
+            disarm(true, "", None),
+            AutoMergeMutationOutcome::RemoteOutcomeUnknown(
+                "auto-merge readback unavailable after the disarm".to_string()
+            )
+        );
+    }
+
+    /// Issue #7697 AC-6: a workspace home is not a Git repository, so an arm
+    /// or disarm started there never reached GitHub.
+    #[test]
+    fn issue_7697_auto_merge_commands_run_from_the_child_bare_repository() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo = tmp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let expected = gwt_core::paths::normalize_windows_child_process_path(
+            &std::fs::canonicalize(&bare_repo).expect("canonical bare repo"),
+        );
+        let mut observed_cwd = None;
+
+        let output = run_auto_merge_command_with(
+            tmp.path(),
+            &["pr", "merge", "7", "--disable-auto"],
+            |cwd, _args| {
+                observed_cwd = Some(cwd.to_path_buf());
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        )
+        .expect("fake gh");
+
+        assert!(output.success);
+        assert_eq!(observed_cwd.as_deref(), Some(expected.as_path()));
     }
 
     #[test]
@@ -6073,6 +6723,62 @@ mod tests {
         assert_eq!(failed, None, "gh failure → None");
     }
 
+    /// Issue #7300 AC-1: a pull request over GitHub's 300-file diff limit is
+    /// read through the paged files API instead of failing forever.
+    #[test]
+    fn oversized_pr_diff_is_rebuilt_from_the_paged_files_api() {
+        assert!(pr_diff_exceeds_github_limit(
+            "gh pr diff: could not find pull request diff: HTTP 406: Sorry, the diff exceeded \
+             the maximum number of files (300). Consider using 'List pull requests files' API"
+        ));
+        assert!(!pr_diff_exceeds_github_limit("gh pr diff: HTTP 502"));
+        assert!(!pr_diff_exceeds_github_limit("gh pr diff: no pr"));
+
+        let repo = Path::new("/tmp/repo");
+        let mut paths = Vec::new();
+        let diff = try_fetch_pr_files_diff_with(repo, 7, 200_000, |_p, args| {
+            paths.push(args[1].to_string());
+            let (link, body) = if args[1].ends_with("page=1") {
+                (
+                    "Link: <repos/o/r/pulls/7/files?per_page=100&page=2>; rel=\"next\"\r\n",
+                    r#"[{"filename":"a.rs","status":"modified","patch":"@@ -1 +1 @@\n-old\n+new"}]"#,
+                )
+            } else {
+                (
+                    "",
+                    r#"[{"filename":"b.rs","previous_filename":"z.rs","status":"renamed"}]"#,
+                )
+            };
+            Ok(GhCliOutput {
+                success: true,
+                stdout: format!("HTTP/2.0 200 OK\r\n{link}\r\n{body}"),
+                stderr: String::new(),
+            })
+        })
+        .expect("files diff");
+        assert_eq!(
+            paths,
+            [
+                "repos/{owner}/{repo}/pulls/7/files?per_page=100&page=1",
+                "repos/o/r/pulls/7/files?per_page=100&page=2",
+            ]
+        );
+        assert_eq!(
+            diff,
+            "diff --git a/a.rs b/a.rs\n# status: modified\n@@ -1 +1 @@\n-old\n+new\n\
+             diff --git a/z.rs b/b.rs\n# status: renamed\n# patch not provided by GitHub\n"
+        );
+
+        let failed = try_fetch_pr_files_diff_with(repo, 7, 200_000, |_p, _a| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "HTTP 502".to_string(),
+            })
+        });
+        assert!(failed.is_err(), "a failed page fails the whole read");
+    }
+
     fn sample_inventory_fields() -> PrInventoryFields {
         PrInventoryFields {
             number: 1,
@@ -6112,7 +6818,7 @@ mod tests {
             "reviewDecision":"APPROVED","autoMergeRequest":null,
         });
         let read = |row: &serde_json::Value| {
-            parse_pr_inventory_json(&serde_json::json!([row]).to_string(), Utc::now())
+            parse_pr_inventory_json(&serde_json::json!([row]).to_string(), UtcTimestamp::now())
                 .unwrap()
                 .remove(0)
         };
@@ -6186,17 +6892,23 @@ mod tests {
         ] {
             let mut value = monitor_lifecycle_payload();
             value["statusCheckRollup"] = checks;
+            value["autoMergeRequest"] = if expected == "MERGE-CANDIDATE" {
+                serde_json::json!({"enabledAt": "2026-11-26T00:00:00Z"})
+            } else {
+                serde_json::Value::Null
+            };
             let mut calls = 0;
             let (state, item) = try_fetch_pr_lifecycle_for_monitor_with(
                 Path::new("/repo"), 42, |_, args| {
                     calls += 1;
                     assert_eq!(&args[..4], &["pr", "view", "42", "--json"]);
-                    assert_eq!(args[4], "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup");
+                    assert_eq!(args[4], "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest");
                     Ok(GhCliOutput { success: true, stdout: value.to_string(), stderr: String::new() })
                 },
             ).unwrap();
             assert_eq!(state, PrState::Open);
             assert_eq!(item.lifecycle, expected);
+            assert_eq!(item.auto_merge_enabled, expected == "MERGE-CANDIDATE");
             assert_eq!(calls, 1);
             assert_eq!(item.unresolved_review_threads, None);
         }
@@ -6334,6 +7046,62 @@ mod tests {
     }
 
     #[test]
+    fn completion_snapshot_ignores_only_superseded_cancelled_checks() {
+        let check = |workflow, started_at, conclusion| {
+            serde_json::json!({
+                "__typename": "CheckRun", "name": "verify", "workflowName": workflow,
+                "startedAt": started_at, "status": "COMPLETED", "conclusion": conclusion
+            })
+        };
+        let old = check("CI", "2026-10-09T00:01:00Z", "CANCELLED");
+        let new = check("CI", "2026-10-09T00:02:00Z", "SUCCESS");
+        let blocker = |checks: Vec<serde_json::Value>| {
+            let payload = serde_json::json!({
+                "number": 42, "state": "OPEN", "isDraft": false, "headRefName": "work/issue-7310",
+                "headRefOid": "same-head", "url": "https://github.com/o/r/pull/42",
+                "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": checks,
+                "body": "Agent Visual Check: n/a (no UI surface)"
+            });
+            fetch_pr_completion_snapshot_with(None, Path::new("/repo"), 42, |_, args| {
+                let stdout = if args[0] == "pr" {
+                    payload.to_string()
+                } else {
+                    serde_json::json!({"data":{"repository":{"pullRequest":{
+                        "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}
+                    }}}})
+                    .to_string()
+                };
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout,
+                    stderr: String::new(),
+                })
+            })
+            .unwrap()
+            .inventory
+            .completion_blocker()
+        };
+        assert_eq!(blocker(vec![new.clone(), old.clone()]), None);
+        let red = Some("checks_not_green");
+        assert_eq!(blocker(vec![old.clone()]), red);
+        assert_eq!(
+            blocker(vec![
+                old.clone(),
+                check("Other CI", "2026-10-09T00:02:00Z", "SUCCESS")
+            ]),
+            red
+        );
+        assert_eq!(
+            blocker(vec![old, check("CI", "2026-10-09T00:02:00Z", "FAILURE")]),
+            red
+        );
+        assert_eq!(
+            blocker(vec![new, check("CI", "2026-10-09T00:03:00Z", "CANCELLED")]),
+            red
+        );
+    }
+
+    #[test]
     fn completion_snapshot_refuses_unknown_draft_and_unread_review() {
         let payload = serde_json::json!({"number":42,"state":"OPEN","headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"});
         let read = |value: serde_json::Value| {
@@ -6374,13 +7142,34 @@ mod tests {
         );
     }
 
+    /// Issue #7810 AC-1b: a PR with no CodeRabbit review — unread, never
+    /// posted, or skipped by a rate limit — is promotable and completable on
+    /// its required checks alone.
+    #[test]
+    fn issue_7810_coderabbit_review_is_not_a_promotion_or_completion_condition() {
+        for coderabbit in [None, Some(false), Some(true)] {
+            let fields = PrInventoryFields {
+                coderabbit_review_complete: coderabbit,
+                ..promotable_fields()
+            };
+            assert_eq!(ready_to_promote_blocker(&fields), None, "{coderabbit:?}");
+            let row = inventory_item_from_fields(
+                fields,
+                UtcTimestamp::now(),
+                &PrInventoryOptions::default(),
+            );
+            assert_eq!(row.completion_blocker(), None, "{coderabbit:?}");
+        }
+    }
+
     #[test]
     fn completion_uses_non_strict_behind_policy_without_changing_promotion_taxonomy() {
         let mut fields = promotable_fields();
         fields.merge_state_status = "BEHIND".into();
         assert_eq!(ready_to_promote_blocker(&fields), Some("behind_base"));
-        let row =
-            |fields| inventory_item_from_fields(fields, Utc::now(), &PrInventoryOptions::default());
+        let row = |fields| {
+            inventory_item_from_fields(fields, UtcTimestamp::now(), &PrInventoryOptions::default())
+        };
         assert_eq!(
             row(fields.clone()).completion_blocker(),
             Some("behind_base")
@@ -6395,7 +7184,7 @@ mod tests {
             head_sha: "observed-head".into(),
             inventory: inventory_item_from_fields(
                 fields,
-                Utc::now(),
+                UtcTimestamp::now(),
                 &PrInventoryOptions::default(),
             ),
         }
@@ -6583,6 +7372,27 @@ mod tests {
     }
 
     #[test]
+    fn superseded_checks_in_title_or_body_preserve_the_actual_lifecycle() {
+        let mut fields = sample_inventory_fields();
+        fields.title = "fix(build): ignore superseded cancelled checks in completion".to_string();
+        fields.ci_status = "PENDING".to_string();
+        let classify = |fields: &PrInventoryFields| classify_pr_lifecycle(fields, now_3868()).class;
+        assert_eq!(classify(&fields), PrLifecycleClass::InProgress);
+
+        fields.title = "fix(build): handle cancelled checks".to_string();
+        fields.body =
+            "Ignore superseded cancelled checks. A run can be superseded by #100.".to_string();
+        fields.ci_status = "FAILURE".to_string();
+        assert_eq!(classify(&fields), PrLifecycleClass::CiRed);
+
+        fields.mergeable = "CONFLICTING".to_string();
+        assert_eq!(classify(&fields), PrLifecycleClass::Conflicted);
+
+        fields.body = "Example:\n\n```text\nThis PR is superseded by #100\n```".to_string();
+        assert_eq!(classify(&fields), PrLifecycleClass::Conflicted);
+    }
+
+    #[test]
     fn classifies_owner_issue_closed_as_superseded_close_proposal() {
         let mut fields = sample_inventory_fields();
         fields.closing_issues = vec![PrClosingIssue {
@@ -6732,7 +7542,7 @@ mod tests {
 
     // ---- Issue #3868: fallback detection, dwell time, no-progress counting ----
 
-    fn now_3868() -> DateTime<Utc> {
+    fn now_3868() -> UtcTimestamp {
         "2026-09-01T12:00:00Z".parse().expect("now")
     }
 
@@ -7125,7 +7935,7 @@ mod tests {
         );
         let cache_path = tmp.path().join(PR_INVENTORY_CACHE_FILE);
         PrInventoryCache {
-            fetched_at: Some(Utc::now()),
+            fetched_at: Some(UtcTimestamp::now()),
             ..Default::default()
         }
         .save(&cache_path)
@@ -7942,12 +8752,12 @@ mod tests {
 
     use gwt_core::github_budget::{BudgetLedger, ProbeSnapshot, ResourceWindow};
 
-    fn now_3891() -> DateTime<Utc> {
+    fn now_3891() -> UtcTimestamp {
         "2026-09-02T00:00:00Z".parse().expect("now")
     }
 
     fn healthy_probe_payload() -> String {
-        let reset = (now_3891() + chrono::Duration::hours(1)).timestamp();
+        let reset = shift_test_timestamp(now_3891(), Duration::hours(1)).timestamp();
         serde_json::json!({"resources": {
             "core": {"limit": 5000, "remaining": 4990, "reset": reset},
             "graphql": {"limit": 5000, "remaining": 4800, "reset": reset}
@@ -8044,7 +8854,7 @@ mod tests {
         tmp: &Path,
         ledger: &BudgetLedger,
         gh: &mut FakeGh,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         options: &PrInventoryOptions,
     ) -> Result<PrInventoryRead> {
         let gh = std::sync::Mutex::new(gh);
@@ -8098,7 +8908,7 @@ mod tests {
             // mutability rather than a captured `&mut`.
             let owner_calls = std::sync::atomic::AtomicUsize::new(0);
             let calls_before = gh.calls.len();
-            let now = now_3891() + chrono::Duration::seconds(offset);
+            let now = shift_test_timestamp(now_3891(), Duration::seconds(offset));
             let read = {
                 let gh = std::sync::Mutex::new(&mut gh);
                 fetch_pr_inventory_cached_with(
@@ -8169,7 +8979,10 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 2),
+            shift_test_timestamp(
+                now_3891(),
+                Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 2),
+            ),
             &PrInventoryOptions::default(),
         )
         .unwrap();
@@ -8182,7 +8995,7 @@ mod tests {
     fn read_with_merge_queue_answer(
         tmp: &Path,
         gh: &mut FakeGh,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         answer: GhCliOutput,
     ) -> (PrInventoryRead, Vec<String>) {
         let ledger = BudgetLedger::at(&tmp.join("budget"));
@@ -8277,7 +9090,7 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            now_3891() + chrono::Duration::seconds(1),
+            shift_test_timestamp(now_3891(), Duration::seconds(1)),
             &PrInventoryOptions::default(),
         )
         .expect("cached read");
@@ -8481,7 +9294,7 @@ mod tests {
         let first = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("first");
         gh.calls.clear();
 
-        let later = now_3891() + chrono::Duration::seconds(60);
+        let later = shift_test_timestamp(now_3891(), Duration::seconds(60));
         let second = cached_read(tmp.path(), &ledger, &mut gh, later, &options).expect("second");
 
         assert!(
@@ -8523,7 +9336,10 @@ mod tests {
         let options = PrInventoryOptions::default();
         cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("warm");
         gh.calls.clear();
-        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let later = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         let read = cached_read(tmp.path(), &ledger, &mut gh, later, &options).expect("periodic");
         assert_eq!(gh.calls, vec![light_list_call()]);
         assert_eq!(read.github_calls, 1);
@@ -8538,7 +9354,7 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+            shift_test_timestamp(later, Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1)),
             &options,
         )
         .expect("changed head");
@@ -8570,7 +9386,10 @@ mod tests {
         gh.calls.clear();
 
         // The snapshot TTL elapsed, but the independent checks interval has not.
-        let second_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let second_at = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         cached_read(tmp.path(), &ledger, &mut gh, second_at, &options).expect("second");
         assert_eq!(
             gh.calls,
@@ -8579,7 +9398,7 @@ mod tests {
         );
         gh.calls.clear();
 
-        let checks_at = now_3891() + chrono::Duration::seconds(602);
+        let checks_at = shift_test_timestamp(now_3891(), Duration::seconds(602));
         cached_read(tmp.path(), &ledger, &mut gh, checks_at, &options).expect("checks due");
         assert_eq!(
             gh.calls,
@@ -8592,7 +9411,10 @@ mod tests {
 
         // PR 3 got a new commit: its updatedAt moved, so it is hydrated again.
         gh.rows[0] = light_row(3, "2026-09-02T00:30:00Z", "CLEAN");
-        let third_at = checks_at + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let third_at = shift_test_timestamp(
+            checks_at,
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         let third = cached_read(tmp.path(), &ledger, &mut gh, third_at, &options).expect("third");
         assert!(
             gh.calls
@@ -8646,7 +9468,10 @@ mod tests {
             5,
             "cold reads must be bounded too"
         );
-        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let later = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         read_at(later).expect("warm remaining 5");
         {
             let mut gh = gh.lock().unwrap();
@@ -8656,8 +9481,11 @@ mod tests {
             gh.calls.clear();
         }
         peak.store(0, Ordering::SeqCst);
-        let read = read_at(later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1))
-            .expect("changed cycle");
+        let read = read_at(shift_test_timestamp(
+            later,
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        ))
+        .expect("changed cycle");
         assert_eq!(read.github_calls, 6);
         assert_eq!(read.hydrated, 5);
         assert_eq!(read.skipped_unchanged, 30);
@@ -8686,14 +9514,17 @@ mod tests {
 
         // The account's GraphQL budget is nearly gone in the warm probe's
         // same reset window (observed by any process).
-        let exhausted_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let exhausted_at = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         let mut resources = BTreeMap::new();
         resources.insert(
             "graphql".to_string(),
             ResourceWindow {
                 limit: 5000,
                 remaining: 120,
-                reset_at: now_3891() + chrono::Duration::hours(1),
+                reset_at: shift_test_timestamp(now_3891(), Duration::hours(1)),
             },
         );
         ledger.record_probe(&ProbeSnapshot {
@@ -8743,7 +9574,7 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            exhausted_at + chrono::Duration::hours(1),
+            shift_test_timestamp(exhausted_at, Duration::hours(1)),
             &options,
         )
         .expect("recovered read");
@@ -8827,8 +9658,10 @@ mod tests {
         gh.probe_remaining = 50;
         // Past the probe's max age, so the refresh re-probes (free) and sees
         // the exhausted window before spending.
-        let later = now_3891()
-            + chrono::Duration::seconds(ThrottlePolicy::default().probe_max_age_secs + 1);
+        let later = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(ThrottlePolicy::default().probe_max_age_secs + 1),
+        );
         let refresh = PrInventoryOptions {
             refresh: true,
             ..PrInventoryOptions::default()
@@ -8864,7 +9697,7 @@ mod tests {
                 resource: "graphql".to_string(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: later + chrono::Duration::seconds(300),
+                reset_at: shift_test_timestamp(later, Duration::seconds(300)),
             },
             later,
         );
@@ -8909,7 +9742,7 @@ mod tests {
     /// tell a declared owner from one guessed off a branch name.
     #[test]
     fn owner_issue_reports_whether_it_was_declared_or_derived() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
 
         let declared = classify_pr_lifecycle(
             &inventory_fields(
@@ -9002,7 +9835,7 @@ mod tests {
     /// the one operation that performs it.
     #[test]
     fn an_all_green_draft_is_ready_to_promote() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let fields = promotable_fields();
         assert_eq!(ready_to_promote_blocker(&fields), None);
 
@@ -9018,7 +9851,7 @@ mod tests {
     /// PR may never ship. A failed agent visual check is the real refusal.
     #[test]
     fn deferred_user_verification_alone_never_blocks_promotion() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let deferred = promotable_fields();
         assert!(
             deferred.body.contains(DEFERRED_USER_VERIFICATION_RESULT),
@@ -9117,20 +9950,6 @@ mod tests {
                 },
             ),
             (
-                "coderabbit_review_unknown",
-                PrInventoryFields {
-                    coderabbit_review_complete: None,
-                    ..promotable_fields()
-                },
-            ),
-            (
-                "coderabbit_review_pending",
-                PrInventoryFields {
-                    coderabbit_review_complete: Some(false),
-                    ..promotable_fields()
-                },
-            ),
-            (
                 "agent_visual_check_unknown",
                 PrInventoryFields {
                     body: "no verdict here".to_string(),
@@ -9177,7 +9996,7 @@ mod tests {
     /// and the per-state counts through the inventory item.
     #[test]
     fn inventory_rows_carry_the_conflict_and_the_counts() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let fields = PrInventoryFields {
             mergeable: "CONFLICTING".to_string(),
             conflict: Some(PrConflictReport {
@@ -9245,7 +10064,7 @@ mod tests {
     /// not only on the decision.
     #[test]
     fn inventory_rows_carry_the_owner_derivation_source() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let item = inventory_item_from_fields(
             inventory_fields("work/issue-99", vec![]),
             now,

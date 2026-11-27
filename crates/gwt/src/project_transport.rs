@@ -8,7 +8,8 @@ use crate::agent_capability::{
 };
 use crate::{
     AgentBuildAbortTerminalizationRequest, AgentWorkMaterializationProbeRequest,
-    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkTerminalizationRequest, AgentWorkspaceCloseProofRepairRequest,
+    AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
     AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, RuntimeHookEvent,
 };
 use axum::{
@@ -130,6 +131,7 @@ impl OutboundEvent {
                     | BackendEvent::UpdateCheckResult { .. }
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
+                    | BackendEvent::UpdateDownloadStatus { .. }
                     | BackendEvent::UpdateAutoApply { .. }
                     | BackendEvent::UpdateApplyPendingPersisted { .. }
                     | BackendEvent::UpdateApplyError { .. }
@@ -286,6 +288,10 @@ pub enum TransportEvent {
         >,
     },
     RuntimeHook(RuntimeHookEvent),
+    AuthenticatedRuntimeHook {
+        grant: AgentCapabilityGrant,
+        event: RuntimeHookEvent,
+    },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -515,7 +521,11 @@ thread_local! {
 fn defers_serialization(event: &BackendEvent) -> bool {
     matches!(
         event,
-        BackendEvent::ActiveWorkProjectionPatch { .. } | BackendEvent::TerminalSnapshot { .. }
+        BackendEvent::ActiveWorkProjectionPatch { .. }
+            | BackendEvent::BoardEntries { .. }
+            | BackendEvent::TerminalSnapshot { .. }
+            | BackendEvent::IssueMonitorInbox { .. }
+            | BackendEvent::IssueMonitorStatus { .. }
     )
 }
 
@@ -558,6 +568,11 @@ fn prepare_outbound_with_payload(
         }
         crate::BackendEvent::AttachmentProgress { operation_id, .. } => {
             (Some(operation_id.clone()), None, None)
+        }
+        // Issue #5561: an inbox replaces the previous one and carries every
+        // Issue body, so a client that is not draining keeps only the newest.
+        crate::BackendEvent::IssueMonitorInbox { .. } => {
+            (Some("issue_monitor_inbox".to_string()), None, None)
         }
         _ => (None, None, None),
     };
@@ -1475,6 +1490,11 @@ pub fn agent_router(state: TransportState, access_log: AccessLogSink) -> Router 
             post(execution_adoption_handler),
         )
         .route("/internal/workspace-update", post(workspace_update_handler))
+        .route("/internal/workspace-reopen", post(workspace_reopen_handler))
+        .route(
+            "/internal/workspace-close-proof-repair",
+            post(workspace_close_proof_repair_handler),
+        )
         .route(
             "/internal/work-materialization-probe",
             post(work_materialization_probe_handler),
@@ -1628,9 +1648,10 @@ async fn hook_live_handler(
     State(state): State<TransportState>,
     Json(mut event): Json<RuntimeHookEvent>,
 ) -> StatusCode {
-    let Some(principal) = agent_capability_principal(&headers, &state) else {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
         return StatusCode::UNAUTHORIZED;
     };
+    let principal = grant.principal();
     if event.gwt_session_id.as_deref() != Some(principal.session_id()) {
         tracing::warn!(
             target: "gwt_security",
@@ -1656,11 +1677,12 @@ async fn hook_live_handler(
         None => "none",
         _ => "other",
     };
-    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
-        event.occurred_at.as_str()
-    } else {
-        "invalid"
-    };
+    let occurred_at =
+        if gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&event.occurred_at).is_ok() {
+            event.occurred_at.as_str()
+        } else {
+            "invalid"
+        };
     tracing::info!(
         target: "gwt.hook.delivery",
         stage = "receipt",
@@ -1670,7 +1692,22 @@ async fn hook_live_handler(
         occurred_at,
         "runtime hook delivery"
     );
-    state.send(TransportEvent::RuntimeHook(event));
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    {
+        let captured = grant.clone();
+        if tokio::task::spawn_blocking(move || {
+            crate::project_runtime::agent_frontend::run_owner_agent_dispatch_test_hook(
+                &captured,
+                crate::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::BeforeHookDispatch,
+            );
+        })
+        .await
+        .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+    state.send(TransportEvent::AuthenticatedRuntimeHook { grant, event });
     StatusCode::NO_CONTENT
 }
 
@@ -1741,6 +1778,142 @@ async fn workspace_update_handler(
             AgentWorkspaceUpdateError::new(
                 AgentWorkspaceUpdateErrorCode::Internal,
                 "Host workspace mutation task failed before a response was produced".to_string(),
+            ),
+        ),
+    }
+}
+
+async fn workspace_reopen_handler(
+    headers: HeaderMap,
+    State(state): State<TransportState>,
+    Json(request): Json<AgentWorkspaceReopenRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "workspace_reopen_requires_active_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::cli::execution_state::with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &execution_binding,
+            || {
+                crate::apply_bound_authenticated_workspace_reopen(
+                    &mutation_project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                )
+            },
+        )
+        .map_err(|_| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "workspace reopen authority lease is unavailable",
+            )
+        })?
+        .ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "workspace reopen authority changed before mutation",
+            )
+        })?
+    })
+    .await;
+    match result {
+        Ok(Ok(receipt)) => {
+            state.send(TransportEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host workspace reopen task failed before a response was produced",
+            ),
+        ),
+    }
+}
+
+async fn workspace_close_proof_repair_handler(
+    headers: HeaderMap,
+    State(state): State<TransportState>,
+    Json(request): Json<AgentWorkspaceCloseProofRepairRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "close_proof_repair_requires_active_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::cli::execution_state::with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &execution_binding,
+            || {
+                crate::apply_bound_authenticated_workspace_close_proof_repair(
+                    &mutation_project_root,
+                    &session_id,
+                    &execution_binding,
+                    request,
+                )
+            },
+        )
+        .map_err(|_| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "close proof repair authority lease is unavailable",
+            )
+        })?
+        .ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+                "close proof repair authority changed before mutation",
+            )
+        })?
+    })
+    .await;
+    match result {
+        Ok(Ok(receipt)) => {
+            state.send(TransportEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host close proof repair task failed before a response was produced",
             ),
         ),
     }
@@ -1927,6 +2100,8 @@ fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusC
         | AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
         | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
         | AgentWorkspaceUpdateErrorCode::IdentityConflict
+        | AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+        | AgentWorkspaceUpdateErrorCode::TerminalWork
         | AgentWorkspaceUpdateErrorCode::TransactionConflict => StatusCode::CONFLICT,
         AgentWorkspaceUpdateErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -2177,6 +2352,8 @@ struct AgentWorkspaceUpdateErrorResponse {
     reason: &'static str,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Box<gwt_core::workspace_projection::WorkTerminalDiagnosis>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic_reason: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mismatched_fields: Vec<String>,
@@ -2197,6 +2374,8 @@ fn workspace_update_error_response(
         AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired => "workspace_ensure_required",
         AgentWorkspaceUpdateErrorCode::ProvenanceMismatch => "provenance_mismatch",
         AgentWorkspaceUpdateErrorCode::IdentityConflict => "identity_conflict",
+        AgentWorkspaceUpdateErrorCode::PrimaryActorRequired => "primary_actor_required",
+        AgentWorkspaceUpdateErrorCode::TerminalWork => "terminal_work",
         AgentWorkspaceUpdateErrorCode::TransactionConflict => "transaction_conflict",
         AgentWorkspaceUpdateErrorCode::Internal => "internal",
     };
@@ -2206,6 +2385,7 @@ fn workspace_update_error_response(
             code: error.code,
             reason,
             message: error.message,
+            details: error.details,
             diagnostic_reason: error.diagnostic_reason,
             mismatched_fields: error.mismatched_fields,
             recovery_operations: error.recovery_operations,
@@ -2281,11 +2461,14 @@ impl AgentPaneSessionScope {
                     child_started_at,
                 })
             }
-            FrontendEvent::PaneSendInput { session_id, text }
-                if session_id == self.grant.principal().session_id()
-                    && self.grant.principal().authorizes_producing_mutation() =>
+            FrontendEvent::PaneSendInput {
+                session_id,
+                text,
+                request_id,
+            } if session_id == self.grant.principal().session_id()
+                && self.grant.principal().authorizes_producing_mutation() =>
             {
-                Some(AgentFrontendRequest::SendInput { text })
+                Some(AgentFrontendRequest::SendInput { text, request_id })
             }
             FrontendEvent::RecoverRestoredWindow {
                 id,
@@ -2526,6 +2709,27 @@ impl ClientSessionScope {
             Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
         }
     }
+}
+
+/// Malformed tuning can only be correlated on its own authenticated browser project.
+/// Payload identity is never routing authority, and parser diagnostics are not echoed.
+fn rejected_tuning_parse(scope: &ClientSessionScope, text: &str) -> Option<BackendEvent> {
+    let ClientSessionScope::Browser(ClientScope::Project(key)) = scope else {
+        return None;
+    };
+    let raw: serde_json::Value = serde_json::from_str(text).ok()?;
+    if raw.get("kind")?.as_str()? != "agent_roster"
+        || raw.get("action")?.get("kind")?.as_str()? != "set_tuning"
+        || raw.get("project_key")?.as_str()? != key.as_str()
+    {
+        return None;
+    }
+    let request_id = raw.get("request_id")?.as_str()?;
+    if request_id.trim().is_empty() || request_id.len() > 256 {
+        return None;
+    }
+    Some(BackendEvent::AgentRosterError { project_key: key.to_string(), request_id: Some(request_id.to_string()),
+        message: "Invalid tuning request. Reload registered members and retry with explicit model and reasoning fields.".into() })
 }
 
 fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
@@ -3085,6 +3289,9 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(event) = rejected_tuning_parse(&scope, text.as_ref()) {
+                                    send_agent_terminal_result(&mut sender, event, Duration::from_secs(1)).await;
+                                }
                                 if let Some(request_id) = name_request_id {
                                     pending_names.remove(&request_id);
                                     send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
@@ -3096,7 +3303,15 @@ async fn client_session_with_scope(
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) => {
+                        // Issue #7346: the transport queues the Close reply on
+                        // receipt but only writes it on the next flush.
+                        // Dropping the socket here would reset the connection
+                        // and the client would observe abnormal 1006.
+                        let _ = tokio::time::timeout(Duration::from_secs(1), sender.close()).await;
+                        break;
+                    }
+                    None => break,
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         eprintln!("websocket error: {error}");
@@ -3462,10 +3677,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         assert!(matches!(
+            // test-hygiene: allow-wall-clock-deadline Bound delivery of the actual authenticated HTTP request; channel receipt establishes progress.
             tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
                 .await
                 .unwrap(),
-            Some(TransportEvent::RuntimeHook(_))
+            Some(TransportEvent::AuthenticatedRuntimeHook { .. })
         ));
         let text = std::fs::read_to_string(hook_log.path()).unwrap();
         let records: Vec<serde_json::Value> = text
@@ -3621,6 +3837,7 @@ mod tests {
             .filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-connected-promotion".to_string(),
                 text: "before-promotion".to_string(),
+                request_id: None,
             })
             .is_none());
 
@@ -3635,9 +3852,10 @@ mod tests {
             scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-connected-promotion".to_string(),
                 text: "after-promotion".to_string(),
+                request_id: None,
             }),
             Some(ScopedFrontendRequest::Agent {
-                request: AgentFrontendRequest::SendInput { text },
+                request: AgentFrontendRequest::SendInput { text, .. },
                 ..
             }) if text == "after-promotion"
         ));
@@ -3998,6 +4216,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-1".to_string(),
                     text: "hello".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "Inspection principal must not dispatch producing terminal input"
@@ -4006,6 +4225,7 @@ mod tests {
             .filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "foreign-claim".to_string(),
                 text: "hello".to_string(),
+                request_id: None,
             })
             .is_none());
         assert!(
@@ -4108,8 +4328,9 @@ mod tests {
             bound_scope.filter_inbound(FrontendEvent::PaneSendInput {
                 session_id: "session-1".to_string(),
                 text: "hello".to_string(),
+                request_id: Some(73),
             }),
-            Some(super::AgentFrontendRequest::SendInput { text }) if text == "hello"
+            Some(super::AgentFrontendRequest::SendInput { text, request_id: Some(73) }) if text == "hello"
         ));
         // Issue #3552 AC-4: unblocking peer *close* (Issue #3629 AC-9) must not
         // leak into peer *injection*. An ordinary agent — even a fully bound,
@@ -4121,6 +4342,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-peer".to_string(),
                     text: "hello".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "a producing ordinary agent still cannot inject into a peer Session's pane"
@@ -4146,6 +4368,7 @@ mod tests {
                 .filter_inbound(FrontendEvent::PaneSendInput {
                     session_id: "session-1".to_string(),
                     text: "must-not-dispatch".to_string(),
+                    request_id: None,
                 })
                 .is_none(),
             "Prepared principal must remain observation-only"
@@ -4296,6 +4519,7 @@ mod tests {
         BackendEvent::AttachmentProgress {
             id: pane.to_string(),
             operation_id: operation_id.to_string(),
+            expected_target: None,
             phase,
             file_index: Some(0),
             file_count: 1,
@@ -4365,6 +4589,18 @@ mod tests {
                 window_id: "pane".into(),
                 state: crate::WindowProcessStatus::Stopped,
             },
+            BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            BackendEvent::BoardEntries {
+                id: "board".into(),
+                entries: Vec::new(),
+                has_more_before: false,
+            },
+            BackendEvent::IssueMonitorStatus {
+                status: Box::new(
+                    crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
+                        .status_view(),
+                ),
+            },
             BackendEvent::TerminalStatus {
                 id: "pane".into(),
                 status: crate::WindowProcessStatus::Stopped,
@@ -4390,7 +4626,28 @@ mod tests {
             "GUI producer must enqueue the patch without encoding it"
         );
 
-        for (queue, encodings) in [(first, 1), (second, 0)] {
+        // The counter only observes events already allowed to defer. Inspect
+        // these new kinds directly so eager encoding cannot pass with zero.
+        for queue in [&first, &second] {
+            let state = queue.state.lock().unwrap();
+            for kind in [
+                "issue_monitor_inbox",
+                "issue_monitor_status",
+                "board_entries",
+            ] {
+                let queued = state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.kind == kind)
+                    .unwrap();
+                assert!(
+                    matches!(&queued.payload, SharedOutboundPayload::Deferred(_)),
+                    "GUI producer must defer {kind} encoding"
+                );
+            }
+        }
+
+        for (queue, encodings) in [(first, 4), (second, 0)] {
             let expected = expected.clone();
             std::thread::spawn(move || {
                 DEFERRED_SERIALIZATIONS.with(|count| count.set(0));
@@ -4881,6 +5138,41 @@ mod tests {
         assert!(
             payloads[0].contains("project_index_status"),
             "replacement keeps the original queue position"
+        );
+    }
+
+    // Issue #5561: every inbox broadcast carries every Issue body. A client
+    // that stops draining must hold only the newest inbox, not one per scan.
+    #[test]
+    fn client_queue_keeps_only_the_latest_issue_monitor_inbox() {
+        let queue = ClientQueue::default();
+        let mut latest = None;
+        for _ in 0..3 {
+            let prepared = prepare_owned_outbound(OutboundEvent::project(
+                project_a(),
+                BackendEvent::IssueMonitorInbox { items: Vec::new() },
+            ));
+            latest = Some(prepared.payload.clone());
+            queue.enqueue(&prepared);
+        }
+
+        let state = queue.state.lock().unwrap();
+        let inboxes: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "issue_monitor_inbox")
+            .collect();
+        assert_eq!(inboxes.len(), 1, "queued inboxes must not accumulate");
+        let (
+            SharedOutboundPayload::Deferred(queued),
+            Some(SharedOutboundPayload::Deferred(latest)),
+        ) = (&inboxes[0].payload, latest.as_ref())
+        else {
+            panic!("inbox encoding must stay deferred");
+        };
+        assert!(
+            Arc::ptr_eq(queued, latest),
+            "the queued inbox is the newest one"
         );
     }
 
@@ -5723,5 +6015,30 @@ mod tests {
         assert_eq!(hub.scope("a"), None);
         hub.register("a".into());
         assert_eq!(hub.scope("a"), Some(ClientScope::Hub));
+    }
+}
+
+#[cfg(test)]
+mod tuning_parse_tests {
+    use super::*;
+    #[test]
+    fn malformed_tuning_correlates_only_the_authenticated_browser_project() {
+        let key = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+        let scope = ClientSessionScope::Browser(ClientScope::Project(key.clone()));
+        let request = serde_json::json!({"kind":"agent_roster","project_key":key.as_str(),"request_id":"tune-1",
+            "action":{"kind":"set_tuning","member_id":"member","model":null,"expected_core_revision":"token","authority":"forged"}});
+        assert!(decode_frontend_event(&request.to_string()).is_err());
+        let event = rejected_tuning_parse(&scope, &request.to_string()).unwrap();
+        assert!(
+            matches!(event, BackendEvent::AgentRosterError { project_key, request_id: Some(id), .. } if project_key == key.as_str() && id == "tune-1")
+        );
+        assert!(rejected_tuning_parse(
+            &ClientSessionScope::Browser(ClientScope::Hub),
+            &request.to_string()
+        )
+        .is_none());
+        let mut foreign = request;
+        foreign["project_key"] = serde_json::json!("fedcba9876543210");
+        assert!(rejected_tuning_parse(&scope, &foreign.to_string()).is_none());
     }
 }

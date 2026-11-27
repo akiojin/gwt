@@ -13,10 +13,11 @@ gwt-core = { path = "../gwt-core" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
+time.workspace = true
 dirs.workspace = true
 libc.workspace = true
 notify.workspace = true
+pulldown-cmark.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

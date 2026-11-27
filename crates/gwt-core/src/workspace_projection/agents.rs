@@ -1,9 +1,10 @@
 //! Per-agent summary slice of a [`WorkspaceProjection`]: session identity,
 //! runtime status, current focus, Board linkage, and Workspace affiliation.
 
+use crate::timestamp::UtcTimestamp;
+
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::coordination::BoardEntryKind;
@@ -61,7 +62,7 @@ pub struct WorkspaceAgentSummary {
     pub affiliation_status: WorkspaceAgentAffiliationStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 impl WorkspaceAgentSummary {
@@ -99,7 +100,7 @@ impl WorkspaceAgentSummary {
         worktree_path: Option<PathBuf>,
         branch: Option<String>,
         status_category: WorkspaceStatusCategory,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> Self {
         let window_id = window_id.into();
         Self {
@@ -198,7 +199,7 @@ mod tests {
         // SPEC-2359 US-80 / FR-427: a Shell Work reuses the agent canonical Work
         // id derivation, so a shell and an agent on the same branch land in one
         // Work row.
-        let updated_at: chrono::DateTime<chrono::Utc> = "2026-06-21T03:00:00Z".parse().expect("ts");
+        let updated_at: UtcTimestamp = "2026-06-21T03:00:00Z".parse().expect("ts");
         let shell = WorkspaceAgentSummary::shell_work(
             "tab-1:shell-3",
             Some(std::path::PathBuf::from("/repo/work/x")),

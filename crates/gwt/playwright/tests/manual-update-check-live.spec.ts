@@ -103,7 +103,8 @@ test.describe("Header manual update check", () => {
     await expect(page.locator("#update-modal")).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).__manualUpdateActions)).toEqual(["check_for_updates", "check_for_updates"]);
     const checkBox = await button.boundingBox();
-    const barBox = await page.locator(".project-bar").boundingBox();
+    // Issue #7740: the version and its update check live in the shared footer.
+    const barBox = await page.locator(".app-foot").boundingBox();
     expect(checkBox).not.toBeNull();
     expect(barBox).not.toBeNull();
     expect(checkBox!.y).toBeGreaterThanOrEqual(0);

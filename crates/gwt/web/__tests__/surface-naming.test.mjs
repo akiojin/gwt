@@ -24,7 +24,7 @@ const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 test("the status strip uses the Issues label and navigation name", () => {
   const html = readFileSync(resolve(here, "../index.html"), "utf8");
   assert.match(html, /aria-label="Open Issues: Off"/);
-  assert.match(html, /op-status-strip__label">ISSUES<\/span>/);
+  assert.match(html, /op-status-strip__label">Auto-run<\/span>/);
 });
 
 function presetRoleLabels() {
@@ -56,10 +56,9 @@ test("the three Issue-family presets carry distinguishable role labels", () => {
   );
 
   const html = readFileSync(resolve(here, "../index.html"), "utf8");
-  const workLabel = html.match(/data-surface="works"[^>]*>[\s\S]*?op-rail__surface-label">([^<]+)/)?.[1];
-  assert.equal(workLabel, "Works", "the current Work surface retains its own visible label");
-  assert.equal(new Set([labels.issue, labels.issue_monitor, workLabel]).size, 3,
-    "Issue, Issues and the current Work surface remain distinguishable");
+  // Issue #7880 (design item 137): Works is folded into Issues, so the rail
+  // carries no Works entry and no path leads to the retired Works surface.
+  assert.doesNotMatch(html, /data-surface="works"/, "the rail has no Works entry");
 });
 
 test("user and agent copy uses the Issues name across shipped surfaces", () => {
@@ -67,7 +66,12 @@ test("user and agent copy uses the Issues name across shipped surfaces", () => {
   const oldName = new RegExp(["issue", "monitor"].join("\\s+"), "i");
   const paths = execFileSync("git", ["ls-files", "-z", "--",
     "*.rs", "*.md", "*.js", "*.mjs", "*.ts", "*.html", "*.css", "*.py", "*.ps1", "*.yml",
-    ":(exclude).gwt/**"], { cwd: root, encoding: "utf8" })
+    // Issue #7745: design records quote the wording of their time; they are
+    // not shipped copy, so they are not rewritten to the current name.
+    ":(exclude).gwt/**", ":(exclude)docs/design/**",
+    // Issue #7928: CHANGELOG.md is generated from past commit subjects at
+    // release time; it records history and is not rewritten to the current name.
+    ":(exclude)CHANGELOG.md"], { cwd: root, encoding: "utf8" })
     .split("\0")
     .filter((path) => /\.(?:rs|md|js|mjs|ts|html|css|py|ps1|yml)$/.test(path));
   const remaining = paths.filter((path) => oldName.test(readFileSync(resolve(root, path), "utf8")));

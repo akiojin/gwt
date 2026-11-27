@@ -1,6 +1,6 @@
 // SPEC-2356 — Operator Design System: chrome shell wiring.
 // Imports the small theme/hotkey modules and assembles the project bar
-// theme toggle, command palette, hotkey overlay, mission briefing intro,
+// theme toggle, hotkey overlay, mission briefing intro,
 // status strip live clock, and Living Telemetry counter logic.
 
 import { createThemeManager, createBrowserEnv } from "/theme-manager.js";
@@ -30,27 +30,16 @@ export function initOperatorShell(deps = {}) {
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
   safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
-  const palette = safeWire(
-    "command palette",
-    () => wireCommandPalette({ doc, hotkey }),
-    markDegraded,
-    null,
-  );
-  safeWire(
-    "global hotkeys",
-    () => wireGlobalHotkeys({ doc, hotkey, palette }),
-    markDegraded,
-  );
+  safeWire("global hotkeys", () => wireGlobalHotkeys({ doc, hotkey }), markDegraded);
 
-  return { themeManager, hotkey, palette };
+  return { themeManager, hotkey };
 }
 
-function safeWire(label, fn, onError, fallback = undefined) {
+function safeWire(label, fn, onError) {
   try {
-    return fn();
+    fn();
   } catch (error) {
     onError(label, error);
-    return fallback;
   }
 }
 
@@ -195,7 +184,7 @@ export function applyTelemetryCounts(doc, counts = {}) {
   const runningInline = Number(counts.running_inline ?? 0);
   const inlineSlot = doc.getElementById("op-strip-running-inline");
   if (inlineSlot) {
-    inlineSlot.textContent = `${runningInline} inline`;
+    inlineSlot.textContent = `${runningInline} in Issues`;
     inlineSlot.hidden = !(runningInline > 0);
   }
   const runningCell = doc.querySelector(".op-status-strip__cell--running");
@@ -206,27 +195,55 @@ export function applyTelemetryCounts(doc, counts = {}) {
         : "";
   }
   setText("op-strip-idle", counts.idle ?? 0);
-  // FR-039 (anshin): WAITING cell counts agents waiting on the operator.
+  // SPEC #5016 AC-HS1: the cell keeps its FR-039 `waiting` styling contract
+  // and shows the server BLOCK count (agents that need the operator).
   setText("op-strip-waiting", counts.waiting ?? 0);
   setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
 }
 
-export function subscribeIssueMonitorStatus(doc, model) {
-  return model.subscribeFrame(state => state.status, status => renderIssueMonitorStatus(doc, status));
+export function subscribeWorkAttentionSummary(doc, model) {
+  return model.subscribeFrame(state => state?.projection?.attentionSummary?.summary ?? "", summary => {
+    const cell = doc.querySelector(".op-status-strip__cell--waiting");
+    if (cell) cell.title = summary;
+  });
 }
 
-export function renderIssueMonitorStatus(doc, status = {}) {
+export function subscribeIssueMonitorStatus(doc, model) {
+  let selected;
+  let selectedKey;
+  return model.subscribeFrame(state => {
+    // SPEC #5016 AC-HS1/HS2: read only the model's combined attention value.
+    const summary = state.decisionAttention?.summary;
+    // Subscribe to the strip's presentation, not unrelated Monitor settings.
+    const key = JSON.stringify([issueMonitorStatusStripView(state.status ?? {},
+      state.counts ?? { queue: 0, active: 0, maxActive: 1 }), summary]);
+    if (!selected || selectedKey !== key) {
+      selectedKey = key;
+      selected = { status: state.status, counts: state.counts, summary };
+    }
+    return selected;
+  }, state => renderIssueMonitorStatus(doc, state, state.summary));
+}
+
+export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0, active: 0, maxActive: 1 } } = {}, attentionSummary = "") {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
 
   wireIssueMonitorStatusCell(doc, cell);
-  const view = issueMonitorStatusStripView(status);
+  const view = issueMonitorStatusStripView(status, counts);
   value.textContent = view.value;
+  const needsHuman = doc.getElementById("op-strip-needs-human");
+  const needsHumanLabel = view.needsHuman == null ? "" : `Needs human ${view.needsHuman}`;
+  if (needsHuman) {
+    needsHuman.hidden = !needsHumanLabel;
+    needsHuman.textContent = needsHumanLabel;
+  }
+  const attention = attentionSummary || needsHumanLabel;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", `Open Issues: ${view.value}`);
-  cell.setAttribute("title", `Open Issues | ${view.title}`);
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, attention].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, attention].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
@@ -254,7 +271,7 @@ function normalizedIssueMonitorQuotaHold(status) {
   return provider && resetAt ? { provider, reset_at: resetAt } : null;
 }
 
-function issueMonitorStatusStripView(status = {}) {
+function issueMonitorStatusStripView(status, counts) {
   const enabled = Boolean(status.enabled);
   const quotaHold = normalizedIssueMonitorQuotaHold(status);
   const rawState = String(status.state || (enabled ? "idle" : "disabled"));
@@ -271,26 +288,26 @@ function issueMonitorStatusStripView(status = {}) {
   } else if (state === "quota_hold") {
     state = "idle";
   }
-  const queue = Math.max(0, Number(status.queue_len || 0));
-  const active = Math.max(0, Number(status.active_count || 0));
-  const maxActive = Math.max(0, Number(status.max_active_agents ?? 1));
+  const { queue, active, maxActive } = counts;
+  const needsHuman = status.needs_human_count ?? null;
 
   if (state === "disabled") {
     return {
       state,
       value: "Off",
-      title: "Issues: Off",
+      needsHuman,
+      title: "Auto-run: Off",
       alert: false,
     };
   }
 
   let label = "Idle";
   if (state === "error") label = "Error";
-  else if (state === "auth_required") label = "Auth";
-  else if (state === "launching" || state === "active") label = "Run";
-  else if (state === "quota_hold") label = "Hold";
+  else if (state === "auth_required") label = "Sign-in needed";
+  else if (state === "launching" || state === "active") label = "Running";
+  else if (state === "quota_hold") label = "On hold";
 
-  const value = `${label} Q${queue} A${active}/${maxActive}`;
+  const value = `${label} · ${queue} queued · ${active} of ${maxActive} active`;
   const lastError = typeof status.last_error === "string" ? status.last_error.trim() : "";
   const quotaHoldDetail = state === "quota_hold"
     ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}`
@@ -299,184 +316,9 @@ function issueMonitorStatusStripView(status = {}) {
   return {
     state,
     value,
-    title: detail ? `Issues: ${value} | ${detail}` : `Issues: ${value}`,
+    needsHuman,
+    title: detail ? `Auto-run: ${value} | ${detail}` : `Auto-run: ${value}`,
     alert: state === "error" || state === "auth_required",
-  };
-}
-
-// ------------------------------------------------------------
-// Provider usage pill (SPEC-2970)
-// ------------------------------------------------------------
-
-const USAGE_PROVIDER_LABEL = { codex: "CX", claude_code: "CC" };
-const USAGE_PROVIDER_NAME = { codex: "Codex", claude_code: "Claude Code" };
-
-function usageProviderLabel(provider) {
-  const known = USAGE_PROVIDER_LABEL[provider];
-  if (known) return known;
-  const compact = String(provider || "")
-    .replace(/[^a-z0-9]+/gi, "")
-    .slice(0, 2)
-    .toUpperCase();
-  return compact || "?";
-}
-
-function usageSummaryPercent(account) {
-  const percentages = (account.windows || [])
-    .filter(
-      (window) => account.provider !== "claude_code" ||
-        window.kind === "five_hour" || window.kind === "weekly",
-    )
-    .map((window) => window.used_percent)
-    .filter(
-      (percent) =>
-        typeof percent === "number" ||
-        (typeof percent === "string" && percent.trim() !== ""),
-    )
-    .map(Number)
-    .filter(Number.isFinite)
-    .map((percent) => Math.max(0, Math.min(100, percent)));
-  return percentages.length ? Math.max(...percentages) : null;
-}
-
-// Stable, glanceable per-provider summary value for the status strip (the
-// window nearest its limit when available, else a short degraded token).
-function usageSummaryValue(account) {
-  const kind = (account.state || {}).kind || "ok";
-  if (kind === "disabled") return "off";
-  if (kind === "no_data") return "—";
-  if (kind === "unavailable") return "n/a";
-  const percent = usageSummaryPercent(account);
-  if (percent != null) return `${Math.round(percent)}%`;
-  return "—";
-}
-
-function usageSeverity(account) {
-  if (account.limit_reached) return "danger";
-  const percent = usageSummaryPercent(account);
-  if (percent == null) return "";
-  if (percent >= 95) return "danger";
-  if (percent >= 80) return "warning";
-  return "normal";
-}
-
-function usageCriticality(account) {
-  if (account.limit_reached) return 101;
-  return usageSummaryPercent(account) ?? -1;
-}
-
-// SPEC-2970 — status-strip USAGE cell: a stable, consolidated summary
-// (`USAGE CX 23% CC 9%`). Hover, focus, and click all show the same consolidated
-// popover (all windows + consumption) via the app-provided hooks. No ticker
-// rotation — everything is visible at a glance / in the popover.
-export function applyProviderUsage(doc, snapshot = {}) {
-  const cell = doc.getElementById("op-strip-usage");
-  if (!cell) return;
-  const win = doc.defaultView || window;
-  const accounts = snapshot.accounts || [];
-  if (!accounts.length) {
-    while (cell.firstChild) cell.removeChild(cell.firstChild);
-    cell.hidden = true;
-    cell.setAttribute("aria-expanded", "false");
-    cell.setAttribute("aria-label", "Provider usage and limits");
-    cell.title = "Provider usage & limits";
-    delete cell.dataset.limit;
-    try {
-      win.__gwtHideUsageHover?.({ immediate: true });
-    } catch {
-      /* no-op */
-    }
-    return;
-  }
-  while (cell.firstChild) cell.removeChild(cell.firstChild);
-  const label = doc.createElement("span");
-  label.className = "op-status-strip__label";
-  label.textContent = "USAGE";
-  cell.appendChild(label);
-  const summaries = accounts.map((account) => ({
-    account,
-    label: usageProviderLabel(account.provider),
-    accessibleLabel:
-      USAGE_PROVIDER_NAME[account.provider] || usageProviderLabel(account.provider),
-    value: usageSummaryValue(account),
-    severity: usageSeverity(account),
-    accessibleSeverity: account.limit_reached
-      ? "limit reached"
-      : usageSeverity(account),
-    criticality: usageCriticality(account),
-  }));
-  const visibleSummaries =
-    summaries.length <= 2
-      ? summaries
-      : [
-          summaries.reduce((mostCritical, summary) =>
-            summary.criticality > mostCritical.criticality ? summary : mostCritical,
-          ),
-        ];
-  for (const summary of visibleSummaries) {
-    const { account } = summary;
-    const chip = doc.createElement("span");
-    chip.className = "op-usage-sum";
-    chip.dataset.provider = account.provider;
-    if (account.limit_reached) chip.dataset.limit = "true";
-    if (summary.severity) chip.dataset.severity = summary.severity;
-    chip.textContent = `${summary.label} ${summary.value}`;
-    cell.appendChild(chip);
-  }
-  if (summaries.length > 2) {
-    const more = doc.createElement("span");
-    more.className = "op-usage-more";
-    more.textContent = `+${summaries.length - 1}`;
-    more.title = `${summaries.length - 1} more providers`;
-    cell.appendChild(more);
-  }
-  const accessibleSummary = `Provider usage: ${summaries
-    .map(
-      (summary) =>
-        `${summary.accessibleLabel} ${summary.value}${
-          summary.accessibleSeverity ? ` ${summary.accessibleSeverity}` : ""
-        }`,
-    )
-    .join(", ")}`;
-  cell.setAttribute("aria-label", accessibleSummary);
-  cell.setAttribute("aria-controls", "provider-usage-popover");
-  if (!cell.hasAttribute("aria-expanded")) cell.setAttribute("aria-expanded", "false");
-  cell.title = accessibleSummary;
-  if (accounts.some((a) => a.limit_reached)) cell.dataset.limit = "true";
-  else delete cell.dataset.limit;
-  cell.hidden = false;
-
-  // No modal: hover (or click, for touch/non-hover) shows the full popover.
-  const showUsagePopover = () => {
-    try {
-      win.__gwtShowUsageHover?.(cell);
-    } catch {
-      /* no-op */
-    }
-  };
-  const hideUsagePopover = () => {
-    try {
-      win.__gwtHideUsageHover?.();
-    } catch {
-      /* no-op */
-    }
-  };
-  cell.onclick = showUsagePopover;
-  cell.onmouseenter = showUsagePopover;
-  cell.onfocus = showUsagePopover;
-  cell.onmouseleave = hideUsagePopover;
-  cell.onblur = (event) => {
-    if (win.__gwtUsageHoverContains?.(event?.relatedTarget)) return;
-    hideUsagePopover();
-  };
-  cell.onkeydown = (event) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      showUsagePopover();
-      win.requestAnimationFrame?.(() => win.__gwtFocusUsageHover?.());
-    } else if (event.key === "Escape") {
-      win.__gwtHideUsageHover?.({ immediate: true });
-    }
   };
 }
 
@@ -532,11 +374,11 @@ function runtimeHealthState(state) {
 function runtimeHealthStateLabel(state) {
   switch (runtimeHealthState(state)) {
     case "hot":
-      return "HOT";
+      return "High";
     case "warn":
-      return "WARN";
+      return "Elevated";
     case "warming":
-      return "WARM";
+      return "Warming";
     default:
       return "OK";
   }
@@ -568,11 +410,11 @@ function signedDelta(value) {
 function runtimeHealthTitle(snapshot, queue) {
   return [
     RUNTIME_HEALTH_CPU_UNITS,
-    `state: ${runtimeHealthState(snapshot.state)}`,
-    `processes: ${Number(snapshot.process_count) || 0}`,
-    `runners: ${Number(snapshot.runner_count) || 0}`,
-    `queued: ${Number(queue.queued_entries) || 0}`,
-    `dropped: ${signedDelta(queue.dropped_lossy_delta)}`,
+    `State: ${runtimeHealthStateLabel(snapshot.state)}`,
+    `Processes: ${Number(snapshot.process_count) || 0}`,
+    `Runners: ${Number(snapshot.runner_count) || 0}`,
+    `Queued events: ${Number(queue.queued_entries) || 0}`,
+    `Dropped events: ${signedDelta(queue.dropped_lossy_delta)}`,
   ].join(" | ");
 }
 
@@ -655,13 +497,13 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
 
   const summary = doc.createElement("div");
   summary.className = "op-runtime-health-detail__summary";
-  appendRuntimeHealthChip(doc, summary, "STATE", runtimeHealthStateLabel(snapshot.state));
+  appendRuntimeHealthChip(doc, summary, "State", runtimeHealthStateLabel(snapshot.state));
   appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeAggregateCpu(snapshot.cpu_percent));
-  appendRuntimeHealthChip(doc, summary, "MEM", formatRuntimeMemory(snapshot.memory_bytes));
+  appendRuntimeHealthChip(doc, summary, "Memory", formatRuntimeMemory(snapshot.memory_bytes));
   appendRuntimeHealthChip(
     doc,
     summary,
-    "PROC",
+    "Processes",
     `${Number(snapshot.process_count) || 0}/${Number(snapshot.runner_count) || 0}`,
   );
   detail.appendChild(summary);
@@ -1147,210 +989,10 @@ function wireHotkeyOverlay({ doc, hotkey }) {
 }
 
 // ------------------------------------------------------------
-// Command Palette
-// ------------------------------------------------------------
-
-function wireCommandPalette({ doc, hotkey }) {
-  const overlay = doc.getElementById("op-palette-backdrop");
-  const input = doc.getElementById("op-palette-input");
-  const list = doc.getElementById("op-palette-list");
-  const button = doc.getElementById("op-palette-button");
-  if (!overlay || !input || !list) return null;
-
-  const actions = createActionRegistry(doc);
-  let selectedIndex = 0;
-  let visible = [];
-
-  function open() {
-    overlay.dataset.open = "true";
-    overlay.removeAttribute("aria-hidden");
-    // SPEC-2356 — combobox accessibility: announce that the popup is now open
-    // so screen readers attach the listbox to the input.
-    input.setAttribute("aria-expanded", "true");
-    input.value = "";
-    selectedIndex = 0;
-    render();
-    setTimeout(() => input.focus(), 0);
-  }
-
-  function close() {
-    delete overlay.dataset.open;
-    overlay.setAttribute("aria-hidden", "true");
-    input.setAttribute("aria-expanded", "false");
-    input.removeAttribute("aria-activedescendant");
-    if (doc.activeElement === input) input.blur();
-  }
-
-  function render() {
-    const query = input.value.trim().toLowerCase();
-    visible = actions.filter(query);
-    if (selectedIndex >= visible.length) selectedIndex = Math.max(0, visible.length - 1);
-    while (list.firstChild) list.removeChild(list.firstChild);
-    if (visible.length === 0) {
-      const empty = doc.createElement("li");
-      empty.className = "op-palette__empty";
-      empty.textContent = query
-        ? `No commands match "` + query + `"`
-        : "No commands registered yet.";
-      list.appendChild(empty);
-      return;
-    }
-    const groups = new Map();
-    for (const a of visible) {
-      const key = a.group ?? "Commands";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(a);
-    }
-    let idx = 0;
-    for (const [group, items] of groups) {
-      const head = doc.createElement("li");
-      head.className = "op-palette__group";
-      head.textContent = group;
-      list.appendChild(head);
-      for (const a of items) {
-        const li = doc.createElement("li");
-        li.className = "op-palette__row";
-        li.dataset.index = String(idx);
-        li.dataset.selected = idx === selectedIndex ? "true" : "false";
-        // SPEC-2356 — combobox/listbox a11y: each row is an option with a
-        // stable id so the input can target it via aria-activedescendant.
-        li.id = `op-palette-row-${idx}`;
-        li.setAttribute("role", "option");
-        li.setAttribute("aria-selected", idx === selectedIndex ? "true" : "false");
-        li.innerHTML = `<span></span><span class="op-palette__hint"></span>`;
-        li.firstChild.textContent = a.label;
-        li.lastChild.textContent = a.hint ?? "";
-        li.addEventListener("mousemove", () => {
-          if (selectedIndex !== idx) {
-            selectedIndex = idx;
-            updateSelection();
-          }
-        });
-        const myIdx = idx;
-        li.addEventListener("click", () => {
-          execute(visible[myIdx]);
-        });
-        list.appendChild(li);
-        idx += 1;
-      }
-    }
-  }
-
-  function updateSelection() {
-    const rows = list.querySelectorAll(".op-palette__row");
-    rows.forEach((row, i) => {
-      const isSelected = i === selectedIndex;
-      row.dataset.selected = isSelected ? "true" : "false";
-      row.setAttribute("aria-selected", isSelected ? "true" : "false");
-      if (isSelected) {
-        row.scrollIntoView({ block: "nearest" });
-        // SPEC-2356 — point the combobox input at the active option so screen
-        // readers announce the highlighted command without moving DOM focus.
-        input.setAttribute("aria-activedescendant", row.id);
-      }
-    });
-    if (rows.length === 0) input.removeAttribute("aria-activedescendant");
-  }
-
-  function execute(action) {
-    if (!action) return;
-    close();
-    try { action.handler(); } catch (e) { console.error("palette action threw", e); }
-  }
-
-  input.addEventListener("input", () => {
-    selectedIndex = 0;
-    render();
-  });
-
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { close(); e.preventDefault(); return; }
-    if (e.key === "ArrowDown") {
-      selectedIndex = Math.min(selectedIndex + 1, visible.length - 1);
-      updateSelection();
-      e.preventDefault();
-    } else if (e.key === "ArrowUp") {
-      selectedIndex = Math.max(selectedIndex - 1, 0);
-      updateSelection();
-      e.preventDefault();
-    } else if (e.key === "Enter") {
-      execute(visible[selectedIndex]);
-      e.preventDefault();
-    }
-  });
-
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
-  });
-
-  button?.addEventListener("click", open);
-
-  hotkey.register("cmd+k", () => { open(); return true; });
-  hotkey.register("cmd+p", () => { open(); return true; });
-
-  return {
-    open, close,
-    register: (action) => actions.register(action),
-    unregister: (id) => actions.unregister(id),
-  };
-}
-
-function createActionRegistry(doc) {
-  const items = new Map();
-
-  // Default surface commands. Frontend modules dispatch these via DOM events
-  // so we don't need a hard import dependency between operator-shell and app.
-  const dispatch = (id) => () => doc.dispatchEvent(new CustomEvent("op:command", { detail: { id } }));
-
-  const seed = [
-    { id: "open-board", label: "Focus Board surface", hint: "⌘B", group: "Navigate", handler: dispatch("open-board") },
-    { id: "open-git", label: "Focus Work", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
-    { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
-    { id: "open-recovery-center", label: "Open Recovery Center", hint: "Durable delivery", group: "Navigate", handler: dispatch("open-recovery-center") },
-    { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
-    // SPEC-3431 FR-026: the rail gear only appears on hover, so the palette is
-    // the keyboard-reachable entry to PM settings.
-    { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
-    { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
-    { id: "open-branches", label: "Open Issues", hint: "Issues and other work", group: "Spawn", handler: dispatch("open-branches") },
-    { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
-    { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },
-  ];
-  seed.forEach((a) => items.set(a.id, a));
-
-  return {
-    register(action) {
-      if (!action || !action.id) throw new Error("action requires id");
-      items.set(action.id, action);
-    },
-    unregister(id) {
-      items.delete(id);
-    },
-    filter(query) {
-      const all = Array.from(items.values());
-      if (!query) return all;
-      const score = (a) => {
-        const haystack = `${a.label} ${a.id} ${a.group ?? ""}`.toLowerCase();
-        if (haystack.startsWith(query)) return 100;
-        if (haystack.includes(query)) return 50;
-        const tokens = query.split(/\s+/).filter(Boolean);
-        let acc = 0;
-        for (const t of tokens) if (haystack.includes(t)) acc += 10;
-        return acc;
-      };
-      return all.map((a) => ({ a, s: score(a) }))
-        .filter(({ s }) => s > 0)
-        .sort((x, y) => y.s - x.s)
-        .map(({ a }) => a);
-    },
-  };
-}
-
-// ------------------------------------------------------------
 // Global hotkeys (delegate to operator command bus)
 // ------------------------------------------------------------
 
-function wireGlobalHotkeys({ doc, hotkey, palette }) {
+function wireGlobalHotkeys({ doc, hotkey }) {
   const send = (id) => () => {
     doc.dispatchEvent(new CustomEvent("op:command", { detail: { id } }));
     return true;
@@ -1362,12 +1004,6 @@ function wireGlobalHotkeys({ doc, hotkey, palette }) {
   // SPEC-2356 Phase 9: Cmd+\\ sidebar toggle hotkey is removed in favor of the
   // hover-reveal peek 帯. Chrome visibility is now driven entirely by pointer
   // hover / keyboard focus / pointer tap.
-
-  if (typeof palette?.close === "function") {
-    doc.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") palette.close();
-    });
-  }
 
   hotkey.attach(doc);
 }
@@ -1385,19 +1021,108 @@ function pad2(n) {
 }
 
 // The project execution owner is independent of the browser's GUI connection.
-export function subscribeProjectOwnerHealth(doc, model) {
-  return model.subscribeFrame(state => state, health => {
-    if (health) applyProjectOwnerHealth(doc, health);
+export function subscribeProjectOwnerHealth(doc, model, { send, createFocusTrap = () => () => {} } = {}) {
+  const cell = doc.querySelector("[data-project-owner-health]");
+  let health = null, confirmationId = null, pending = false, releaseTrap = null, returnFocus = null;
+  const node = (tag, className, text) => {
+    const element = doc.createElement(tag);
+    element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  const restart = node("button", "text-button", "Restart daemon…");
+  restart.type = "button";
+  restart.dataset.ownerRestart = "";
+  restart.hidden = true;
+  cell?.append(restart);
+  const modal = node("div", "modal-backdrop");
+  modal.id = "owner-restart-modal";
+  modal.setAttribute("aria-hidden", "true");
+  const dialog = node("div", "modal-shell");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "owner-restart-title");
+  dialog.setAttribute("aria-describedby", "owner-restart-description");
+  dialog.tabIndex = -1;
+  const header = node("div", "modal-header");
+  const title = node("h2", "", "Restart unresponsive daemon?");
+  title.id = "owner-restart-title";
+  header.append(title);
+  const body = node("div", "modal-body");
+  body.id = "owner-restart-description";
+  body.textContent = "Restarting stops all agents hosted by this daemon, including agents in other open projects. Diagnostics are saved first. GWT then sends SIGTERM and, if the daemon does not exit during the grace period, SIGKILL. Unsaved terminal work may be lost.";
+  const footer = node("div", "modal-footer");
+  const cancel = node("button", "text-button", "Cancel");
+  cancel.type = "button";
+  cancel.dataset.ownerRestartCancel = "";
+  const confirm = node("button", "wizard-button primary destructive", "Save diagnostics and restart");
+  confirm.type = "button";
+  confirm.dataset.ownerRestartConfirm = "";
+  footer.append(cancel, confirm);
+  dialog.append(header, body, footer);
+  modal.append(dialog);
+  doc.body.append(modal);
+  function hide() {
+    confirmationId = null;
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+    releaseTrap?.(); releaseTrap = null;
+    returnFocus?.focus?.(); returnFocus = null;
+  }
+  restart.addEventListener("click", () => {
+    if (health?.state !== "wedged" || !health.recovery_id || pending || !send) return;
+    confirmationId = health.recovery_id;
+    returnFocus = doc.activeElement;
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+    releaseTrap = createFocusTrap(dialog, { document: doc });
+    cancel.focus();
   });
+  cancel.addEventListener("click", hide);
+  modal.addEventListener("click", event => { if (event.target === modal) hide(); });
+  const onKey = event => {
+    if (event.key === "Escape" && modal.classList.contains("open")) {
+      event.preventDefault(); event.stopPropagation(); hide();
+    }
+  };
+  doc.addEventListener("keydown", onKey);
+  confirm.addEventListener("click", () => {
+    const current = model.read();
+    if (!modal.classList.contains("open") || current?.state !== "wedged" || !confirmationId || current.recovery_id !== confirmationId || pending || !send) return;
+    const recoveryId = confirmationId;
+    pending = true;
+    restart.disabled = true;
+    hide();
+    if (send({ kind: "restart_wedged_owner", confirmed: true, recovery_id: recoveryId }) !== "sent") {
+      pending = false;
+      restart.disabled = false;
+    }
+  });
+  const unsubscribe = model.subscribeFrame(state => state, current => {
+    const identityChanged = health?.recovery_id !== current?.recovery_id;
+    health = current;
+    if (health) applyProjectOwnerHealth(doc, health);
+    restart.hidden = health?.state !== "wedged" || !health?.recovery_id || !send;
+    // A backend refusal keeps the owner wedged. A new observation reopens
+    // the explicit confirmation path; the backend consumes each token once.
+    pending = false;
+    restart.disabled = false;
+    if (health?.state !== "wedged" || identityChanged) hide();
+  });
+  return () => {
+    unsubscribe(); hide();
+    doc.removeEventListener("keydown", onKey);
+    restart.remove(); modal.remove();
+  };
 }
 
 function applyProjectOwnerHealth(doc, health = {}) {
   const cell = doc.querySelector("[data-project-owner-health]");
   if (!cell) return;
-  const state = ["healthy", "degraded"].includes(health.state) ? health.state : "connecting";
+  const state = ["healthy", "degraded", "wedged"].includes(health.state) ? health.state : "connecting";
   cell.dataset.state = state;
   cell.hidden = false;
   cell.title = health.detail || "";
   const value = cell.querySelector("[data-project-owner-health-value]");
-  if (value) value.textContent = state === "healthy" ? "Ready" : state === "degraded" ? "Unavailable" : "Connecting";
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "wedged" ? "Not responding" : state === "degraded" ? "Unavailable" : "Connecting";
 }

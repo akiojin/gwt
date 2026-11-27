@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { openWorks } from "./_helpers/works-entry";
 
 const interruptedBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const interruptedAppUrl = interruptedBase ? new URL(new URL(APP_URL).pathname, interruptedBase).href : APP_URL;
@@ -71,13 +72,35 @@ test.beforeEach(async ({ page }, testInfo) => {
   });
   if (!interruptedBase) await installEmbeddedRoutes(page);
   await page.goto(interruptedAppUrl);
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 });
 
 test.afterEach(({ page }) => {
   expect(browserErrors.get(page), "console and page errors").toEqual([]);
+});
+
+test("Issue #7523: recovery failure explains impact and next action without Debug state", async ({ page }, testInfo) => {
+  const proof = process.env.GWT_PLAYWRIGHT_ISSUE_7523_EVENTS;
+  test.skip(!proof, "requires the Rust recovery regression's actual backend events");
+  const events = JSON.parse(await readFile(proof!, "utf8"));
+  const operation = events.find((event: any) => event.kind === "window_command_error" && event.operation === "resize");
+  expect(operation).toBeTruthy();
+  expect(operation.message).toContain("not delivered to the window");
+  expect(operation.message).toContain("background process connection is interrupted");
+  expect(operation.message).toContain("Reopen the window and check its state");
+  expect(operation.message).not.toMatch(/Some\(|Degraded|None/);
+  await page.evaluate(detail => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+  }, { ...operation, id: "agent-1" });
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toContainText("Reopen the window");
+  await page.getByRole("button", { name: /Notifications/ }).click();
+  const details = page.locator(".notification-center__details").filter({ hasText: "background process connection is interrupted" });
+  await details.locator("summary").click();
+  await expect(details).toContainText(operation.message);
+  await expect(details).not.toContainText("Some(");
+  await testInfo.attach("recovery-failure", { body: await page.screenshot(), contentType: "image/png" });
 });
 
 test("operation failure preserves runtime state while a true PTY error still renders", async ({ page }, testInfo) => {
@@ -95,11 +118,20 @@ test("operation failure preserves runtime state while a true PTY error still ren
   expect(operation).toBeTruthy();
   await inject({ ...operation, id: "agent-1" });
   await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toBeVisible();
-  await expect(page.locator(".toast-alerts__item").filter({ hasText: operation.message })).toBeVisible();
+  // SPEC #7007 T-014: the toast body is the typed presentation (impact +
+  // next action) for the operation. The raw backend message travels as
+  // notification-history details and must not headline the toast.
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: "The terminal size may be out of date. Reopen the window to refresh it." })).toBeVisible();
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: operation.message })).toHaveCount(0);
   await expect(agentWindow.locator(".status-label")).toHaveText("Running");
   await expect(agentWindow.locator(".status-chip")).not.toHaveClass(/\berror\b/);
   await expect(page.locator(".toast-alerts__item").filter({ hasText: "Agent error" })).toHaveCount(0);
   await testInfo.attach("operation-failure", { body: await page.screenshot({ path: testInfo.outputPath("operation-failure.png") }), contentType: "image/png" });
+  await inject({ kind: "terminal_status", id: "agent-1", status: "stopped", detail: null });
+  await expect(agentWindow.locator(".status-label")).toHaveText("Stopped");
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: "Agent error" })).toHaveCount(0);
+  await testInfo.attach("stopped", { body: await page.screenshot({ path: testInfo.outputPath("stopped.png") }), contentType: "image/png" });
+  await inject({ kind: "terminal_status", id: "agent-1", status: "running", detail: null });
   const error = events.find((event: any) => event.kind === "terminal_status" && event.status === "error");
   expect(error).toBeTruthy();
   await inject({ ...error, id: "agent-1" });
@@ -153,4 +185,41 @@ test("capacity-ended turn renders Waiting with its reason and recovers", async (
   });
   await expect(agentWindow.locator(".status-label")).toHaveText("Running");
   await expect(agentWindow.locator(".status-chip")).not.toHaveAttribute("title", /Selected model is at capacity/);
+});
+
+test("Issue #7542: a failed PM launch is shown as not running with a working Restart", async ({ page }, testInfo) => {
+  await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => Boolean((window as any).__gwtPmSettingsTestApi))).toBe(true);
+  await page.evaluate(() => {
+    const mount = document.createElement("section");
+    mount.id = "pm-start-block-mount";
+    mount.className = "settings-panel";
+    document.body.appendChild(mount);
+    (window as any).__gwtPmSettingsTestApi.mount(mount);
+  });
+  await page.evaluate(detail => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+  }, {
+    kind: "pm_status", project_key: new URL(page.url()).pathname.split("/").filter(Boolean).at(-1),
+    available: true, auto_start: true, paused: false, is_running: false,
+    loop_interval_secs: 60, loop_interval_secs_decimal: "60",
+    configured_agent_id: "claude", agent_options: [{ id: "claude", name: "Claude Code" }],
+    start_block: {
+      kind: "launch_failed", permanent: false, restart_clears_it: true,
+      reason: "Configured PM still holds its reservation",
+      required_operation: "Close any Project Manager window that is still open, then press Restart Project Manager in Settings.",
+      observed_at: "2026-11-17T10:00:00Z",
+    },
+  });
+  const panel = page.locator("#pm-start-block-mount");
+  const line = panel.locator('[data-role="pm-start-block"]');
+  await expect(line).toBeVisible();
+  await expect(line).toHaveText(
+    "The Project Manager is not running: Configured PM still holds its reservation. "
+      + "Close any Project Manager window that is still open, then press Restart Project Manager in Settings.",
+  );
+  await expect(panel.locator('[data-role="pm-restart"]')).toBeEnabled();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+  await testInfo.attach("pm-launch-failed", { body: await page.screenshot(), contentType: "image/png" });
 });

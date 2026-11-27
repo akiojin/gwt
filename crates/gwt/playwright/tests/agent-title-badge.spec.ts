@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -28,11 +29,49 @@ test.describe("Agent title role and worktree badges", () => {
     expect(errors.get(page), "zero console/page errors").toEqual([]);
   });
 
+  test("Issue #3823 PM titles isolate own operations from worker reports", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installAgentTitleBadgeBackend(page, undefined, false, false, true);
+    await page.goto(appUrl);
+    await page.locator("#op-pm-entry").click();
+    await page.getByRole("button", { name: "Open PM terminal" }).click();
+    const pane = page.locator('.workspace-window[data-id="agent-1"]');
+    const title = pane.locator(".title-text");
+    // Issue #8012: until the ledger loads, neither the header nor the pane
+    // paints the PM window's catalog name; the ledger's PM then names both.
+    const headerPm = page.locator('[data-destination="pm"] .app-head__label');
+    const footerPm = page.locator("#app-foot-pm .app-foot__pm");
+    await expect(title).toHaveText("Project Manager — Starting");
+    await expect(headerPm).toHaveText("PM");
+    await expect(footerPm).toHaveText("PM: —");
+    await page.screenshot({ path: info.outputPath("pm-title-before-ledger.png") });
+    await page.evaluate(() => (window as any).__releaseRoster());
+    await expect(title).toHaveText("Project Manager · Ozawa — Starting");
+    await expect(headerPm).toHaveText("Ozawa");
+    await expect(footerPm).toHaveText("PM: Ozawa");
+    await expect(pane.locator(".window-role-badge")).toHaveText("PM");
+    await page.evaluate(() => (window as any).__injectPmTitle("driving_pr", "running"));
+    await expect(title).toHaveText("Project Manager · Ozawa — Driving PRs");
+    await page.evaluate(() => (window as any).__injectPmTitle("driving_pr", "error"));
+    await expect(title).toHaveText("Project Manager · Ozawa — Driving PRs");
+    await expect(title).toHaveAttribute("title", "Project Manager · Ozawa — Driving PRs");
+    await page.evaluate(() => (window as any).__injectPmTitle("reconciling", "idle"));
+    await expect(title).toHaveText("Project Manager · Ozawa — Reconciling");
+    // Issue #7922 AC-4: a recorded wake stall replaces the last operation.
+    await page.evaluate(() => (window as any).__injectPmTitle("stalled", "waiting"));
+    await expect(title).toHaveText("Project Manager · Ozawa — Not receiving wakes");
+    await page.screenshot({ path: info.outputPath("pm-stalled-title.png") });
+    // A restored runtime has no activity wire value until its own operation.
+    await page.evaluate(() => (window as any).__injectPmTitle(null, "idle"));
+    await expect(title).toHaveText("Project Manager · Ozawa — Starting");
+    await page.screenshot({ path: info.outputPath("pm-operation-title.png") });
+  });
+
   test("Issue #5478 review title stays distinct from its waiting owner", async ({ page }, info) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, false, true);
     await page.goto(appUrl);
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     const owner = page.locator('.work-row[data-window-id="agent-1"]');
     const review = page.locator('.work-row[data-window-id="agent-2"]');
     await expect(owner.locator(".work-purpose")).toHaveText("Deliver Issue #42");
@@ -81,7 +120,7 @@ test.describe("Agent title role and worktree badges", () => {
     const screenshot = info.outputPath("kanban-agent-names.png");
     await kanban.screenshot({ path: screenshot });
     await info.attach("Kanban agent names", { path: screenshot, contentType: "image/png" });
-    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await openWorks(page);
     await expect(page.locator(".work-row[data-window-id='agent-1'] .work-name")).toHaveText(assignedName);
     await expect(page.locator(".work-row[data-window-id='agent-1'] .work-purpose")).toHaveText("Fix cache");
     await expect(page.locator(".work-row[data-window-id='agent-2'] .work-purpose")).toHaveText("Intake Agent");
@@ -140,8 +179,9 @@ async function installAgentTitleBadgeBackend(
   primaryAgent = { agentId: "codex", color: "cyan", title: "Codex" },
   identityScenario = false,
   reviewScenario = false,
+  pmScenario = false,
 ) {
-  await page.addInitScript(({ primaryAgentFixture, identityScenario, reviewScenario }) => {
+  await page.addInitScript(({ primaryAgentFixture, identityScenario, reviewScenario, pmScenario }) => {
     (window as any).__gwtPlaywrightTestBridge = true;
     const windows = [
       {
@@ -211,6 +251,11 @@ async function installAgentTitleBadgeBackend(
         tab_group_active: false,
       },
     ];
+    if (pmScenario) {
+      Object.assign(windows[0], { is_pm: true, agent_name: "Maple",
+        dynamic_title: "Other agent: workspace.ensure refused",
+        dynamic_title_detail: "Worker's blocked report", purpose_title: "Other agent's work" });
+    }
     if (reviewScenario) {
       windows[0].purpose_title = "Deliver Issue #42";
       windows[1].title = "Review · Issue #42";
@@ -252,6 +297,22 @@ async function installAgentTitleBadgeBackend(
       windows: windows.map((windowData) => ({ ...windowData })),
     };
 
+    // The ledger designates a PM whose name differs from the PM window's.
+    const projectKey = location.pathname.split("/").filter(Boolean).at(-1);
+    const rosterReply = request_id => ({ kind: "agent_roster", request_id, roster: {
+      project_key: projectKey, revision: 1, revision_decimal: "1", capacity: 1, recommended_capacity: 1,
+      past_contributors: [], past_complete: true, by_session: {}, error: null,
+      members: [{ agent_member_id: "pm-member", agent_id: "claude", name: "Ozawa", enabled: true, pm_eligible: true,
+        pm_project_key: projectKey, created_at: "2026-11-01T00:00:00Z", assignment: null, provider: "claude",
+        model: null, active_assignments: [], saved_manual_profile: null, saved_manual_revision: null, history: [],
+        issue_count: 0, landed_count: null, active_seconds: null, tokens: null }] } });
+    let rosterReleased = false;
+    const heldRosterRequests = [];
+    (window as any).__releaseRoster = () => {
+      rosterReleased = true;
+      for (const { socket, request_id } of heldRosterRequests.splice(0)) socket.emit(rosterReply(request_id));
+    };
+
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -269,7 +330,7 @@ async function installAgentTitleBadgeBackend(
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
           this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "title-badge-fixture", observed_at: new Date().toISOString(), agents: [
-          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: pmScenario, issue_number: null },
           { window_id: 'agent-2', session_id: 'agent-2-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
           { window_id: 'agent-3', session_id: 'agent-3-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
         ] } } });
@@ -285,6 +346,10 @@ async function installAgentTitleBadgeBackend(
         }
         if (msg.kind === "list_windows") {
           this.emit(windowListState);
+        }
+        if (msg.kind === "agent_roster" && pmScenario) {
+          if (rosterReleased) this.emit(rosterReply(msg.request_id));
+          else heldRosterRequests.push({ socket: this, request_id: msg.request_id });
         }
         if (msg.kind === "load_board") {
           const post = { id: "named-post", author_kind: "agent", author: "Codex",
@@ -324,9 +389,16 @@ async function installAgentTitleBadgeBackend(
       workspaceState.workspace.tabs[0].workspace.windows[0].dynamic_title = title;
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState }));
     };
+    (window as any).__injectPmTitle = (activity: string | null, status: string) => {
+      for (const data of [workspaceState.workspace.tabs[0].workspace.windows[0], windowListState.windows[0]]) {
+        Object.assign(data, { pm_activity: activity, status, title: "Another agent failed",
+          dynamic_title: `Board: another agent is ${status}`, dynamic_title_detail: "Other agent's failure" });
+      }
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState }));
+    };
     Object.defineProperty(window, "WebSocket", {
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, { primaryAgentFixture: primaryAgent, identityScenario, reviewScenario });
+  }, { primaryAgentFixture: primaryAgent, identityScenario, reviewScenario, pmScenario });
 }

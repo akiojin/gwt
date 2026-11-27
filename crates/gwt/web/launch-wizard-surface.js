@@ -261,6 +261,181 @@ export function createLaunchWizardSurface({
         return note;
       }
 
+      // Issue #7652 (SPEC #7007 items 243 and 251): the execution environment
+      // this launch runs on, its place on the project's list, and why each
+      // entry ahead of it is not the one used. The backend owns the wording.
+      function appendExecutionEnvironmentNote(parent, environment) {
+        if (!environment) return null;
+        const note = createNode("div", "launch-note launch-environment");
+        note.dataset.priority = environment.priority ? String(environment.priority) : "";
+        note.setAttribute("role", "note");
+        note.appendChild(createNode(
+          "div",
+          "launch-environment__title",
+          `Execution environment · ${environment.name || ""}`,
+        ));
+        note.appendChild(createNode("div", "launch-environment__detail", environment.note || ""));
+        for (const skipped of environment.skipped || []) {
+          note.appendChild(createNode(
+            "div",
+            "launch-environment__skipped",
+            `${skipped.priority}. ${skipped.name} — ${skipped.reason}`,
+          ));
+        }
+        note.appendChild(createNode(
+          "div",
+          "launch-environment__detail",
+          "Execution environments are tried in the order of this project's list.",
+        ));
+        parent.appendChild(note);
+        return note;
+      }
+
+      // Issue #7771 (SPEC #7007 mock v3): a new launch on an Issue is planned
+      // in three stages. These draw the parts the settings form does not
+      // have: the registered agents with their traits, and the rows of the
+      // plan. An agent's traits are fixed, so nothing here edits them.
+      function appendIssuePlanTraits(parent, agent) {
+        const traits = createNode("div", "assignee-traits");
+        const add = (label, value, modifier) => {
+          const chip = createNode(
+            "span",
+            modifier ? `assignee-trait ${modifier}` : "assignee-trait",
+            `${label} `,
+          );
+          chip.appendChild(createNode("b", "", value));
+          traits.appendChild(chip);
+        };
+        add("Reasoning", agent.reasoning || "Tool default");
+        add("Speed", agent.speed || "Tool default");
+        if (agent.personality) {
+          add("Personality", agent.personality, "assignee-trait--personality");
+        }
+        parent.appendChild(traits);
+        return traits;
+      }
+
+      function appendIssuePlanAssignees(parent, plan, onAssign) {
+        const issue = createLaunchSection("Issue", "The work this launch starts.");
+        issue.appendChild(
+          createNode("div", "launch-static-value issue-plan-issue", `#${plan.issue_number}`),
+        );
+        parent.appendChild(issue);
+        const section = createLaunchSection(
+          "Assignee candidates",
+          "Registered agents in roster order. The first one that can take the launch is chosen; pick another to change it. Traits belong to the agent and are not changed here.",
+        );
+        const list = createNode("div", "start-method-list assignee-list");
+        for (const agent of plan.assignees || []) {
+          const button = createNode("button", "start-method-button assignee-option");
+          button.type = "button";
+          button.dataset.agentMemberId = agent.agent_member_id;
+          button.disabled = agent.available !== true;
+          button.setAttribute("aria-pressed", agent.selected ? "true" : "false");
+          if (agent.selected) {
+            button.classList.add("selected");
+          }
+          const head = createNode("div", "start-method-head");
+          head.appendChild(createNode("div", "start-method-title", agent.name));
+          if (agent.selected) {
+            head.appendChild(createNode("div", "start-method-badge", "Assignee"));
+          }
+          button.appendChild(head);
+          button.appendChild(createNode("div", "start-method-summary", agent.status || ""));
+          appendIssuePlanTraits(button, agent);
+          button.addEventListener("click", () => {
+            if (!button.disabled && !agent.selected) {
+              onAssign(agent.agent_member_id);
+            }
+          });
+          list.appendChild(button);
+        }
+        section.appendChild(list);
+        parent.appendChild(section);
+        return section;
+      }
+
+      function appendIssuePlanAssignee(parent, plan, onChange) {
+        const agent = (plan.assignees || []).find((candidate) => candidate.selected);
+        const section = createLaunchSection(
+          "Assignee",
+          "The agent this launch starts as. Its traits are fixed and this plan does not override them.",
+        );
+        const row = createNode("div", "launch-note issue-plan-assignee");
+        row.appendChild(
+          createNode("div", "launch-environment__title", agent ? agent.name : "No agent assigned"),
+        );
+        if (agent) {
+          appendIssuePlanTraits(row, agent);
+        }
+        section.appendChild(row);
+        const change = createNode(
+          "button",
+          "wizard-button issue-plan-change-assignee",
+          "Change assignee",
+        );
+        change.type = "button";
+        change.addEventListener("click", () => onChange());
+        section.appendChild(change);
+        parent.appendChild(section);
+        return section;
+      }
+
+      // One function per row of the plan, so a row can be replaced by an
+      // editable control without touching the others.
+      function appendIssuePlanBranchRow(grid, plan) {
+        const field = createLaunchField("Branch", true);
+        field.classList.add("issue-plan-branch");
+        field.appendChild(createNode("div", "launch-static-value", plan.branch || ""));
+        field.appendChild(createNode("div", "launch-field-help", plan.branch_detail || ""));
+        grid.appendChild(field);
+        return field;
+      }
+
+      function appendIssuePlanPermissionsRow(grid, plan) {
+        const field = createLaunchField("Permissions", true);
+        field.classList.add("issue-plan-permissions");
+        field.appendChild(createNode("div", "launch-static-value", plan.permissions || ""));
+        field.appendChild(
+          createNode(
+            "div",
+            "launch-field-help",
+            "A launch from this wizard always starts this way.",
+          ),
+        );
+        grid.appendChild(field);
+        return field;
+      }
+
+      function appendIssuePlanRows(parent, plan, branchIsFixed) {
+        const section = createLaunchSection(
+          "Plan",
+          "What this launch sets up. Where the session runs is chosen below.",
+        );
+        const grid = createNode("div", "launch-form-grid");
+        if (branchIsFixed) {
+          appendIssuePlanBranchRow(grid, plan);
+        }
+        appendIssuePlanPermissionsRow(grid, plan);
+        section.appendChild(grid);
+        parent.appendChild(section);
+        return section;
+      }
+
+      // Issue #7652 (SPEC #7007 item 189): what a launch chooses is an
+      // override for that launch. The Issues settings form saves what it
+      // shows, so it carries no such note.
+      function appendLaunchOverrideNote(parent, savedSettingsForm) {
+        if (savedSettingsForm) return null;
+        const note = createNode(
+          "div",
+          "launch-field-help launch-override-note",
+          "Model, reasoning and speed chosen here apply to this launch only. They take priority over the execution environment's settings, and the agent's saved traits stay as they are.",
+        );
+        parent.appendChild(note);
+        return note;
+      }
+
       // Issue #4911: Issues settings form repeats the Agent
       // Settings block once per launch candidate, in launch order. The backend
       // owns the list — it holds one editable draft, so only the open set
@@ -858,6 +1033,10 @@ export function createLaunchWizardSurface({
         setup: "settings",
         runtime: "runtime",
         start: "confirm",
+        // Issue #7771: the three stages of a launch on an Issue.
+        assignee: "settings",
+        plan: "runtime",
+        confirm: "confirm",
       });
 
       function gotoWizardStep(phase) {
@@ -1356,7 +1535,10 @@ export function createLaunchWizardSurface({
             && !launchWizard.runtime_resolution_pending
             && (launchWizard.start_methods || []).length > 0,
         );
-        const showSetupForms = showManualSetup && !isRuntimeConfirmation;
+        // Issue #7771: a stage of an Issue launch stands where the settings
+        // form would be drawn.
+        const planStage = launchWizard.issue_plan?.stage || null;
+        const showSetupForms = showManualSetup && !isRuntimeConfirmation && !planStage;
         wizardBody.innerHTML = "";
         const wizardMain = createNode("div", "wizard-main");
         wizardMain.appendChild(renderWizardProgressRail());
@@ -1434,7 +1616,8 @@ export function createLaunchWizardSurface({
 
         // SPEC-3165 — the generic work-registration prompt stays skippable
         // and continues to drive the duplicate-work advisory.
-        if (isStartWorkLaunch()) {
+        // Issue #7771: the stages of an Issue launch already have their Issue.
+        if (isStartWorkLaunch() && !launchWizard.issue_plan?.stage) {
           const section = createLaunchSection(
             "Register an Issue",
             "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
@@ -1677,7 +1860,32 @@ export function createLaunchWizardSurface({
           panel.appendChild(branchPickerSection);
         }
 
-        if (showSetupForms && launchWizard.show_branch_controls !== false) {
+        if (planStage === "assignee") {
+          appendIssuePlanAssignees(panel, launchWizard.issue_plan, (agentMemberId) =>
+            sendWizardAction({ kind: "set_agent_member", agent_member_id: agentMemberId }));
+        }
+        if (planStage === "plan") {
+          appendIssuePlanAssignee(panel, launchWizard.issue_plan, () =>
+            gotoWizardStep("settings"));
+          if (launchWizard.execution_environment) {
+            const environment = createLaunchSection(
+              "Execution environment",
+              "Decided by the order of this project's list.",
+            );
+            appendExecutionEnvironmentNote(environment, launchWizard.execution_environment);
+            panel.appendChild(environment);
+          }
+          appendIssuePlanRows(
+            panel,
+            launchWizard.issue_plan,
+            launchWizard.show_branch_controls === false,
+          );
+        }
+
+        if (
+          (showSetupForms || planStage === "plan")
+          && launchWizard.show_branch_controls !== false
+        ) {
           const section = createLaunchSection(
             "Branch",
             "Choose the selected branch or create a new branch from it.",
@@ -1851,6 +2059,33 @@ export function createLaunchWizardSurface({
               );
               grid.appendChild(fallback);
             }
+            if (launchWizard.selected_agent_id === "codex" && launchWizard.show_codex_speed) {
+              const speed = appendChoiceOrSelectField(
+                grid,
+                "Speed",
+                [
+                  { value: "off", label: "Off" },
+                  { value: "fast", label: "Fast" },
+                  { value: "ultrafast", label: "Ultrafast" },
+                ],
+                launchWizard.codex_speed || "off",
+                (value) => sendWizardAction({ kind: "set_codex_speed", speed: value }),
+              );
+              speed.appendChild(createNode(
+                "div",
+                "launch-field-help",
+                "Ultrafast requires GPT-6 Astra or GPT-6.1 Sol and Pro $500 or an eligible Enterprise / Edu plan with workspace access. Codex warns and omits unsupported tiers; check its launch output if the requested speed is unavailable.",
+              ));
+            }
+            if (launchWizard.selected_agent_id === "claude" && launchWizard.show_fast_mode) {
+              appendToggleField(
+                grid,
+                "Fast mode",
+                "Use Claude Code Fast mode",
+                launchWizard.fast_mode,
+                (enabled) => sendWizardAction({ kind: "set_fast_mode", enabled }),
+              );
+            }
             if (launchWizard.show_reasoning) {
               const reasoningLabel = launchWizard.selected_agent_id === "grok"
                 ? "Effort"
@@ -1898,6 +2133,8 @@ export function createLaunchWizardSurface({
               section,
               launchWizard.issue_monitor_pool_impact,
             );
+            appendLaunchOverrideNote(section, launchWizard.issue_monitor_pool);
+            appendExecutionEnvironmentNote(section, launchWizard.execution_environment);
           }
           setupParent.appendChild(section);
         }
@@ -2139,6 +2376,15 @@ export function createLaunchWizardSurface({
             grid.appendChild(note);
           }
           section.appendChild(grid);
+          // Issue #7652 (item 197): inherited from this project's last
+          // launch, or a change made for this one.
+          if (launchWizard.runtime_target_note) {
+            section.appendChild(createNode(
+              "div",
+              "launch-field-help launch-runtime-note",
+              launchWizard.runtime_target_note,
+            ));
+          }
 
           panel.appendChild(section);
         }

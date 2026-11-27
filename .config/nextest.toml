@@ -1,7 +1,15 @@
+experimental = ["wrapper-scripts"]
+
 # Issue #3845: a blocked test must fail without preventing later tests from running.
 [profile.default]
 fail-fast = false
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Issue #3889: this test runs twenty complete Git fixtures. Canonical Windows
+# verification reached attempt 17 at 120s; retain a bounded batch budget.
+[[profile.default.overrides]]
+filter = 'test(=migration_e2e_test::t104_bareify_rollback_passes_twenty_consecutive_runs)'
+slow-timeout = { period = "30s", terminate-after = 10 }
 
 # Issue #5566: coverage has many short fixture tests; overlap their I/O waits.
 # Inherit the complete inventory and timeout policy from the default profile.
@@ -14,6 +22,21 @@ path = "junit.xml"
 # Issue #5564: retain execution identities for the required shard-union check.
 [profile.ci.junit]
 path = "junit.xml"
+
+# Issue #7572: listing runs before nextest's per-test timeouts take effect.
+[scripts.wrapper.ci-list-deadline]
+command = { command-line = ["scripts/ci_nextest_list.py", "60"], relative-to = "workspace-root" }
+target-runner = "within-wrapper"
+
+[[profile.ci.scripts]]
+platform = 'cfg(target_os = "linux")'
+list-wrapper = "ci-list-deadline"
+
+# Issue #7724: a coverage shard stalled in enumeration for 15 minutes with no
+# output. Its profile inherits the default one, so it needs its own deadline.
+[[profile.coverage.scripts]]
+platform = 'cfg(target_os = "linux")'
+list-wrapper = "ci-list-deadline"
 
 # Issue #4822: local Windows canonical verification opts into this profile.
 # Bound process pressure while allowing pure units to overlap fixture work.

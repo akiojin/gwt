@@ -99,7 +99,7 @@ fn build_stamp_from(commit: Option<&str>, epoch: Option<&str>) -> RuntimeBuildSt
         commit: non_empty(commit),
         time: non_empty(epoch)
             .and_then(|seconds| seconds.parse::<i64>().ok())
-            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+            .and_then(|seconds| gwt_core::timestamp::UtcTimestamp::from_timestamp(seconds, 0))
             .map(|stamp| stamp.to_rfc3339()),
     }
 }
@@ -207,8 +207,8 @@ fn status_json_with_local(
             !manifest.auto_apply_deferred
                 && manifest.version == wait.version
                 && match (
-                    chrono::DateTime::parse_from_rfc3339(&manifest.downloaded_at),
-                    chrono::DateTime::parse_from_rfc3339(&wait.observed_at),
+                    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&manifest.downloaded_at),
+                    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&wait.observed_at),
                 ) {
                     (Ok(downloaded), Ok(observed)) => observed >= downloaded,
                     _ => false,
@@ -236,10 +236,10 @@ fn status_json_with_local(
     let overdue = wait.as_ref().is_some_and(|wait| {
         wait.next_evaluation_at
             .as_deref()
-            .and_then(|next| chrono::DateTime::parse_from_rfc3339(next).ok())
+            .and_then(|next| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(next).ok())
             .is_some_and(|next| {
-                chrono::Utc::now() - next.with_timezone(&chrono::Utc)
-                    > chrono::Duration::seconds(UPDATE_WAIT_OVERDUE_AFTER_SECS)
+                gwt_core::timestamp::UtcTimestamp::now() - next
+                    > time::Duration::seconds(UPDATE_WAIT_OVERDUE_AFTER_SECS)
             })
     });
     payload["update_wait_overdue"] = serde_json::json!(overdue);
@@ -502,6 +502,7 @@ mod tests {
             attempt: 1,
             recorded_at: "2026-10-01T01:00:00Z".into(),
             message: Some("payload copy failed".into()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
         let failed = status_json_with_local(&outcome, &generation, home.path());

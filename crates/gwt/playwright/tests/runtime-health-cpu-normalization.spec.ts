@@ -85,7 +85,7 @@ test.describe("Runtime health CPU normalization", () => {
   }) => {
     const cell = page.locator("#op-strip-runtime-health");
     await expect(page.locator("#op-strip-runtime-health-value")).toHaveText(
-      "HOT 100% 5.0G",
+      "High 100% 5.0G",
     );
     // The raw total must not survive anywhere in the compact cell.
     await expect(cell).not.toContainText("501");

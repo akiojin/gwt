@@ -81,6 +81,9 @@ pub enum IssueCommand {
         number: u64,
         /// Explicit orphan artifact comments whose payload should be archived.
         archive_comments: Vec<u64>,
+        /// Issue #7825: wrap a body without gwt-spec header / sections index
+        /// unchanged as the `spec` section before repairing.
+        wrap_body: bool,
     },
     /// Issue #4541: run the deterministic SPEC artifact lint and, unless
     /// `snapshot` is off, finalize the Intake Inspection Snapshot with the
@@ -177,6 +180,13 @@ pub enum IssueCommand {
         issue_number: u64,
         reviewed_sha: String,
         verdict_raw: String,
+        evidence_review_token: Option<String>,
+    },
+    MonitorReviewMergedEvidence {
+        issue_number: u64,
+        pr_number: u64,
+        reviewed_sha: String,
+        evidence_revision: String,
     },
     MonitorStatus {
         project_root: Option<std::path::PathBuf>,
@@ -193,6 +203,10 @@ pub enum IssueCommand {
         expected_priority_order: Option<Vec<u64>>,
         reason: Option<String>,
         issue_numbers: Vec<u64>,
+    },
+    MonitorQueueAdopt {
+        project_root: Option<std::path::PathBuf>,
+        terminal: String,
     },
     MonitorQueueList {
         project_root: Option<std::path::PathBuf>,
@@ -211,6 +225,7 @@ pub enum IssueCommand {
         head: String,
         work_id: String,
         board_entry_id: String,
+        resume_condition: Option<crate::issue_monitor::AgentSwitchResumeCondition>,
     },
     MonitorQueuePush {
         project_root: Option<std::path::PathBuf>,
@@ -343,6 +358,12 @@ pub enum IssueCommand {
         number: u64,
         reason: String,
         force: bool,
+    },
+    /// Record who verifies each remaining external criterion of a settled delivery.
+    MonitorVerificationDeclare {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        criteria: Vec<(String, String)>,
     },
     /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
     /// evidence it was formed from.

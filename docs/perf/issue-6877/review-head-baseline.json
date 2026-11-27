@@ -1,0 +1,33 @@
+{
+  "window_start": "2026-11-12T01:00:00+09:00",
+  "window_end_exclusive": "2026-11-12T01:10:00+09:00",
+  "duration_seconds": 600,
+  "project_root": "E:\\gwt",
+  "scope": "gwt.process.summary / gh / phase=start / issue_monitor_scan",
+  "gui_pid": 52136,
+  "gui_started_at": "2026-11-11T11:40:47Z",
+  "running_release": "9.160.0",
+  "source_baseline": "9221b0c75953e23eae442dc0ff0b73ad822b53a9",
+  "total_gh_starts": 67,
+  "labels": {
+    "gh api graphql issue timelines": 14,
+    "gh pr view 7083 --json headRefOid": 12,
+    "gh pr view 7080 --json headRefOid": 12,
+    "gh pr view 7074 --json headRefOid": 12,
+    "gh api issues": 5,
+    "gh pr view 7074 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 2,
+    "gh pr view 7078 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 2,
+    "gh api repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": 2,
+    "gh api repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1 --include": 1,
+    "gh pr view 7082 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1,
+    "gh pr view 7083 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1,
+    "gh pr view 7080 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1,
+    "gh pr view 6958 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1,
+    "gh pr view 6611 --json number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup": 1
+  },
+  "limitations": [
+    "Installed runtime observation, not a matched after measurement.",
+    "Span attribution has no parent PID and excludes unlogged commands.",
+    "Fleet thresholds remain unproven by unit tests."
+  ]
+}

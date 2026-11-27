@@ -1,0 +1,76 @@
+{
+  "runtime": {
+    "version": "9.164.0",
+    "binary": "/Applications/GWT.app/Contents/MacOS/gwt",
+    "binary_sha256": "cfa5f77f68e6b46c489ddb6c455238540fb78c7d0949905f722fca2aff748ff9",
+    "gui_pid": 92211,
+    "daemon_pid": 93096,
+    "window_start": "2026-11-13T17:48:21+09:00",
+    "window_end": "2026-11-13T17:58:21+09:00",
+    "duration_seconds": 600,
+    "log_path": "/Users/akio-jinsenji/.gwt/logs/gwt.log.2026-11-13",
+    "scope": "gwt.process.summary / kind=gh / phase=start / span.name=issue_monitor_scan / project_root=/Users/akio-jinsenji/Repos/gwt",
+    "limitation": "Fresh v9.164.0 runtime startup interval, not a six-agent steady-state sample."
+  },
+  "startup_window": {
+    "window_start": "2026-11-13T17:48:21+09:00",
+    "window_end_exclusive": "2026-11-13T17:58:21+09:00",
+    "duration_seconds": 600,
+    "scan_gh_starts": 90,
+    "by_category": {
+      "closed_pulls": 7,
+      "issues": 22,
+      "pr_view": 50,
+      "open_pulls": 3,
+      "issue_timelines": 8
+    },
+    "started_in_window_outcomes": {
+      "completed": 89,
+      "success": 61,
+      "failed": 28,
+      "timed_out": 23,
+      "right_censored": 1
+    },
+    "raw_sha256": "9c3bddba4274b2731be228240d1fcd4740ba1a9202a232ed8b6a1693051b92b1"
+  },
+  "network_failure_window": {
+    "start": "2026-11-13T17:58:50+09:00",
+    "end_exclusive": "2026-11-13T18:00:00+09:00",
+    "timeline_starts": 167,
+    "timeline_ends": 167,
+    "failed_timeline_ends": 167,
+    "scan_rejections": 168,
+    "first_rejections": [
+      {
+        "timestamp": "2026-11-13T17:58:58.027706+09:00",
+        "level": "INFO",
+        "fields": {
+          "message": "Issues scan proposal rejected",
+          "project_root": "/Users/akio-jinsenji/Repos/gwt",
+          "captured_revision": 32,
+          "current_revision": 36,
+          "reason": "revision-changed"
+        },
+        "target": "gwt.issue_monitor.scan"
+      },
+      {
+        "timestamp": "2026-11-13T17:58:59.085279+09:00",
+        "level": "INFO",
+        "fields": {
+          "message": "Issues scan proposal rejected",
+          "project_root": "/Users/akio-jinsenji/Repos/gwt",
+          "captured_revision": 36,
+          "current_revision": 37,
+          "reason": "revision-changed"
+        },
+        "target": "gwt.issue_monitor.scan"
+      }
+    ],
+    "raw_sha256": "1e40294c0c75f3045cb7764139954cef16407d0173ed0b923f0b9d6e2060e2ad"
+  },
+  "limitations": [
+    "v9.164.0 measurements do not certify v9.164.1 or the subsequent retry fix.",
+    "Startup and explicit control activity are included.",
+    "The required six continuously running implementation agents were absent; no five-minute/sixty-minute CPU pair was recorded."
+  ]
+}

@@ -32,10 +32,14 @@ test.describe("mobile project chrome", () => {
     await expect(page.locator("#app-version")).toBeVisible();
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 });
-      const controls = page.locator(".project-actions > button:visible, .project-actions > [role=button]:visible, .op-theme-toggle__option");
-      await expect(controls).toHaveCount(6);
+      // Issue #7740: the header is a brand row plus one sideways-scrolling
+      // row, so a control is brought into view before it is measured. The
+      // version and its update Check button moved to the shared footer.
+      const controls = page.locator(".app-head__item, .project-actions > button:visible, .op-theme-toggle__option, .app-foot #app-version, #update-check-button:visible");
+      await expect(controls).toHaveCount(13);
       for (const control of await controls.all()) {
-        await expect(control).toBeInViewport({ ratio: 1 });
+        await control.scrollIntoViewIfNeeded();
+        await expect(control).toBeInViewport({ ratio: 0.95 });
         const bounds = await control.boundingBox();
         expect(bounds!.width).toBeGreaterThanOrEqual(44);
         expect(bounds!.height).toBeGreaterThanOrEqual(44);
@@ -44,6 +48,7 @@ test.describe("mobile project chrome", () => {
           return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
         })).toBe(true);
       }
+      expect((await page.locator(".project-bar").boundingBox())!.height, "brand row plus one row").toBeLessThanOrEqual(104);
       const bar = await page.locator(".project-bar").boundingBox();
       const rail = await page.locator(".op-rail").boundingBox();
       const surface = await page.locator(".surface-area").boundingBox();
@@ -59,6 +64,8 @@ test.describe("mobile project chrome", () => {
       await page.screenshot({ path: testInfo.outputPath(`mobile-chrome-${width}-${theme}.png`) });
     }
     await page.setViewportSize({ width: 320, height: 568 });
+    // SPEC #6476: a persistence diagnostic must not let the footer consume
+    // the workspace on a short phone screen.
     const diagnostic = {
       kind: "load_error",
       path: "/Users/example/nested-project-state-directory/nested-project-state-directory/.gwt/projects/99a8660247f5bc49/workspace/current.json",
@@ -70,7 +77,7 @@ test.describe("mobile project chrome", () => {
     const notice = page.locator(".workspace-state-notice");
     await expect(notice).toBeVisible();
     const noticeBounds = await notice.boundingBox();
-    for (const control of await page.locator(".project-actions > button, #app-version, .op-theme-toggle__option").all()) {
+    for (const control of await page.locator(".app-head__item, .project-actions > button, .op-theme-toggle__option").all()) {
       const bounds = await control.boundingBox();
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(noticeBounds!.y);
     }
@@ -123,39 +130,43 @@ test.describe("Operator chrome smoke", () => {
   test("rail items are reachable without any reveal interaction", async ({ page }) => {
     for (const id of [
       '[data-surface="issues"]',
-      '[data-surface="works"]',
       '[data-cmd="open-logs"]',
       '[data-cmd="open-index"]',
       '[data-cmd="open-profile"]',
-      "#op-palette-button",
     ]) {
       await expect(page.locator(id)).toBeVisible();
     }
   });
 
   test("hovering and focusing a rail item exposes its explanation outside the scroll area", async ({ page }) => {
-    const control = page.locator("#op-palette-button");
+    const control = page.locator('.op-rail__item[data-cmd="open-logs"]');
     const explanation = page.locator("#rail-control-explanation");
     await control.hover();
     await expect(explanation).toBeVisible();
-    await expect(explanation).toContainText("Command palette");
+    await expect(explanation).toContainText("Logs");
     await control.focus();
     await expect(explanation).toBeVisible();
   });
 
-  test("⌘K opens the command palette", async ({ page }) => {
+  test("the retired command palette has no rail entry, DOM, or ⌘K / ⌘P shortcut (#7879)", async ({ page }) => {
+    await expect(page.locator("#op-palette-button")).toHaveCount(0);
+    await expect(page.locator(".op-palette-backdrop, .op-palette")).toHaveCount(0);
+    await expect(page.locator(".op-rail")).not.toContainText("⌘K");
+    const dialogs = page.locator('[role="dialog"][aria-modal="true"]:visible');
+    const before = await dialogs.count();
     // Headed Chromium reserves the physical Meta+K chord for browser chrome
     // before the page sees it. Dispatch the same trusted-shape DOM event so
     // this browser E2E exercises gwt's global hotkey registry deterministically.
-    await page.locator("body").dispatchEvent("keydown", {
-      key: "k",
-      code: "KeyK",
-      metaKey: true,
-      bubbles: true,
-    });
-    await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
-    await page.keyboard.press("Escape");
-    await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute("data-open", "true");
+    for (const key of ["k", "p"]) {
+      await page.locator("body").dispatchEvent("keydown", {
+        key,
+        code: `Key${key.toUpperCase()}`,
+        metaKey: true,
+        bubbles: true,
+      });
+    }
+    await expect(dialogs).toHaveCount(before);
+    await expect(page.locator(".op-palette-backdrop, .op-palette")).toHaveCount(0);
   });
 });
 
@@ -165,6 +176,8 @@ test.describe("Operator chrome reduced-motion", () => {
 
   test("the rail renders identically under prefers-reduced-motion", async ({ page }) => {
     await expect(page.locator(".op-rail")).toBeVisible();
-    await expect(page.locator('[data-surface="works"]')).toBeVisible();
+    await expect(page.locator('[data-surface="issues"]')).toBeVisible();
+    // Issue #7880 (design item 137): Works has no rail entry.
+    await expect(page.locator('[data-surface="works"]')).toHaveCount(0);
   });
 });

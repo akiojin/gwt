@@ -33,8 +33,10 @@ Do **not** hand the PR to merge automation until the Ready PR Gate passes:
   establish such a request. An actual `rejected(<reason>)` records a known
   blocker that must be repaired. Keep autonomous `n/a (autonomous)` and legacy
   `deferred (autonomous execution)` compatibility without rewriting the body.
-- UI work requires `Agent Visual Check: pass` plus the same fresh record's
-  measured passing headed Chromium results for dark and light themes.
+- UI work requires agent review and headed Chromium evidence in both themes.
+  Follow the [CI evidence path](../../gwt-verify/references/agent-visual.md)
+  for protected gwt PRs that select it. Otherwise provide explicit local
+  headed evidence in the same fresh record.
 - The PR is a releaseable slice with no known blockers.
 
 If automated verification fails or an explicitly requested check is pending,

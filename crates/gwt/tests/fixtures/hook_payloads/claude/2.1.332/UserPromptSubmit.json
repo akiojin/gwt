@@ -1,0 +1,9 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "transcript_path": "/redacted/capture.jsonl",
+  "cwd": "/redacted/scratch",
+  "prompt_id": "00000000-0000-0000-0000-000000000002",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Use the Read tool once on probe.txt and report its sole line."
+}

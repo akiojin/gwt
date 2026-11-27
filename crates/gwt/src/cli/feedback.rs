@@ -5,6 +5,7 @@ use gwt_core::feedback::{
     FeedbackContext, FeedbackInput, FeedbackKind, FeedbackRecord, FeedbackState, FeedbackStore,
     PublicFeedback, StoredFeedback,
 };
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_github::client::{
     CreateRepositoryIssue, RepositoryIssue, RepositoryIssueKind, ResolutionDeadline,
 };
@@ -67,7 +68,7 @@ pub fn run<E: super::CliEnv>(
             FeedbackCommand::Create(mut input) => {
                 attach_error_record(&mut input, &root);
                 let context = context(&root);
-                let (record, fresh) = store.submit(*input, context, chrono::Utc::now())?;
+                let (record, fresh) = store.submit(*input, context, UtcTimestamp::now())?;
                 if fresh {
                     submit(env, &store, record, &root)
                 } else {
@@ -184,7 +185,7 @@ fn run_auto_create<E: super::CliEnv>(
     report: SafeAutoReport,
     out: &mut String,
 ) -> Result<i32, gwt_github::SpecOpsError> {
-    let now = chrono::Utc::now();
+    let now = UtcTimestamp::now();
     #[cfg(windows)]
     let submitted = store.submit_owned_auto(report, now);
     #[cfg(not(windows))]
@@ -479,7 +480,7 @@ fn attach_error_record(input: &mut FeedbackInput, root: &Path) {
         "{}: {}",
         input.operation, input.refusal
     ));
-    let since = chrono::Utc::now() - chrono::TimeDelta::hours(1);
+    let since = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(1);
     input.error_record_id = gwt_core::error_ledger::list_since(Some(since))
         .unwrap_or_default()
         .into_iter()
@@ -623,7 +624,7 @@ fn process_with(
             Err(error) => {
                 record.state = FeedbackState::Failed;
                 record.error = Some(format!(
-                    "feedback to akiojin/gwt: approval unavailable: {error}"
+                    "feedback to akiojin/gwt: approval unavailable: {error}. The complete report remains saved locally; run feedback.retry with this request_id from a desktop session where the consent window can open."
                 ));
                 store.save(&record)?;
                 return Ok(record);
@@ -667,7 +668,7 @@ pub(super) fn send_to_upstream(
 fn auto_send_error(error: OwnerMutationError) -> AutoReason {
     match error {
         OwnerMutationError::PreSubmit(gwt_github::client::ApiError::Unauthorized) => {
-            AutoReason::AuthUnavailable
+            AutoReason::AuthRejected
         }
         OwnerMutationError::PreSubmit(_) => AutoReason::PreSubmitFailed,
         OwnerMutationError::RemoteOutcomeUnknown(_) => AutoReason::RemoteOutcomeUnknown,
@@ -700,7 +701,7 @@ fn send_auto_to_upstream_checked(
     let repository = RepositoryIdentity::gwt_upstream();
     let issues = client
         .list_issues(&repository, deadline)
-        .map_err(|_| AutoReason::PreSubmitFailed)?;
+        .map_err(|error| auto_send_error(OwnerMutationError::PreSubmit(error)))?;
     let marker = snapshot.marker();
     if let Some(issue) = issues
         .items()
@@ -719,7 +720,7 @@ fn send_auto_to_upstream_checked(
         before_read()?;
         let comments = client
             .list_comments(&repository, issue.number, deadline)
-            .map_err(|_| AutoReason::PreSubmitFailed)?;
+            .map_err(|error| auto_send_error(OwnerMutationError::PreSubmit(error)))?;
         if !comments
             .items()
             .iter()
@@ -930,6 +931,64 @@ mod tests {
         FakeIssueClient, IssueNumber, IssueState, UpdatedAt,
     };
 
+    #[test]
+    fn auto_auth_failures_distinguish_missing_credentials_from_github_rejection() {
+        // Issue #7984: a 401 from GitHub is not the same as having no usable
+        // environment credential. Both stay closed enum values (no token/body).
+        assert_eq!(
+            auto_send_error(OwnerMutationError::PreSubmit(ApiError::Unauthorized)),
+            AutoReason::AuthRejected
+        );
+        assert_eq!(
+            serde_json::to_value(AutoReason::AuthRejected).unwrap(),
+            "auth_rejected"
+        );
+        assert_eq!(
+            serde_json::to_value(AutoReason::AuthUnavailable).unwrap(),
+            "auth_unavailable"
+        );
+        // The first GitHub request is discovery, so a rejected token surfaces
+        // there before any mutation.
+        for operation in [
+            OwnerRepositoryOperation::ListIssues,
+            OwnerRepositoryOperation::ListComments,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyRun),
+                    UtcTimestamp::now(),
+                )
+                .unwrap();
+            let client = FakeIssueClient::new();
+            client.seed_repository_issue(RepositoryIssue {
+                repository: RepositoryIdentity::gwt_upstream(),
+                number: IssueNumber(42),
+                title: record.snapshot.report().title(),
+                body: "\"safe_auto_v1\"".into(),
+                labels: vec![],
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt(UtcTimestamp::now().to_rfc3339()),
+            });
+            client.fail_next_owner_operation(
+                operation,
+                OwnerRepositoryFaultTiming::BeforeSubmit,
+                ApiError::Unauthorized,
+            );
+            let outcome = send_auto_to_upstream_checked(
+                &client,
+                &record.snapshot,
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+                &|| Ok(()),
+                &|| Ok(()),
+            );
+            assert_eq!(outcome, Err(AutoReason::AuthRejected), "{operation:?}");
+            assert_eq!(client.owner_mutation_count(), 0);
+        }
+    }
+
     // PM0393 component proof: this entry exists only in the test executable.
     // Production run_owned_sender still uses the fixed GitHub constructor.
     mod loopback {
@@ -1092,6 +1151,7 @@ mod tests {
                     Some(AutoReason::PolicyRevoked) => "policy_revoked",
                     Some(AutoReason::WorkerUnavailable) => "worker_unavailable",
                     Some(AutoReason::AuthUnavailable) => "auth_unavailable",
+                    Some(AutoReason::AuthRejected) => "auth_rejected",
                     Some(AutoReason::PreSubmitFailed) => "pre_submit_failed",
                     Some(AutoReason::RemoteOutcomeUnknown) => "remote_outcome_unknown",
                     Some(AutoReason::SenderInterrupted) => "sender_interrupted",
@@ -1256,7 +1316,7 @@ mod tests {
                     let (record, _) = store
                         .submit_owned_auto(
                             SafeAutoReport::current(KnownOperation::VerifyRun),
-                            chrono::Utc::now(),
+                            UtcTimestamp::now(),
                         )
                         .unwrap();
                     let id = record.snapshot.id();
@@ -1497,7 +1557,7 @@ mod tests {
         let (record, _) = store
             .submit_auto(
                 SafeAutoReport::current(KnownOperation::VerifyRun),
-                chrono::Utc::now(),
+                UtcTimestamp::now(),
             )
             .unwrap();
         let path = store.path(&record.snapshot.id()).unwrap();
@@ -1541,7 +1601,7 @@ mod tests {
             let (record, _) = store
                 .submit_auto(
                     SafeAutoReport::current(KnownOperation::VerifyRun),
-                    chrono::Utc::now(),
+                    UtcTimestamp::now(),
                 )
                 .unwrap();
             let client = FakeIssueClient::new();
@@ -1553,7 +1613,7 @@ mod tests {
                 labels: vec![],
                 state: IssueState::Open,
                 kind: RepositoryIssueKind::Plain,
-                updated_at: UpdatedAt(chrono::Utc::now().to_rfc3339()),
+                updated_at: UpdatedAt(UtcTimestamp::now().to_rfc3339()),
             };
             if comment {
                 client.seed_repository_issue(issue.clone());
@@ -1605,7 +1665,7 @@ mod tests {
             let (record, _) = store
                 .submit_owned_auto(
                     SafeAutoReport::current(KnownOperation::VerifyRun),
-                    chrono::Utc::now(),
+                    UtcTimestamp::now(),
                 )
                 .unwrap();
             let id = record.snapshot.id();
@@ -1679,7 +1739,7 @@ mod tests {
             let (record, _) = store
                 .submit_owned_auto(
                     SafeAutoReport::current(KnownOperation::VerifyPlan),
-                    chrono::Utc::now(),
+                    UtcTimestamp::now(),
                 )
                 .unwrap();
             let id = record.snapshot.id();
@@ -1696,7 +1756,7 @@ mod tests {
                     labels: vec![],
                     state: IssueState::Open,
                     kind: RepositoryIssueKind::Plain,
-                    updated_at: UpdatedAt(chrono::Utc::now().to_rfc3339()),
+                    updated_at: UpdatedAt(UtcTimestamp::now().to_rfc3339()),
                 });
             }
             client.fail_next_owner_operation(
@@ -1737,7 +1797,7 @@ mod tests {
             let (record, _) = store
                 .submit_auto(
                     SafeAutoReport::current(KnownOperation::VerifyRun),
-                    chrono::Utc::now(),
+                    UtcTimestamp::now(),
                 )
                 .unwrap();
             let result = process_auto_with(
@@ -1915,7 +1975,7 @@ mod tests {
             let (record, _) = store
                 .submit_auto(
                     SafeAutoReport::current(KnownOperation::HookHealth),
-                    chrono::Utc::now(),
+                    UtcTimestamp::now(),
                 )
                 .unwrap();
             let result = process_auto_with(
@@ -1949,7 +2009,7 @@ mod tests {
             .unwrap();
             assert_eq!(repeated, result);
             let (duplicate, fresh) = store
-                .submit_auto(record.snapshot.report().clone(), chrono::Utc::now())
+                .submit_auto(record.snapshot.report().clone(), UtcTimestamp::now())
                 .unwrap();
             assert!(!fresh);
             assert_eq!(duplicate, result);
@@ -1965,7 +2025,7 @@ mod tests {
         let (record, _) = store
             .submit_auto(
                 SafeAutoReport::current(KnownOperation::Search),
-                chrono::Utc::now(),
+                UtcTimestamp::now(),
             )
             .unwrap();
         let receipt_path = store.path(&record.snapshot.id()).unwrap();
@@ -2121,7 +2181,7 @@ mod tests {
         let (legacy, _) = store
             .submit_auto(
                 SafeAutoReport::current(KnownOperation::classify(&sample.input.operation)),
-                chrono::Utc::now(),
+                UtcTimestamp::now(),
             )
             .unwrap();
         let mut created = String::new();
@@ -2278,7 +2338,7 @@ mod tests {
         let (record, _) = store
             .submit_auto(
                 SafeAutoReport::current(KnownOperation::Search),
-                chrono::Utc::now(),
+                UtcTimestamp::now(),
             )
             .unwrap();
         let _sender = store.try_sender_lock(&record.snapshot.id()).unwrap();
@@ -2315,7 +2375,7 @@ mod tests {
         let (legacy, _) = legacy_store
             .submit_auto(
                 SafeAutoReport::current(KnownOperation::classify(&sample.input.operation)),
-                chrono::Utc::now(),
+                UtcTimestamp::now(),
             )
             .unwrap();
         let legacy = detach_auto(&mut env, &legacy_store, legacy).unwrap();
@@ -2492,7 +2552,7 @@ mod tests {
                     os: "test".into(),
                     active_agents: 2,
                 },
-                chrono::Utc::now(),
+                UtcTimestamp::now(),
             )
             .unwrap();
         (dir, store, record)
@@ -2724,6 +2784,12 @@ mod tests {
                 usize::from(consent == Ok(true))
             );
             assert_eq!(store.read(&record.id).unwrap().input, record.input);
+            if consent.is_err() {
+                let error = result.error.as_deref().unwrap();
+                assert!(error.contains("approval unavailable: No desktop display"));
+                assert!(error.contains("feedback.retry"), "{error}");
+                assert!(error.contains("remains saved locally"), "{error}");
+            }
             assert_eq!(
                 result.state,
                 match consent {
@@ -2797,7 +2863,10 @@ mod tests {
             .submit(
                 record.input.clone(),
                 environment.clone(),
-                record.created_at + chrono::TimeDelta::minutes(1),
+                record
+                    .created_at
+                    .checked_add(std::time::Duration::from_secs(60).try_into().unwrap())
+                    .unwrap(),
             )
             .unwrap();
         assert!(fresh, "new environment must retain a distinct receipt");

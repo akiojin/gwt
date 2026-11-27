@@ -17,7 +17,6 @@ import {
   openLiveLaunchWizardForBranch,
   sendLiveGwtEvent,
   withLiveGwtBackendLock,
-  type LiveLaunchWizardFixture,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
@@ -45,15 +44,14 @@ test.describe("Issues cache responsiveness (live backend)", () => {
         page.on("console", message => {
           if (message.type() === "error") errors.push(message.text());
         });
-        let wizardFixture: LiveLaunchWizardFixture | undefined;
         const generation = randomUUID();
         try {
           await gotoLiveGwt(page, BASE, { enableTestBridge: true });
           await openLiveGwtProject(page, fixture.project);
           await clearLiveLaunchWizard(page);
-          // Materialize/reuse the Work surface before arming the remote gate.
-          // This opens only the wizard; it never submits an agent launch.
-          wizardFixture = await openLiveLaunchWizardForBranch(page, branch);
+          // Open once before arming the remote gate. This opens only the
+          // wizard; it never submits an agent launch.
+          await openLiveLaunchWizardForBranch(page, branch);
           const wizard = page.locator("#wizard-modal");
           await expect(wizard).toBeVisible({ timeout: 30_000 });
           await clearLiveLaunchWizard(page);
@@ -74,11 +72,7 @@ test.describe("Issues cache responsiveness (live backend)", () => {
           await assertRemoteStillGated(fixture.gate_root, generation);
 
           const openCursor = await messageCursor(page);
-          await sendLiveGwtEvent(page, {
-            kind: "open_launch_wizard",
-            id: wizardFixture.windowId,
-            branch_name: branch,
-          });
+          await openLiveLaunchWizardForBranch(page, branch);
           await waitForWizardReply(page, openCursor, true);
           await expect(wizard).toBeVisible({ timeout: RESPONSE_BUDGET_MS });
           await expect(page.locator("html")).toHaveAttribute(
@@ -100,11 +94,7 @@ test.describe("Issues cache responsiveness (live backend)", () => {
           // Unblock any old-implementation child before real backend cleanup.
           await mkdir(fixture.gate_root, { recursive: true });
           await writeFile(join(fixture.gate_root, "released"), generation);
-          try {
-            await clearLiveLaunchWizard(page);
-          } finally {
-            await wizardFixture?.cleanup();
-          }
+          await clearLiveLaunchWizard(page);
         }
         expect(errors).toEqual([]);
       });

@@ -1,4 +1,38 @@
-## Agent Visual Check (the agent's own browser-check)
+## Agent Visual Check
+
+For a new gwt PR targeting protected `develop`, use the protected WebView CI
+path after the headed workflow has landed on the base. Pass the complete
+local headless matrix through `verify.run`, leaving `headed_e2e_commands`
+unset. Create the Ready PR with these two lines in its body.
+
+- `Headed Evidence: CI`
+- `Agent Visual Check: pending (CI headed)`
+
+The required WebView check runs Chromium on Xvfb and uploads
+`webview-headed-<run-id>-<attempt>` before it waits for review. Download that
+artifact from the PR's Test workflow. Confirm the run belongs to the exact PR
+head. Check `report.json` for passing Chromium in both themes and zero failures,
+open relevant screenshots in dark and light, and confirm the relevant test
+results in the CI logs. Use retained traces to inspect action and console
+events. Publish the
+result through `pr.comment`. Include the reviewed artifact and image paths,
+and put the following acknowledgement on its own line.
+
+`Agent Visual Check: pass (headed CI <run-id>/<attempt>, <PR-head-SHA>)`
+
+The WebView check waits up to 12 minutes for that exact acknowledgement from
+the PR author. If review times out, use `actions.rerun` for the failed job and
+review the new attempt's artifact. Repair any defect before acknowledging a
+new head. After the check passes, update the PR body to `Agent Visual Check: pass`
+and keep `Headed Evidence: CI` for subsequent pushes.
+
+Check that the relevant tests run in the `Measure headed WebView E2E` step
+in `.github/workflows/test.yml`. Live-only tests skip unless their setup is
+available. Use explicit local headed evidence if CI skips the changed behavior,
+the workflow is unavailable or changed by the PR, or the target is an existing
+Draft or another repository.
+
+### Explicit local headed verification
 
 The agent's own headed run is evidence the **agent** produced. It is recorded
 on its own line and is **never a User Verification Result** — a self-reported
