@@ -369,6 +369,7 @@ mod tests {
             attempt: 2,
             recorded_at: "2026-10-05T19:12:00Z".into(),
             message: Some("version mismatch".into()),
+            notify_on_gui_startup: false,
         };
         gwt_core::update::persist_update_apply_result(&failure).unwrap();
         let status = super::status(&project_root).unwrap();
