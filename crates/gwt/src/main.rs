@@ -2715,6 +2715,12 @@ enum UserEvent {
         state: gwt_core::update::UpdateState,
         client_id: ClientId,
     },
+    UpdateVersionResolved {
+        client_id: ClientId,
+        version: String,
+        request: Arc<()>,
+        result: Result<gwt_core::update::UpdateState, String>,
+    },
     CancelUpdateDownload {
         version: Option<String>,
     },
@@ -5423,6 +5429,7 @@ mod tests {
             update_download_in_flight: None,
             update_download_cancel: None,
             update_download_retry: None,
+            pending_update_version_resolutions: Default::default(),
             last_download_manifest: None,
             deferred_update_discovery: None,
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
@@ -5892,6 +5899,38 @@ mod tests {
             assert!(gwt_core::update::load_pending_update_manifest().is_none());
             assert!(!crate::update_front_door::try_apply_pending_update_at_bootstrap(temp.path()));
         }
+    }
+
+    #[test]
+    fn cancel_update_discards_late_release_selection_resolution() {
+        let temp = tempdir().unwrap();
+        let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![], None);
+        let key = ("manual".to_string(), "99.0.0".to_string());
+        let cancelled = Arc::new(());
+        runtime
+            .pending_update_version_resolutions
+            .insert(key.clone(), cancelled.clone());
+        runtime.cancel_update_download(Some(key.1.clone()));
+
+        // A new request for the same version can arrive before the old
+        // lookup returns. The old result may neither publish nor consume it.
+        let retry = Arc::new(());
+        runtime
+            .pending_update_version_resolutions
+            .insert(key.clone(), retry.clone());
+        assert!(runtime
+            .finish_update_version_resolution(
+                key.0.clone(),
+                key.1.clone(),
+                &cancelled,
+                Err("late result".into()),
+            )
+            .is_empty());
+        assert!(Arc::ptr_eq(
+            &runtime.pending_update_version_resolutions[&key],
+            &retry
+        ));
+        assert!(runtime.update_download_in_flight.is_none());
     }
 
     #[test]
@@ -12312,6 +12351,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::ApplyUpdateStart { state, client_id }) => {
                 clients.dispatch(start_update_download(app, state, client_id));
+            }
+            Event::UserEvent(UserEvent::UpdateVersionResolved { client_id, version, request, result }) => {
+                clients.dispatch(app.finish_update_version_resolution(client_id, version, &request, result));
             }
             Event::UserEvent(UserEvent::CancelUpdateDownload { version }) => {
                 clients.dispatch(app.cancel_update_download(version));

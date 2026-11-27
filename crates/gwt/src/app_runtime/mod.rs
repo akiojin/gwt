@@ -2485,6 +2485,7 @@ pub struct AppRuntime {
     pub(crate) update_download_in_flight: Option<ClientId>,
     pub(crate) update_download_cancel: Option<tokio::sync::watch::Sender<bool>>,
     pub(crate) update_download_retry: Option<(gwt_core::update::UpdateState, ClientId)>,
+    pub(crate) pending_update_version_resolutions: HashMap<(ClientId, String), Arc<()>>,
     pub(crate) last_download_manifest: Option<gwt_core::update::PendingUpdateManifest>,
     /// Newest discovery to retry if the active download fails.
     pub(crate) deferred_update_discovery: Option<gwt_core::update::UpdateState>,
@@ -5404,6 +5405,7 @@ impl AppRuntime {
             update_download_in_flight: None,
             update_download_cancel: None,
             update_download_retry: None,
+            pending_update_version_resolutions: Default::default(),
             last_download_manifest: None,
             deferred_update_discovery: None,
             attachment_uploads,

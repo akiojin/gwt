@@ -314,31 +314,53 @@ impl AppRuntime {
     /// downloading, so Later / Restart now use the selected release. Manual
     /// selection never enters the automatic discovery path.
     pub(super) fn apply_update_to_version_events(
-        &self,
+        &mut self,
         client_id: &str,
         version: String,
     ) -> Vec<OutboundEvent> {
         let proxy = self.proxy.clone();
-        let client_id_owned = client_id.to_string();
+        let client_id = client_id.to_string();
+        let request = std::sync::Arc::new(());
+        self.pending_update_version_resolutions
+            .insert((client_id.clone(), version.clone()), request.clone());
         self.blocking_tasks.spawn(move || {
             let manager = gwt_core::update::UpdateManager::new();
             let current_exe = std::env::current_exe().ok();
-            match manager.resolve_state_for_version(&version, current_exe.as_deref()) {
-                Ok(state) => {
-                    proxy.send(UserEvent::ApplyUpdateStart {
-                        state,
-                        client_id: client_id_owned,
-                    });
-                }
-                Err(message) => {
-                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                        client_id_owned,
-                        update_apply_error_failed("Resolve release", &message),
-                    )]));
-                }
-            }
+            let result = manager.resolve_state_for_version(&version, current_exe.as_deref());
+            proxy.send(UserEvent::UpdateVersionResolved {
+                client_id,
+                version,
+                request,
+                result,
+            });
         });
         vec![]
+    }
+
+    pub(crate) fn finish_update_version_resolution(
+        &mut self,
+        client_id: ClientId,
+        version: String,
+        request: &std::sync::Arc<()>,
+        result: Result<gwt_core::update::UpdateState, String>,
+    ) -> Vec<OutboundEvent> {
+        let key = (client_id.clone(), version);
+        let std::collections::hash_map::Entry::Occupied(entry) =
+            self.pending_update_version_resolutions.entry(key)
+        else {
+            return Vec::new();
+        };
+        if !std::sync::Arc::ptr_eq(entry.get(), request) {
+            return Vec::new();
+        }
+        entry.remove();
+        match result {
+            Ok(state) => crate::start_update_download(self, state, client_id),
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed("Resolve release", &error),
+            )],
+        }
     }
 
     pub(super) fn save_ui_trace_events(
@@ -1075,6 +1097,8 @@ impl AppRuntime {
         let Some(version) = requested.or_else(|| active.clone()) else {
             return Vec::new();
         };
+        self.pending_update_version_resolutions
+            .retain(|(_, resolving_version), _| *resolving_version != version);
         if self.update_download_retry.as_ref().is_some_and(|(state, _)| {
             matches!(state, gwt_core::update::UpdateState::Available { latest, .. } if *latest == version)
         }) {

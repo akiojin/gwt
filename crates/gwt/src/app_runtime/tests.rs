@@ -2204,6 +2204,7 @@ fn sample_runtime_with_events(
         update_download_in_flight: None,
         update_download_cancel: None,
         update_download_retry: None,
+        pending_update_version_resolutions: Default::default(),
         last_download_manifest: None,
         deferred_update_discovery: None,
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
