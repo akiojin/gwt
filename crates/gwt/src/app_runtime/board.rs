@@ -14,6 +14,9 @@
 //! flow through here unchanged — the handler emits the same
 //! `BackendEvent::BoardEntries` / `BackendEvent::BoardError` responses.
 
+use futures_util::StreamExt;
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -28,7 +31,8 @@ use gwt_core::{
 use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
 
 use super::{
-    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent, WindowPreset,
+    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent, UserEvent,
+    WindowPreset,
 };
 
 pub(super) fn gui_default_board_scope_for_project(
@@ -477,7 +481,7 @@ pub(crate) fn attach_board_body_html(entries: &mut [coordination::BoardEntry]) {
 /// Keep the source too: remote providers can reuse IDs in different channels.
 #[derive(Default)]
 struct BoardBodyHtmlCache {
-    entries: HashMap<String, (chrono::DateTime<chrono::Utc>, String, String)>,
+    entries: HashMap<String, (UtcTimestamp, String, String)>,
 }
 
 impl BoardBodyHtmlCache {
@@ -501,6 +505,100 @@ impl BoardBodyHtmlCache {
         );
         html
     }
+}
+
+fn board_snapshot_events(
+    project_root: &Path,
+    client_id: &str,
+    id: &str,
+    all: bool,
+) -> Vec<OutboundEvent> {
+    let scope = match board_read_scope(project_root, all) {
+        Ok(scope) => scope,
+        Err(error) => return vec![board_read_error(client_id, id, error)],
+    };
+    // Issue #7642: every saved PM report is on the Board before it is shown.
+    gwt::pm_report_board::publish_best_effort(project_root);
+    let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
+        gwt::board_provider::load_snapshot(project_root)
+    } else {
+        gwt::board_provider::load_snapshot_for_scope(project_root, &scope)
+    };
+    match snapshot_result {
+        Ok(snapshot) => {
+            let mut entries = snapshot.board.entries;
+            attach_board_body_html(&mut entries);
+            vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardEntries {
+                    id: id.to_string(),
+                    entries,
+                    has_more_before: snapshot.board.has_more_before,
+                },
+            )]
+        }
+        Err(error) => vec![board_read_error(client_id, id, error.to_string())],
+    }
+}
+
+fn board_history_events(
+    project_root: &Path,
+    client_id: &str,
+    id: &str,
+    before_entry_id: Option<&str>,
+    limit: usize,
+    all: bool,
+) -> Vec<OutboundEvent> {
+    let scope = match board_read_scope(project_root, all) {
+        Ok(scope) => scope,
+        Err(error) => return vec![board_read_error(client_id, id, error)],
+    };
+    let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
+        gwt::board_provider::load_entries_before(project_root, before_entry_id, limit)
+    } else {
+        gwt::board_provider::load_entries_before_for_scope(
+            project_root,
+            before_entry_id,
+            limit,
+            &scope,
+        )
+    };
+    match page_result {
+        Ok(page) => {
+            let mut entries = page.entries;
+            attach_board_body_html(&mut entries);
+            vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardHistoryPage {
+                    id: id.to_string(),
+                    entries,
+                    has_more_before: page.has_more_before,
+                },
+            )]
+        }
+        Err(error) => vec![board_read_error(client_id, id, error.to_string())],
+    }
+}
+
+fn board_read_scope(
+    project_root: &Path,
+    all: bool,
+) -> Result<coordination::BoardAudienceScope, String> {
+    if all {
+        Ok(coordination::BoardAudienceScope::All)
+    } else {
+        gui_default_board_scope_for_project(project_root).map_err(|error| error.to_string())
+    }
+}
+
+fn board_read_error(client_id: &str, id: &str, message: String) -> OutboundEvent {
+    OutboundEvent::reply(
+        client_id,
+        BackendEvent::BoardError {
+            id: id.to_string(),
+            message,
+        },
+    )
 }
 
 impl AppRuntime {
@@ -552,49 +650,13 @@ impl AppRuntime {
         } else {
             self.board_all_view_windows.remove(id);
         }
-
-        let scope = if all {
-            gwt_core::coordination::BoardAudienceScope::All
-        } else {
-            match gui_default_board_scope_for_project(&project_root) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::BoardError {
-                            id: id.to_string(),
-                            message: error.to_string(),
-                        },
-                    )];
-                }
-            }
-        };
-        let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt::board_provider::load_snapshot(&project_root)
-        } else {
-            gwt::board_provider::load_snapshot_for_scope(&project_root, &scope)
-        };
-        match snapshot_result {
-            Ok(snapshot) => {
-                let mut entries = snapshot.board.entries;
-                attach_board_body_html(&mut entries);
-                vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardEntries {
-                        id: id.to_string(),
-                        entries,
-                        has_more_before: snapshot.board.has_more_before,
-                    },
-                )]
-            }
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )],
-        }
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let task_client = client_id.clone();
+        let task_id = id.clone();
+        self.spawn_board_read(&client_id, &id, move || {
+            board_snapshot_events(&project_root, &task_client, &task_id, all)
+        })
     }
 
     pub(crate) fn load_board_history_events(
@@ -647,51 +709,39 @@ impl AppRuntime {
         } else {
             self.board_all_view_windows.remove(id);
         }
-
-        let scope = if all {
-            gwt_core::coordination::BoardAudienceScope::All
-        } else {
-            match gui_default_board_scope_for_project(&project_root) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::BoardError {
-                            id: id.to_string(),
-                            message: error.to_string(),
-                        },
-                    )];
-                }
-            }
-        };
-        let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt::board_provider::load_entries_before(&project_root, before_entry_id, limit)
-        } else {
-            gwt::board_provider::load_entries_before_for_scope(
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let before_entry_id = before_entry_id.map(str::to_string);
+        let task_client = client_id.clone();
+        let task_id = id.clone();
+        self.spawn_board_read(&client_id, &id, move || {
+            board_history_events(
                 &project_root,
-                before_entry_id,
+                &task_client,
+                &task_id,
+                before_entry_id.as_deref(),
                 limit,
-                &scope,
+                all,
             )
-        };
-        match page_result {
-            Ok(page) => {
-                let mut entries = page.entries;
-                attach_board_body_html(&mut entries);
-                vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardHistoryPage {
-                        id: id.to_string(),
-                        entries,
-                        has_more_before: page.has_more_before,
-                    },
-                )]
-            }
+        })
+    }
+
+    /// Issue #7702: disk read and HTML render stay off the GUI thread. The
+    /// caller registers `board_all_view_windows` before this spawn.
+    fn spawn_board_read<F>(&self, client_id: &str, id: &str, read: F) -> Vec<OutboundEvent>
+    where
+        F: FnOnce() -> Vec<OutboundEvent> + Send + 'static,
+    {
+        let proxy = self.proxy.clone();
+        match self.blocking_tasks.try_spawn(move || {
+            proxy.send(UserEvent::Dispatch(read()));
+        }) {
+            Ok(()) => Vec::new(),
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BoardError {
                     id: id.to_string(),
-                    message: error.to_string(),
+                    message: error,
                 },
             )],
         }
@@ -739,9 +789,7 @@ impl AppRuntime {
     }
 
     /// Issue #4406: apply a Board refresh that ran off the GUI event loop.
-    /// A Work milestone is merged into the cached Active Work view, the same
-    /// cache-only path the Workspace watcher takes (Issue #3783); rebuilding
-    /// Active Work here cost seconds per Board post.
+    /// A Work milestone shares the Workspace watcher's background preparation.
     pub(crate) fn apply_board_projection_refresh(
         &mut self,
         refreshed: BoardProjectionRefreshed,
@@ -759,9 +807,7 @@ impl AppRuntime {
             return Vec::new();
         }
         let context = context.as_ref().expect("current Board project context");
-        for notification in decision_notifications {
-            self.notify_board_decision(context, notification);
-        }
+        self.queue_board_decision_notifications(context, decision_notifications);
         events.retain(|event| match &event.event {
             BackendEvent::BoardEntries { id, .. } => {
                 self.project_key_for_window(id) == Some(&context.project_key)
@@ -769,36 +815,23 @@ impl AppRuntime {
             _ => false,
         });
         if let Some((project_root, projection)) = milestone {
-            events.extend(
-                self.apply_workspace_projection_title_sync_cache_only(&project_root, &projection),
-            );
+            self.queue_workspace_projection_patch(&project_root, Box::new(projection));
         }
         events
     }
 
-    /// Board notifications have internal authority to send only this fixed
-    /// pointer to a saved decision. They never grant an agent PM input rights
-    /// or turn the decision's untrusted body into a privileged prompt.
-    fn notify_board_decision(
+    /// Submit the history-sized notification batch off the GUI event loop.
+    fn queue_board_decision_notifications(
         &self,
         context: &super::ProjectContext,
-        notification: BoardDecisionNotification,
+        notifications: Vec<BoardDecisionNotification>,
     ) {
+        if notifications.is_empty() {
+            return;
+        }
         let root = context.project_root.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().map_err(|error| error.to_string())
-                .and_then(|executor| executor.block_on(async {
-                    let client = gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
-                        &root, &gwt_core::paths::gwt_home(),
-                    ).await?;
-                    client.command(gwt::project_runtime::events::OwnerCommand::NotifyBoardDecision {
-                        entry_id: notification.entry_id, session_id: notification.session_id,
-                    }).await
-                }));
-            if let Err(error) = result {
-                tracing::warn!(%error, "project owner declined Board notification");
-            }
+            notify_board_decisions(&root, notifications);
         }) {
             tracing::warn!(%error, "Board notification worker unavailable");
         }
@@ -812,6 +845,46 @@ impl AppRuntime {
         let job = self.board_projection_refresh_job(project_root);
         let (refreshed, _) = run_board_projection_refresh(job, BoardScopedViews::new());
         self.apply_board_projection_refresh(refreshed)
+    }
+}
+
+/// The project owner validates the saved decision and its exact recipient
+/// before delivering this fixed pointer to the session.
+fn notify_board_decisions(root: &Path, notifications: Vec<BoardDecisionNotification>) {
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())
+        .and_then(|executor| {
+            executor.block_on(async {
+                let client =
+                    gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
+                        root,
+                        &gwt_core::paths::gwt_home(),
+                    )
+                    .await?;
+                // One client and a bounded number of concurrent commands keep
+                // the notification backlog out of the blocking worker pool.
+                futures_util::stream::iter(notifications)
+                    .for_each_concurrent(8, |notification| async {
+                        let result = client
+                            .command(
+                                gwt::project_runtime::events::OwnerCommand::NotifyBoardDecision {
+                                    entry_id: notification.entry_id,
+                                    session_id: notification.session_id,
+                                },
+                            )
+                            .await;
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "project owner declined Board notification");
+                        }
+                    })
+                    .await;
+                Ok::<(), String>(())
+            })
+        });
+    if let Err(error) = result {
+        tracing::warn!(%error, "project owner declined Board notification");
     }
 }
 
@@ -849,8 +922,8 @@ pub(crate) struct BoardProjectionRefreshed {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoardDecisionNotification {
-    entry_id: String,
-    session_id: String,
+    pub(super) entry_id: String,
+    pub(super) session_id: String,
 }
 
 /// Scoped Board views of one project, by Board window, kept between refreshes
@@ -921,7 +994,7 @@ pub(crate) fn run_board_projection_refresh(
                 .iter()
                 .map(|entry| entry.updated_at)
                 .max()
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+                .unwrap_or(UtcTimestamp::MIN)
         });
         // All uses the same bounded cache as Workspace/Broadcast. The core
         // hot cursor handles ordinary appends without rereading event segments.
@@ -958,8 +1031,8 @@ pub(crate) fn run_board_projection_refresh(
         }) {
             if let Some(since) = since {
                 let since = since
-                    .checked_sub_signed(chrono::Duration::nanoseconds(1))
-                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+                    .checked_add(-time::Duration::nanoseconds(1))
+                    .unwrap_or(UtcTimestamp::MIN);
                 match gwt::board_provider::load_entries_since(&window.tab_project_root, since) {
                     Ok(recent) => {
                         let mut ids = entries
@@ -1086,7 +1159,7 @@ mod body_html_tests {
             cache.html_for(&entry, |_| panic!("unchanged body rendered again")),
             first
         );
-        entry.updated_at += chrono::Duration::seconds(1);
+        entry.updated_at += time::Duration::seconds(1);
         entry.body = "**new**".into();
         let next = cache.html_for(&entry, gwt::board_remote::markdown::markdown_to_html);
         assert!(next.contains("<strong>new</strong>"));

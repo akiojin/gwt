@@ -930,6 +930,7 @@ mod tests {
 #[cfg(test)]
 mod project_owner_tests {
     use super::*;
+    use gwt_core::deadline_budget::{ScopedDeadlineBudget, HANG_GUARD};
 
     #[test]
     fn explicit_quit_subscriber_closes_its_managed_owner_lease() {
@@ -960,6 +961,9 @@ mod project_owner_tests {
     }
 
     fn exercise_explicit_quit(checkpoint: QuitCheckpoint) {
+        // These cases exercise delivery and ordering under load. The live
+        // subscriber's short production budget is a separate contract.
+        let _quit_budget = ScopedDeadlineBudget::hang_guard(&GUI_QUIT_DELIVERY_BUDGET);
         let before_connection = checkpoint != QuitCheckpoint::Connected;
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -1011,6 +1015,13 @@ mod project_owner_tests {
                 crate::project_runtime::transport::BoundProjectTransport::bind(&endpoint).unwrap();
             endpoint.project_transport_url = Some(bound.private_url.clone());
             let transport = bound.serve().unwrap();
+            // Keep background owner initialization outside the Quit budget.
+            let client =
+                crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint).unwrap();
+            if let Err(error) = inspect_project_owner(&client, &endpoint).await {
+                transport.shutdown().await;
+                panic!("project owner must be ready before Quit: {error}");
+            }
             let mut residency = transport.residency();
             let (healthy, received) = std::sync::mpsc::channel();
             let (resolving, entered) = std::sync::mpsc::channel();
@@ -1026,10 +1037,9 @@ mod project_owner_tests {
                     let attempt = resolved_count.fetch_add(1, Ordering::SeqCst);
                     if before_connection && first.swap(false, Ordering::SeqCst) {
                         resolving.send(()).unwrap();
-                        gwt_core::test_support::recv_event(
-                            &resumed.lock().unwrap(),
-                            "Quit before owner discovery returns",
-                        );
+                        // The test releases discovery after stop (or its hang
+                        // guard) in the blocked-discovery case.
+                        resumed.lock().unwrap().recv().unwrap();
                     }
                     if checkpoint == QuitCheckpoint::PendingEndpoint && attempt == 1 {
                         return Err("pending owner has not published its endpoint yet".into());
@@ -1055,8 +1065,8 @@ mod project_owner_tests {
                 }
                 subscriber.stop();
             });
-            // test-hygiene: allow-wall-clock-deadline Exercise bounded Quit while discovery is held by an explicit channel barrier.
-            let stopped = tokio::time::timeout(Duration::from_secs(3), &mut stopping).await;
+            // test-hygiene: allow-wall-clock-deadline Bounds a hung join so the test can release the held discovery worker.
+            let stopped = tokio::time::timeout(HANG_GUARD, &mut stopping).await;
             // Always release the exact held worker, including on RED, so no
             // failed regression can strand a resolver or the fixture cleanup.
             if checkpoint == QuitCheckpoint::BlockedDiscovery {
@@ -1065,21 +1075,21 @@ mod project_owner_tests {
             if stopped.is_err() {
                 stopping.await.unwrap();
             }
-            // test-hygiene: allow-wall-clock-deadline Bounds actual Quit delivery; the channel barrier establishes order, not elapsed time.
-            let drained = tokio::time::timeout(Duration::from_secs(5), async {
-                while !residency.borrow().exit_started {
-                    residency
-                        .changed()
-                        .await
-                        .expect("owner must publish its shutdown");
-                }
+            // test-hygiene: allow-wall-clock-deadline Bounds a missing shutdown notification while Continue prevents idle retirement.
+            let drained = tokio::time::timeout(HANG_GUARD, async {
+                residency
+                    .wait_for(|snapshot| snapshot.exit_started)
+                    .await
+                    .map(|_| ())
             })
             .await;
             transport.shutdown().await;
             stopped
                 .expect("Quit must not wait for blocked endpoint discovery")
                 .unwrap();
-            drained.expect("explicit Quit must drain without reconnect grace");
+            drained
+                .expect("explicit Quit must drain without reconnect grace")
+                .expect("owner must publish its shutdown");
             assert_eq!(
                 resolutions.load(Ordering::SeqCst),
                 match checkpoint {
@@ -1200,6 +1210,8 @@ type OwnerEventCallback =
 static NEXT_OWNER_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 const OWNER_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 const OWNER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const GUI_QUIT_DELIVERY_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new("GUI_QUIT_DELIVERY", Duration::from_secs(1));
 
 const HEALTH_TIMEOUT: &str = "Project health request timed out";
 
@@ -1328,6 +1340,8 @@ impl DaemonSubscriber {
         let on_health: Arc<OwnerHealthCallback> = Arc::new(on_health);
         let on_event: Arc<OwnerEventCallback> = Arc::new(on_event);
         let resolver: Arc<EndpointResolver> = Arc::new(resolver);
+        // Resolve the budget on the caller thread so test pins follow the subscriber.
+        let quit_delivery_timeout = GUI_QUIT_DELIVERY_BUDGET.resolve();
         let join_handle = thread::Builder::new().name("gwt-project-owner-subscriber".into()).spawn(move || {
             use crate::protocol::{ProjectOwnerHealthState as State, ProjectOwnerHealthView};
             let publish = |id, identity, state, detail| on_health(id, identity, ProjectOwnerHealthView { recovery_id: if state == State::Wedged { wedged_owners().lock().ok().and_then(|owners| owners.get(&project_key).map(|owner| owner.recovery_id.clone())) } else { None }, project_key: project_key.clone(), state, detail });
@@ -1390,7 +1404,7 @@ impl DaemonSubscriber {
                     if quit.load(Ordering::SeqCst) {
                         if let Some(stream) = stream {
                             // The send is bounded independently of health polling and GUI cleanup.
-                            match tokio::time::timeout(Duration::from_secs(1), close_project_owner_for_quit(stream)).await {
+                            match tokio::time::timeout(quit_delivery_timeout, close_project_owner_for_quit(stream)).await {
                                 Ok(Ok(())) => quit_delivered = true,
                                 Ok(Err(error)) => tracing::warn!(%error, "GUI Quit lease close failed"),
                                 Err(error) => tracing::warn!(%error, "GUI Quit lease close timed out"),
@@ -1445,7 +1459,7 @@ impl DaemonSubscriber {
                 // existing owner; never ensure, spawn, scan, or kill a daemon.
                 // A pending ensure may publish during this same bounded budget.
                 let result = runtime.block_on(async {
-                    tokio::time::timeout(Duration::from_secs(1), async {
+                    tokio::time::timeout(quit_delivery_timeout, async {
                         loop {
                             let discover = resolver.clone();
                             let resolution = tokio::task::spawn_blocking(move || discover());
@@ -1478,7 +1492,7 @@ impl DaemonSubscriber {
     }
 }
 
-async fn close_project_owner_for_quit<S>(mut stream: S) -> Result<(), String>
+pub(crate) async fn close_project_owner_for_quit<S>(mut stream: S) -> Result<(), String>
 where
     S: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
     S::Error: std::fmt::Display,

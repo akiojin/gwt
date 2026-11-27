@@ -124,11 +124,9 @@ test("Issue #3165: missing saved settings explain why Start has not launched an 
     assert.equal(guidance.textContent,
       "Agent not started: no saved Agent settings. Save Agent settings, then select Start.");
   }
-  const cursor = sent.length;
-  body.querySelector('[data-action="monitor-toggle"]').click();
-  assert.deepEqual(sent.slice(cursor), [{ kind: "set_issue_monitor_enabled", enabled: true }]);
-  assert.equal(guidance.hidden, false, "opening settings is not monitoring success");
-  assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
+  // Issue #7728 AC-2: Start lives in the one project stop/start, not here.
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]'), null);
+  assert.equal(body.querySelector('[data-role="monitor-state"]').textContent, "Not assigning");
   surface.applyIssueMonitorStatus({ ...status, launch_profile_source: "saved" });
   assert.equal(guidance.hidden, true, "saving settings clears the recovery text");
   surface.applyIssueMonitorStatus({ ...status, launch_profile_source: "default", active_count: 1 });
@@ -378,7 +376,7 @@ test("Monitor Queue and slots read one immutable model projection in both views"
     assert.equal(body.querySelector('[data-metric="capacity"]').textContent, `${active} of ${maxActive}`);
     assert.match(body.querySelector('[data-metric="active"]').getAttribute("aria-description"),
       new RegExp(`Issues agent capacity: ${active}/${maxActive}`));
-    assert.equal(strip.textContent, `Run Q${queue} A${active}/${maxActive}`);
+    assert.equal(strip.textContent, `Running · ${queue} queued · ${active} of ${maxActive} active`);
   };
   surface.applyIssueMonitorStatus({ enabled: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
     counts: { queue: 99, active: 99, maxActive: 99 } });
@@ -565,18 +563,38 @@ test("needs_human derives one immutable count and reason for shared Issue views"
   assert.equal(reason(), snapshot.byIssue[41].reason);
   assert.equal(detailReason(), reason());
   surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 99 });
-  assert.equal(surface.issueMonitorModel.read().humanAttention, snapshot);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.count, null,
+    "different snapshot memberships leave the combined total unknown");
+  assert.match(monitorBand(body).pill.title, /Needs human 99/);
   surface.applyIssueMonitorInbox([item(41, "needs_human", undefined)]);
   assert.equal(reason(), "Human decision required");
   assert.equal(detailReason(), reason());
   surface.applyIssueMonitorInbox([item(41, "queued", undefined)]);
-  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 0);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
   assert.equal(reason(), undefined);
   assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: null });
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, null);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 0 });
   surface.applyIssueMonitorInbox([]);
   assert.deepEqual(surface.issueMonitorModel.read().humanAttention,
     { count: 0, summary: "Needs human 0", byIssue: {} });
   assert.equal(snapshot.byIssue[41].reason, "Choose credentials");
+});
+
+test("Issue #7536 external verification waits do not retain stale decision attention", async (t) => {
+  const { surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ autonomous_issues: [{ issue_number: 7536, phase: "implementing",
+    needs_human: false, review_dispatch_hold: { reason: "Old dispatch hold" },
+    steering: { reason: "Old steering request" } }] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 7536, state: "open" }, state: "awaiting_verification" }]);
+  const snapshot = surface.issueMonitorModel.read();
+  assert.equal(snapshot.humanAttention.count, 0);
+  assert.equal(snapshot.reviewAttention.count, 0);
+  assert.equal(snapshot.steeringAttention.count, 0);
+  assert.equal(snapshot.decisionAttention.count, 0);
 });
 
 test("review holds derive shared counts and reasons from current status and open inbox", async (t) => {
@@ -935,7 +953,7 @@ test("Issue #3620: the Operator strip preserves a zero effective worker cap", as
   const { document } = parseHTML('<div id="op-strip-issue-monitor"><span id="op-strip-issue-monitor-value"></span></div>');
   renderIssueMonitorStatus(document, { status: { enabled: true, state: "idle" },
     counts: { queue: 2, active: 0, maxActive: 0 } });
-  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle Q2 A0/0");
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle · 2 queued · 0 of 0 active");
 });
 
 test("Issues band preserves higher-priority states around quota-hold metadata", async (t) => {
@@ -1095,11 +1113,7 @@ test("Issue rows render monitor projections and send controls from the full cano
     '[data-action="monitor-capacity-auto"]',
   ]) assert.equal(body.querySelector(selector), null, `${selector} belongs in Settings`);
 
-  body.querySelector('[data-action="monitor-toggle"]').click();
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_enabled",
-    enabled: true,
-  });
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]'), null, "Issues has no own Start/Stop");
   body.querySelector('[data-action="monitor-autonomous"]').click();
   assert.deepEqual(sent.at(-1), {
     kind: "set_issue_monitor_autonomous_mode",
@@ -1120,11 +1134,10 @@ test("Issue rows render monitor projections and send controls from the full cano
     kind: "quick_register_issue",
     title: "Investigate flaky release gate",
     launch: true,
-    auto_merge: false,
   });
 
   assert.equal(monitorBand(body).text(), "Stopped | Queue 3 | Active 0 · 0 issues · PM 0");
-  assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
+  assert.equal(body.querySelector('[data-role="monitor-state"]').textContent, "Not assigning");
   // Issue #3561: the click above only sent the request; the switch still shows
   // the server state (Off) until a status confirms the change.
   assert.equal(
@@ -1220,15 +1233,13 @@ test("Issue #3561: Autonomous switch exposes aria-checked and shows server state
   assert.equal(toggle.getAttribute("aria-checked"), "true");
   assert.equal(stateWord(), "On");
 
-  // AC-5: Start/Stop is an action button (label = what the press does, state
-  // lives in the Issues band pill) and it does not move on click either.
-  const startStop = body.querySelector('[data-action="monitor-toggle"]');
-  assert.equal(startStop.textContent, "Start");
-  startStop.click();
-  assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_enabled", enabled: true });
-  assert.equal(startStop.textContent, "Start");
+  // Issue #7728 AC-2: assignment is a read-only state here; the project
+  // stop/start in Settings and the project list is the only action.
+  const assignment = body.querySelector('[data-role="monitor-state"]');
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]'), null);
+  assert.equal(assignment.textContent, "Not assigning");
   surface.applyIssueMonitorStatus(status(true, { enabled: true, state: "idle" }));
-  assert.equal(startStop.textContent, "Stop");
+  assert.equal(assignment.textContent, "Assigning");
   assert.equal(monitorBand(body).pill.textContent, "Waiting · Empty");
 });
 
@@ -1445,7 +1456,7 @@ test("Issue board has four queue columns, labelled controls and one filter row",
   assert.ok(controls.querySelector('[data-action="monitor-auto-refill"]'));
   assert.ok(controls.querySelector('[data-action="monitor-autonomous"]'));
   for (const [action, label] of [["monitor-auto-refill", "Auto-refill"], ["monitor-autonomous", "Autonomous"],
-    ["monitor-toggle", "Start"], ["monitor-settings", "Issues settings"]]) {
+    ["monitor-settings", "Issues settings"]]) {
     assert.ok(controls.querySelector(`[data-action="${action}"]`).textContent.includes(label), `${action} has a visible label`);
   }
 
@@ -1466,17 +1477,26 @@ test("AC-M1: approved header reads status, actions, then one filter row", async 
   assert.deepEqual([...status.querySelectorAll(".issue-monitor-stat-label")].map(node => node.textContent),
     ["Issues", "Agent slots", "Queued", "Backlog", "Verification slots", "Last scan"]);
   surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,
-    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z"});
+    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z",
+    verification_capacity:{capacity:4,running:1,available:3}});
   assert.equal(status.querySelector('[data-metric="capacity"]').textContent,"1 of 3");
   assert.equal(status.querySelector('[data-metric="backlog"]').textContent,"8");
   assert.equal(status.querySelector('[data-metric="last-scan"]').textContent,"00:00:00 UTC");
-  assert.equal(status.querySelector('[data-metric="verification"]').textContent,"Not reported");
+  const verification = status.querySelector('[data-metric="verification"]');
+  assert.equal(verification.textContent,"1 of 4 · 3 available");
+  assert.match(verification.getAttribute("aria-description"), /1 running, 3 available, capacity 4/);
+  assert.equal(verification.getAttribute("title"), null, "no stale native unavailable tooltip");
+  surface.applyIssueMonitorStatus({verification_capacity:{capacity:4,running:0,available:4}});
+  assert.equal(verification.textContent,"0 of 4 · 4 available");
+  surface.applyIssueMonitorStatus({});
+  assert.equal(verification.textContent,"Unavailable", "missing observations clear stale measured values");
+  surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,max_active_agents_override:3});
   const limit = controls.querySelector('[data-action="monitor-limit"]');
   assert.equal(limit.value,"3");
   limit.value="4";
   limit.dispatchEvent(new window.Event("change",{bubbles:true}));
   assert.deepEqual(sent.at(-1),{kind:"set_issue_monitor_max_active_agents",max_active_agents:4});
-  assert.equal(controls.querySelector('[data-action="monitor-toggle"]').classList.contains("destructive"),true);
+  assert.equal(controls.querySelector('[data-role="monitor-state"]').dataset.state,"running");
   limit.value="5";
   limit.dispatchEvent(new window.Event("input",{bubbles:true}));
   surface.applyIssueMonitorStatus({max_active_agents:3,max_active_agents_override:3});
@@ -1571,14 +1591,30 @@ test("Issue #6922: stopped Auto-refill explains Start beside the switch and in t
   assert.ok(hint(), "the stopped explanation is visible near Issues controls");
   assert.equal(hint().hidden, false);
   assert.equal(hint().getAttribute("role"), "status");
-  assert.equal(hint().textContent, "Start the Issues to begin Auto-refill.");
-  assert.match(empty().textContent, /Start the Issues to begin Auto-refill/);
+  assert.equal(hint().textContent, "Start the project to begin Auto-refill.");
+  assert.match(empty().textContent, /Start the project to begin Auto-refill/);
   surface.applyIssueMonitorStatus({enabled:true});
   assert.equal(hint().hidden, true);
-  assert.doesNotMatch(empty().textContent, /Start the Issues/);
+  assert.doesNotMatch(empty().textContent, /Start the project/);
   surface.applyIssueMonitorStatus({enabled:false,terminal_queue_auto_refill:false});
   assert.equal(hint().hidden, true);
   assert.match(empty().textContent, /turn on Auto-refill/);
+});
+
+test("Issue #7813: empty Queued column states why Auto-refill adds nothing", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({kind:"knowledge_entries",id:"win-1",knowledge_kind:"issue",request_id:load.request_id,
+    entries:[],refresh_enabled:true});
+  const empty = () => body.querySelector('[data-queue-column="queued"] .knowledge-empty');
+  surface.applyIssueMonitorStatus({enabled:true,terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:4,terminal_queue:[]});
+  assert.match(empty().textContent, /next Issues scan/);
+  surface.applyIssueMonitorStatus({terminal_queue_refill_hold:"limit_reached"});
+  assert.doesNotMatch(empty().textContent, /next Issues scan/);
+  assert.match(empty().textContent, /refill limit \(4\)/);
+  surface.applyIssueMonitorStatus({terminal_queue_refill_hold:"no_candidates"});
+  assert.doesNotMatch(empty().textContent, /next Issues scan/);
+  assert.match(empty().textContent, /no eligible Backlog issue/);
 });
 
 test("Issue queue drops include hold-labeled cards and retain server projection", async (t) => {
@@ -1939,7 +1975,7 @@ test("queue priority displays canonical reasons and observed assignment without 
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
     request_id: load.request_id, entries: [1, 2, 3].map(number => knowledgeEntry(number, "queued", number)), refresh_enabled: true });
   surface.applyIssueMonitorStatus({ terminal_queue: [
-    { number: 1, queued_by: "urgent", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z" },
+    { number: 1, queued_by: "urgent", priority: "urgent", priority_reason: "urgent", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z" },
     { number: 2, priority: "normal", priority_reason: "urgent_limit_reached" },
     { number: 3, priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z" },
   ] });

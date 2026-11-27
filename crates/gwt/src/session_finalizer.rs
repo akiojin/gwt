@@ -182,6 +182,32 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
     desired_restore_on_startup: Option<bool>,
     exit_receipt: Option<&gwt_agent::SessionExitReceipt>,
 ) -> std::io::Result<Option<()>> {
+    finalize_exact_close_if(
+        sessions_dir,
+        identity,
+        incarnation,
+        pty,
+        window_id,
+        desired_restore_on_startup,
+        exit_receipt,
+        false,
+        |_| Ok(true),
+    )
+}
+
+/// Recheck an automatic-close decision inside the normal exact runtime fence.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finalize_exact_close_if(
+    sessions_dir: &Path,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    incarnation: u64,
+    pty: &PtyHandle,
+    window_id: &str,
+    desired_restore_on_startup: Option<bool>,
+    exit_receipt: Option<&gwt_agent::SessionExitReceipt>,
+    settled_auto_close: bool,
+    can_close: impl FnOnce(&gwt_agent::SessionRuntimeState) -> std::io::Result<bool>,
+) -> std::io::Result<Option<()>> {
     let proof = gwt_agent::ManualLaunchRuntimeProof {
         host_pid: std::process::id(),
         runtime_incarnation: incarnation,
@@ -197,6 +223,9 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
                 &identity.session_id,
             );
             let current = gwt_agent::SessionRuntimeState::load(&sidecar)?;
+            if !can_close(&current)? {
+                return Ok(None);
+            }
             let child_pid = pty
                 .process_id()
                 .ok_or_else(|| std::io::Error::other("captured child PID unavailable"))?;
@@ -215,6 +244,9 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
                 return Err(std::io::Error::other(
                     "captured runtime process identity changed before close",
                 ));
+            }
+            if settled_auto_close && child_running {
+                pty.record_finalizer_stop();
             }
             if !kill_and_reap(pty, window_id)? {
                 return Err(std::io::Error::other(
@@ -262,9 +294,10 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
                     ));
                 }
             }
-            Ok(())
+            Ok(Some(()))
         },
     )
+    .map(Option::flatten)
 }
 
 /// Stop under the exact runtime lease without waiting on the caller's event loop.
@@ -533,7 +566,7 @@ impl TerminalPersistence {
                     "window_id": self.window_id,
                     "exit_confirmed": exit_confirmed,
                     "reason": reason,
-                    "recorded_at": chrono::Utc::now(),
+                    "recorded_at": gwt_core::timestamp::UtcTimestamp::now(),
                 }),
             )?;
             scratch.as_file().sync_all()?;
@@ -823,7 +856,7 @@ mod tests {
                     capability_generation: 1,
                 });
             } else {
-                successor.created_at += chrono::Duration::seconds(1);
+                successor.created_at += time::Duration::seconds(1);
             }
             successor.save(temp.path()).unwrap();
             let bytes = std::fs::read(&path).unwrap();

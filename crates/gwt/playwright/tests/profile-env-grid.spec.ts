@@ -21,7 +21,7 @@ test.describe("Profile environment variable grid", () => {
     await page.goto(APP_URL);
 
     const profile = page.locator(".surface-profile");
-    await expect(profile.getByText("Environment Variables")).toBeVisible({
+    await expect(profile.getByRole("heading", { name: "Environment variables", exact: true })).toBeVisible({
       timeout: 10_000,
     });
     await expect(profile.getByText("Save now")).toHaveCount(0);
@@ -46,7 +46,7 @@ test.describe("Profile environment variable grid", () => {
     ]);
     await expect(pathRow.locator(".profile-env-result")).toHaveText("/usr/bin");
 
-    await pathRow.locator('input[aria-label^="Profile value"]').fill("/custom/bin");
+    await pathRow.locator('input[aria-label^="Set value"]').fill("/custom/bin");
     await expect(pathRow.locator("select")).toHaveValue("override");
     await expect(pathRow.locator(".profile-env-result")).toHaveText("/custom/bin");
     await page.waitForFunction(() =>
@@ -82,7 +82,7 @@ test.describe("Profile environment variable grid", () => {
     const addedRow = profile.locator('.profile-env-row[data-env-key="CUSTOM_FLAG"]');
     await expect(addedRow).toHaveCount(1);
 
-    const addedValueInput = addedRow.locator('input[aria-label^="Profile value"]');
+    const addedValueInput = addedRow.locator('input[aria-label^="Set value"]');
     await addedValueInput.fill("1");
     await expect(addedValueInput).toHaveValue("1");
     await addedValueInput.blur();
@@ -118,7 +118,7 @@ test.describe("Profile environment variable grid", () => {
     await page.goto(APP_URL);
 
     const profile = page.locator(".surface-profile");
-    await expect(profile.getByText("Environment Variables")).toBeVisible({
+    await expect(profile.getByRole("heading", { name: "Environment variables", exact: true })).toBeVisible({
       timeout: 10_000,
     });
 
@@ -149,7 +149,7 @@ test.describe("Profile environment variable grid", () => {
     await page.goto(APP_URL);
 
     const profile = page.locator(".surface-profile");
-    await expect(profile.getByText("Environment Variables")).toBeVisible({
+    await expect(profile.getByRole("heading", { name: "Environment variables", exact: true })).toBeVisible({
       timeout: 10_000,
     });
 
@@ -215,7 +215,7 @@ test.describe("Profile environment variable grid", () => {
     await expect(profile.locator('.profile-env-row[data-env-key="PATH"] .profile-env-result')).toHaveText("/newer/bin");
     await page.evaluate(() => window.__profileFixtureReplyNext());
     await waitForProfileIdle(profile);
-    await profile.getByRole("button", { name: "Refresh profiles" }).click();
+    await profile.getByRole("button", { name: "Refresh environment variable sets" }).click();
     await waitForProfileIdle(profile);
     await expect(value).toHaveValue("/newer/bin");
   });
@@ -230,7 +230,7 @@ test.describe("Profile environment variable grid", () => {
     await name.fill("unsaved-name");
     await name.blur();
     await page.waitForFunction(() => window.__profileFixturePendingSaves.length === 1);
-    await expect(profile.locator(".profile-status")).toHaveText("Saving profile...");
+    await expect(profile.locator(".profile-status")).toHaveText("Saving environment variable set…");
     await page.evaluate(() => window.__profileFixtureReplyNext("fixture save failed"));
     await expect(profile.locator(".profile-status.error")).toHaveText("fixture save failed");
     await expect(name).toHaveValue("unsaved-name");
@@ -238,7 +238,7 @@ test.describe("Profile environment variable grid", () => {
     await expect(profile.locator('.profile-env-row[data-env-key="PATH"] .profile-env-os-value')).toHaveText("/usr/bin");
     await name.fill("default");
     await name.blur();
-    await profile.getByRole("button", { name: "Refresh profiles" }).click();
+    await profile.getByRole("button", { name: "Refresh environment variable sets" }).click();
     await waitForProfileIdle(profile);
     await expect(name).toHaveValue("default");
     await expect(profile.locator(".profile-status.error")).toHaveCount(0);
@@ -285,7 +285,7 @@ test.describe("Profile environment variable grid", () => {
     try {
       await expect.poll(() => page.evaluate(() => (window as any).__profileReconnect.held))
         .toEqual(["load_profile", "save_profile"]);
-      await expect(profile.locator(".profile-status")).toContainText("Saving profile");
+      await expect(profile.locator(".profile-status")).toContainText("Saving environment variable set");
       await page.evaluate(() => (window as any).__profileReconnect.old.close());
       await expect.poll(() => page.evaluate(() => (window as any).__profileReconnect.recovered))
         .toEqual(["load_profile"]);
@@ -312,6 +312,9 @@ test.describe("Profile environment variable grid", () => {
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated checkout server");
     const theme = info.project.name.includes("light") ? "light" : "dark";
+    const beforeName = `rename-before-${theme}`;
+    const afterName = `rename-after-${theme}`;
+    const finalName = `rename-final-${theme}`;
     await page.addInitScript(theme => {
       localStorage.setItem("gwt:ui:theme", theme);
       const add = WebSocket.prototype.addEventListener;
@@ -336,15 +339,15 @@ test.describe("Profile environment variable grid", () => {
     const profile = page.locator('.workspace-window[data-preset="profile"]').last();
     await waitForProfileIdle(profile);
     const id = (await profile.getAttribute("data-id"))!;
-    await sendLiveGwtEvent(page, { kind: "create_profile", id, name: "rename-before" });
+    await sendLiveGwtEvent(page, { kind: "create_profile", id, name: beforeName });
     const name = profile.locator(".profile-field input").first();
-    await expect(name).toHaveValue("rename-before");
-    await page.evaluate(id => {
+    await expect(name).toHaveValue(beforeName);
+    await page.evaluate(({ id, afterName }) => {
       const old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
         socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
       if (!old) throw new Error("missing owning project socket");
       const send = WebSocket.prototype.send;
-      const state = { old, id, dropName: "rename-after", lost: false, reconnected: false, recovered: [] as string[],
+      const state = { old, id, dropName: afterName, lost: false, reconnected: false, recovered: [] as string[],
         restore() { WebSocket.prototype.send = send; } };
       WebSocket.prototype.send = function (data) {
         const request = typeof data === "string" ? JSON.parse(data) : null;
@@ -353,30 +356,30 @@ test.describe("Profile environment variable grid", () => {
         return send.call(this, data);
       };
       (window as any).__profileRename = state;
-    }, id);
+    }, { id, afterName });
     try {
-      await name.fill("rename-after");
+      await name.fill(afterName);
       await name.blur();
       await expect.poll(() => page.evaluate(() => (window as any).__profileRename.lost)).toBe(true);
-      await expect(profile.locator(".profile-row.selected .profile-row-title")).toHaveText("rename-before");
+      await expect(profile.locator(".profile-row.selected .profile-row-title")).toHaveText(beforeName);
       await page.evaluate(() => (window as any).__profileRename.old.close());
       await expect.poll(() => page.evaluate(() => (window as any).__profileRename.reconnected)).toBe(true);
-      await expect(profile.locator(".profile-status")).toHaveText("Saving profile...");
+      await expect(profile.locator(".profile-status")).toHaveText("Saving environment variable set…");
       expect(await page.evaluate(() => (window as any).__profileRename.recovered)).toEqual([]);
-      await profile.getByRole("button", { name: "Refresh profiles" }).click();
+      await profile.getByRole("button", { name: "Refresh environment variable sets" }).click();
       await waitForProfileIdle(profile);
-      await expect(name).toHaveValue("rename-after");
+      await expect(name).toHaveValue(afterName);
       expect(await page.evaluate(() => (window as any).__profileRename.recovered)).toEqual(["load_profile"]);
-      await page.evaluate(() => {
+      await page.evaluate(finalName => {
         const state = (window as any).__profileRename;
         state.old = (window as any).__gwtPlaywrightSockets.findLast((socket: WebSocket) =>
           socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
-        state.dropName = "rename-final"; state.lost = false; state.reconnected = false; state.recovered = [];
-      });
-      await name.fill("rename-final");
+        state.dropName = finalName; state.lost = false; state.reconnected = false; state.recovered = [];
+      }, finalName);
+      await name.fill(finalName);
       await name.blur();
       await expect.poll(() => page.evaluate(() => (window as any).__profileRename.lost)).toBe(true);
-      await name.fill("rename-after");
+      await name.fill(afterName);
       await profile.locator(".profile-textarea").fill("Newer rename draft");
       await profile.locator(".profile-textarea").blur();
       await expect(profile.locator(".profile-status.error")).toContainText(/not found/i);
@@ -391,7 +394,7 @@ test.describe("Profile environment variable grid", () => {
       await expect.poll(() => page.evaluate(() => (window as any).__profileRename.reconnected)).toBe(true);
       await expect(profile.locator(".profile-status.error")).toHaveText(before!);
       await expect(profile.locator(".profile-textarea")).toHaveValue("Newer rename draft");
-      await expect(name).toHaveValue("rename-after");
+      await expect(name).toHaveValue(afterName);
       expect(await page.evaluate(() => {
         const state = (window as any).__profileRename;
         return { sameInput: state.input === state.root.querySelector(".profile-textarea"), recovered: state.recovered };
@@ -404,6 +407,38 @@ test.describe("Profile environment variable grid", () => {
     }
   });
 
+  test("live migrated environment sets remain project-scoped and suppress inherited variables", async ({ page }, info) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base || process.env.GWT_PLAYWRIGHT_LEGACY_ENVIRONMENT_FIXTURE !== "1",
+      "requires an isolated backend seeded with a legacy environment set");
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+      await gotoLiveGwt(page, base!);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator('.op-rail__item[data-cmd="open-profile"]').click();
+      const profile = page.locator('.workspace-window[data-preset="profile"]').first();
+      await expect(profile.getByRole("heading", { name: "Environment variables", exact: true })).toBeVisible();
+      await expect(profile.getByText("Assigned to 1 project", { exact: true })).toBeVisible();
+      const token = profile.locator('.profile-env-row[data-env-key="GITHUB_TOKEN"]');
+      await expect(token.locator("select")).toHaveValue("disabled");
+      await expect(token.locator(".profile-env-result")).toHaveText("Disabled");
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
+        detail: { section: "issues" },
+      })));
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const assigned = settings.getByRole("combobox", { name: "Environment variable set" });
+      await expect(assigned).toHaveValue("default");
+      await expect(settings.locator(".profile-env-grid")).toHaveCount(0);
+      await assigned.selectOption("");
+      await expect(assigned).toBeEnabled();
+      await expect(assigned).toHaveValue("");
+      await assigned.selectOption("default");
+      await expect(assigned).toBeEnabled();
+      await expect(assigned).toHaveValue("default");
+    });
+  });
+
   test("live Profile saves a marker across reload and recovers from a rename error", async ({ page }, info) => {
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated live gwt backend");
@@ -412,26 +447,11 @@ test.describe("Profile environment variable grid", () => {
       const theme = info.project.name.includes("light") ? "light" : "dark";
       await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
       await gotoLiveGwt(page, base!, { enableTestBridge: true });
-      await page.locator('.op-rail__item[data-cmd="open-profile"]').click();
-      const pane = page.locator('.workspace-window[data-preset="profile"]');
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "profile",
+        bounds: { x: 30, y: 30, width: 1200, height: 800 } });
+      const pane = page.locator('.workspace-window[data-preset="profile"]').last();
       const profile = pane;
-      await expect(profile.getByText("Environment Variables", { exact: true })).toBeVisible();
-      // The default window is shorter than the fixed metadata plus env editor.
-      // Use normal window gestures to give the live case the fixture's height.
-      const titlebar = await pane.locator(".titlebar").boundingBox();
-      expect(titlebar).not.toBeNull();
-      await page.mouse.move(titlebar!.x + 20, titlebar!.y + 10);
-      await page.mouse.down();
-      await page.mouse.move(120, 90, { steps: 5 });
-      await page.mouse.up();
-      const handle = await pane.locator(".resize-handle").boundingBox();
-      const frame = await pane.boundingBox();
-      expect(handle).not.toBeNull();
-      expect(frame).not.toBeNull();
-      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2 + 680 - frame!.height, { steps: 5 });
-      await page.mouse.up();
+      await expect(profile.getByRole("heading", { name: "Environment variables", exact: true })).toBeVisible();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       const id = await pane.getAttribute("data-id");
       expect(id).toBeTruthy();
@@ -439,13 +459,13 @@ test.describe("Profile environment variable grid", () => {
       const cursor = () => page.evaluate(() => Number((window as any).__gwtPlaywrightMessageSequence) || 0);
       const refresh = async () => {
         const after = await cursor();
-        await profile.getByRole("button", { name: "Refresh profiles" }).click();
+        await profile.getByRole("button", { name: "Refresh environment variable sets" }).click();
         await waitForLiveProfileReply(page, id!, after);
         await waitForProfileIdle(profile);
       };
       await refresh();
 
-      const key = "GWT_PROFILE_LIVE_FIXTURE";
+      const key = `GWT_PROFILE_LIVE_FIXTURE_${theme.toUpperCase()}`;
       const marker = `profile-grid-${theme}`;
       await expect(profile.locator(`.profile-env-row[data-env-key="${key}"]`)).toHaveCount(0);
       await profile.getByRole("button", { name: "+ Add variable" }).click();
@@ -454,7 +474,7 @@ test.describe("Profile environment variable grid", () => {
       await keyInput.fill(key);
       await keyInput.blur();
       await waitForLiveProfileReply(page, id!, keyCursor, key);
-      const value = profile.locator(`.profile-env-row[data-env-key="${key}"] input[aria-label^="Profile value"]`);
+      const value = profile.locator(`.profile-env-row[data-env-key="${key}"] input[aria-label^="Set value"]`);
       const saveCursor = await cursor();
       await value.fill(marker);
       await value.blur();
@@ -494,10 +514,80 @@ test.describe("Profile environment variable grid", () => {
       await info.attach("Profiles live", { path: screenshot, contentType: "image/png" });
     });
   });
+
+  // SPEC #6476 T-005pf (AC-1): on a phone the Profile controls kept their
+  // desktop sizes and the five-column environment grid needed ~440px.
+  test.describe("Profile touch targets", () => {
+    test.use({ hasTouch: true });
+    test("Profile controls are 44px tap targets and the editor fits a phone", async ({ page }, info) => {
+      await installEmbeddedRoutes(page);
+      await installProfileBackend(page);
+      await page.goto(APP_URL);
+      const profile = page.locator(".surface-profile");
+      await expect(profile.getByRole("heading", { name: "Environment variables", exact: true })).toBeVisible({ timeout: 10_000 });
+      const controls = ".surface-profile .profile-root :is(button, input, select, textarea):visible";
+      const measure = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 40) || node.className,
+          left: box.left, right: box.right, width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
+      }));
+      // The window heading renders before the profile snapshot reply. Take the
+      // desktop baseline only after the editor rows exist, otherwise it holds
+      // just the list-pane buttons and the 601px comparison sees new controls.
+      const pathRow = profile.locator(".profile-env-row", { hasText: "PATH" });
+      await expect(pathRow).toBeVisible();
+      await expect(profile.getByRole("button", { name: "+ Add variable" })).toBeVisible();
+      const desktop = (await measure()).map(control => control.minHeight);
+      expect(desktop).not.toContain("44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      await expect.poll(async () => (await measure()).map(control => control.minHeight),
+        { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+      expect(await pathRow.evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
+        "601px keeps the five-column environment grid").toBe(5);
+      const assertOnce = async (width: number) => {
+        const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+        const measured = await measure();
+        expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(
+          ["New environment variable set", "Refresh environment variable sets", "+ Add variable"]));
+        for (const control of measured) {
+          expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        for (const selector of [".profile-root", ".profile-env-grid"]) {
+          expect(await profile.locator(selector).evaluate(node => node.scrollWidth - node.clientWidth),
+            `${selector} must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
+        }
+      };
+      // A pending custom row carries a key input instead of key text.
+      await profile.getByRole("button", { name: "+ Add variable" }).click();
+      await expect(profile.locator('input[aria-label^="Environment variable key"]')).toHaveCount(1);
+      for (const [width, height] of [[320, 568], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        await expect(() => assertOnce(width)).toPass({ timeout: 5_000 });
+        expect((await profile.locator(".profile-list-pane").boundingBox())!.height,
+          `the profile list leaves room for the editor at ${width}x${height}`).toBeLessThanOrEqual(height * 0.3 + 1);
+        await page.screenshot({ path: info.outputPath(`profile-${width}.png`) });
+        expect(await profile.locator(".profile-env-grid").evaluate(node => node.scrollHeight > node.clientHeight),
+          `the variable grid keeps its own scroll at ${width}px`).toBe(true);
+        const value = pathRow.locator('input[aria-label^="Set value"]');
+        await value.scrollIntoViewIfNeeded();
+        const mode = (await pathRow.locator("select").boundingBox())!;
+        const input = (await value.boundingBox())!;
+        expect(Math.abs(mode.y - input.y), `mode and value share a row at ${width}px`).toBeLessThan(2);
+        await value.tap();
+        await value.fill(`/phone/${width}`);
+        await expect(pathRow.locator("select")).toHaveValue("override");
+        await expect(pathRow.locator(".profile-env-result")).toHaveText(`/phone/${width}`);
+        await page.screenshot({ path: info.outputPath(`profile-env-${width}.png`) });
+      }
+    });
+  });
 });
 
 async function waitForProfileIdle(profile) {
-  await expect(profile.locator(".profile-status")).toContainText(/^Active /);
+  await expect(profile.locator(".profile-status")).toContainText(/^Device default:/);
 }
 
 async function waitForLiveProfileReply(page, id: string, after: number, key?: string, value?: string, kind = "profile_snapshot") {
@@ -507,7 +597,7 @@ async function waitForLiveProfileReply(page, id: string, after: number, key?: st
       entry.sequence > after && entry.payload.id === id && entry.payload.kind === kind &&
       (!key || entry.payload.snapshot?.profiles.some((profile: any) =>
         profile.env_vars.some((env: any) => env.key === key && (value === undefined || env.value === value))))
-    ), { id, after, key, value, kind });
+    ), { id, after, key, value, kind }, { timeout: 10_000 });
 }
 
 async function installProfileBackend(page, { holdSaves = false } = {}) {
@@ -517,7 +607,7 @@ async function installProfileBackend(page, { holdSaves = false } = {}) {
 
     const profileWindow = {
       id: "profile-1",
-      title: "Profile",
+      title: "Environment variables",
       preset: "profile",
       geometry: { x: 96, y: 96, width: 720, height: 680 },
       z_index: 1,

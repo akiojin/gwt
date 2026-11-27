@@ -9,8 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
 use fs2::FileExt;
+use gwt_core::{
+    operation_deadline::{self, NamedFileLock},
+    timestamp::UtcTimestamp,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -101,7 +104,7 @@ pub const GWT_PANE_WS_URL_ENV: &str = "GWT_PANE_WS_URL";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentSessionHistoryEntry {
     pub agent_session_id: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: UtcTimestamp,
 }
 
 /// Durable launch-time binding for a Docker-backed Session.
@@ -187,7 +190,7 @@ pub struct SessionActiveLaunchHandshake {
     pub host_started_at: u64,
     #[serde(default)]
     pub phase: SessionActiveLaunchPhase,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 impl SessionActiveLaunchHandshake {
@@ -223,7 +226,7 @@ pub struct SessionManualHandoffFence {
     pub execution_identity: SessionExecutionIdentity,
     pub host_pid: u32,
     pub host_started_at: u64,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 impl SessionManualHandoffFence {
@@ -334,6 +337,34 @@ pub enum SessionLaunchOrigin {
     UserRestart,
 }
 
+/// Account and credential location selected for this launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionAccount {
+    pub account_id: String,
+    /// Environment variable name for selecting the credential home.
+    pub env_key: String,
+    /// `None` uses the tool's default credential home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_home: Option<String>,
+}
+
+/// Reason the account changed when starting a session again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSwitchReason {
+    RateLimit,
+    Manual,
+}
+
+/// A dated change between account ids for a provider conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountSwitch {
+    pub from: String,
+    pub to: String,
+    pub reason: AccountSwitchReason,
+    pub at: UtcTimestamp,
+}
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -395,6 +426,10 @@ pub struct Session {
     /// Sessions keep this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<SessionExecutionBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_account: Option<ExecutionAccount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub account_switches: Vec<AccountSwitch>,
     #[serde(default)]
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
@@ -418,7 +453,7 @@ pub struct Session {
     /// When the bypass was armed. Consumers treat a bypass without a fresh
     /// timestamp as expired so a forgotten disarm cannot outlive its release.
     #[serde(default)]
-    pub workflow_bypass_armed_at: Option<DateTime<Utc>>,
+    pub workflow_bypass_armed_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub launch_command: String,
     #[serde(default)]
@@ -446,15 +481,15 @@ pub struct Session {
     /// idempotent. Legacy TOML files without this field deserialize as `0`.
     #[serde(default)]
     pub schema_version: u32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+    pub last_activity_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_hook_event: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_hook_event_at: Option<DateTime<Utc>>,
+    pub last_hook_event_at: Option<UtcTimestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completed_stop_at: Option<DateTime<Utc>>,
+    pub last_completed_stop_at: Option<UtcTimestamp>,
     /// Exit code reported by the agent's PTY child the last time it was reaped
     /// (Issue #3341). `1` alongside [`Self::last_exit_signal`] means signal
     /// death; `0` with no signal means the agent shut itself down cleanly,
@@ -467,7 +502,7 @@ pub struct Session {
     /// When the exit was observed, not when it was persisted — the gap between
     /// the two has already been misread as a much later death.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_exited_at: Option<DateTime<Utc>>,
+    pub last_exited_at: Option<UtcTimestamp>,
     pub display_name: String,
 }
 
@@ -477,7 +512,7 @@ pub struct Session {
 pub struct SessionExitReceipt {
     pub exit_code: u32,
     pub signal: Option<String>,
-    pub exited_at: DateTime<Utc>,
+    pub exited_at: UtcTimestamp,
 }
 
 /// Lightweight runtime state updated by hook events while the PTY is alive.
@@ -531,8 +566,8 @@ impl CurrentHookEventObservation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRuntimeState {
     pub status: AgentStatus,
-    pub updated_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
+    pub last_activity_at: UtcTimestamp,
     /// Exact durable producing Session represented by this runtime sidecar.
     /// Legacy and hook-only sidecars omit it and therefore cannot authorize a
     /// destructive terminal handoff.
@@ -564,7 +599,7 @@ pub struct SessionRuntimeState {
     /// protocol output included (Issue #3541). `hook.health` compares it with
     /// the newest hook failure to tell "recovered" from "unresolved".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completed_hook_event_at: Option<DateTime<Utc>>,
+    pub last_completed_hook_event_at: Option<UtcTimestamp>,
     /// Missing in old sidecars; absence is never evidence of a normal outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_hook_outcome: Option<HookCompletionOutcome>,
@@ -588,7 +623,7 @@ impl Session {
         agent_id: AgentId,
     ) -> Self {
         let worktree_path = worktree_path.into();
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let display_name = agent_id.display_name().to_string();
         let repo_hash = gwt_core::repo_hash::detect_repo_hash(&worktree_path)
             .map(|hash| hash.as_str().to_string());
@@ -617,6 +652,8 @@ impl Session {
             docker_service: None,
             docker_runtime_binding: None,
             execution_binding: None,
+            execution_account: None,
+            account_switches: Vec::new(),
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
             review_dispatch: false,
@@ -730,14 +767,14 @@ impl Session {
             }
         }
         self.execution_binding = binding;
-        self.updated_at = Utc::now();
+        self.updated_at = UtcTimestamp::now();
         Ok(())
     }
 
     /// Update the session status and touch timestamps.
     pub fn update_status(&mut self, status: AgentStatus) {
         self.status = status;
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         self.updated_at = now;
         if matches!(
             status,
@@ -757,7 +794,7 @@ impl Session {
         self.last_exit_code = Some(receipt.exit_code);
         self.last_exit_signal = receipt.signal.clone();
         self.last_exited_at = Some(receipt.exited_at);
-        self.updated_at = Utc::now();
+        self.updated_at = UtcTimestamp::now();
     }
 
     /// Apply hook status without reviving an explicitly stopped or closed Session.
@@ -771,7 +808,7 @@ impl Session {
 
     /// Persist that a managed runtime hook was observed for this session.
     pub fn record_hook_event(&mut self, event: &str) {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         self.last_hook_event = Some(event.to_string());
         self.last_hook_event_at = Some(now);
         self.updated_at = now;
@@ -783,7 +820,7 @@ impl Session {
     /// Persist that the latest Stop hook was allowed to complete.
     pub fn record_completed_stop(&mut self) {
         self.consecutive_interruptions = 0;
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         self.last_completed_stop_at = Some(now);
         self.updated_at = now;
         if self.last_hook_event.as_deref() != Some("Stop") {
@@ -915,9 +952,7 @@ impl Session {
         if self.status == AgentStatus::Stopped {
             return false;
         }
-        let elapsed = Utc::now()
-            .signed_duration_since(self.last_activity_at)
-            .num_seconds();
+        let elapsed = UtcTimestamp::now().whole_seconds_since(self.last_activity_at);
         elapsed >= IDLE_TIMEOUT_SECS
     }
 
@@ -927,7 +962,7 @@ impl Session {
         validate_session_id_path_component(&self.id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let content = serialize_session_toml(self)?;
-        with_session_lock(dir, &self.id, || {
+        with_session_lock(dir, &self.id, "Session::save", None, || {
             write_session_toml_atomic(&session_file_path(dir, &self.id), &content)
         })
     }
@@ -940,7 +975,7 @@ impl Session {
         validate_session_id_path_component(&self.id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let content = serialize_session_toml(self)?;
-        with_session_lock(dir, &self.id, || {
+        with_session_lock(dir, &self.id, "Session::save_if_absent", None, || {
             let path = session_file_path(dir, &self.id);
             match inspect_session_path(&path) {
                 SessionPathState::Missing => {
@@ -976,7 +1011,8 @@ impl Session {
             return Ok(false);
         }
         let content = serialize_session_toml(self)?;
-        with_session_lock(dir, &self.id, || {
+        let operation = "Session::save_if_execution_identity_matches";
+        with_session_lock(dir, &self.id, operation, None, || {
             let path = session_file_path(dir, &self.id);
             let durable = match inspect_session_path(&path) {
                 SessionPathState::Present(session) => session,
@@ -1011,7 +1047,7 @@ impl Session {
         }
         let content = serialize_session_toml(self)?;
         let expected_content = serialize_session_toml(expected)?;
-        with_session_lock(dir, &self.id, || {
+        with_session_lock(dir, &self.id, "Session::save_if_unchanged", None, || {
             self.commit_if_unchanged_under_lease(dir, &content, &expected_content)
         })
     }
@@ -1071,7 +1107,8 @@ impl Session {
         }
         let content = serialize_session_toml(self)?;
         let expected_content = serialize_session_toml(expected)?;
-        with_session_lock(dir, &self.id, || {
+        let operation = "Session::save_if_absent_or_unchanged";
+        with_session_lock(dir, &self.id, operation, None, || {
             let path = session_file_path(dir, &self.id);
             match inspect_session_path(&path) {
                 SessionPathState::Missing => {}
@@ -1304,83 +1341,45 @@ fn serialize_session_toml(session: &Session) -> io::Result<String> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
-fn with_session_lock<T, F>(dir: &Path, session_id: &str, action: F) -> io::Result<T>
-where
-    F: FnOnce() -> io::Result<T>,
-{
-    let _thread_guard = SessionLeaseThreadGuard::enter()?;
-    fs::create_dir_all(dir)?;
-    let lock_path = session_lock_path(dir, session_id);
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    lock_file.lock_exclusive()?;
-    let result = action();
-    match lock_file.unlock() {
-        Ok(()) => result,
-        Err(unlock_error) => match result {
-            Ok(_) => Err(unlock_error),
-            Err(action_error) => Err(action_error),
-        },
-    }
-}
-
-fn with_session_lock_wait<T, F>(
+fn with_session_lock<T>(
     dir: &Path,
     session_id: &str,
-    wait: Duration,
-    action: F,
-) -> io::Result<T>
-where
-    F: FnOnce() -> io::Result<T>,
-{
+    operation: &str,
+    deadline: Option<Instant>,
+    action: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     let _thread_guard = SessionLeaseThreadGuard::enter()?;
     fs::create_dir_all(dir)?;
-    let lock_path = session_lock_path(dir, session_id);
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    let deadline = Instant::now() + wait;
-    loop {
-        match lock_file.try_lock_exclusive() {
-            Ok(()) => break,
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-            {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Session lease is held by another gwt operation; hook bookkeeping skipped",
-                    ));
-                }
-                std::thread::sleep(SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)));
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let lock = acquire_session_lock(dir, session_id, operation, deadline)?;
     let result = action();
-    match lock_file.unlock() {
-        Ok(()) => result,
-        Err(unlock_error) => match result {
-            Ok(_) => Err(unlock_error),
-            Err(action_error) => Err(action_error),
-        },
-    }
+    let unlocked = lock.unlock();
+    result.and_then(|value| unlocked.map(|()| value))
+}
+
+fn acquire_session_lock(
+    dir: &Path,
+    session_id: &str,
+    operation: &str,
+    deadline: Option<Instant>,
+) -> io::Result<NamedFileLock> {
+    NamedFileLock::acquire_until(&session_lock_path(dir, session_id), operation, deadline)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(
+                    error.kind(),
+                    format!("Session lease is held by another gwt operation; retry after it settles: {error}"),
+                )
+            } else {
+                error
+            }
+        })
 }
 
 /// Ordered Session path locks held until this guard is dropped.
 /// Acquire owner leases first and do not persist these Sessions while held.
 #[must_use]
 pub struct SessionPathLeases {
-    files: Vec<File>,
+    files: Vec<NamedFileLock>,
     _thread_guard: Option<SessionLeaseThreadGuard>,
     _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -1388,7 +1387,7 @@ pub struct SessionPathLeases {
 impl SessionPathLeases {
     fn unlock(self) -> io::Result<()> {
         let mut result = Ok(());
-        for file in self.files.iter().rev() {
+        for file in self.files.into_iter().rev() {
             if let Err(error) = file.unlock() {
                 if result.is_ok() {
                     result = Err(error);
@@ -1401,11 +1400,17 @@ impl SessionPathLeases {
 
 /// Hold sorted, deduplicated Session path leases across an external transaction.
 /// An empty set takes no lock and may be used inside an existing Session lease.
+#[track_caller]
 pub fn acquire_session_path_leases(
     sessions_dir: &Path,
     session_ids: &[&str],
 ) -> io::Result<SessionPathLeases> {
-    acquire_session_path_leases_wait(sessions_dir, session_ids, SESSION_LEASE_WAIT)
+    acquire_session_path_leases_until(
+        sessions_dir,
+        session_ids,
+        &format!("Session transaction at {}", std::panic::Location::caller()),
+        operation_deadline::now() + SESSION_LEASE_WAIT,
+    )
 }
 
 /// Hold the per-Session lease while classifying its durable path and running
@@ -1413,6 +1418,7 @@ pub fn acquire_session_path_leases(
 ///
 /// Callers combining this with an owner ledger lease must acquire the owner
 /// lease first and must not persist the same Session from `operation`.
+#[track_caller]
 pub fn with_session_path_lease<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1426,6 +1432,7 @@ where
 
 /// [`with_session_path_lease`] with an explicit wait bound for retry-aware
 /// callers and deterministic contention tests.
+#[track_caller]
 pub fn with_session_path_lease_wait<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1435,7 +1442,25 @@ pub fn with_session_path_lease_wait<T, F>(
 where
     F: FnOnce(SessionPathState) -> io::Result<T>,
 {
-    let leases = acquire_session_path_leases_wait(sessions_dir, &[session_id], wait)?;
+    with_named_session_path_lease_until(
+        sessions_dir,
+        session_id,
+        &format!("Session transaction at {}", std::panic::Location::caller()),
+        operation_deadline::now() + wait,
+        operation,
+    )
+}
+
+/// Lease an exact Session path with an absolute wait limit and a diagnostic operation name.
+pub fn with_named_session_path_lease_until<T>(
+    sessions_dir: &Path,
+    session_id: &str,
+    operation_name: &str,
+    deadline: Instant,
+    operation: impl FnOnce(SessionPathState) -> io::Result<T>,
+) -> io::Result<T> {
+    let leases =
+        acquire_session_path_leases_until(sessions_dir, &[session_id], operation_name, deadline)?;
     let result = operation(inspect_session_path(&session_file_path(
         sessions_dir,
         session_id,
@@ -1449,10 +1474,11 @@ where
     }
 }
 
-fn acquire_session_path_leases_wait(
+fn acquire_session_path_leases_until(
     sessions_dir: &Path,
     session_ids: &[&str],
-    wait: Duration,
+    operation: &str,
+    deadline: Instant,
 ) -> io::Result<SessionPathLeases> {
     let ids: BTreeSet<_> = session_ids.iter().copied().collect();
     let mut leases = SessionPathLeases {
@@ -1472,37 +1498,13 @@ fn acquire_session_path_leases_wait(
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     }
     fs::create_dir_all(sessions_dir)?;
-    let deadline = Instant::now() + wait;
-    let is_contended = |error: &io::Error| {
-        error.kind() == io::ErrorKind::WouldBlock
-            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-    };
     for id in ids {
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(session_lock_path(sessions_dir, id))?;
-        loop {
-            match lock_file.try_lock_exclusive() {
-                Ok(()) => break,
-                Err(error) if is_contended(&error) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Session lease is held by another gwt operation; retry after it settles",
-                    ));
-                    }
-                    std::thread::sleep(
-                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        leases.files.push(lock_file);
+        leases.files.push(acquire_session_lock(
+            sessions_dir,
+            id,
+            operation,
+            Some(deadline),
+        )?);
     }
     Ok(leases)
 }
@@ -1514,6 +1516,7 @@ fn acquire_session_path_leases_wait(
 /// Session persistence use the same lock file. Callers combining this with an
 /// owner ledger lease must acquire the owner lease first and must not persist
 /// the same Session from `operation`.
+#[track_caller]
 pub fn with_session_lease<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1527,6 +1530,7 @@ where
 
 /// [`with_session_lease`] with an explicit wait bound for retry-aware callers
 /// and deterministic contention tests.
+#[track_caller]
 pub fn with_session_lease_wait<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1536,19 +1540,43 @@ pub fn with_session_lease_wait<T, F>(
 where
     F: FnOnce(&Session) -> io::Result<T>,
 {
-    with_session_path_lease_wait(sessions_dir, session_id, wait, |state| match state {
-        SessionPathState::Present(session) => operation(&session),
-        SessionPathState::Missing => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Session not found: {session_id}"),
-        )),
-        SessionPathState::Error(error) => Err(error),
-    })
+    with_named_session_lease_wait(
+        sessions_dir,
+        session_id,
+        &format!("Session transaction at {}", std::panic::Location::caller()),
+        wait,
+        operation,
+    )
+}
+
+/// Like [`with_session_lease_wait`] with a diagnostic name for the protected operation.
+pub fn with_named_session_lease_wait<T>(
+    sessions_dir: &Path,
+    session_id: &str,
+    operation_name: &str,
+    wait: Duration,
+    operation: impl FnOnce(&Session) -> io::Result<T>,
+) -> io::Result<T> {
+    with_named_session_path_lease_until(
+        sessions_dir,
+        session_id,
+        operation_name,
+        operation_deadline::now() + wait,
+        |state| match state {
+            SessionPathState::Present(session) => operation(&session),
+            SessionPathState::Missing => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Session not found: {session_id}"),
+            )),
+            SessionPathState::Error(error) => Err(error),
+        },
+    )
 }
 
 /// Lease two distinct Sessions in lexical order under an already-held owner
 /// lease. A single thread guard covers the pair; ordinary nested Session
 /// leases remain forbidden. The callback receives Sessions in caller order.
+#[track_caller]
 pub fn with_session_pair_lease<T>(
     sessions_dir: &Path,
     session_ids: [&str; 2],
@@ -1568,37 +1596,19 @@ pub fn with_session_pair_lease<T>(
     fs::create_dir_all(sessions_dir)?;
     let mut ordered = session_ids;
     ordered.sort_unstable();
-    let deadline = Instant::now() + SESSION_LEASE_WAIT;
+    let deadline = operation_deadline::now() + SESSION_LEASE_WAIT;
+    let operation_name = format!(
+        "Session pair transaction at {}",
+        std::panic::Location::caller()
+    );
     let mut locks = Vec::with_capacity(2);
     for id in ordered {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(session_lock_path(sessions_dir, id))?;
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => break,
-                Err(error)
-                    if error.kind() == io::ErrorKind::WouldBlock
-                        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-                {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "Session pair lease is held; retry after it settles",
-                        ));
-                    }
-                    std::thread::sleep(
-                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        locks.push(file);
+        locks.push(acquire_session_lock(
+            sessions_dir,
+            id,
+            &operation_name,
+            Some(deadline),
+        )?);
     }
     let sessions = [
         Session::load(&session_file_path(sessions_dir, session_ids[0]))?,
@@ -1656,7 +1666,7 @@ pub fn persist_observed_session_runtime_stopped_under_lease(
     current.update_status(AgentStatus::Stopped);
     current.restore_window_on_startup = false;
     runtime.status = AgentStatus::Stopped;
-    runtime.updated_at = Utc::now();
+    runtime.updated_at = UtcTimestamp::now();
     write_session_toml_atomic(&path, &serialize_session_toml(&current)?)?;
     writer.save(&runtime)?;
     Ok(true)
@@ -1791,7 +1801,7 @@ where
 {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
+    with_session_lock(sessions_dir, session_id, "update_session", None, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
         mutate(&mut session)?;
@@ -1833,7 +1843,9 @@ where
 {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock_wait(sessions_dir, session_id, wait, || {
+    let operation = "update_session_with_wait";
+    let deadline = Some(operation_deadline::now() + wait);
+    with_session_lock(sessions_dir, session_id, operation, deadline, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
         mutate(&mut session)?;
@@ -1859,7 +1871,8 @@ where
 {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
+    let operation = "update_session_if_changed";
+    with_session_lock(sessions_dir, session_id, operation, None, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load(&path)?;
         let before = serialize_session_toml(&session)?;
@@ -2025,7 +2038,8 @@ where
     {
         return Ok(false);
     }
-    with_session_lock(sessions_dir, session_id, || {
+    let operation = "remove_session_if_execution_identity_matches";
+    with_session_lock(sessions_dir, session_id, operation, None, || {
         let path = session_file_path(sessions_dir, session_id);
         let session = match inspect_session_path(&path) {
             SessionPathState::Present(session) => session,
@@ -2125,7 +2139,7 @@ fn normalize_config_override(value: &str) -> String {
 impl SessionRuntimeState {
     /// Create a new runtime state snapshot for the given status.
     pub fn new(status: AgentStatus) -> Self {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         Self {
             status,
             updated_at: now,
@@ -2525,7 +2539,7 @@ pub fn begin_session_active_launch_handshake_under_lease(
         host_pid: std::process::id(),
         host_started_at,
         phase: SessionActiveLaunchPhase::PreSpawn,
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
     };
     save_active_launch_handshake(sessions_dir, &handshake)?;
     Ok(Some(handshake))
@@ -2644,7 +2658,7 @@ pub fn begin_session_manual_handoff_under_lease(
         execution_identity: expected.clone(),
         host_pid: std::process::id(),
         host_started_at,
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
     };
     save_manual_handoff(sessions_dir, &handoff)?;
     Ok(Some(handoff))
@@ -2732,7 +2746,8 @@ pub fn persist_session_status(
 ) -> std::io::Result<()> {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
+    let operation = "persist_session_status";
+    with_session_lock(sessions_dir, session_id, operation, None, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
         session.update_status(status);
@@ -2743,7 +2758,7 @@ pub fn persist_session_status(
         let mut runtime = SessionRuntimeState::load(&runtime_path)
             .unwrap_or_else(|_| SessionRuntimeState::new(status));
         runtime.status = status;
-        runtime.updated_at = Utc::now();
+        runtime.updated_at = UtcTimestamp::now();
         runtime.last_activity_at = runtime.updated_at;
         writer.save(&runtime)
     })
@@ -2930,7 +2945,7 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
         {
             runtime = previous;
             runtime.status = status;
-            runtime.updated_at = Utc::now();
+            runtime.updated_at = UtcTimestamp::now();
         } else {
             runtime.last_completed_hook_event_at = previous.last_completed_hook_event_at;
             runtime.last_completed_hook_outcome = previous.last_completed_hook_outcome;
@@ -2960,7 +2975,7 @@ pub fn persist_session_restore_window_on_startup_if_execution_identity_matches_u
         return Ok(true);
     }
     session.restore_window_on_startup = restore;
-    session.updated_at = Utc::now();
+    session.updated_at = UtcTimestamp::now();
     let content = serialize_session_toml(&session)?;
     write_session_toml_atomic(
         &session_file_path(sessions_dir, &expected.session_id),
@@ -3026,7 +3041,7 @@ pub fn persist_session_terminal_status_for_exact_runtime_under_lease(
 
     session.update_status(status);
     exact_runtime.status = status;
-    exact_runtime.updated_at = Utc::now();
+    exact_runtime.updated_at = UtcTimestamp::now();
     let session_content = serialize_session_toml(&session)?;
     write_session_toml_atomic(
         &session_file_path(sessions_dir, &expected.session_id),
@@ -3080,9 +3095,13 @@ pub fn persist_session_completed_stop(
 ) -> std::io::Result<()> {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
-        persist_session_completed_stop_under_lease(sessions_dir, session_id)
-    })
+    with_session_lock(
+        sessions_dir,
+        session_id,
+        "persist_session_completed_stop",
+        None,
+        || persist_session_completed_stop_under_lease(sessions_dir, session_id),
+    )
     .map(|_| ())
 }
 
@@ -3158,7 +3177,7 @@ fn apply_agent_session_id(session: &mut Session, agent_session_id: &str) {
     {
         session.session_history.push(AgentSessionHistoryEntry {
             agent_session_id: agent_session_id.to_string(),
-            started_at: Utc::now(),
+            started_at: UtcTimestamp::now(),
         });
     }
     session.agent_session_id = Some(agent_session_id.to_string());
@@ -3179,7 +3198,9 @@ pub fn persist_session_hook_metadata_with_wait(
 ) -> io::Result<Session> {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock_wait(sessions_dir, session_id, wait, || {
+    let operation = "hook session metadata";
+    let deadline = Some(operation_deadline::now() + wait);
+    with_session_lock(sessions_dir, session_id, operation, deadline, || {
         persist_session_hook_metadata_under_lease(
             sessions_dir,
             session_id,
@@ -3296,7 +3317,7 @@ pub fn persist_session_restore_window_on_startup(
             return Ok(());
         }
         session.restore_window_on_startup = restore;
-        session.updated_at = Utc::now();
+        session.updated_at = UtcTimestamp::now();
         Ok(())
     })
     .map(|_| ())
@@ -3550,7 +3571,7 @@ display_name = "Codex"
     #[test]
     fn record_process_exit_keeps_a_clean_exit_receipt() {
         let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
-        let exited_at = Utc::now();
+        let exited_at = UtcTimestamp::now();
 
         session.record_process_exit(&SessionExitReceipt {
             exit_code: 0,
@@ -3570,7 +3591,7 @@ display_name = "Codex"
         session.record_process_exit(&SessionExitReceipt {
             exit_code: 1,
             signal: Some("Killed: 9".to_string()),
-            exited_at: Utc::now(),
+            exited_at: UtcTimestamp::now(),
         });
 
         assert_eq!(session.last_exit_signal.as_deref(), Some("Killed: 9"));
@@ -3592,7 +3613,7 @@ display_name = "Codex"
         let dir = tempfile::tempdir().expect("tempdir");
         let session = session_with_execution_owner();
         session.save(dir.path()).expect("save Session");
-        let exited_at = Utc::now();
+        let exited_at = "2017-01-01T00:59:60.125000001+0100".parse().unwrap();
 
         persist_session_exit(
             dir.path(),
@@ -3605,14 +3626,15 @@ display_name = "Codex"
         )
         .expect("persist exit receipt");
 
-        let reloaded = Session::load(&session_file_path(dir.path(), &session.id))
-            .expect("reload persisted Session");
+        let path = session_file_path(dir.path(), &session.id);
+        let persisted = fs::read_to_string(&path).expect("read Session TOML");
+        assert!(persisted
+            .lines()
+            .any(|line| line == r#"last_exited_at = "2016-12-31T23:59:60.125000001Z""#));
+        let reloaded = Session::load(&path).expect("reload persisted Session");
         assert_eq!(reloaded.last_exit_code, Some(0));
         assert_eq!(reloaded.last_exit_signal, None);
-        assert_eq!(
-            reloaded.last_exited_at.map(|at| at.timestamp_millis()),
-            Some(exited_at.timestamp_millis())
-        );
+        assert_eq!(reloaded.last_exited_at, Some(exited_at));
     }
 
     /// Issue #3341: the exit receipt and the Stopped status are written by two
@@ -3630,7 +3652,7 @@ display_name = "Codex"
             &SessionExitReceipt {
                 exit_code: 7,
                 signal: None,
-                exited_at: Utc::now(),
+                exited_at: UtcTimestamp::now(),
             },
         )
         .expect("persist exit receipt");
@@ -4143,6 +4165,45 @@ display_name = "Codex"
     }
 
     #[test]
+    fn session_lease_error_identifies_the_metadata_writer_and_hold_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new(dir.path(), "work/metadata", AgentId::Codex);
+        session.save(dir.path()).unwrap();
+        let (locked, acquire) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+
+        let error = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                update_session_if_changed(dir.path(), &session.id, move |_| {
+                    locked.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            acquire.recv().unwrap();
+            let result =
+                with_session_lease_wait(dir.path(), &session.id, Duration::ZERO, |_| Ok(()));
+            release.send(()).unwrap();
+            result.unwrap_err()
+        });
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        let error = error.to_string();
+        assert!(
+            error.contains("operation=update_session_if_changed"),
+            "{error}"
+        );
+        let hold_time = error
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("elapsed_ms="))
+            .unwrap();
+        assert!(
+            hold_time.trim_end_matches(',').parse::<u64>().is_ok(),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn exact_snapshot_update_is_atomic_fail_closed_and_preserves_noop_bytes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut session = Session::new(dir.path(), "work/exact-update", AgentId::Codex);
@@ -4313,7 +4374,7 @@ display_name = "Codex"
         session.agent_session_id = Some("conversation-current".to_string());
         session.session_history.push(AgentSessionHistoryEntry {
             agent_session_id: "conversation-current".to_string(),
-            started_at: Utc::now(),
+            started_at: UtcTimestamp::now(),
         });
         session.record_hook_event("UserPromptSubmit");
         let expected_history = session.session_history.clone();
@@ -4854,6 +4915,32 @@ display_name = "Codex"
         let session: Session = toml::from_str(legacy).expect("deserialize legacy");
 
         assert!(session.project_state_root.is_none());
+        assert!(session.execution_account.is_none());
+        assert!(session.account_switches.is_empty());
+    }
+
+    #[test]
+    fn session_account_and_switch_history_round_trip() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let account = ExecutionAccount {
+            account_id: "codex-2".into(),
+            env_key: "CODEX_HOME".into(),
+            credential_home: Some("/tmp/accounts/codex/codex-2".into()),
+        };
+        let switch = AccountSwitch {
+            from: "codex-1".into(),
+            to: account.account_id.clone(),
+            reason: AccountSwitchReason::RateLimit,
+            at: session.created_at,
+        };
+        session.execution_account = Some(account.clone());
+        session.account_switches.push(switch.clone());
+
+        let persisted = toml::to_string(&session).expect("serialize account metadata");
+        assert!(persisted.contains("reason = \"rate_limit\""));
+        let restored: Session = toml::from_str(&persisted).expect("deserialize account metadata");
+        assert_eq!(restored.execution_account, Some(account));
+        assert_eq!(restored.account_switches, [switch]);
     }
 
     #[test]
@@ -4924,7 +5011,7 @@ display_name = "Claude Code"
     #[test]
     fn should_mark_stopped_old_activity() {
         let mut session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
-        session.last_activity_at = Utc::now() - chrono::Duration::seconds(120);
+        session.last_activity_at = (std::time::SystemTime::now() - Duration::from_secs(120)).into();
         session.status = AgentStatus::Running;
         assert!(session.should_mark_stopped());
     }
@@ -5912,13 +5999,16 @@ display_name = "Claude Code"
     fn runtime_state_legacy_json_defaults_execution_proof_to_none() {
         let legacy = r#"{
   "status": "Running",
-  "updated_at": "2026-08-13T00:00:00Z",
-  "last_activity_at": "2026-08-13T00:00:00Z",
+  "updated_at": "2026-08-13T00:00:00.010Z",
+  "last_activity_at": "2026-08-13T00:00:00.000120Z",
   "source_event": "SessionStart"
 }"#;
 
         let runtime: SessionRuntimeState =
             serde_json::from_str(legacy).expect("deserialize legacy runtime sidecar");
+        let serialized = serde_json::to_string(&runtime).unwrap();
+        assert!(serialized.contains(r#""updated_at":"2026-08-13T00:00:00.010Z""#));
+        assert!(serialized.contains(r#""last_activity_at":"2026-08-13T00:00:00.000120Z""#));
 
         assert!(runtime.execution_identity.is_none());
         assert!(runtime.runtime_incarnation.is_none());

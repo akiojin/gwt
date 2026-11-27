@@ -30,15 +30,45 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
-  from the rail, with an optional Split view and a separate PM entry.
-- **Provider usage** — USAGE shows Claude's Fable and Opus weekly limits together.
-  Missing limits show `—`; cached readings are marked `stale`. Hover for shared
-  account limits, reset times, and enabled Usage credits with utilization,
-  used/limit, and currency. Enable Claude account usage in Settings → Usage & Limits.
-  When Codex's subscription quota is full and credits remain, USAGE shows
-  `Using credits` and the balance. The popover shows the observed credits/hour
-  after two readings from the same account; an initial reading has no rate.
+- **Home and project pages** — the start page (**Home**) is your conversation
+  with the Project Manager; every project opens in its own browser tab. A
+  common header leads to the PM, Notifications, Projects, Agents, and
+  Environments, with Settings in its **Menu**. On a project page, the rail
+  opens Themes, Issues, Agents, Board, Settings, and diagnostics. See
+  [Screens](#screens) and the [Glossary](#glossary).
+- **Execution environments** — open Environments from the header, on a project
+  page or on the start page, to see what your agents run on. Accounts shows each provider account's usage, reset
+  times, and limit state in one place; an account's detail adds every window,
+  enabled Usage credits, Codex's `Using credits` balance and observed
+  credits/hour, and the Claude account usage opt-in. Missing limits show `—`.
+  Tools are installed and updated in Settings → Supported Agents.
+  An environment is an account plus the tool agents reach it through. A tool
+  that signs in to its own account (Claude Code, Codex, …) gets its environment
+  automatically; add one for an account reached through Hermes Agent, OpenClaw,
+  or OpenCode. Edit an environment to set its model, Skip permissions, and Fast
+  mode — changes apply from the next session. Tools that read their own
+  settings file show those values read-only. In Settings → Issues execution
+  settings, and on the Environments screen of an open project,
+  **Available execution environments** lists the ones a project
+  uses in priority order: a session starts on the first one that can be used,
+  skipping one that is held by a limit or signed out. Once a project has saved
+  the list, a registered agent also starts on the environment chosen this way,
+  whatever tool it was registered with.
+  Accounts imports signed-in default accounts. Use **Add account** to open a
+  sign-in terminal for a separate Claude Code, Codex, or Grok Build account.
+  On macOS, add a GitHub Copilot account with its GitHub login and a
+  fine-grained personal access token with the Copilot Requests permission.
+  gwt verifies the login and stores the token in macOS Keychain.
+  The new account stays unavailable to sessions until sign-in succeeds. You
+  can reopen its sign-in terminal, change its priority, or remove it from the
+  pool. **Use this account** puts it first for future starts and resumes.
+  To move a running session, including the PM, choose **Resume with the next
+  account**. gwt waits for the current turn to finish before resuming the
+  conversation. On a provider rate limit, gwt tries the next signed-in account
+  and resubmits the rejected turn after resuming. If removing an active
+  account leaves only other tools, the session waits and lists the configured
+  alternatives. Starting a conversation with a different tool is a separate
+  action.
 
 ## Install
 
@@ -153,7 +183,12 @@ unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgp
 
   Grok Build is provided by xAI's official `grok` command. Install it with
   `npm install -g @xai-official/grok`, then authenticate on first launch or set
-  `XAI_API_KEY` for API-key workflows.
+  `XAI_API_KEY` for API-key workflows. For host launches, gwt passes Grok’s
+  official `--trust` for the launched Git repository, including its main checkout
+  and linked worktrees. This enables project hooks, MCP/LSP, instructions, and
+  skills for that repository. Grok saves the grant in `trusted_folders.toml`, so
+  later manual launches using the same trust store and repository key also use
+  it. Global CLI defaults and grants for other repositories are unchanged.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
@@ -172,9 +207,13 @@ custom agents.
 
 Codex model choices follow its local `models_cache.json` in Launch Wizard and
 Agents settings, with a bundled fallback when the cache is unavailable. Saved
-models that disappear remain unchanged and show a warning. Once every seven
+models that disappear remain unchanged and show a warning. If the live catalog
+is unavailable, Agents shows a notice and **Retry model catalog** rereads it
+without changing saved values or an unfinished edit. Once every seven
 days, gwt checks for catalog and saved-profile differences and adds each new
 difference to PM Reports once.
+The selected member's ID stays visible while names change. The project's **Agents**
+surface shows recorded sessions under **Agent history**.
 
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
@@ -185,11 +224,19 @@ be verified. `gh copilot` also requires manual updates because the detected
 distribution may differ from the extension updater's target. The row explains
 these limitations. Metadata failures disable updates and show the reason.
 
+After installation, the completion message shows how to add the detected CLI
+directory to your shell's PATH. gwt's Installed status does not confirm your
+terminal's PATH. If `claude` or another command is not found, follow the displayed
+bash/zsh, fish, or Windows instructions, open a new terminal, and run the command
+with `--version`. gwt does not edit your shell startup files.
+
 Automatic agent updates are off by default. When enabled, gwt checks installed
-agents with a verified update route at the next app startup and updates only known newer versions, with
-no live agent panes (including the Project Manager) or pending launches. Manual
-installs and updates also require those agents to be closed. Missing agents are
-never installed automatically.
+agents with a verified update route at the next app startup and updates only known newer versions.
+An agent tool is skipped while an agent pane (including the Project Manager) is
+running it; other tools still update. Manual installs and updates follow the same
+rule: close only the panes that use that tool, which the refusal message names.
+While a tool is being updated, new launches of that tool are refused until it
+finishes. Missing agents are never installed automatically.
 
 | Agent | CLI command |
 | --- | --- |
@@ -201,6 +248,30 @@ never installed automatically.
 | OpenClaw | `openclaw` |
 | Hermes Agent | `hermes` |
 | GitHub Copilot | `gh copilot` |
+
+## Glossary
+
+gwt's screens use these terms. The words in parentheses are the terms of the GUI
+design of #7007 (`docs/design/issue-7007/README.md`).
+
+| Term | Meaning |
+| --- | --- |
+| **Home** (ホーム) | The start page at `/`: the conversation with the Project Manager. It answers waiting decisions and shows no project contents. |
+| **Project** (プロジェクト) | A repository gwt manages. Each project has its own URL and browser tab; the **Projects** list opens, clones, and closes them. |
+| **Theme** (テーマ) | A group of issues toward one goal, kept as a GitHub Issue with sub-issues. The PM records themes from the Home conversation. Hierarchy: project → theme → issue → child issue. |
+| **Issue** (課題) | One unit of work, kept as a GitHub Issue. Issues are the work agents execute; the older word "Work" for this is retired. |
+| **Sub-issue** (サブ Issue / 子課題) | An issue under a theme or under another issue (GitHub sub-issues). Completion of children rolls up into the parent's progress. |
+| **SPEC** | A design-required issue labelled `gwt-spec`, whose spec, plan, and tasks sections are the source of truth for its design. |
+| **Agent** (エージェント) | A named member that takes issues, with an avatar and traits. Agents are listed in the shared ledger (**Agents**). |
+| **Project Manager / PM** | The agent chosen to run a project: it talks with you on Home, records themes, and orders issues. Any idle agent can be selected as PM. |
+| **Tool** (ツール) | The agent program installed on this machine, such as Claude Code or Codex. Install and update it in **Tool management**. |
+| **Account** (アカウント) | A signed-in provider account a tool uses, with its usage, reset times, and limit state, listed in **Accounts**. |
+| **Execution environment** (実行環境) | An account plus the tool that reaches it. A project lists its environments in priority order, and a session starts on the first usable one. |
+| **Session** | One run of an agent on an issue in a terminal. |
+| **Board** (掲示板) | The record of posts by agents and you: status, decisions, handoffs, and blockers. It is a log, not where work is managed. |
+| **Notifications** | Events that need your attention, opened from the header. |
+| **Issues runtime** | The background loop that picks ready issues and starts agents on them, configured in **Issues execution settings**. |
+| **Reports** | The PM's status reports on a project. They appear on the project's **Board**, not in the Home conversation, which keeps replies, decisions, and completions. |
 
 ## Usage
 
@@ -222,14 +293,37 @@ the tray menu:
   Continue work. A daemon shared with another connected GUI or started
   independently remains running.
 
-Project browser tabs show agent RUN / BLOCK counts in their titles and a
-status favicon. BLOCK includes waiting, stopped, and error states; shell
-windows are excluded. The status strip and the Works heading show the same
-RUNNING / BLOCK / IDLE / ERROR counts as the tab title. An unread marker clears when the project tab is visible
+Project browser tabs show agent counts in plain words in their titles (for
+example `gwt — 3 running · 1 blocked — gwt`) and a status favicon. Blocked
+includes waiting, stopped, and error states; shell windows are excluded. The
+status strip (Running / Idle / Blocked / Errors) shows the same counts as the
+tab title. The strip's Auto-run cell reads like
+`Running · 9 queued · 3 of 6 active`. An unread marker clears when the project tab is visible
 and focused. Hub metadata stays fixed.
 
-The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
-from GitHub, Recent projects, and the currently open projects. Every project
+The root URL `http://127.0.0.1:<port>/` is the **Hub**. It opens on **Home**,
+the conversation with the Project Manager: the decisions the Project Manager
+of each open project is waiting on appear there as messages, oldest at the
+top. Answer with the buttons in a message, or reply from the box at the
+bottom; the answer goes to the Project Manager of that project. A new message
+names its project with `@Project name`, or with the project list beside the
+box when several projects are open. Home shows no project contents. With no
+project yet, it offers Import from GitHub, Open a folder, and Clone from a URL.
+
+On a machine that is not ready for agents yet, the Hub opens the **first-run
+setup** instead: Welcome, Tools, Project Manager, Project, Done. **Tools**
+lists the agent tools registered on this machine; the setup does not continue
+until at least one installed tool is registered, and says so. After installing
+a tool, choose **Check again**. **Project Manager** has one row to choose who
+serves as Project Manager: an agent already in the ledger, or a new agent you
+name. That agent becomes the Project Manager of each project that has not
+chosen its own; a new agent joins the ledger when the Project Manager first
+starts in a project. Opening a project is optional. Every step can be opened
+again from **Settings → System → Review first-run setup**.
+
+**Projects** in the header opens the project list: Open Folder, Clone from
+GitHub, Recent projects, and the currently open projects, with a search by
+name. `http://127.0.0.1:<port>/?view=projects` opens it directly. Every project
 has its own URL, `http://127.0.0.1:<port>/p/<project-hash>`, and project links
 open in a new browser tab, so one browser tab shows one project. Different
 projects keep their windows and launch dialogs separate; two browser tabs on
@@ -237,6 +331,46 @@ the same project URL share its live workspace. Bookmarking or restoring a
 project URL reopens a recent project automatically; an unknown project URL
 shows "Project not found" with a link back to the Hub. Open the Hub through
 **Open in browser** in the tray menu or `gwt open` without arguments.
+
+### Screens
+
+Every page has the same header and footer. The header entries, in order:
+
+| Header entry | Opens |
+| --- | --- |
+| **PM** | The decisions waiting on Home, the conversation with the Project Manager. Shows the PM's name and avatar and the number of decisions waiting. |
+| **Notifications** | The notification drawer, with an unread badge. Available on a project page. |
+| **Projects** | The project list (`/?view=projects`). |
+| **Agents** | The agent ledger (**Agents**: **Team** / **Past**). On Home it opens on the first open project, or shows **Projects** when none is open. |
+| **Environments** | **Execution environments**: what agents run on, with **Accounts** and **Tool management** under **Manage**. |
+| **Menu ▾** | **Settings**. Available on a project page. |
+
+An entry that needs an open project stays visible but disabled on Home and
+explains why. The footer shows the gwt version and `PM: <name>` (`PM: —` while
+unknown).
+
+- **Home** (`/`) — the conversation with the Project Manager, described above.
+  It shows no project contents.
+- **Projects** — Open Folder…, Clone from GitHub…, a search box, and the
+  **Open**, **Recent**, and **Projects awaiting shutdown** lists. A project
+  opens in a new browser tab.
+- **Project page** (`/p/<project-hash>`) — the rail selects **Themes**,
+  **Issues**, **Agents**, **Board**, and **Settings**; **Logs**, **Index**, and
+  **Env vars** sit below them. The rail's PM button opens the agent ledger, and
+  the gear beside it opens Project Manager settings. **Themes** lists themes
+  and the issues under each.
+  **Issues** is the issue board with each issue's detail and agent output.
+  **Agents** here shows **Agent history & plans** for this project. **Board**
+  is the record of what agents, the PM, and you posted, including PM reports. **Split view** shows two of
+  these side by side, including **Works**, the list of live agent terminals.
+- **Execution environments** — the environments a project's sessions start on.
+  **Accounts** lists each registered provider account with its usage, reset
+  times, and limit state. **Tool management** installs and updates the tools
+  themselves (Settings → **Supported Agents**); adding an account does not
+  install a tool.
+- **Settings** — **Application settings** (System, Supported Agents, Custom
+  Agents, Agent Backends, Usage & Limits) and **Project settings** (Issues
+  execution settings, Hook Center) for the open project.
 
 Autostart lives in **Settings > System > Launch GWT at login**. Enabling it
 installs an OS-native per-user entry (macOS LaunchAgent / Windows HKCU Run /
@@ -493,7 +627,11 @@ To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 is one per OS-login user; a second `gwt` invocation prints the existing URL and
 exits instead of starting a second server.
 
-gwtd operations run through stdin JSON envelopes without opening the main gwt window.
+### gwtd operations and daemon
+
+This section and its [Japanese counterpart](README.ja.md#gwtd-operations-and-daemon)
+are the canonical user reference for operations, daemon usage and compatibility.
+`gwtd` operations run through stdin JSON envelopes without opening the main gwt window.
 Operations requiring consent can show a native OS dialog:
 
 ```bash
@@ -513,6 +651,124 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+Responses retain `ok`, `operation`, `exit_code` and the legacy human-readable
+`output` string. JSON object/array reports also appear directly in `data`,
+including `execution.status`, `board.show`, `pr.list` and PM status operations.
+`issue.view` exposes issue fields in `data`; `pr.view` and `pr.current` expose
+the PR snapshot (`pr.current` uses `data:null` when no PR exists). Existing
+`pr.checks` and verification data contracts are preserved. Text-only operations
+may omit `data`. Prefer `data` to parsing `output` in new callers.
+
+Failures include `error_category` and a stable `error_code`. Categories are
+`not_found` (for example `NOT_FOUND_ISSUE`), `conflict`
+(`CONFLICT_CONCURRENT_WRITE`), `permission` (`PERMISSION_DENIED`), `input`
+(`INPUT_VALIDATION_FAILED`), `internal` (`INTERNAL_INDEX_INTEGRITY`), `external`
+(`EXTERNAL_NETWORK`) and `operation` (`OPERATION_FAILED`, an unclassified
+nonzero result). Existing operation-specific codes such as
+`ISSUE_CACHE_CONFLICT` are retained. Categories use typed failure information;
+legacy failures that have lost that information use a fallback rather than
+guessing from message wording. `refusal` and recovery fields retain their
+existing meaning. Invalid envelopes answer JSON with exit code 2,
+`error_category:"input"`, an `INPUT_*` code and `operation:null`; redacted
+intake diagnostics never echo caller-controlled secrets.
+
+Nested operations use JSON objects in `data`: after decoding the response once,
+`pm.operation.execute` exposes its audit result at `data` and the inner envelope
+at `data.after`. A JSON inner report is available at `data.after.data`, with no
+additional JSON decoding. The nested legacy `output` strings remain for
+compatibility. Error codes classify failures; they do not authorize retries or
+prove whether a remote mutation committed.
+
+The [operation catalog](crates/gwt/src/cli/operation_catalog.rs) (`OPERATIONS`)
+defines **230 canonical operations across 36 families**, plus **40 aliases**
+(270 accepted spellings) in v9.167.1. A family is the first dot-separated
+segment; the standalone `search` operation counts as one family. Canonical names
+use lowercase, dots between segments and underscores within multiword segments
+(for example, `workspace.project_scan`). Aliases are explicitly listed alternate
+spellings, such as `actions.job-logs` for `actions.job_logs` and `pane.stop` for
+`pane.close`; hyphen/underscore substitution is not generally accepted.
+Use canonical names in new scripts and guidance. The catalog's
+`catalog_covers_every_dispatched_operation` test checks the accepted spellings
+against the [JSON dispatcher](crates/gwt/src/cli/json_envelope.rs).
+Recount the catalog from a source checkout when updating this inventory:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import re
+catalog = Path('crates/gwt/src/cli/operation_catalog.rs').read_text()
+names = re.findall(r'name: "([^"]+)"', catalog)
+aliases = re.findall(r'aliases: &\[([^\]]*)\]', catalog)
+alias_count = sum(len(re.findall(r'"[^"]+"', group)) for group in aliases)
+print(len(names), len({name.split('.')[0] for name in names}), alias_count)
+PY
+```
+
+Use `gwtd --help` or `gwtd --help daemon` for help. `gwtd --help` lists every
+family, and each `gwtd --help <family>` ends with that family's complete
+operation list, generated from the same catalog. Ordinary operation argv such
+as `gwtd daemon start` is rejected; send `daemon.start` as an envelope instead.
+Managed hooks retain the dedicated argv transports `gwtd hook event <Event>`
+and `gwtd hook provider-event <provider> <native-event>`.
+
+To return to a binary that only supports Agent registry schema 3, stop all
+Agents, the desktop app, and daemons first. Using the **new** `gwtd`, run:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"agent.registry.restore_schema3","params":{}}
+JSON
+```
+
+This writes the current shared registry and every project's committed preferences
+to schema 3 without reverting to the migration backup. It refuses outstanding
+Agent assignments, live or unproven Sessions, missing/damaged records, and unknown
+mirror contents. Stop Agents and release reservations normally; use
+`agent.registry.status` / `agent.registry.reconcile` to inspect and resolve mirror
+conflicts before retrying. Do not delete records to bypass a refusal.
+The registry replacement is atomic; an interruption leaves either the complete
+schema 4 or the complete schema 3 registry. Records and the original
+`agent-registry.schema3-backup.json` are retained. After success, start the old
+binary directly: starting the new desktop app would migrate back to schema 4.
+Running the operation again on schema 3 makes no changes.
+
+The runtime daemon supports macOS/Linux Unix domain sockets and Windows named
+pipes. The GUI supervises the project daemon, starting or replacing it as needed;
+normal GUI use does not require a manual `daemon.start`. To run a standalone
+daemon, the following starts the server in the invoking process and stays attached
+until shutdown (or returns if a usable daemon already exists):
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"daemon.start","params":{}}
+JSON
+```
+
+Endpoint metadata is stored at
+`~/.gwt/projects/<repo-hash>/runtime/daemon/<worktree-hash>.json`, as defined by
+[`RuntimeScope::endpoint_path`](crates/gwt-core/src/daemon.rs). The endpoint's
+`bind` names a Unix socket or Windows pipe; it need not be beside the JSON file
+because long Unix socket paths can be shortened. Do not edit or delete live
+endpoint metadata. Startup can clean up dead owners' stale descriptors; an
+incompatible client does not remove a live owner's descriptor.
+
+Keep `gwt` and `gwtd` from the same distribution version. Compatibility is checked
+separately at each boundary; there is no general version negotiation:
+
+| Boundary | Accepted version and behavior |
+| --- | --- |
+| stdin JSON envelope | `schema_version:1` (also the default when omitted); other schema versions and unknown operations are rejected. |
+| Daemon IPC | `DAEMON_PROTOCOL_VERSION` is currently 4; endpoint and handshake protocol versions must match, along with scope and authentication token. |
+| Project `OwnerCommand` transport | The client reuses only an endpoint with a matching product `daemon_version` (after trimming whitespace and leading `v`); `OwnerRequest` has no separate version negotiation field. |
+
+The GUI supervisor replaces an authenticated daemon from another product version
+during startup/recovery. `daemon.status` and `daemon.subscribe` observe/connect
+using the IPC contract; they do not perform that product-version replacement.
+These checks are implemented in the
+[daemon contract](crates/gwt-core/src/daemon.rs),
+[supervisor](crates/gwt/src/daemon_supervisor.rs) and
+[project runtime client](crates/gwt/src/project_runtime/client.rs).
 
 `workspace.project_scan` reports host endpoint discovery costs, including cache
 hits, enumerated entries and elapsed milliseconds. Missing roots and stopped
@@ -687,40 +943,32 @@ platform's console shutdown signal.
    project.
 2. Use `Board`, `Issue`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
-3. In the **Curate** lane, choose `Intake` from the Command
-   Palette to shape new work: a branchless, throwaway session that discusses,
-   plans, and registers a GitHub Issue. Work that needs design gets the
-   `gwt-spec` design-required label and SPEC artifacts on that Issue. Intake
-   never creates a branch.
+3. Discuss new work with the Project Manager on Home. For work that needs a
+   design, record the SPEC on a GitHub Issue with the `gwt-spec` label.
 4. In the **Execute** lane, run the registered work: `Open Workspace` launches
    an `Agent` on an existing branch, the background `Issues` runtime picks up
    registered Issues automatically, or launch directly from an Issue detail
    with the unified prompt form `gwt-execute #N` when the owner is already known.
-5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
-   only when an Execute launch is confirmed (Intake sessions stay branchless and
-   ephemeral).
+5. gwt prepares the work branch and worktree when the Execute launch is confirmed.
 6. Use the shared Board for status, claims, next steps, blockers, handoffs,
    and decisions while agents run. To mirror those Board posts into Slack or
    Teams, configure a remote Board provider first; see
    [Board providers](#board-providers-local--slack--teams).
-7. Open `Branches` only when you need Git inspection, filtering, cleanup, or
-   lower-level branch/worktree details.
 
 Common windows include:
 
-- `Agent` — live coding-agent process windows created through Intake, Open
+- `Agent` — live coding-agent process windows created through Open
   Workspace, Issues, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
   open this same Work Item view. Issues agents are mirrored read-only in
   the Issue window's right pane,
-  and `Windowize` opens the same session in its native terminal in Works for input.
+  and `Windowize` opens the same session in its native terminal for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
-- `Profile` — environment/profile management
-- `Branches` — branch inspection, filtering, cleanup, and Git details
+- `Environment variables` (**Env vars** in the rail) — manage named sets of overrides and inherited variables to disable. Assign a set under **Settings → Issues → Environment variables**. The choice applies to new launches in that project. On upgrade, registered projects and the device default retain the previous set. Newly registered projects start with **None**.
 - `Settings` — application and agent configuration. The `System` tab lets
   you choose the narrative output language (Auto / English / 日本語) used
   for Workspace summaries and Board post bodies. `Auto` resolves against
@@ -761,12 +1009,22 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-Implementation Agents are persistent project members with memorable names in the output language.
+Implementation Agents are persistent members shared by projects on this computer, with memorable names in the output language.
+The same member can work in different projects at the same time, with one assignment per project and the shared machine budget still enforced.
+Agents lists those project assignments together; selecting another project's assignment opens that project.
+Registered members become available for new work under the project’s launch settings when their assignment ends.
+If a new name is already registered, the message identifies its member and tool;
+**Show member** opens that member's row.
 A new Issue reuses an available member; a continuation prefers its previous member when available.
-New member names are unique within the project and use localized family names when needed.
-Restoration and restart preserve the member identity. Names appear in Works, Agents, Fleet,
-Kanban, Board, Issue comments, and PR attribution. The resident PM shows its assigned name
-alongside a PM badge in PM, Works, and Agents.
+New member names are unique across the shared roster and use localized family names when needed.
+Edit a member’s tool, model, reasoning, runtime and permission preferences inline in Agents. Runtime and permission overrides follow that member; Inherit keeps each project’s existing settings. Docker service, shell and routing settings remain project-specific. Changing tools clears the previous tool’s tuning. Manage tools opens installation and updates. Open shell for sign-in opens a shell for the chosen tool’s native sign-in; it does not run a command automatically.
+Saved member settings apply to the next NEW saved-profile candidate launch. Launch Agent uses its current form and retains its prompt-free permission policy; Auto uses tier settings. Running Sessions and exact resumed conversations retain their recorded settings.
+A new Launch Agent on an Issue is planned in three stages after you choose **Configure and start**: **Issue & assignee** (pick a registered agent; its reasoning, speed and personality are shown and stay as saved), **Launch plan** (assignee, execution environment, branch, where the session runs, permissions) and **Confirm**. The session starts as the agent you picked, on the project's execution environment. Resuming, starting with the last settings, opening an existing branch and **Open a shell** stay on the first screen. A launch without an Issue, and a project with no registered agent, keep the settings form.
+Existing rosters migrate when the project runtime starts or Agents is read; older releases cannot edit the new preference format.
+Imported people remain distinct even when their old names match.
+Restoration and restart preserve the member identity. Names appear in Agents, the agent
+terminals, Kanban, Board, Issue comments, and PR attribution. The resident PM shows its
+assigned name alongside a PM badge in PM, the header, and Agents.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -825,7 +1083,7 @@ It contains **Launch control** (Autonomous, Monitoring), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
 profiles. Issues and Settings have independent views and can appear side by side
 in Split view, preserving Issue search/selection and unfinished settings edits.
-Auto-apply updates is in **System**. Register or rest members in **Agents**;
+Auto-apply updates is in **System**. Register members in **Agents**.
 Project settings does not edit member counts or machine capacity.
 Machine safety limits still govern new launches, and changing registration does
 not stop existing agents. Auto-refill is
@@ -847,7 +1105,7 @@ tier or the current next-tier selection. The preview shows provider, model and
 effort in both tabs. **Raise one tier** raises only this Issue's minimum for its
 next launch; a running agent keeps its profile. Changes appear after the server
 accepts them, and the highest tier explains why it cannot be raised. Next-tier
-previews remain subject to launch-time checks. **Windowize** opens the agent in its native terminal in Works.
+previews remain subject to launch-time checks. **Windowize** opens the agent in its native terminal.
 **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.
@@ -868,14 +1126,18 @@ after other projects' workers, while PM windows stay separate.
 See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
-`issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
-members. To return the machine limit to Auto, use the **Auto** button beside
+`issue.monitor.config.set` with `{"max_active":4}` to grow the roster to at least four
+registered members. To return the machine limit to Auto, use the **Auto** button beside
 **Agent limit** or `issue.monitor.config.set` with `{"max_active_mode":"auto"}`;
-this also works with a roster and keeps its members. Without a roster,
+this also works with a roster and keeps its members.
+Explicit Manual limits and roster resize requests may not exceed 256; `max_active`
+still requires a positive value. Reducing a request preserves registered members,
+and existing larger rosters remain readable.
+Without a roster,
 `{"max_active":4}` sets a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
 and the shared `agent_capacity` measurement. Roster projects also report
-`agent_roster_capacity` and `agent_roster_revision` for the project member setting.
+`agent_roster_capacity` and `agent_roster_revision` for the shared member setting.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
@@ -1086,6 +1348,15 @@ session; closing or cancelling an Issue alone does not count. It measures
 agent-declared completion, so the rate can be optimistic if the PR fails later.
 PR merge is not required for this metric.
 
+`issue.monitor.status` also exposes `event_history`: the newest 100 Monitor
+notifications, ordered oldest first, with an `id`, RFC3339 `recorded_at`,
+an emission `sequence` that preserves order when timestamps coincide,
+`issue_number`, notification kind `level` (`info`/`warn`/`error`/`done`), and
+`message`. Failed attempts, retry notices, needs-human transitions, merges and
+slot releases remain readable after GUI notifications are consumed and across
+restarts. New entries evict the oldest; display fields such as `last_error`
+continue to report the latest error separately.
+
 Host free space is part of the same snapshot: `disk_space` in
 `issue.monitor.status` lists the volumes the worktrees and the verification
 coordinator live on and carries a `warning` once one of them falls below
@@ -1102,6 +1373,14 @@ to also reclaim the shared base-branch workspaces (`develop`, `main`), which
 are kept by default because their rebuild lands on whoever opens them next.
 Running worktrees, the main worktree, the calling worktree, and the worktree
 hosting the running `gwtd` are never touched, whatever the flags say.
+
+To remove the worktrees themselves, use `worktree.remove_merged`. It removes
+each `work/*` worktree whose HEAD is merged into `origin/<base>`, that has no
+uncommitted or untracked changes, and that has neither a running process nor a
+live gwt launch, together with its local branch. An unqualified call is a dry
+run listing the candidates and every kept worktree with its reason; pass
+`dry_run: false` to remove and `branches: [...]` to limit the sweep. Shared
+base-branch workspaces and the same protected worktrees are never removed.
 
 Automatic low-disk GC reclaims merged idle caches first. If disk space still
 falls below the configured `[build_artifact_gc]` thresholds, it then reclaims
@@ -1166,7 +1445,9 @@ implementation → independent review → strong automated gate → auto-merge. 
 is **off by default** and requires a **two-stage opt-in**:
 
 1. Enable the `Autonomous` toggle in the Issue surface toolbar (per project).
-2. Label each issue you want handled autonomously with `auto-merge`.
+2. Include each issue you want handled autonomously: open the issue's detail
+   and choose `Include` under Operations → Autonomous target. This adds the
+   `auto-merge` label, which you can also add yourself.
 
 An issue additionally qualifies only when it has machine-checkable acceptance
 criteria (an `## Acceptance Criteria` checklist in the body), the base
@@ -1190,6 +1471,26 @@ explicitly tagged `(measurement)` or `[measurement]`, the Issue stays in Backlog
 as **Awaiting measurement**, outside NeedsHuman, and the comment identifies
 `awaiting_measurement`. Update its acceptance checklist
 after measurement to allow close, or choose **Return to queue** to resume work.
+For checks that require a release, main, or another host, explicitly tag each
+remaining criterion `(release-verification)`, `(main-verification)`, or
+`(host-verification)` (square brackets also work). With Autonomous on, only
+those checks and optional measurement criteria remaining puts the delivered
+Issue in **Awaiting verification** (`awaiting_verification`), outside active
+slots and NeedsHuman. Record who will verify in each criterion. After the
+release or host becomes available, choose **Return to queue** (or
+`issue.monitor.requeue` with a reason) to request verification. Untagged
+implementation criteria continue through the normal queue.
+After the external-check-only delivery is settled, assign every remaining
+criterion a verifier with `issue.monitor.verification.declare`:
+
+```json
+{"schema_version":1,"operation":"issue.monitor.verification.declare","params":{"number":42,"criteria":[{"id":"AC-2","verifier":"PM on release host"}]}}
+```
+
+`issue.monitor.status` retains `verification_declaration` with the original
+criterion text, verifier, and declaration time. Every remaining AC must appear
+exactly once. Missing delivery or settlement, implementation criteria, and empty
+verifiers are refused; declaring verification does not change Autonomous mode.
 With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
 `merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria
@@ -1312,16 +1613,22 @@ children refuse completion. Repeating the same completion under a new operation
 is valid and may record an empty task delta.
 Replaying Update or Complete preserves
 the original receipt while the current task may reflect later changes, including
-a subsequent reopen. Reopen and Cancel
+a subsequent reopen. Raw-ID Reopen and Cancel
 continue to return their receipt's applied task state.
+Reopen, Cancel and Complete also accept a top-level `task_key` from the selected Task
+projection with an empty `request.task_id`. Empty, unknown or mixed selectors
+are rejected. These keyed operations return the current saved task and revision
+alongside the original receipt, so a retry cannot present an older receipt's
+task state as current. Reopen keeps the same user audit, CAS and pending
+reassessment rules. Completed Tasks can also be reopened from their selected detail.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own
 revisions. Missing or unreadable data returns a diagnostic and recovery read.
 Reading a receipt observes its recorded outcome; it does not acknowledge a new
 durable write.
-This transport adapter is available; the Tasks screen and checkbox controls
-are still pending.
+The Tasks detail supports cancellation and reopening completed tasks. Task
+editing and completion checkbox controls are still pending.
 
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
@@ -1631,7 +1938,7 @@ unchanged.
 
 - It starts automatically when you open a project, and there is a per-project
   opt-out.
-- PM settings offers **Pause / Resume** for its autonomous loop. Pause persists
+- The Project Manager section in Agents offers **Pause / Resume** for its autonomous loop. Pause persists
   across restarts while the PM remains available for conversation; Issues
   and running agents keep working. Resume reconciles the latest status. JSON
   operations `pm.pause` / `pm.resume` provide the same control, and `pm.status`
@@ -1658,7 +1965,10 @@ dialog. Choose **Approve once** or remember approval for that repository and
 operation kind; ask the PM to inspect or revoke saved approvals through
 `pm.approval.status` / `pm.approval.revoke`. Required-check changes use
 `repository.required_checks.update` and preserve the branch's strict policy and
-retained checks' app bindings.
+retained checks' app bindings. Branch protection toggles (`allow_force_pushes`,
+`required_conversation_resolution`, `enforce_admins`, `strict`) on `develop` or
+`main` use `repository.branch_protection.update`, which keeps every other
+protection field unchanged.
 
 The same scoped permission route supports `pr.reopen` for a chosen PR,
 `pr.review.submit` for an authorized GitHub review, `release.metadata.set` for
@@ -1675,6 +1985,11 @@ current PR, CI and review state. The audit records the PR, SHA and permission
 source. A changed head requires a new review and authorization. If this route is
 unavailable or the owner has not delegated it, a human must merge the PR;
 `pr.list` explains the external-fork fallback instead of repeating a merge proposal.
+
+The same operation can recover a Ready PR in this repository when the auto-merge
+workflow fails to start. The PM still needs permission for the exact PR and head
+SHA, passing CI, and the existing review and visual checks. GitHub's branch
+protection and required checks remain enforced.
 
 For an explicitly authorized PR close, build-cache cleanup, or provider approval
 response, the PM uses `pm.operation.execute` with the existing `pr.close`,
@@ -1708,8 +2023,7 @@ gwt keeps project knowledge close to the agent workspace:
   Multi-scope searches return available results and report excluded scopes with
   their reasons; JSON responses include `partial` and `unavailable_scopes`.
   Select `reports` to find durable digest and Q&A reports, including questions,
-  answers, and Issue references. The Index window shows the report kind, date,
-  and related Issues, and **Open** returns to the PM's Reports view.
+  answers, and Issue references. Index shows the report kind, date, and related Issues.
 - The Work Item Knowledge Bridge combines cache-backed list/detail views for
   plain and `gwt-spec` tagged Issues with semantic ranking, exact-match
   priority, and match percentages.
@@ -1791,6 +2105,20 @@ Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
 
+The shell file-operation guard allows `mkdir`, `rmdir`, `rm`, `touch`, `cp`,
+and `mv` within the worktree or below the OS temporary directory (`TMPDIR` /
+platform temp; also `/tmp` and `/private/tmp` on Unix). This includes harness
+session scratchpads and verification logs. Temporary roots themselves and paths
+escaping through symlinks remain protected. On refusal, the message lists the
+allowed directories and shows how to preserve a temporary log. For other external
+artifacts, configure the tool to output into the worktree or temporary scratchpad,
+or obtain separate authorization for access.
+
+This guard recognizes shell file commands; it is not an OS sandbox. Redirection
+and arbitrary Python/interpreter I/O are outside its inspection. Agents must use
+the same authorized path boundaries regardless of syntax and must not use another
+syntax to bypass a refusal.
+
 **Settings → Project → Hook Center** audits the selected project's hook
 configuration, binary fallbacks, Codex discovery/trust, and opt-in profile path.
 **Regenerate managed hooks** uses the existing managed-only repair and preserves
@@ -1803,6 +2131,17 @@ Repairs require the live project connection and are never replayed after
 reconnect. A lost repair reply leaves the outcome Unknown; a read-only refresh
 does not confirm completion. The latest audit and last repair outcome are shown
 separately.
+
+**Your hooks** in the same Hook Center lists the scripts you registered for the
+project and registers a new one from a timing (**Session start** or **Stop**)
+and a script location. A location is absolute, starts with `~/`, or is relative
+to the project; the script must exist and be executable. gwt starts a
+registered script when an agent session starts or an agent stops, in the
+agent's working directory, with `GWT_HOOK_TIMING` set to `session_start` or
+`stop`, and does not wait for it. A Stop that gwt blocks does not start it.
+Registered hooks are part of the audit: a script that is missing or no longer
+executable is reported and is not started. Registrations are saved on this
+computer under `~/.gwt/projects/`, not in the repository.
 
 If an agent stop or pane close reports unread Board evidence, read the bodies
 in that same agent session with JSON operation `board.show` and
@@ -2191,72 +2530,11 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
-The PM window's **Tasks** view is a read-only preview of saved request tasks. It
-shows unfinished work first, including parent relationships, assignees, waiting
-reasons, next actions, and pending PM reassessment. **Include completed** also
-shows completed and cancelled tasks. Parents show counts of their direct subtasks
-across all saved tasks, including those outside the preview: completed, cancelled,
-unfinished, and total. Cancellation is separate from completion; finishing all
-subtasks does not complete the parent automatically. The preview contains at most 50 tasks and
-shows the total and any requests awaiting classification. Long summaries are
-shortened; the saved tasks remain complete. Expand **Purpose and completion
-criteria** on a task to see its purpose and the first five completion criteria.
-The preview shows the full criteria count and limits each item to 240 characters
-(with an ellipsis for shortened text). A read failure retains the last
-confirmed list with a warning. **View task details** in Tasks or Chat reads only
-the selected task: its original request, purpose, completion criteria, completion
-evidence, and recent recorded changes. This read-only preview shows at most 4,000
-characters of the original, 20 criteria, 10 evidence references, and 20 changes
-(newest first); other text is limited to 1,000 characters per item and actor IDs
-to 240. Counts and shortened text are explicit. Changes include only receipts
-with a saved change to that task, so this is not a complete operation history.
-**Reload details** refreshes it; changes or read failures retain confirmed detail
-with a stale warning. **Close details** returns focus to its task. Task editing, automatic intake, and history import
-are not available in this preview. **Reports** and **Execution log** remain
-available from the same toolbar.
-
-The PM window opens on **Home**. Select **Chat** in the toolbar to open the PM conversation in one action. Chat shows your
-messages on the right and PM replies on the left, with PM Markdown (headings,
-lists, tables, and code) formatted. It reads the PM session's own conversation
-record and omits tool calls, hook notes, and automatic prompts. When PM sends
-several messages in one turn, only the latest stays open; the earlier ones fold
-into an **N earlier messages** line you can expand. Type a message in
-the box at the bottom to send it to PM (Enter sends, Shift+Enter adds a new
-line). Your text stays in the box until delivery is confirmed, and the reason is
-shown if it could not be sent. Select **Open terminal in Works** in Chat to open
-the same PM session's terminal. The PM entry brings you back to Chat with your
-unsent draft preserved. You can also open the terminal from the PM row in
-**Works**. Use **Execution log** to attach images.
-
-Chat also shows the same **Tasks** preview beside the conversation (above it in
-narrow windows). **Show in conversation** returns to a task's original message
-and keeps your unsent draft. If that message is outside the current conversation
-preview, the button is unavailable and the reason is shown.
-
-The PM window's **Reports** view shows explicit Markdown reports with their kind,
-time, and a **Copy** button. Q&A reports separate the question or instruction from
-the answer and action results; use **Report kind** to filter the history. It is
-read-only; use **Execution log** for terminal
-interaction. Reports survive restarts in
-`~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`. Captured Q&A and
-user instructions share `project-state/user-instructions.json` in the same
-machine-local project store, so one atomic save preserves both. There is no
-automatic expiry or count limit. Q&A bodies and each structured event’s details are limited to 64 KiB; a structured submission is limited to 256 KiB.
-
-PM updates use a short common summary with **Details** for the complete explanation
-and references. **Copy** includes both. Unchanged observations create no new card,
-including after a restart or a switch between Claude and Codex. New critical
-failures and decisions appear immediately; ordinary updates share one digest.
-Resolution, recurrence, and meaningful changes produce a new report.
-Decision reports show two to four numbered choices with the recommendation and
-its reason. Choose an option directly in **Reports**, **Decide**, or Chat's
-**Decision reports** section. These views share sending, failure, and confirmed
-answer state for the current PM session. **Other: reply in chat** keeps your draft
-and opens the composer for a free-text answer. A confirmed send does not mark the
-decision resolved or save a human Q&A by itself. Chat's decision section comes
-from Reports, separately from the native conversation bubbles. **Execution log**
-also accepts choice numbers or your own answer; **Copy** includes the numbered
-choices and complete details.
+Talk to the device Project Manager on Home. Answer a pending decision from the
+conversation on Home or open **Decisions** with the PM button in the shared
+header. An answer from either location resolves the same decision. Find project
+PM reports on **Board**. To inspect PM session output, open the terminal from
+the issue detail or the project’s Agents surface.
 
 A registered PM publishes non-Q&A updates through `pm.report.post` with a versioned
 `submission`: a `request_id`, project-local event/episode identities, expected
@@ -2277,19 +2555,6 @@ PM Q&A posts include an `instruction` object with the full `original`, `kind`
 `supersedes` IDs retain old instructions with a `superseded_by` link. Secrets are
 redacted before storage. Memory search includes the saved originals and outcomes;
 active standing instructions are reloaded at PM startup and each turn.
-
-The **PM status** card and report history share one scroll area. The card starts
-with a compact summary; expand it to see **PM notes** and **Live facts**, and each
-window keeps its disclosure state while polling. Live facts show active windows,
-queue head, human handoffs, release PR, and pending update. Unavailable observations
-are shown as **Unknown**. UI labels stay English; authored content keeps its language. The PM updates
-its explanation with `pm.status.set`: supply 1–3 `items` (`kind`: `working` or
-`waiting`, `text`, and RFC3339 `started_at`), `next_trigger`, and optional
-`user_action`. Set `stale_after_minutes` to change the default 15-minute warning.
-`pm.status` returns the latest explanation, retained status history, and reporting
-diagnostics. Identical statements with unchanged Monitor state do not renew their
-timestamp. A human PM turn requires a successfully saved Q&A report before Stop;
-scheduled automatic cycles are exempt.
 
 The resident PM starts in a gwt-owned runtime directory. Repository skills,
 hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are
@@ -2313,29 +2578,59 @@ an entry removes its copied policy on the next refresh.
 
 ## Surface Navigation
 
-- Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
-- Open **Logs**, **Index**, and **Profile** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Use the Command Palette for all-stop; individual agent stop/restart remain available through the existing controls.
-- Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
-- **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
-- **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
-- In **Agents**, enter a display name, choose a tool, and click **Register**. Change a selected member’s **Display name** inline to save it automatically; the same member and current work are retained. Invalid drafts stay in the field, and **Retry name** retries a failed or conflicting save. Assignment and Board history retain their original names. **Saved manual candidate** shows the selected member’s saved manual model, reasoning, runtime and permission settings; automatic launches use tier settings. **Saved manual candidate revision** identifies that saved setting content: changing the settings changes the revision, while renaming the member or returning to the same settings preserves it. Focus the read-only field to select or copy the full value; it does not indicate chronological order. **Current work** shows the exact Session’s recorded launch facts separately. **Assignment history** shows each Session’s recorded name, tool and launch model; missing values appear as **—**, and provider-internal model changes are not measured here. Empty names and duplicate names (after trimming spaces and ignoring case, including resting members) are rejected. That member keeps the same tool. **Agents Settings** selects registered people by name and shows their tools; model and runtime settings remain available for each candidate. If the selected tool is unavailable, the queue explains the wait and does not switch tools automatically. Existing saved candidates are imported with their settings and configured concurrency capacity preserved.
-- In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
+- On a project page, select **Themes**, **Issues**, **Agents**, **Board**, or **Settings** from the rail. The header's **PM**, **Projects**, **Agents**, **Environments**, and **Menu ▾ → Settings** stay the same on every page (see [Screens](#screens)).
+- **Themes** lists the themes of the project: GitHub Issues that have sub-issues, and the themes the PM records from your conversation on Home. When you ask for something or decide something, the PM records it as a theme (a GitHub Issue labelled `gwt-theme`) or adds it to an existing one, with no extra step from you; tell the PM when something should not become a theme. A recorded theme shows **Source of this theme**, and **Show in conversation** opens the PM on that message. Each row shows how many issues are under the theme and how many are completed, as GitHub reports them. Select a theme to see its issues, and select an issue to open it in Issues. **Issues completed today** counts the closes gwt took in today. **Delete theme** asks for confirmation, then closes the theme's GitHub Issue as not planned. The issues under it are kept, and reopening the Issue on GitHub brings the theme back.
+- Open **Logs**, **Index**, and **Env vars** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Individual agent stop/restart remain available through the existing controls.
+- The project footer shows the assigned Project Manager. The PM button in the
+  project rail opens the agent ledger. Use the gear beside it to open Project
+  Manager settings.
+- **Works**, the list of agent terminals, opens in **Split view**; it is not a rail entry. It lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
+- Use **Team** in the agent ledger to register members and edit their display names and traits. Use **Agents** in the project rail for its assignment plans and session history.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
-- **Register** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
+- **Register** adds one member to the shared roster. Machine safety limits can lower the effective allocation.
+- **Agents** in the header opens the agent ledger. On each **Team** row, **▲** / **▼** change the member's position; an idle member nearer the top is assigned first. **Delete** removes a member from this machine for every project after confirmation. The current Project Manager, a member with assigned work, and a launch candidate cannot be deleted until that role or work is moved. **Settings → System → Open agent ledger** leads to the same ledger. On Home, **Agents** opens the ledger on the first open project; with no project open it shows **Projects**.
+- Any idle member can be made the Project Manager: select the member and click **Select as Project Manager**. The project page's footer names the chosen member at once, and the project's Project Manager settings show it as **Project Manager for this project**. The ledger order is not used to pick the Project Manager.
+- Each member's **Traits** in the ledger are fixed for that agent on every tool. **Reasoning level** (Low / Standard / High / Max) and **Speed** (Normal / Fast / Fastest) are steps common to all tools: a session that Issues starts for the agent takes the nearest step its tool has at or below the chosen one, and **Tool default** leaves the tool's own setting in place. Speed applies to Claude Code and Codex. They apply to the agent serving as Project Manager too, over the reasoning and speed of its launch profile, from its next new conversation. **Personality** is instructions of up to 4,000 characters that the agent reads when a session starts on Claude Code, Codex or Grok. **Save traits** stores them; a launch can override a value for that session, and never changes the saved traits.
+- **Agents** in the sidebar opens the project's **Agent history & plans**: the same members with this project's work. **Agent history** lists every session in the project, the Project Manager's included, with its issue, execution environment, model, reasoning and result. **Planned assignments** lists the issue each agent starts next, as the assignment plan has it. The ledger shows neither.
+- A registered PM can send the `pm.agent.add` JSON operation with `name` and `agent_id` to add one member and receive its ID. Projects that use saved member profiles can select that ID with `issue.monitor.profiles.set`.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
-**Active** counts live agents on this machine, including PM. **Busy**, **Team**, and concurrent
-capacity count implementation members only. Member identities, enabled capacity, and confirmed
+The project browser tab title, status bar, agent terminal list, and Agents show the same **Running**
+count from the project's agent-window status snapshot, including PM agent windows. Shells
+are excluded. The status mapping is:
+
+| Agent window status | Project count |
+| --- | --- |
+| Running, Starting | Running |
+| Waiting, Stopped, Interrupted | Block |
+| Error | Block and Error |
+| Idle | Idle |
+
+**Team** counts enabled registered members, including the configured PM. **Busy** counts active implementation members; concurrent capacity excludes members holding a PM role. Member identities, enabled capacity, and confirmed
 planned-issue reassignments survive an app restart.
 
-Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
+The agent terminal list shows session-attributed input, cache and output usage, a thirty-minute activity graph,
 branch and verification facts. Unavailable measurements display **—**, including context remaining
 unless the provider reports it directly. Today totals use this project's measured conversations;
 account-wide usage is not copied into them. Individual PR information is not shown here.
+**Fleet tokens/min** averages the fleet's token use over five completed UTC minutes. Each
+point sums timestamp-matched minute buckets for the project's currently observed live
+sessions, then divides by five. The chart shows the latest 25 rolling points and excludes
+each session's in-progress minute. A missing session, missing or unmeasured bucket
+(`null`), or unavailable usage makes the affected point a gap and shows **—** when it is
+the latest point. A fully measured window with no tokens shows **0**.
 Today and Fleet explain whether measurements are missing, partial, unavailable, or complete;
-unknown totals stay **—**, while measured zero stays **0**. Cost remains unavailable because
-per-session USD is not supported; Landed PRs remains unavailable until complete daily merge
-data is connected.
+unknown totals stay **—**, while measured zero stays **0**. Cost and Landed PRs are omitted
+because their data sources are not connected.
+
+Issues shows host-wide **Verification slots** as running, capacity, and available counts.
+`issue.monitor.status` exposes the same observation as `verification_capacity`.
+Unavailable observations display **Unavailable** rather than zero.
+
+The Issues status strip displays **Needs human** from the Monitor's
+`needs_human_count`. The Monitor counts distinct Issues requiring a human
+response, including affected Issues during a failure surge. An observed empty
+set displays **0**. An unavailable count is `null` and the status strip omits it.
 
 Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
 setting do not return after reload or restart; the roster's Team/Past tabs remain.
@@ -2346,7 +2641,7 @@ Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select current implement
 Agents by activity while keeping the split layout. PM and auxiliary Shells are skipped.
 The selected native terminal receives input; returning to the list keeps every session running.
 Names stay on one line, and longer purposes can be scrolled horizontally or read on hover.
-Issue and Project Manager settings explain their controls on hover and keyboard focus.
+Issue settings and the Project Manager controls in Agents explain their controls on hover and keyboard focus. Registered manual Monitor launches use the member’s current global implementation defaults; automatic launches use the selected tier. Ordinary manual Work uses the launch form and the tool’s previous preferences. A new Project Manager uses its project’s saved PM profile; an unspecified value uses that route’s existing default. Saving does not change a running or restored Session.
 
 ## Operator Design Language (SPEC-2356)
 
@@ -2357,7 +2652,7 @@ counters). The default type scale is tuned for developer readability, so
 terminal text, IDs, paths, counters, and dense work surfaces stay legible during
 long sessions while display typography remains reserved for headings and chrome
 labels. Every chrome surface — Project Bar, Command Rail, Status Strip,
-Command Palette, Hotkey Overlay, Drawer modals, surface panels — shares a
+Hotkey Overlay, Drawer modals, surface panels — shares a
 single token system that ships in two flagship themes:
 
 - **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
@@ -2384,21 +2679,20 @@ falls back to system colors so accessibility is preserved.
 
 | Combo | Action |
 | --- | --- |
-| `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
 | `⌘B` | Focus the Board surface |
 | `⌘G` | Focus the Issues surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
-| `Esc` | Close any open palette / overlay / drawer / dropdown |
+| `Esc` | Close any open overlay / drawer / dropdown |
 
-The rail keeps **PM** separate from the labeled **Issues**, **Works**, **Agents**,
-**Board**, **Settings**, **Logs**, **Index**, and **Profile** entries. The selected surface fills a fixed pane;
+The project rail lists **Themes**, **Issues**, **Agents**, **Board**, **Settings**,
+**Logs**, **Index**, and **Env vars**. The selected surface fills a fixed pane.
 **Split view** adds an optional second pane. The status strip remains below the
-content area. Reach other actions through the Command Palette or their hotkeys.
+content area. Reach other actions through the rail or their hotkeys.
 
 ### Accessibility
 
-Every modal dialog (Command Palette, Hotkey Overlay, branch cleanup,
+Every modal dialog (Hotkey Overlay, branch cleanup,
 worktree migration, launch wizard) follows the WAI-ARIA
 dialog convention: `role="dialog"` with an accessible name, `aria-modal`,
 focus moves into the dialog on open and returns to the trigger on close,
@@ -2460,6 +2754,11 @@ JSON
   markers from complete or incomplete orphan groups. Indexed comments are
   refused. Retrying the same IDs skips comments already archived.
   Run `issue.spec.lint` again to confirm index health.
+  A hand-written gwt-spec Issue without the `gwt-spec` header and sections
+  index refuses section edits. Pass `wrap_body` to the repair operation
+  (for example, `{"number":1784,"wrap_body":true}`) to wrap the existing body,
+  unchanged, as the `spec` section; the readback must match before the
+  structure is kept. Then save `plan` / `tasks` with `issue.spec.edit`.
 
 ```bash
 gwtd <<'JSON'
@@ -2536,6 +2835,10 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"diagnostics.cpu","params":{}}
 JSON
 ```
+
+Each process sample includes `rss_bytes`, its resident memory in bytes, or `null` when
+unavailable. RSS includes resident pages and does not measure live allocations.
+The process list uses `ps` on macOS and Linux.
 
 The `host_cpu` result includes the latest `fseventsd` process sample and the
 sampling count and interval. On macOS, it samples three times one second apart
@@ -2655,6 +2958,18 @@ Replay needs neither GitHub access nor Git history. The saved baseline is:
 ```bash
 python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
 ```
+
+Merge snapshots also record the current branch-protection context/app IDs and
+each final head's check runs. `required_checks` reports the latest pre-merge
+result for every required check, successful check durations, and the interval
+from the earliest job in their check suites (including prerequisites) to the
+last required completion. `complete_prs` accepts success, neutral, or skipped;
+`all_success_prs` requires literal success for every check. Missing or incomplete
+evidence is reported separately and does not count as a complete sample. This
+uses protection at collection time, not historical protection; old snapshots
+remain replayable but cannot supply these additional measurements.
+Individual check durations exclude dependencies; an aggregator's short duration
+alone does not prove that its underlying test or coverage pipeline is fast.
 
 The JSON reports PR creation-to-merge time, each PR's latest successful final-head
 workflow attempt, base synchronizations per merge, runner waits, and per-job

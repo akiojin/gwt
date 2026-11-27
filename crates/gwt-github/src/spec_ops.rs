@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    body::{Comment as BodyComment, SectionLocation, SectionsIndex, SpecMeta},
+    body::{
+        legacy_artifact, legacy_spec_id, Comment as BodyComment, SectionLocation, SectionsIndex,
+        SpecMeta,
+    },
     cache::{Cache, CacheError},
     client::{
         ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
@@ -26,6 +29,10 @@ pub enum SpecOpsError {
     /// A local operation failure, without implying a network or API cause.
     #[error("{0}")]
     Operation(String),
+    /// Preserve the local I/O kind for structured callers. Retain the legacy
+    /// display prefix used before these failures were separated from Network.
+    #[error("network error: {0}")]
+    LocalIo(#[source] std::io::Error),
     #[error(transparent)]
     Api(#[from] ApiError),
     #[error(transparent)]
@@ -120,10 +127,22 @@ impl<C: IssueClient> SpecOps<C> {
     ) -> Result<String, SpecOpsError> {
         self.refresh_cache(number)?;
         self.check_cached_index(number)?;
-        match self.cache.read_section(number, name)? {
-            Some(s) => Ok(s),
-            None => Err(SpecOpsError::SectionNotFound(name.0.clone())),
+        if let Some(content) = self.cache.read_section(number, name)? {
+            return Ok(content);
         }
+        if self.cache.load_entry(number).is_some_and(|entry| {
+            legacy_spec_id(&entry.snapshot.body).is_some()
+                && entry.spec_body.sections.contains_key(name)
+        }) {
+            // A cache written before legacy support has the comments but
+            // lacks section files even when the conditional fetch is current.
+            self.force_refresh_cache(number)?;
+            self.check_cached_index(number)?;
+            if let Some(content) = self.cache.read_section(number, name)? {
+                return Ok(content);
+            }
+        }
+        Err(SpecOpsError::SectionNotFound(name.0.clone()))
     }
 
     /// Replace the content of a section.
@@ -174,6 +193,19 @@ impl<C: IssueClient> SpecOps<C> {
                 number.0
             )));
         }
+        // Issue #7825: a hand-written body has no header and no sections
+        // index, so a write could never be indexed and the readback would
+        // fail after creating comments. Refuse up front and name the fix.
+        if is_unstructured_body(&entry.snapshot.body) {
+            return Err(SpecOpsError::Validation(format!(
+                "issue #{n} has no gwt-spec header or sections index, so sections cannot be \
+                 written; run issue.spec.repair with {{\"number\":{n},\"wrap_body\":true}} to wrap \
+                 the existing body unchanged as the spec section, then retry. Leftover section \
+                 comments from an earlier failed write can be found with issue.spec.lint and \
+                 retired with issue.spec.repair archive_comments:[<comment ids>]",
+                n = number.0
+            )));
+        }
         let canonical = crate::sections::trim_surrounding_newlines(content).to_string();
         let mut spec_body = entry.spec_body.clone();
         spec_body.splice(name.clone(), canonical.clone());
@@ -183,7 +215,19 @@ impl<C: IssueClient> SpecOps<C> {
 
         // Read the previous location (if any) so we can decide between
         // create_comment / patch_comment / patch_body.
-        let prev_location = spec_body.sections_index.0.get(name).cloned();
+        let prev_location = spec_body
+            .sections_index
+            .0
+            .get(name)
+            .cloned()
+            .filter(|location| {
+                // Legacy comments remain intact as history. Existing indexed
+                // canonical comments still use the normal update protocol.
+                !matches!(location, SectionLocation::Comments(ids) if
+                legacy_spec_id(&entry.snapshot.body).is_some()
+                    && entry.snapshot.comments.iter().any(|comment|
+                        ids.contains(&comment.id.0) && legacy_artifact(&comment.body).is_some()))
+            });
 
         let new_location = new_routing
             .0
@@ -196,6 +240,17 @@ impl<C: IssueClient> SpecOps<C> {
         let original_body = entry.snapshot.body.clone();
         let mut issue_body = entry.snapshot.body;
         let mut new_sections_index = spec_body.sections_index.clone();
+        if legacy_spec_id(&issue_body).is_some()
+            && matches!(
+                crate::body::parse_index_map(&issue_body),
+                Err(crate::body::ParseError::MissingIndex)
+            )
+        {
+            issue_body.push_str(&format!(
+                "\n\n<!-- {} -->\n<!-- sections:\n-->\n",
+                spec_body.meta
+            ));
+        }
 
         let prev_ids: Vec<u64> = match &prev_location {
             Some(SectionLocation::Comments(ids)) => ids.clone(),
@@ -453,7 +508,14 @@ impl<C: IssueClient> SpecOps<C> {
             return Ok(());
         }
         let fresh = self.fetch_fresh(number)?;
-        let index = crate::body::parse_index_map(&fresh.body)?;
+        let index = match crate::body::parse_index_map(&fresh.body) {
+            Err(crate::body::ParseError::MissingIndex) if legacy_spec_id(&fresh.body).is_some() => {
+                // A failed first write may have left the original legacy
+                // body in place. Staged canonical comments are unreferenced.
+                SectionsIndex::default()
+            }
+            result => result?,
+        };
         for id in ids {
             if !index.0.values().any(
                 |location| matches!(location, SectionLocation::Comments(refs) if refs.contains(id)),
@@ -471,6 +533,103 @@ impl<C: IssueClient> SpecOps<C> {
             }
         }
         Ok(())
+    }
+
+    /// Wrap a hand-written gwt-spec body (no header, no sections index) as
+    /// the `spec` section without changing its content (Issue #7825).
+    ///
+    /// The header and index are added in one guarded body PATCH; content
+    /// too large for the body is first staged as part comments. The readback
+    /// must return the original content, otherwise the body is restored and
+    /// the staged comments are removed.
+    pub fn wrap_unstructured_body(
+        &self,
+        number: IssueNumber,
+    ) -> Result<WriteReceipt, SpecOpsError> {
+        let _writer_lock = self.cache.lock_spec_write(number)?;
+        let original = self.fetch_fresh(number)?.body;
+        if !is_unstructured_body(&original) {
+            return Err(SpecOpsError::Validation(format!(
+                "issue #{} already has a gwt-spec header or sections index; wrap_body only \
+                 structures a body that has neither",
+                number.0
+            )));
+        }
+        if !matches!(crate::sections::extract_sections(&original), Ok(sections) if sections.is_empty())
+        {
+            return Err(SpecOpsError::Validation(format!(
+                "issue #{} body contains artifact markers; remove them with issue.edit before \
+                 wrapping the body",
+                number.0
+            )));
+        }
+        let canonical = crate::sections::trim_surrounding_newlines(&original).to_string();
+        if canonical.trim().is_empty() {
+            return Err(SpecOpsError::Validation(format!(
+                "issue #{} body is empty; there is nothing to wrap",
+                number.0
+            )));
+        }
+        let spec = SectionName("spec".to_string());
+        let sections = BTreeMap::from([(spec.clone(), canonical.clone())]);
+        let routing = decide_routing(&sections);
+        let mut created_ids: Vec<u64> = Vec::new();
+        let mut written_body: Option<String> = None;
+        let mut largest_part_bytes = canonical.len();
+
+        let result = (|| -> Result<WriteReceipt, SpecOpsError> {
+            let mut comment_ids: BTreeMap<SectionName, Vec<u64>> = BTreeMap::new();
+            let mut parts_written = 0;
+            if matches!(routing.0.get(&spec), Some(SectionLocation::Comments(_))) {
+                let parts = split_section_into_parts(&canonical)?;
+                let total = parts.len();
+                largest_part_bytes = parts.iter().map(String::len).max().unwrap_or(0);
+                for (i, part) in parts.iter().enumerate() {
+                    let comment_body = wrap_comment_part_body(&spec, part, i + 1, total);
+                    created_ids.push(self.client.create_comment(number, &comment_body)?.id.0);
+                }
+                comment_ids.insert(spec.clone(), created_ids.clone());
+                parts_written = total;
+            }
+            let body = render_body(
+                &SpecMeta {
+                    id: number.0.to_string(),
+                    version: 1,
+                },
+                &routing,
+                &sections,
+                &comment_ids,
+            );
+            self.patch_body_if_unchanged(number, &original, &body)?;
+            written_body = Some(body);
+            if !self.readback_section(number, &spec, &canonical)? {
+                return Err(SpecOpsError::ReadbackMismatch {
+                    section: spec.0.clone(),
+                });
+            }
+            let (location, ids) = if created_ids.is_empty() {
+                ("body".to_string(), Vec::new())
+            } else {
+                ("comments".to_string(), created_ids.clone())
+            };
+            Ok(WriteReceipt {
+                bytes: canonical.len(),
+                parts: parts_written,
+                sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
+                location,
+                comment_ids: ids,
+                largest_part_bytes,
+                verification_error: None,
+            })
+        })();
+        if result.is_err() {
+            if let Some(body) = &written_body {
+                let _ = self.patch_body_if_unchanged(number, body, &original);
+            }
+            let _ = self.delete_unreferenced(number, &created_ids);
+            let _ = self.force_refresh_cache(number);
+        }
+        result
     }
 
     /// Repair section artifacts whose markers were doubled by a failed write.
@@ -678,6 +837,20 @@ impl<C: IssueClient> SpecOps<C> {
 // ---------------------------------------------------------------------------
 // Body text manipulation helpers
 // ---------------------------------------------------------------------------
+
+/// A body with neither a gwt-spec header (current or legacy) nor a sections
+/// index: a hand-written SPEC that section operations cannot address yet.
+fn is_unstructured_body(body: &str) -> bool {
+    legacy_spec_id(body).is_none()
+        && matches!(
+            crate::body::parse_header(body),
+            Err(crate::body::ParseError::MissingHeader)
+        )
+        && matches!(
+            crate::body::parse_index_map(body),
+            Err(crate::body::ParseError::MissingIndex)
+        )
+}
 
 fn rewrite_body_section(body: &str, name: &SectionName, new_content: &str) -> String {
     let begin = format!("<!-- artifact:{} BEGIN -->", name.0);

@@ -380,7 +380,7 @@ fn issue_5646_explicit_wait_uses_the_existing_manual_drain_without_restarting() 
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: true,
     })
@@ -425,7 +425,7 @@ fn issue_5646_failed_wait_keeps_apply_deferred_and_reports_the_failure() {
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     })
@@ -1225,6 +1225,98 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
 }
 
 #[test]
+fn app_runtime_add_settings_set_preserves_unused_same_tool_member_core() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let (mut runtime, recorded, _) = open_agent_settings_sets(
+        temp.path(),
+        &repo,
+        vec![
+            pool_profile("codex"),
+            pool_profile("claude"),
+            pool_profile("grok"),
+        ],
+    );
+    let sessions = temp.path().join("sessions");
+    let roster = gwt::agent_names::mutate_project_roster(
+        &repo,
+        &sessions,
+        gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
+            pm_eligible: false,
+            name: None,
+            agent_id: Some("codex".into()),
+        },
+        None,
+    )
+    .unwrap();
+    let id = roster.members.last().unwrap().agent_member_id.clone();
+    let path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut b = pool_profile("codex");
+    b.agent_member_id = Some(id.clone());
+    b.model = Some("distinct-model".into());
+    b.reasoning = Some("high".into());
+    b.version = Some("distinct-version".into());
+    b.fast_mode = true;
+    gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut pool = prefs.launch_profile_pool();
+        pool.push(b.clone());
+        prefs.set_launch_profile_pool(pool);
+        Ok(())
+    })
+    .unwrap();
+    gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut pool = prefs.launch_profile_pool();
+        pool.retain(|p| p.agent_member_id.as_deref() != Some(&id));
+        prefs.set_launch_profile_pool(pool);
+        Ok(())
+    })
+    .unwrap();
+    let core_revision = gwt::agent_registry::SessionMemberSnapshot::load()
+        .unwrap()
+        .implementation_core(&id)
+        .unwrap()
+        .1;
+    let tuning = serde_json::from_value(serde_json::json!({
+        "member_id": id, "model": b.model, "reasoning": b.reasoning,
+        "runtime_target": "Docker", "skip_permissions": false,
+        "expected_core_revision": core_revision,
+    }))
+    .unwrap();
+    assert!(gwt::agent_registry::set_member_tuning(&tuning)
+        .error
+        .is_none());
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::AddAgentSettingsSet,
+    );
+    let view = agent_settings_view(&events);
+    assert_eq!(view.selected_agent_member_id.as_deref(), Some(id.as_str()));
+    assert!(!view.skip_permissions);
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    save_agent_settings_sets(&mut runtime, &recorded);
+    let prefs = gwt::load_issue_monitor_prefs(&path).unwrap();
+    let saved = gwt::agent_registry::member_profile(&prefs, &id).unwrap();
+    assert_eq!(
+        (saved.model, saved.reasoning, saved.version, saved.fast_mode),
+        (b.model, b.reasoning, b.version, b.fast_mode)
+    );
+    assert_eq!(saved.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+    assert!(!saved.skip_permissions);
+}
+
+#[test]
 fn app_runtime_issue_monitor_agent_settings_keeps_a_runtime_the_form_was_not_asked_about() {
     // Issue #4911 AC-5: the form only asks where a set runs in its Runtime
     // step and reads Host before that, so leaving a set for another one must
@@ -1575,8 +1667,10 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
     );
     let mut expected = before_start;
     expected.agent_roster = after_start.agent_roster.clone();
+    expected.schema_version = 2;
     assert_eq!(
-        after_start, expected,
+        serde_json::to_value(&after_start).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
         "settings-open only registers people; queue, profiles, claims and deliveries are unchanged"
     );
 }
@@ -2019,7 +2113,7 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
     seeded.launch_auto = true;
     seeded.launch_tiers = vec![vec![pool_profile("openclaw")], vec![pool_profile("codex")]];
     let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), seeded);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     monitor.terminal_queue_push(&[3165], "operator", &now);
     monitor.record_candidate(gwt::IssueMonitorIssue {
         author_login: None,
@@ -2106,7 +2200,7 @@ fn app_runtime_issue_monitor_profile_save_compensates_unowned_unsupported_delive
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.set_launch_profile_pool(vec![pool_profile("codex")]);
     monitor.terminal_queue_push(&[3165], "operator", &now);
@@ -2618,6 +2712,9 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
         &repo,
         &sessions,
         gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
+            pm_eligible: false,
             name: None,
             agent_id: Some("codex".into()),
         },
@@ -2942,7 +3039,7 @@ fn app_runtime_agent_window_initial_title_falls_back_to_projection_owner() {
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -2989,7 +3086,7 @@ fn app_runtime_agent_window_initial_title_ignores_projection_owner_for_other_bra
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -3265,4 +3362,135 @@ fn app_runtime_issue_monitor_launch_now_uses_owner_delivery_prompt() {
         "{ahead}"
     );
     assert!(!ahead.contains("close Issue #3165 and finish"), "{ahead}");
+}
+
+/// Issue #7728 AC-1/AC-2: one project stop/start halts and resumes Issue
+/// Monitor assignment and the PM patrol together, from the Hub or the Project.
+#[test]
+fn app_runtime_project_autonomy_stops_and_starts_monitor_and_pm_together() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let roots = [temp.path().join("first"), temp.path().join("other")];
+    for root in &roots {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+        gwt::save_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(root),
+            &gwt::IssueMonitorPrefs {
+                launch_auto: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let tabs = roots
+        .iter()
+        .zip(["first", "other"])
+        .map(|(root, id)| sample_project_tab(id, id, root.clone(), ProjectKind::Git, &[]))
+        .collect();
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("first"));
+    let paused = |root: &std::path::Path| {
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(root))
+            .expect("PM prefs")
+            .settings
+            .paused
+    };
+    let autonomy = |runtime: &AppRuntime, key: &str| {
+        runtime
+            .hub_state_view()
+            .projects
+            .into_iter()
+            .find(|project| project.project_key == key)
+            .and_then(|project| project.autonomy)
+            .expect("hub reports project autonomy")
+    };
+    let other = runtime.project_context("other").unwrap();
+    let other_key = other.project_key.to_string();
+    assert!(!autonomy(&runtime, &other_key).pm_paused);
+
+    // The Hub stops the named Project: the PM patrol pauses with assignment.
+    let events = runtime.handle_frontend_event_in_scope(
+        "hub-client".into(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: Some(other_key.clone()),
+            running: false,
+        },
+        &ClientScope::Hub,
+    );
+    assert!(paused(&roots[1]), "project stop pauses the PM patrol");
+    assert!(!paused(&roots[0]), "other projects are untouched");
+    assert!(autonomy(&runtime, &other_key).pm_paused);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::HubState { .. })),
+        "the Hub list refreshes after a stop"
+    );
+
+    // A Project connection cannot steer another Project.
+    let first = runtime.project_context("first").unwrap();
+    runtime.handle_frontend_event_in_scope(
+        "first-client".into(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: Some(other_key.clone()),
+            running: true,
+        },
+        &ClientScope::Project(first.project_key.clone()),
+    );
+    assert!(paused(&roots[1]), "a foreign start is refused");
+
+    // Settings starts its own Project through the same operation.
+    runtime.handle_frontend_event_in_scope(
+        "other-client".into(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: None,
+            running: true,
+        },
+        &ClientScope::Project(other.project_key.clone()),
+    );
+    assert!(!paused(&roots[1]), "project start resumes the PM patrol");
+}
+
+/// Issue #7728: a start that cannot assign work yet (no launch profile) opens
+/// the profile setup and keeps the PM patrol stopped (fail closed).
+#[test]
+fn app_runtime_project_autonomy_start_without_profile_keeps_pm_stopped() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs::default(),
+    )
+    .unwrap();
+    gwt::pm_registry::set_pm_paused(&repo, true).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetProjectAutonomy {
+            project_key: None,
+            running: true,
+        },
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. } if message == "Issues settings opened"
+    )));
+    assert!(
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .unwrap()
+            .settings
+            .paused,
+        "the PM stays stopped until assignment can start"
+    );
 }

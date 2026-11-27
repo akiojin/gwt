@@ -13,13 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{SecondsFormat, Utc};
 #[cfg(test)]
 use gwt_agent::persist_agent_session_id;
 use gwt_agent::{
     persist_session_hook_metadata_with_wait, AgentStatus, PendingDiscussionResume, Session,
     SessionExecutionIdentity, SessionRuntimeState,
 };
+use gwt_core::operation_deadline;
 use serde::Serialize;
 
 use super::{
@@ -30,6 +30,16 @@ use crate::discussion_resume::load_pending_resume;
 use crate::window_state::window_state_for_hook_event;
 
 const HOOK_SESSION_METADATA_LEASE_WAIT: Duration = Duration::from_millis(25);
+// Leave room for runtime publication and prompt context within the dispatcher
+// deadline.
+const PROMPT_RUNTIME_SESSION_LEASE_WAIT: Duration = Duration::from_millis(150);
+// PR dispatch can hold the Session lease across GitHub I/O. Give tool hooks
+// time to publish their lifetime after the observed 2.131s hold (Issue #7605).
+const TOOL_RUNTIME_SESSION_LEASE_WAIT: Duration = Duration::from_secs(5);
+const OWNED_RUNTIME_SESSION_LEASE_WAIT: Duration = Duration::from_secs(2);
+// Native startup identity is a mandatory durable commit, so use the normal
+// Session transaction's bounded wait rather than fail-open bookkeeping's budget.
+const SESSION_START_METADATA_LEASE_WAIT: Duration = OWNED_RUNTIME_SESSION_LEASE_WAIT;
 
 /// A read-only snapshot, never an execution grant. Completion and doctor compare
 /// this existing Session/process identity again before publishing evidence.
@@ -219,7 +229,7 @@ fn write_state_under_runtime_leases(
         ("PreToolUse" | "PostToolUse", None) => active_tool_calls = None,
         _ => {}
     }
-    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let state = RuntimeState {
         status: status.to_string(),
         updated_at: now.clone(),
@@ -311,6 +321,47 @@ pub(crate) struct HookCompletionContext {
     certified: Cell<bool>,
     ordinary_unbound: bool,
     initially_missing: bool,
+}
+
+// The native producer regression holds only its own accepted completion, after
+// protocol serialization and before any completion lease is reacquired.
+#[cfg(any(test, feature = "test-gh-guard"))]
+type CompletionTestKey = (PathBuf, String);
+#[cfg(any(test, feature = "test-gh-guard"))]
+type CompletionTestHooks = std::collections::HashMap<CompletionTestKey, Box<dyn FnOnce() + Send>>;
+#[cfg(any(test, feature = "test-gh-guard"))]
+fn completion_test_hooks() -> &'static std::sync::Mutex<CompletionTestHooks> {
+    static HOOKS: std::sync::OnceLock<std::sync::Mutex<CompletionTestHooks>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub struct HookCompletionTestGuard(CompletionTestKey);
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl Drop for HookCompletionTestGuard {
+    fn drop(&mut self) {
+        completion_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub fn set_hook_completion_test_hook(
+    worktree: &Path,
+    session_id: &str,
+    hook: impl FnOnce() + Send + 'static,
+) -> HookCompletionTestGuard {
+    let key = (
+        std::fs::canonicalize(worktree).unwrap(),
+        session_id.to_owned(),
+    );
+    assert!(completion_test_hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.clone(), Box::new(hook))
+        .is_none());
+    HookCompletionTestGuard(key)
 }
 
 /// Physical lifecycle evidence for the registered resident PM without an
@@ -486,10 +537,22 @@ impl HookCompletionContext {
         if require_pending && self.observation.is_some() && !self.begin_succeeded.get() {
             return Ok(None);
         }
-        gwt_agent::session::with_session_path_lease_wait(
+        let event = self
+            .observation
+            .as_ref()
+            .map_or("completion", |observation| observation.event.as_str());
+        let wait = match event {
+            "UserPromptSubmit" => PROMPT_RUNTIME_SESSION_LEASE_WAIT,
+            "PreToolUse" | "PostToolUse" => TOOL_RUNTIME_SESSION_LEASE_WAIT,
+            _ => OWNED_RUNTIME_SESSION_LEASE_WAIT,
+        };
+        let deadline = operation_deadline::now() + wait;
+        let deadline = operation_deadline::current().map_or(deadline, |outer| outer.min(deadline));
+        gwt_agent::session::with_named_session_path_lease_until(
             &self.sessions_dir,
             &self.session_id,
-            HOOK_SESSION_METADATA_LEASE_WAIT,
+            &format!("hook runtime-state {event}"),
+            deadline,
             |state| {
                 let gwt_agent::SessionPathState::Present(session) = state else {
                     return Ok(None);
@@ -503,7 +566,20 @@ impl HookCompletionContext {
                 {
                     return Ok(None);
                 }
-                let _writer = gwt_agent::session::runtime_writer_lease(&self.runtime_path)?;
+                let _writer = match gwt_agent::session::runtime_writer_lease(&self.runtime_path) {
+                    Err(error)
+                        if error.kind() == io::ErrorKind::TimedOut
+                            && require_pending
+                            && self
+                                .observation
+                                .as_ref()
+                                .is_some_and(|event| event.event == "UserPromptSubmit") =>
+                    {
+                        tracing::warn!(session_id = %self.session_id, %error, "prompt runtime publication skipped");
+                        return Ok(None);
+                    }
+                    lease => lease?,
+                };
                 let _publication =
                     gwt_agent::session::runtime_publication_lease(&self.runtime_path)?;
                 let runtime = match SessionRuntimeState::load(&self.runtime_path) {
@@ -651,6 +727,26 @@ impl HookCompletionContext {
     /// Keep the existing Session -> writer -> publication lock order. An
     /// unavailable observation leaves the previous pair unchanged.
     pub(crate) fn record(self, outcome: gwt_agent::session::HookCompletionOutcome) {
+        // A prompt can return Board context after runtime publication times out.
+        // Its protocol output must not advance the runtime completion receipt.
+        if !self.runtime_was_published()
+            && self
+                .observation
+                .as_ref()
+                .is_some_and(|event| event.event == "UserPromptSubmit")
+        {
+            return;
+        }
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        if self.exact.is_some() && self.begin_succeeded.get() && self.pending_bound.get() {
+            let hook = completion_test_hooks()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&(self.worktree.clone(), self.session_id.clone()));
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let _ = self.with_current_runtime(self.observation.is_some(), |_, runtime| {
             let Some(runtime) = runtime else {
                 return Ok(());
@@ -664,7 +760,8 @@ impl HookCompletionContext {
             // producers, while publishing timestamp/outcome atomically.
             let mut value: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&self.runtime_path)?)?;
-            value["last_completed_hook_event_at"] = serde_json::to_value(Utc::now())?;
+            value["last_completed_hook_event_at"] =
+                serde_json::to_value(gwt_core::timestamp::UtcTimestamp::now())?;
             value["last_completed_hook_outcome"] = serde_json::to_value(outcome)?;
             if let Some(mut observation) = self.observation.clone() {
                 if self.certified.get() && self.exact.is_some() {
@@ -1030,7 +1127,11 @@ fn persist_hook_metadata(
             event,
             provider.map(HookSessionId::as_str),
             root.as_deref(),
-            HOOK_SESSION_METADATA_LEASE_WAIT,
+            if event == "SessionStart" && provider.is_some() {
+                SESSION_START_METADATA_LEASE_WAIT
+            } else {
+                HOOK_SESSION_METADATA_LEASE_WAIT
+            },
         )
     }
 }
@@ -1438,6 +1539,624 @@ mod tests {
         );
     }
 
+    fn raw_monitor_input_fences_hook(pending: bool, test_name: &str) {
+        use gwt_agent::session::HookCompletionOutcome::Normal;
+        use std::sync::{atomic::AtomicBool, Arc, Mutex, RwLock};
+
+        let wait_for = |path: &Path| {
+            // test-hygiene: allow-wall-clock-deadline Markers establish ordering; this only bounds a missing child.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !path.exists() {
+                assert!(
+                    // test-hygiene: allow-wall-clock-deadline Markers establish ordering; bound a missing child.
+                    std::time::Instant::now() < deadline,
+                    "missing actor marker: {path:?}"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        if let Some(directory) = std::env::var_os("GWT_TEST_RAW_MONITOR_HOOK_ACTOR") {
+            let directory = PathBuf::from(directory);
+            wait_for(&directory.join("go"));
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let id = GwtSessionId::from_env().unwrap();
+            let session = Session::load(&sessions.join(format!("{}.toml", id.as_str()))).unwrap();
+            let completion = begin_hook_event(&session.worktree_path, "Stop", "{}").unwrap();
+            assert!(handle_with_input_owned("Stop", "{}", Some(&completion))
+                .unwrap()
+                .is_some());
+            let pending_completion = if pending {
+                Some(completion)
+            } else {
+                completion.finish_stop(false).unwrap();
+                completion.record(Normal);
+                None
+            };
+            std::fs::write(directory.join("ready"), b"").unwrap();
+            wait_for(&directory.join("complete"));
+            if let Some(completion) = pending_completion {
+                assert!(completion.finish_stop(false).unwrap().is_none());
+                completion.record(Normal);
+            } else {
+                let successor = begin_hook_event(&session.worktree_path, "Stop", "{}").unwrap();
+                handle_with_input_owned("Stop", "{}", Some(&successor)).unwrap();
+                successor.finish_stop(false).unwrap();
+                successor.record(Normal);
+            }
+            std::fs::write(directory.join("done"), b"").unwrap();
+            return;
+        }
+
+        super::super::health::browser_preflight_tests::with_source(
+            |input, session, path, original| {
+                let directory = path.parent().unwrap().join("raw-monitor-hook-actor");
+                std::fs::create_dir(&directory).unwrap();
+                let home = gwt_core::test_support::gwt_home_override().unwrap();
+                let handle = Arc::new(
+                    gwt_terminal::PtyHandle::spawn(gwt_terminal::pty::SpawnConfig {
+                        command: std::env::current_exe()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                        args: vec!["--exact".into(), test_name.into(), "--nocapture".into()],
+                        cols: 80,
+                        rows: 24,
+                        env: [
+                            ("HOME".into(), home.to_string_lossy().into_owned()),
+                            ("USERPROFILE".into(), home.to_string_lossy().into_owned()),
+                            (
+                                "GWT_TEST_RAW_MONITOR_HOOK_ACTOR".into(),
+                                directory.to_string_lossy().into_owned(),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        remove_env: Vec::new(),
+                        cwd: Some(input.worktree_root.clone()),
+                    })
+                    .unwrap(),
+                );
+                let mut runtime = original.clone();
+                runtime.child_pid = handle.process_id();
+                runtime.child_started_at = runtime
+                    .child_pid
+                    .and_then(crate::process::host_process_start_time);
+                assert!(runtime.child_started_at.is_some());
+                runtime.save(path).unwrap();
+                let entry = Arc::new(crate::project_runtime::agent_dispatch::PtyWriterEntry {
+                    project_key: gwt_core::paths::project_scope_hash(&input.worktree_root),
+                    handle: handle.clone(),
+                    current: Arc::new(AtomicBool::new(true)),
+                    monitor_runtime: Some(
+                        crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                            window_id: "raw-monitor-source".into(),
+                            session_id: session.id.clone(),
+                            issue_number: session.linked_issue_number.unwrap(),
+                            worktree_path: session.worktree_path.clone(),
+                            project_root: input.worktree_root.clone(),
+                            sessions_dir: gwt_core::paths::gwt_sessions_dir(),
+                            incarnation: 17,
+                            review_dispatch: false,
+                        },
+                    ),
+                    pm_delivery_replay: Mutex::new(None),
+                });
+                let writers = Arc::new(RwLock::new(std::collections::HashMap::from([(
+                    "raw-monitor-source".into(),
+                    entry.clone(),
+                )])));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // With no terminal frontend, answer ConPTY's startup cursor query.
+                    #[cfg(windows)]
+                    handle.write_input(b"\x1b[1;1R").unwrap();
+                    std::fs::write(directory.join("go"), b"").unwrap();
+                    wait_for(&directory.join("ready"));
+                    let before = std::fs::read(path).unwrap();
+                    let observed: SessionRuntimeState = serde_json::from_slice(&before).unwrap();
+                    assert_eq!(observed.is_current_normal_stop(), !pending);
+                    assert!(observed.current_hook_event.is_some());
+                    let session_path =
+                        gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+                    let session_before = std::fs::read(&session_path).unwrap();
+                    let revision = handle.ordinary_input_revision().unwrap();
+                    crate::project_runtime::agent_dispatch::write_current_raw_input(
+                        &writers,
+                        "raw-monitor-source",
+                        &entry,
+                        b"raw input\r\n",
+                    )
+                    .unwrap();
+                    assert_eq!(handle.ordinary_input_revision(), Some(revision + 1));
+                    assert!(!handle.has_unsent_user_input());
+                    let invalidated = std::fs::read(path).unwrap();
+                    let mut expected: serde_json::Value = serde_json::from_slice(&before).unwrap();
+                    expected
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("current_hook_event");
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&invalidated).unwrap(),
+                        expected,
+                        "accepted raw input removes only current observation"
+                    );
+                    assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+                    std::fs::write(directory.join("complete"), b"").unwrap();
+                    wait_for(&directory.join("done"));
+                    if pending {
+                        assert_eq!(
+                            std::fs::read(path).unwrap(),
+                            invalidated,
+                            "late Stop completion cannot restore current or change history"
+                        );
+                        assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+                    } else {
+                        let successor = SessionRuntimeState::load(path).unwrap();
+                        assert!(successor.is_current_normal_stop());
+                        assert_ne!(successor.current_hook_event, observed.current_hook_event);
+                    }
+                }));
+                assert!(
+                    crate::session_finalizer::kill_and_reap(&handle, "raw-monitor-source").unwrap()
+                );
+                handle.release_descriptors();
+                if let Err(panic) = result {
+                    std::panic::resume_unwind(panic);
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn raw_monitor_input_invalidates_completed_stop_until_genuine_successor() {
+        raw_monitor_input_fences_hook(false,
+            "cli::hook::runtime_state::tests::raw_monitor_input_invalidates_completed_stop_until_genuine_successor");
+    }
+
+    #[test]
+    fn raw_monitor_input_prevents_pending_stop_completion_from_restoring_current() {
+        raw_monitor_input_fences_hook(true,
+            "cli::hook::runtime_state::tests::raw_monitor_input_prevents_pending_stop_completion_from_restoring_current");
+    }
+
+    // Source-side acceptance callbacks below are not physical PTY delivery proof.
+    #[test]
+    fn monitor_prompt_acceptance_invalidates_completed_stop_until_a_new_hook() {
+        use gwt_agent::session::HookCompletionOutcome::Normal;
+        super::super::health::browser_preflight_tests::with_source(|input, session, path, _| {
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let registration = crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                window_id: "input-fence-source".into(),
+                session_id: session.id.clone(),
+                issue_number: session.linked_issue_number.unwrap(),
+                worktree_path: session.worktree_path.clone(),
+                project_root: input.worktree_root.clone(),
+                sessions_dir: sessions.clone(),
+                incarnation: 17,
+                review_dispatch: false,
+            };
+            let normal = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&normal)).unwrap();
+            normal.finish_stop(false).unwrap();
+            normal.record(Normal);
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+            let session_path = sessions.join(format!("{}.toml", session.id));
+            let session_before = std::fs::read(&session_path).unwrap();
+            let mut expected: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            expected
+                .as_object_mut()
+                .unwrap()
+                .remove("current_hook_event");
+            let mut accepted = 0;
+            crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                &registration,
+                std::process::id(),
+                None,
+                || {
+                    assert!(SessionRuntimeState::load(path)?
+                        .current_hook_event
+                        .is_none());
+                    accepted += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(accepted, 1);
+            assert!(!SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap(),
+                expected,
+                "acceptance changes only current observation, preserving history, timestamps and identity",
+            );
+            assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+            let invalidated = std::fs::read(path).unwrap();
+            crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                &registration,
+                std::process::id(),
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                invalidated,
+                "already-unknown current is a raw no-op"
+            );
+            let successor = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&successor)).unwrap();
+            successor.finish_stop(false).unwrap();
+            successor.record(Normal);
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+        });
+    }
+
+    #[test]
+    fn monitor_prompt_acceptance_under_session_lease_fences_pending_stop_completion() {
+        use gwt_agent::session::HookCompletionOutcome::Normal;
+        super::super::health::browser_preflight_tests::with_source(|input, session, path, _| {
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let registration = crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                window_id: "input-fence-source".into(),
+                session_id: session.id.clone(),
+                issue_number: session.linked_issue_number.unwrap(),
+                worktree_path: session.worktree_path.clone(),
+                project_root: input.worktree_root.clone(),
+                sessions_dir: sessions.clone(),
+                incarnation: 17,
+                review_dispatch: false,
+            };
+            let pending = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&pending)).unwrap();
+            assert!(pending.runtime_was_published());
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .current_hook_event
+                .is_some());
+            let mut accepted = false;
+            gwt_agent::with_session_lease(&sessions, &session.id, |current| {
+                let identity = gwt_agent::SessionExecutionIdentity::from_session(current)
+                    .map_err(io::Error::other)?
+                    .unwrap();
+                crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                    &registration,
+                    std::process::id(),
+                    Some(
+                        crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(
+                            &identity,
+                        ),
+                    ),
+                    || {
+                        assert!(SessionRuntimeState::load(path)?
+                            .current_hook_event
+                            .is_none());
+                        accepted = true;
+                        Ok(())
+                    },
+                )
+            })
+            .unwrap();
+            assert!(accepted);
+            let after_acceptance = std::fs::read(path).unwrap();
+            let session_path = sessions.join(format!("{}.toml", session.id));
+            let session_after_acceptance = std::fs::read(&session_path).unwrap();
+            assert!(pending.finish_stop(false).unwrap().is_none());
+            pending.record(Normal);
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                after_acceptance,
+                "old completion cannot restore current or rewrite history"
+            );
+            assert_eq!(
+                std::fs::read(&session_path).unwrap(),
+                session_after_acceptance
+            );
+            assert!(!SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+            let successor = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&successor)).unwrap();
+            successor.finish_stop(false).unwrap();
+            successor.record(Normal);
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+        });
+    }
+
+    #[test]
+    fn monitor_prompt_acceptance_preserves_input_capable_unbound_resume() {
+        super::super::health::browser_preflight_tests::with_source(
+            |input, session, _, original| {
+                let sessions = gwt_core::paths::gwt_sessions_dir();
+                let mut unbound =
+                    Session::new(&session.worktree_path, &session.branch, AgentId::Codex);
+                unbound.linked_issue_number = session.linked_issue_number;
+                unbound.agent_session_id = Some("native-unbound-resume".into());
+                unbound.launch_route = gwt_agent::LaunchRoute::Autonomous;
+                unbound.save(&sessions).unwrap();
+                let path = gwt_agent::runtime_state_path(&sessions, &unbound.id);
+                let mut runtime = original.clone();
+                runtime.execution_identity = None;
+                runtime.save(&path).unwrap();
+                let registration = crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                    window_id: "unbound-input-source".into(),
+                    session_id: unbound.id.clone(),
+                    issue_number: unbound.linked_issue_number.unwrap(),
+                    worktree_path: unbound.worktree_path.clone(),
+                    project_root: input.worktree_root.clone(),
+                    sessions_dir: sessions.clone(),
+                    incarnation: 17,
+                    review_dispatch: false,
+                };
+                let before = std::fs::read(&path).unwrap();
+                let session_path = sessions.join(format!("{}.toml", unbound.id));
+                let session_before = std::fs::read(&session_path).unwrap();
+                let mut accepted = false;
+                crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                    &registration,
+                    std::process::id(),
+                    None,
+                    || {
+                        accepted = true;
+                        Ok(())
+                    },
+                )
+                .expect("unbound Resume remains input-capable and cannot authorize Switch");
+                assert!(accepted);
+                gwt_agent::with_session_lease(&sessions, &unbound.id, |current| {
+                    crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                        &registration,
+                        std::process::id(),
+                        Some(
+                            crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Unbound(
+                                current,
+                            ),
+                        ),
+                        || Ok(()),
+                    )
+                })
+                .expect("the matching unbound exclusion is reused without nested acquisition");
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+            },
+        );
+    }
+
+    #[test]
+    fn four_owned_hooks_publish_after_contended_session_leases_during_pm_reads() {
+        use gwt_core::operation_deadline::{
+            NamedFileLock, ScopedNamedLockContentionObserver, ScopedOperationClock,
+            ScopedOperationDeadline,
+        };
+        use std::sync::{mpsc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let agents: Vec<_> = [
+            "PreToolUse",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "PreToolUse",
+        ]
+        .into_iter()
+        .map(|event| {
+            let session = Session::new(dir.path(), "feature/demo", AgentId::ClaudeCode);
+            session.save(&sessions).unwrap();
+            let runtime_path = gwt_agent::runtime_state_path(&sessions, &session.id);
+            let observation =
+                gwt_agent::session::CurrentHookEventObservation::pending(event).unwrap();
+            write_state_under_runtime_leases(
+                &runtime_path,
+                "PreToolUse",
+                "Running",
+                None,
+                Some("prior"),
+                Some(&observation),
+            )
+            .unwrap();
+            HookCompletionContext {
+                sessions_dir: sessions.clone(),
+                session_id: session.id,
+                runtime_path,
+                worktree: dir.path().to_path_buf(),
+                exact: None,
+                native: None,
+                observation: Some(observation),
+                pending_bound: Cell::new(true),
+                begin_succeeded: Cell::new(true),
+                runtime_published: Cell::new(false),
+                certified: Cell::new(false),
+                ordinary_unbound: true,
+                initially_missing: false,
+            }
+        })
+        .collect();
+        let session_paths: Vec<_> = agents
+            .iter()
+            .map(|hook| sessions.join(format!("{}.toml", hook.session_id)))
+            .collect();
+        let start_hooks = Barrier::new(agents.len());
+        let held_hooks: Vec<_> = agents
+            .into_iter()
+            .map(|hook| {
+                let lock_path = sessions.join(format!(".{}.lock", hook.session_id));
+                let holder = NamedFileLock::acquire(&lock_path, "session metadata update").unwrap();
+                (hook, lock_path, holder)
+            })
+            .collect();
+        let (poll_pm, reads) = mpsc::channel::<mpsc::Sender<()>>();
+        let read_sessions = |poll_pm: &mpsc::Sender<_>| {
+            let (done, seen) = mpsc::channel();
+            poll_pm.send(done).unwrap();
+            seen.recv().unwrap();
+        };
+        let results = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                for finished in reads {
+                    // Monitor status reads the same atomic Session snapshots while
+                    // the writers hold their leases.
+                    for path in &session_paths {
+                        assert!(matches!(
+                            gwt_agent::session::inspect_session_path(path),
+                            gwt_agent::SessionPathState::Present(_)
+                        ));
+                    }
+                    finished.send(()).unwrap();
+                }
+            });
+            let workers = held_hooks
+                .into_iter()
+                .map(|(hook, lock_path, holder)| {
+                    let poll_pm = poll_pm.clone();
+                    let start_hooks = &start_hooks;
+                    scope.spawn(move || {
+                        start_hooks.wait();
+                        read_sessions(&poll_pm);
+                        let start = gwt_core::operation_deadline::now();
+                        let _clock = ScopedOperationClock::set(start);
+                        let event = hook.observation.as_ref().unwrap().event.as_str();
+                        let _deadline = (event == "UserPromptSubmit").then(|| {
+                            ScopedOperationDeadline::enter(
+                                start + super::super::event_dispatcher::USER_PROMPT_SUBMIT_HOOK_DEADLINE,
+                            )
+                        });
+                        let advanced_clock = std::rc::Rc::new(Cell::new(None));
+                        let after_contention = advanced_clock.clone();
+                        let _observer = ScopedNamedLockContentionObserver::set(&lock_path, move || {
+                            read_sessions(&poll_pm);
+                            // Release only after the failed 25ms window and within
+                            // the aggregate prompt's existing 200ms deadline.
+                            after_contention.set(Some(ScopedOperationClock::set(
+                                start + Duration::from_millis(100),
+                            )));
+                            drop(holder);
+                        });
+                        let result = hook.with_current_runtime(true, |session, _| {
+                            let session = gwt_agent::session::persist_session_hook_metadata_under_lease(
+                                &hook.sessions_dir,
+                                &session.id,
+                                event,
+                                None,
+                                None,
+                            )?;
+                            let tool = if event == "PostToolUse" { "prior" } else { "next" };
+                            write_state_under_runtime_leases(
+                                &hook.runtime_path,
+                                event,
+                                "Running",
+                                None,
+                                Some(tool),
+                                hook.observation.as_ref(),
+                            )
+                            .map_err(io::Error::other)?;
+                            Ok((session, true))
+                        });
+                        let published = hook.accept_runtime_publication(result)?;
+                        assert_eq!(
+                            published.unwrap().last_hook_event.as_deref(),
+                            Some(event)
+                        );
+                        let runtime = SessionRuntimeState::load(&hook.runtime_path)?;
+                        assert_eq!(runtime.source_event.as_deref(), Some(event));
+                        let calls = runtime.active_tool_calls.unwrap();
+                        assert_eq!(calls.contains("prior"), event != "PostToolUse");
+                        assert_eq!(calls.contains("next"), event == "PreToolUse");
+                        drop(advanced_clock.take());
+                        Ok::<(), HookError>(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            drop(poll_pm);
+            workers
+                .into_iter()
+                .map(|worker| worker.join())
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            result.unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn tool_hooks_publish_after_observed_pr_mutation_lease_hold() {
+        use gwt_core::operation_deadline::{
+            ScopedNamedLockContentionObserver, ScopedOperationClock,
+        };
+        use gwt_core::test_support::{gwt_home_override, ScopedGwtHome};
+        use std::{rc::Rc, sync::mpsc};
+
+        super::super::health::browser_preflight_tests::with_source(|input, session, path, _| {
+            let home = gwt_home_override().unwrap();
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let lock_path = sessions.join(format!(".{}.lock", session.id));
+            let binding = session.execution_binding.as_ref().unwrap();
+            let payload = r#"{"tool_use_id":"issue-7605-tool"}"#;
+
+            for event in ["PreToolUse", "PostToolUse"] {
+                let completion = begin_hook_event(&input.worktree_root, event, payload).unwrap();
+                let (lease_state, wait_for_lease_state) = mpsc::channel();
+                let (release, wait_for_release) = mpsc::channel();
+                let published = std::thread::scope(|scope| {
+                    let home = &home;
+                    let sessions = &sessions;
+                    scope.spawn(move || {
+                        let _home = ScopedGwtHome::set(home);
+                        let dispatched = crate::cli::execution_state::with_current_pr_mutation_execution_binding_lease(
+                            sessions,
+                            binding,
+                            || {
+                                lease_state.send(()).unwrap();
+                                wait_for_release.recv().unwrap();
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(dispatched, Some(()));
+                        lease_state.send(()).unwrap();
+                    });
+                    wait_for_lease_state
+                        .recv()
+                        .expect("PR mutation holds the Session lease");
+                    let started = operation_deadline::now();
+                    let _clock = ScopedOperationClock::set(started);
+                    let advanced_clock = Rc::new(Cell::new(None));
+                    let after_contention = advanced_clock.clone();
+                    let observer = ScopedNamedLockContentionObserver::set(&lock_path, move || {
+                        after_contention.set(Some(ScopedOperationClock::set(
+                            started + Duration::from_millis(2_131),
+                        )));
+                        release.send(()).unwrap();
+                        wait_for_lease_state
+                            .recv()
+                            .expect("PR mutation released the lease");
+                    });
+                    let result = handle_with_input_owned(event, payload, Some(&completion));
+                    drop(observer);
+                    assert!(advanced_clock.take().is_some(), "the hook must contend");
+                    result
+                });
+
+                let published = published.unwrap().expect("publish after PR mutation");
+                assert_eq!(published.last_hook_event.as_deref(), Some(event));
+                assert!(completion.runtime_was_published());
+                let runtime = SessionRuntimeState::load(path).unwrap();
+                assert_eq!(runtime.source_event.as_deref(), Some(event));
+                assert_eq!(
+                    runtime
+                        .active_tool_calls
+                        .unwrap()
+                        .contains("issue-7605-tool"),
+                    event == "PreToolUse"
+                );
+            }
+        });
+    }
+
     #[test]
     fn owned_hook_outer_lease_error_after_callback_cannot_certify_output() {
         super::super::health::browser_preflight_tests::with_source(|input, _, path, _| {
@@ -1652,7 +2371,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.json");
         let mut state = SessionRuntimeState::new(AgentStatus::Running);
-        state.last_completed_hook_event_at = Some(Utc::now());
+        state.last_completed_hook_event_at = Some(gwt_core::timestamp::UtcTimestamp::now());
         state.last_completed_hook_outcome =
             Some(gwt_agent::session::HookCompletionOutcome::Blocked);
         state.save(&path).unwrap();
@@ -1884,48 +2603,71 @@ mod tests {
     #[test]
     fn claude_session_start_persists_agent_session_id_into_session_toml() {
         let _lock = env_lock();
-        let mut env = EnvGuard::new();
-        let dir = tempfile::tempdir().unwrap();
-        let sessions_dir = dir.path().join(".gwt").join("sessions");
-        let worktree = dir.path().join("pm-worktree");
-        std::fs::create_dir_all(&worktree).unwrap();
-        let session = Session::new(&worktree, "work", AgentId::ClaudeCode);
-        let session_id = session.id.clone();
-        session.save(&sessions_dir).unwrap();
-        assert!(
-            Session::load(&sessions_dir.join(format!("{session_id}.toml")))
-                .unwrap()
-                .exact_resume_session_id()
-                .is_none(),
-            "a freshly registered Session starts without a resume handle"
-        );
-        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
-        env.set(GWT_SESSION_ID_ENV, session_id.clone());
-        env.set(
-            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
-            runtime_path.as_os_str().to_os_string(),
-        );
+        for aggregate in [false, true] {
+            let mut env = EnvGuard::new();
+            let dir = tempfile::tempdir().unwrap();
+            let sessions_dir = dir.path().join(".gwt").join("sessions");
+            let worktree = dir.path().join("pm-worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            let session = Session::new(&worktree, "work", AgentId::ClaudeCode);
+            let session_id = session.id.clone();
+            session.save(&sessions_dir).unwrap();
+            assert!(
+                Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+                    .unwrap()
+                    .exact_resume_session_id()
+                    .is_none(),
+                "a freshly registered Session starts without a resume handle"
+            );
+            let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+            env.set(GWT_SESSION_ID_ENV, session_id.clone());
+            env.set(
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+                runtime_path.as_os_str().to_os_string(),
+            );
 
-        handle_with_input(
-            "SessionStart",
-            r#"{"session_id":"pm-conversation-3966","cwd":"pm-worktree"}"#,
-        )
-        .expect("SessionStart must persist the provider conversation id");
+            // A concurrent Session transaction can hold this same lease
+            // while a restored provider reports its native conversation.
+            let lease = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(sessions_dir.join(format!(".{session_id}.lock")))
+                .unwrap();
+            lease.lock_exclusive().unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                lease.unlock().unwrap();
+            });
 
-        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
-        assert_eq!(
-            loaded.exact_resume_session_id(),
-            Some("pm-conversation-3966"),
-            "the reloaded Session must expose the handle the restore path resumes from"
-        );
-        assert_eq!(
-            loaded
-                .session_history
-                .iter()
-                .map(|entry| entry.agent_session_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["pm-conversation-3966"],
-        );
+            let input = r#"{"session_id":"pm-conversation-3966","cwd":"pm-worktree"}"#;
+            let result = if aggregate {
+                let completion = begin_hook_event(&worktree, "SessionStart", input)
+                    .expect("current Session permits an owned startup hook");
+                handle_with_input_owned("SessionStart", input, Some(&completion)).map(|_| ())
+            } else {
+                handle_with_input("SessionStart", input)
+            };
+            release.join().unwrap();
+            result
+                .expect("SessionStart must persist the provider conversation id after contention");
+
+            let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+            assert_eq!(
+                loaded.exact_resume_session_id(),
+                Some("pm-conversation-3966"),
+                "the reloaded Session must expose the handle the restore path resumes from"
+            );
+            assert_eq!(
+                loaded
+                    .session_history
+                    .iter()
+                    .map(|entry| entry.agent_session_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["pm-conversation-3966"],
+            );
+        }
     }
 
     #[test]

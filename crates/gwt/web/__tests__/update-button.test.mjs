@@ -11,13 +11,20 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
-import { createUpdateCtaController } from "../update-cta.js";
+import {
+  createUpdateCtaController,
+  UPDATE_APPLY_FAILURE_STAGES,
+  updateApplyFailureNotice,
+  updateApplyResultNotice,
+} from "../update-cta.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
 const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+const backendUpdateSources = ["../../src/main.rs", "../../src/app_runtime/settings_update.rs"]
+  .map(path => readFileSync(resolve(here, path), "utf8"));
 
 function createManualCheckFixture() {
   const fixture = createFixture();
@@ -202,14 +209,14 @@ test("manual rediscovery preserves the active phase and scheduled Retry never ca
   assert.equal(retry.hidden, true);
   retry.click();
   assert.deepEqual(fixture.sent, [], "Retry must never invoke scheduled cancellation");
-  cta.click();
+  fixture.document.querySelector("[data-update-cta-cancel]").click();
   assert.deepEqual(fixture.sent, [{ kind: "cancel_update_auto_apply" }]);
   controller.handleUpdateAutoApply({ version: "9.150.0", phase: "postponed" });
   controller.handleUpdateCheckResult(manual);
-  assert.equal(cta.dataset.status, "draining");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "draining");
   controller.handleUpdateAutoApply({ version: "9.150.0", phase: "applying" });
   controller.handleUpdateCheckResult(manual);
-  assert.equal(cta.dataset.status, "applying");
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "applying");
 });
 
 test("update_state renders one reusable update CTA", () => {
@@ -1386,11 +1393,9 @@ test("issue #4376: the draining CTA names its blockers and the modal offers Stop
   assert.equal(fixture.document.getElementById("update-cta").textContent, "Update v9.99.0 ready — Restart now");
 });
 
-// Issue #3906 AC-7 / #4076 AC-5: the backend announces the cancel grace; the
-// CTA turns into the cancel control, and the cancellation returns it to the
-// staged state.
-test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends cancel_update_auto_apply", () => {
-  const fixture = createFixture({ now: () => Date.parse("2026-09-07T02:00:00Z") });
+test("issue #7250: scheduled auto-apply shows a countdown and a dedicated cancel button", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
   controller.handleUpdateApplyPendingPersisted({ version: "9.91.0" });
   controller.handleIssueMonitorStatus({
@@ -1401,18 +1406,29 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   let cta = fixture.document.getElementById("update-cta");
   assert.equal(cta.dataset.status, "scheduled");
   assert.equal(cta.className, "update-cta is-scheduled");
-  assert.equal(cta.textContent, "Update v9.91.0 applies in 60 s — click to cancel");
-  assert.equal(cta.disabled, false);
+  assert.equal(cta.textContent, "Update v9.91.0 applies in 60 s");
+  const cancel = fixture.document.querySelector("[data-update-cta-cancel]");
+  assert.equal(cancel.tagName, "BUTTON");
+  assert.equal(cancel.textContent, "Cancel automatic update");
+  assert.equal(cta.contains(cancel), false);
   assert.equal(fixture.document.getElementById("update-modal") === null, true);
 
   cta.click();
+  assert.deepEqual(fixture.sent, []);
+  t.mock.timers.tick(17000);
+  controller.handleUpdateAutoApply({ version: "9.91.0", phase: "scheduled", grace_secs: 60 });
+  assert.equal(cta.textContent, "Update v9.91.0 applies in 43 s");
+  cancel.click();
+  cancel.click();
   assert.deepEqual(fixture.sent, [{ kind: "cancel_update_auto_apply" }]);
+  t.mock.timers.tick(1000);
   assert.equal(fixture.document.getElementById("update-cta").textContent, "Cancelling automatic update…");
 
   controller.handleUpdateAutoApply({ version: "9.91.0", phase: "cancelled" });
   cta = fixture.document.getElementById("update-cta");
   assert.equal(cta.dataset.status, "ready");
   assert.equal(cta.textContent, "Update v9.91.0 ready — Restart now");
+  assert.equal(fixture.document.querySelector("[data-update-cta-cancel]"), null);
 
   controller.handleUpdateAutoApply({ version: "9.91.0", phase: "scheduled", grace_secs: 60 });
   controller.handleUpdateAutoApply({ version: "9.91.0", phase: "postponed" });
@@ -1427,6 +1443,7 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   assert.equal(cta.disabled, true);
 
   assert.match(cssRule(".update-cta.is-scheduled"), /var\(--color-state-needs-input\)/);
+  assert.match(cssRule(".update-cta__cancel"), /var\(--color-text\)/);
   assert.match(
     appSource,
     /case "update_auto_apply":[\s\S]{0,200}applyUpdateAutoApply\(/,
@@ -1488,4 +1505,71 @@ test("issue #5343: a different ready target clears the administrator reason", ()
   assert.equal(cta.textContent, "Update v9.107.0 ready — Restart now");
   controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
   assert.equal(cta.textContent, "Update v9.106.0 ready — Restart now");
+});
+
+// Issue #7248 AC-1: every stage the backend can attach to update_apply_error.
+test("issue #7248: the failure stage inventory covers every backend update_apply_error stage", () => {
+  const emitted = new Set();
+  const patterns = [
+    /update_download_failure\(\s*"([^"]+)"/g,
+    /update_apply_error_failed\(\s*"([^"]+)"/g,
+    /UpdateApplyError \{[^}]*?stage: Some\("([^"]+)"/gs,
+    /spawn_update_apply_resolution\([^;]*?"([^"]+)",\s*"[a-z_]+",?\s*\)/gs,
+  ];
+  for (const source of backendUpdateSources) {
+    for (const pattern of patterns) {
+      for (const match of source.matchAll(pattern)) emitted.add(match[1]);
+    }
+  }
+  assert.ok(emitted.size >= 8, `expected the backend stage scan to find stages, got ${[...emitted]}`);
+  for (const stage of emitted) {
+    assert.ok(UPDATE_APPLY_FAILURE_STAGES.includes(stage), `stage "${stage}" is missing from UPDATE_APPLY_FAILURE_STAGES`);
+  }
+  assert.ok(UPDATE_APPLY_FAILURE_STAGES.includes(null), "message-only failures carry no stage");
+});
+
+// Issue #7248 AC-3: each stage has a stable notification row with the log route.
+test("issue #7248: every failure stage maps to a keyed notification notice with reason and log", () => {
+  const keys = new Set();
+  for (const stage of UPDATE_APPLY_FAILURE_STAGES) {
+    const payload = { stage, reason: `reason for ${stage}`, log_path: "/home/.gwt/logs/update.log" };
+    const notice = updateApplyFailureNotice(payload);
+    assert.equal(notice.key, `update-apply-error:${stage || "unknown"}`);
+    keys.add(notice.key);
+    assert.equal(notice.title, stage ? `Update failed: ${stage}` : "Update failed");
+    assert.equal(notice.message, `reason for ${stage}`);
+    assert.match(notice.details, /Log: \/home\/\.gwt\/logs\/update\.log/);
+  }
+  assert.equal(keys.size, UPDATE_APPLY_FAILURE_STAGES.length, "stages never share a row");
+  assert.equal(updateApplyFailureNotice({ message: "legacy" }).message, "legacy");
+  assert.equal(updateApplyFailureNotice(null), null);
+});
+
+test("issue #7248: a settled apply failure names expected and observed versions", () => {
+  const notice = updateApplyResultNotice({
+    outcome: "failure", from_version: "1.0.0", to_version: "1.1.0", observed_version: "1.0.0",
+    attempt: 2, recorded_at: "2026-11-11T00:00:00Z", message: "mismatch",
+  });
+  assert.equal(notice.key, "update-apply-result:2026-11-11T00:00:00Z");
+  assert.equal(notice.title, "Update failed: v1.0.0 → v1.1.0");
+  assert.match(notice.message, /expected v1\.1\.0, observed v1\.0\.0/);
+  assert.match(notice.details, /mismatch/);
+  assert.equal(updateApplyResultNotice({ outcome: "success", to_version: "1.1.0" }), null);
+  assert.equal(updateApplyResultNotice(null), null);
+});
+
+test("issue #7248: app.js records every apply failure outside the CTA status gate", () => {
+  const block = appSource.match(/case "update_apply_error":[\s\S]*?break;/)?.[0];
+  assert.ok(block);
+  assert.match(block, /updateApplyFailureModel\.update\(\(\) => failure\)/);
+  assert.match(block, /applyUpdateApplyError\(failure\)/);
+  const failureSink = appSource.match(/updateApplyFailureModel\.subscribe\([\s\S]*?\n      \}\);/)?.[0];
+  assert.match(failureSink, /notificationCenter\.recordError\(updateApplyFailureNotice\(failure\)\)/);
+  assert.match(failureSink, /applyUpdateApplyFailure\(failure\)/);
+  assert.doesNotMatch(failureSink, /status/, "the history sink never reads the CTA status");
+  const resultSink = appSource.match(/updateApplyResultModel\.subscribe\([\s\S]*?\n      \}\);/)?.[0];
+  assert.match(resultSink, /recordUpdateFailureNotice\(updateApplyResultNotice\(result\)\)/);
+  assert.match(appSource, /updateApplyResultModel\.update\(\(\) => event\.previous_failure \?\? null\)/);
+  const settings = appSource.match(/case "update_settings":[\s\S]*?break;/)?.[0];
+  assert.match(settings, /updateApplyResultModel\.update\(\(\) => event\.status\?\.last_apply_result \?\? null\)/);
 });

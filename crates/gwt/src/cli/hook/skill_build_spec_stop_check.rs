@@ -125,7 +125,7 @@ fn release_terminal_build(worktree: &Path, current_session_id: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+
     use gwt_core::skill_state::{save, SkillState};
 
     fn active_state(session: &str, phase: &str) -> SkillState {
@@ -133,7 +133,7 @@ mod tests {
             start_evidence: None,
             active: true,
             owner_spec: Some(1935),
-            started_at: Utc.with_ymd_and_hms(2026, 4, 21, 9, 0, 0).unwrap(),
+            started_at: "2026-04-21T09:00:00Z".parse().unwrap(),
             phase: Some(phase.to_string()),
             session_id: session.to_string(),
         }
@@ -191,7 +191,7 @@ mod tests {
         save(dir.path(), SKILL_NAME, &active_state("sess-1", "verify")).unwrap();
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
         monitor.complete_active_launch(1935, "tab::sess-1");
-        let now = Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         monitor.declare_autonomous_wait(1935, "verification deferred", "capacity returns", &now);
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(dir.path());
         let mut prefs = monitor.prefs();
@@ -243,7 +243,8 @@ mod tests {
             .wait
             .as_mut()
             .unwrap();
-        wait.since = (Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+        wait.since =
+            (gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(3)).to_rfc3339();
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
         assert_block_with(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
@@ -332,7 +333,7 @@ mod tests {
         let mut record: execution_state::ExecutionControlRecord =
             serde_json::from_value(serde_json::json!({
                 "owner_kind": "spec", "owner_number": 1935, "primary_session_id": "sess-1",
-                "entrypoint": "$gwt-execute", "status": "active", "launched_at": Utc::now(),
+                "entrypoint": "$gwt-execute", "status": "active", "launched_at": gwt_core::timestamp::UtcTimestamp::now(),
             }))
             .unwrap();
         execution_state::save(dir.path(), &record).unwrap();

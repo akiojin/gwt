@@ -582,7 +582,10 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     };
     if bookkeeping_warning {
         let snapshot = runtime
-            .issue_monitor_window_snapshot_for_tab_cached("tab-1", &chrono::Utc::now().to_rfc3339())
+            .issue_monitor_window_snapshot_for_tab_cached(
+                "tab-1",
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+            )
             .unwrap();
         assert_eq!(snapshot.windows.len(), 1);
         assert_eq!(
@@ -634,7 +637,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     assert_eq!(
         observations[0].eligibility,
         TerminalCloseEligibility::Eligible(reason),
-        "terminal settlement trace: {settlement_trace:?}"
+        "terminal delivery settlement trace: {settlement_trace:?}"
     );
     assert_eq!(
         runtime.restore_work_terminality(&session, &repo, Some(&owner_id)),
@@ -737,7 +740,10 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         let accounting =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), closed_prefs);
         let snapshot = runtime
-            .issue_monitor_window_snapshot_for_tab_cached("tab-1", &chrono::Utc::now().to_rfc3339())
+            .issue_monitor_window_snapshot_for_tab_cached(
+                "tab-1",
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+            )
             .unwrap();
         assert!(snapshot.windows.is_empty());
         assert_eq!(accounting.agent_status().occupied_slot_count, Some(0));
@@ -1180,7 +1186,7 @@ fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is
             "legacy Monitor restore",
             &["bug"],
             "legacy owner",
-            &Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         ))
         .unwrap();
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start_with_monitor(&repo)).unwrap();

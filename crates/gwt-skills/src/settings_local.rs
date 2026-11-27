@@ -309,7 +309,9 @@ pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Resul
 }
 
 pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()> {
+    crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Write)?;
     let tmp_path = atomic_staging_path(path, "gwt-managed")?;
+    crate::asset_io::ensure_safe_mutation(&tmp_path, crate::asset_io::AssetRoute::Write)?;
     // Only clean up a staging file this invocation successfully created.
     let staging_write = |source| {
         crate::asset_io::AssetIoError::new(crate::asset_io::AssetRoute::Write, &tmp_path, source)
@@ -362,6 +364,7 @@ fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()>
 }
 
 pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
+    crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Write)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1653,6 +1656,15 @@ mod tests {
         assert!(plugin_path.exists());
         let config = fs::read_to_string(config_path).unwrap();
         assert!(config.contains("gwt-hook-bridge"));
+        let value: Value = serde_json::from_str(&config).unwrap();
+        assert!(
+            value.pointer("/commands/ownerDisplay").is_none(),
+            "OpenClaw rejects unknown commands.ownerDisplay and then refuses to enable the hook bridge"
+        );
+        assert_eq!(
+            value.pointer("/plugins/entries/gwt-hook-bridge/enabled"),
+            Some(&Value::Bool(true))
+        );
         let plugin = fs::read_to_string(plugin_path).unwrap();
         assert!(plugin.contains("before_tool_call"));
         assert!(plugin.contains("after_tool_call"));

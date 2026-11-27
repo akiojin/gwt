@@ -456,6 +456,14 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
+        Self::try_update_at_path(path, mutate)
+    }
+
+    pub fn try_update_at_path<F, T, E>(path: &Path, mutate: F) -> std::result::Result<T, E>
+    where
+        F: FnOnce(&mut Self) -> std::result::Result<T, E>,
+        E: From<ConfigError>,
+    {
         let guard = settings_write_guard(path)?;
         let path = &guard.target;
 
@@ -467,6 +475,56 @@ impl Settings {
         let result = mutate(&mut settings)?;
         settings.save_unlocked(path)?;
         Ok(result)
+    }
+
+    /// Change only the project assignments. Startup migration must preserve
+    /// unrelated settings, comments and unknown keys.
+    pub fn update_project_environment_assignments<F>(path: &Path, update: F) -> Result<()>
+    where
+        F: FnOnce(&mut ProfilesConfig) -> Result<()>,
+    {
+        let guard = settings_write_guard(path)?;
+        let target = &guard.target;
+        let content = match std::fs::read_to_string(target) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let mut settings: Self =
+            toml::from_str(&content).map_err(|error| ConfigError::ParseError {
+                reason: error.to_string(),
+            })?;
+        let before = settings.profiles.project_environments.clone();
+        settings.profiles.normalize_active_profile();
+        update(&mut settings.profiles)?;
+        let assignments = settings.profiles.project_environments;
+        if assignments == before {
+            return Ok(());
+        }
+        let mut document =
+            content
+                .parse::<DocumentMut>()
+                .map_err(|error| ConfigError::ParseError {
+                    reason: error.to_string(),
+                })?;
+        let profiles = document
+            .as_table_mut()
+            .entry("profiles")
+            .or_insert(Item::Table(Table::new()))
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::ParseError {
+                reason: "profiles must be a table".into(),
+            })?;
+        if let Some(assignments) = assignments {
+            let mut table = Table::new();
+            for (key, name) in assignments {
+                table.insert(&key, value(name));
+            }
+            profiles.insert("project_environments", Item::Table(table));
+        } else {
+            profiles.remove("project_environments");
+        }
+        write_atomic(target, &document.to_string())
     }
 
     /// Merge only the app-wide update preference, retaining comments and
@@ -794,6 +852,33 @@ gwtd_mutation_p95_ms = 350.0
         let loaded: Settings = toml::from_str(&toml_str).unwrap();
         assert!(loaded.debug);
         assert_eq!(loaded.worktree_root, Some(PathBuf::from("/tmp/wt")));
+    }
+
+    #[test]
+    fn migrated_project_environment_assignments_preserve_unrelated_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original =
+            "# keep this comment\nfuture_key = true\n\n[server]\nembedded_port = 47001\n";
+        std::fs::write(&path, original).unwrap();
+
+        let migrate = || {
+            Settings::update_project_environment_assignments(&path, |profiles| {
+                profiles.migrate_environment_assignments(["registered"]);
+                Ok(())
+            })
+            .unwrap();
+        };
+        migrate();
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        assert!(migrated.starts_with(original));
+        let settings = Settings::load_from_path(&path).unwrap();
+        assert_eq!(
+            settings.profiles.project_environments.unwrap()["registered"],
+            "default"
+        );
+        migrate();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated);
     }
 
     #[test]

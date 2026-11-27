@@ -175,7 +175,8 @@
    - Continue the [readiness checks](readiness.md) and any automated tests in this owner shell. A failure
      must exit it so the trap terminates and reaps the owned child. Test
      frameworks must put cleanup in `finally` so evidence failures cannot
-     bypass shutdown.
+     bypass shutdown. Start the readiness session keeper before automated
+     tests; the `--no-tray` server exits once no browser session remains.
    - For manual inspection, finish the owner-shell script with
      `wait "$CHECK_PID"` after readiness and audit succeed. Keep its tool
      session running until the user says the check is finished.

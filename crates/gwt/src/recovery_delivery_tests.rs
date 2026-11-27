@@ -6,8 +6,8 @@ use std::{
     },
 };
 
-use chrono::{DateTime, Utc};
 use gwt_agent::{AgentId, ExecutionBindingIdentity, Session, SessionExecutionBinding};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{
     coordination::{
         BoardAudienceScope, BoardEntry, BoardEntryKind, BoardExactAppendConflict,
@@ -157,7 +157,7 @@ impl BoardProvider for ExactSpyProvider {
     fn load_entries_since(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
     ) -> Result<Vec<BoardEntry>> {
         LocalProvider.load_entries_since(worktree_root, since)
     }
@@ -165,7 +165,7 @@ impl BoardProvider for ExactSpyProvider {
     fn load_entries_since_for_scope(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
         scope: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>> {
         LocalProvider.load_entries_since_for_scope(worktree_root, since, scope)
@@ -176,7 +176,7 @@ impl BoardProvider for ExactSpyProvider {
         worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
-        within: chrono::Duration,
+        within: time::Duration,
     ) -> Result<bool> {
         LocalProvider.has_recent_post_by(worktree_root, author, kind, within)
     }
@@ -741,7 +741,7 @@ fn missing_foreign_and_wrong_branch_authority_stop_before_store_or_provider() {
             "intent-authority-refusal",
             input("must remain effect free"),
             |_| RecoveryDeliveryRoute::new(RecoveryProvider::Local, Box::new(provider)),
-            |root| resolve_delivery_authority(root, session_id),
+            |root| resolve_delivery_authority(root, session_id, false),
             {
                 let calls = store_calls.clone();
                 let unexpected_store = unexpected_store.clone();
@@ -776,8 +776,8 @@ fn worktree_form_comes_from_attached_or_detached_head_not_path_prefix() {
     let mut named_session = durable_session(&branch_path, "session-branch");
     named_session.agent_name = Some("ミオ".into());
     named_session.save(&sessions).expect("save branch Session");
-    let branch =
-        resolve_delivery_authority(&branch_path, Some("session-branch")).expect("branch authority");
+    let branch = resolve_delivery_authority(&branch_path, Some("session-branch"), false)
+        .expect("branch authority");
     assert_eq!(branch.worktree_form(), BoardWorktreeForm::BranchBacked);
     assert_eq!(branch.origin_branch(), Some("work/authority"));
     let report = deliver_with(
@@ -823,7 +823,7 @@ fn worktree_form_comes_from_attached_or_detached_head_not_path_prefix() {
     durable_session(detached.path(), "session-detached")
         .save(&sessions)
         .expect("save detached Session");
-    let detached = resolve_delivery_authority(detached.path(), Some("session-detached"))
+    let detached = resolve_delivery_authority(detached.path(), Some("session-detached"), false)
         .expect("detached authority");
     assert_eq!(detached.worktree_form(), BoardWorktreeForm::Ephemeral);
     assert_eq!(detached.origin_branch(), None);

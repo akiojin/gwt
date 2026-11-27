@@ -318,6 +318,7 @@ fn native_final_permission_guard_rechecks_materialized_skip_after_an_allowed_aud
                 prepared_manual_launch_claim: None,
                 issue_monitor_trust_candidate: None,
                 issue_monitor_launch: false,
+                pm_restore_prior: None,
             },
             |_| {},
         )
@@ -379,6 +380,7 @@ pub(super) fn managed_owner_fixture(
         ],
     );
     seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let owner = Arc::new(
         owner_fixture_block_on(async {
             if with_monitor {
@@ -475,7 +477,7 @@ fn assert_registered_pm_successor_recovery(occupied_owner: &str, terminal: bool)
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, owner, pm, ordinary) = managed_owner_fixture(temp.path(), false);
     run_git(&repo, &["checkout", "-b", "work/issue-42"]);
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let predecessor_id = work::canonical_work_id(&repo, Some("work/issue-42"), None).unwrap();
     let occupied_id = work::successor_work_id(&predecessor_id);
     let mut start = work::WorkEvent::new(work::WorkEventKind::Start, &predecessor_id, now);
@@ -579,7 +581,7 @@ fn assert_registered_pm_successor_recovery(occupied_owner: &str, terminal: bool)
             resume_context: None,
             kind: WorkspaceLaunchProjectionKind::StartWork,
             live_session_ids: &HashSet::new(),
-            now: Utc::now(),
+            now: gwt_core::timestamp::UtcTimestamp::now(),
         },
         true,
     )
@@ -630,7 +632,7 @@ fn pm_successor_recovery_resolves_branch_only_history_to_the_local_owner_checkou
             checkout.to_str().unwrap(),
         ],
     );
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let predecessor_id = work::canonical_work_id(&repo, Some("work/issue-42"), None).unwrap();
     let occupied_id = work::successor_work_id(&predecessor_id);
     let branch_only = work::WorkspaceExecutionContainerRef {
@@ -694,7 +696,7 @@ fn registered_pm_workspace_close_uses_canonical_eligibility_and_current_membersh
             },
         ),
         Some("stopped"),
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
 
@@ -759,7 +761,7 @@ fn registered_pm_workspace_close_uses_canonical_eligibility_and_current_membersh
             },
         ),
         None,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
     let remote = managed_close_work(&owner, &pm, "remote-work", "done");
@@ -780,7 +782,7 @@ fn registered_pm_workspace_close_uses_canonical_eligibility_and_current_membersh
         &[],
         None,
         Some(&member_session_id),
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
     let live = managed_close_work(&owner, &pm, work_id, "done");
@@ -839,6 +841,7 @@ fn managed_owner_session_at(
     gwt::project_runtime::test_support::OwnerRuntimeProbe,
 ) {
     seed_owner_fixture_roster(repo, 8);
+    configure_owner_fixture_tools(repo, &["pane-contract-fixture"]);
     let owner = owner_fixture_block_on(
         gwt::project_runtime::test_support::ProjectOwnerHarness::start(repo),
     )
@@ -930,6 +933,7 @@ pub(super) fn managed_exit_fixture(
         fs::create_dir_all(&repo).unwrap();
         init_repo_with_initial_commit(&repo);
         seed_owner_fixture_roster(&repo, 4);
+        configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
         let owner = owner_fixture_block_on(production_owner_fixture(&repo));
         let config = managed_owner_config_at(&repo, &repo, "main");
         (repo, owner, config)
@@ -1408,7 +1412,7 @@ fn paused_work_does_not_inherit_shared_projection_owner() {
         .expect("save projection");
 
     // The session's own Work item with its own identity.
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let work_id =
         gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/paused"), None)
             .expect("canonical id");
@@ -1611,6 +1615,7 @@ fn app_runtime_close_work_blocks_when_owning_agent_is_live() {
         .create_from_base("HEAD", "work/live", &worktree_path)
         .unwrap();
     seed_owner_fixture_roster(&repo, 4);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let owner = owner_fixture_block_on(production_owner_fixture(&repo));
     let id = owner.pane_id("live-work");
     let launched = owner_fixture_block_on(owner.command(
@@ -1746,7 +1751,7 @@ fn app_runtime_close_work_retains_worktree_and_branch() {
         .expect("save projection");
 
     // Persist a Paused Work whose execution container points at the worktree.
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     gwt_core::workspace_projection::record_workspace_work_paused_event(
         &repo,
         "work-session-session-cleanup",
@@ -1845,8 +1850,12 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
         .active_agent_sessions
         .remove("tab-1::agent-resume")
         .unwrap();
-    gwt::project_runtime::workspace::paused_work_record_task(&repo, &stopped, Utc::now())
-        .expect("canonical domain Paused Work record")();
+    gwt::project_runtime::workspace::paused_work_record_task(
+        &repo,
+        &stopped,
+        gwt_core::timestamp::UtcTimestamp::now(),
+    )
+    .expect("canonical domain Paused Work record")();
     let paused_view = runtime
         .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("paused projection view");
@@ -2518,7 +2527,7 @@ fn app_runtime_resumed_work_dedupes_missing_lexically_equivalent_worktree_paths(
     assert_eq!(view.active_works[0].owner.as_deref(), Some("SPEC-2359"));
     assert_eq!(view.active_works[0].pr_number, Some(2359));
     assert_eq!(
-        view.active_works[0].board_refs,
+        view.active_works[0].board_refs.as_ref(),
         vec!["resumed-board-ref".to_string()]
     );
 }
@@ -3532,6 +3541,9 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         &repo,
         &runtime.sessions_dir,
         gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
+            pm_eligible: false,
             name: None,
             agent_id: Some("claude".into()),
         },
@@ -4510,7 +4522,8 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     hook.branch = Some(probe.session.as_ref().unwrap().branch.clone());
     // A logical provider timestamp, so the durable comparison does not wait
     // for the wall clock to advance beyond the launch's heartbeat.
-    hook.occurred_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    hook.occurred_at =
+        (gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1)).to_rfc3339();
     assert!(owner_fixture_block_on(probe.runtime_hook(&hook))
         .unwrap()
         .is_success());
@@ -4587,10 +4600,9 @@ fn issue_monitor_heartbeat_throttle_counts_from_the_last_publication() {
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let window_id = "tab-1::agent-1";
     let at = |secs: i64| {
-        chrono::DateTime::parse_from_rfc3339("2026-09-22T07:58:46Z")
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-09-22T07:58:46Z")
             .expect("timestamp")
-            .with_timezone(&chrono::Utc)
-            + chrono::Duration::seconds(secs)
+            + time::Duration::seconds(secs)
     };
 
     let due = [0, 30, 59, 61, 90, 121]
@@ -4632,13 +4644,12 @@ fn issue_monitor_window_observation_carries_the_last_pane_output_time() {
     };
     assert_eq!(observed(&runtime), None, "no output seen yet is unknown");
 
-    let before = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let before = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::seconds(1);
     runtime.handle_runtime_output(window_id.clone(), b"Working (3s)".to_vec());
 
     let last_output_at = observed(&runtime).expect("output time recorded");
-    let last_output_at = chrono::DateTime::parse_from_rfc3339(&last_output_at)
-        .expect("rfc3339")
-        .with_timezone(&chrono::Utc);
+    let last_output_at =
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&last_output_at).expect("rfc3339");
     assert!(last_output_at >= before, "{last_output_at} < {before}");
 }
 
@@ -4753,10 +4764,9 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
             "You've hit your usage limit.",
             false,
         );
-        if !live_hook {
-            let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
-            return owner_fixture_block_on(async {
-                // test-hygiene: allow-wall-clock-deadline Bounds actual Monitor/census convergence after the confirmed control exit; observed state controls progress.
+        let wait_for_notification = || {
+            owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bounds the canonical Monitor completion for either actual provider exit.
                 tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                     loop {
                         owner.wait_monitor_idle().await.unwrap();
@@ -4769,14 +4779,18 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
                     }
                 })
                 .await
-                .expect("the control exit must release and notify its Monitor slot")
-            });
+                .expect("the actual exit must release and notify its Monitor slot")
+            })
+        };
+        if !live_hook {
+            let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+            return wait_for_notification();
         }
         let mut hook =
             runtime_hook_state_for_event("Idle", "Stop", &probe.session.as_ref().unwrap().id);
         hook.project_root = Some(repo.display().to_string());
         hook.branch = Some(probe.session.as_ref().unwrap().branch.clone());
-        hook.occurred_at = Utc::now().to_rfc3339();
+        hook.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         assert!(owner_fixture_block_on(probe.runtime_hook(&hook))
             .unwrap()
             .is_success());
@@ -4817,21 +4831,7 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
         assert_eq!(retained.pty.process_id(), probe.pty.process_id());
         assert_eq!(probe.pane.lock().unwrap().last_exit().unwrap().exit_code, 7);
         assert!(runtime.window_lookup.contains_key("tab-1::monitor-agent"));
-        let notified = owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Bounds the actual Monitor commit while the exact diagnostic runtime remains installed.
-            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-                loop {
-                    owner.wait_monitor_idle().await.unwrap();
-                    let monitor = owner_monitor_read(&repo, 42);
-                    if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty() {
-                        break monitor;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("the retained pane must still release and notify its Monitor slot")
-        });
+        let notified = wait_for_notification();
         assert!(
             owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_ok(),
             "Monitor notification cannot depend on removing the diagnostic pane"

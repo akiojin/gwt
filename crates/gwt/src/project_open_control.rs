@@ -1,5 +1,4 @@
-//! Issue #4538 AC-4 / AC-5: wire contract of the local project-open control
-//! request that `gwt open <path>` sends to the running tray-resident process.
+//! Wire contracts for local project control requests to the tray process.
 //!
 //! The request is authorized by a per-process control token that only the
 //! OS user can read (the tray lock file is written `0600`). Validation is pure
@@ -12,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Route served by the embedded browser server.
 pub const PROJECT_OPEN_CONTROL_PATH: &str = "/internal/projects/open";
+pub const PANE_LAYOUT_PLACE_CONTROL_PATH: &str = "/internal/projects/panes/place";
 
 /// Upper bound on the JSON body. A path never needs more.
 pub const PROJECT_OPEN_CONTROL_MAX_BODY_BYTES: usize = 16 * 1024;
@@ -33,6 +33,16 @@ pub struct ProjectOpenControlResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectOpenControlErrorBody {
     pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaneLayoutPlaceRequest {
+    pub project_key: String,
+    pub id: String,
+    pub board_id: String,
+    pub lane_id: crate::persistence::AgentKanbanLane,
+    pub order: Option<u32>,
 }
 
 /// Per-project URL path for a canonical ProjectKey.

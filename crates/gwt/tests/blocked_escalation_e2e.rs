@@ -15,6 +15,8 @@
 //! resolves to the filesystem backend regardless of the developer machine's
 //! `~/.gwt/config.toml`.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{io::Write, path::Path, process::Stdio};
 
 use gwt_agent::{AgentId, Session};
@@ -392,7 +394,7 @@ fn the_escalation_outlives_the_board_projection_window() {
     for _ in 0..gwt_core::coordination::HOT_PROJECTION_ENTRY_LIMIT {
         let mut noise = entry.clone();
         noise.id = uuid::Uuid::new_v4().to_string();
-        noise.created_at = chrono::Utc::now();
+        noise.created_at = UtcTimestamp::now();
         noise.updated_at = noise.created_at;
         gwt_core::coordination::post_entry(fixture.project.path(), noise).expect("post noise");
     }

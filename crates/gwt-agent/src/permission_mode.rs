@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::custom::CustomCodingAgent;
@@ -280,7 +280,7 @@ pub struct PermissionModeDecision {
     /// Set when the materialized launch failed the mapping check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_evidence: Option<String>,
-    pub decided_at: DateTime<Utc>,
+    pub decided_at: UtcTimestamp,
 }
 
 impl Default for PermissionModeDecision {
@@ -301,7 +301,7 @@ impl Default for PermissionModeDecision {
             recovery_action: "Build the launch through `AgentLaunchBuilder` so the permission mode decision is recorded.".to_string(),
             provider_mapping: ProviderSkipMapping::unsupported(String::new()),
             dropped_evidence: None,
-            decided_at: DateTime::<Utc>::UNIX_EPOCH,
+            decided_at: UtcTimestamp::UNIX_EPOCH,
         }
     }
 }
@@ -461,7 +461,7 @@ fn decide_with_mapping(
         recovery_action,
         provider_mapping: mapping,
         dropped_evidence: None,
-        decided_at: Utc::now(),
+        decided_at: UtcTimestamp::now(),
     }
 }
 

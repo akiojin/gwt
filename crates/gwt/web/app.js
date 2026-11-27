@@ -1,7 +1,8 @@
+import { createLaunchOperationId } from "/launch-pending-controller.js";
 import { createProjectExecutionPolicyModel, createProjectViewReadiness } from "/project-execution-policy-model.js";
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createMemberTuningModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -11,12 +12,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyTelemetryCounts,
         subscribeIssueMonitorStatus,
         subscribeWorkAttentionSummary,
-        applyProviderUsage,
         subscribeRuntimeHealth,
         subscribeProjectOwnerHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
+        HUB_PROJECTS_URL_PATH,
+        HUB_DECISIONS_URL_PATH,
+        HUB_URL_PATH,
         parseFrontendRoute,
         projectUrlPath,
         renderRouteNotFound,
@@ -40,10 +43,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updateTerminalGridMessage,
       } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
+      import { createExecutionEnvironments } from "/execution-environments.js";
+      import { createProjectThemes } from "/project-themes.js";
+      import { createAppChrome, projectPm } from "/app-chrome.js";
+      import { renderPmExecutionEnvironments, renderProjectExecutionEnvironments } from "/project-execution-environments.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
-      import { createRecoveryCenterController } from "/recovery-center-modal.js";
       import {
         continueWorkOutcomeNotice,
         createContinueWorkDispatcher,
@@ -56,7 +62,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       import { createWorkspaceRenderSync } from "/issue-render-sync.js";
       import { createRenderDegradationBanner } from "/render-degradation-banner.js";
       import { createWorkspaceStateNotice } from "/workspace-state-notice.js";
-      import { createUpdateCtaController } from "/update-cta.js";
+      import { createUpdateCtaController, updateApplyFailureNotice, updateApplyResultNotice } from "/update-cta.js";
       // SPEC-2356 Anshin Addendum (FR-040): the in-app attention toaster ships
       // alongside the server-intent desktop notifier in the same module.
       import {
@@ -64,6 +70,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         createAgentAttentionToaster,
         notificationForTransition,
         monitorDiagnostic,
+        monitorNoticeIdentity,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
 
@@ -80,9 +87,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-3431 FR-026 / FR-132: one shared PM settings controller feeds
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
+      import { createProjectAutonomyControl } from "/project-autonomy.js";
       import { createToastStack } from "/toast-host.js";
       import { createProjectPageMetadata, projectAgentSummary } from "/project-page-metadata.js";
-      import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
+      import { createNotificationCenter } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved
       // to /branches-cleanup-surface.js.
       import { createBranchesCleanupSurface } from "/branches-cleanup-surface.js";
@@ -131,6 +139,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         takeTerminalActivationIntent,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
+      // Issue #7702: drop the compositionend echo of an IME commit xterm
+      // already sent from keydown. Registered below, after terminal.open().
+      import { createTerminalInputCommitGate } from "/terminal-input-commit.js";
 
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";
@@ -150,10 +161,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       } from "/surface-rail.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
+      import { createBrowserEnv } from "/theme-manager.js";
       import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
-      import { createPmChat, createPmWindowModel } from "/pm-chat.js";
-      import { logGroupsFromHistoryRows } from "/task-log.js";
+      import { createPmWindowModel } from "/pm-chat.js";
       import { windowCommandErrorPresentation } from "/window-command-error.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
@@ -178,7 +189,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       } from "/window-worktree-form.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
-      // module loads so the theme toggle, command palette, hotkey overlay,
+      // module loads so the theme toggle, hotkey overlay,
       // status strip clock, and Mission Briefing intro are wired before the
       // rest of app.js continues bootstrapping the legacy surfaces.
       let __op;
@@ -190,7 +201,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         __op = {
           themeManager: null,
           hotkey: null,
-          palette: null,
         };
       }
       const projectOwnerHealthModel = createUiStateStore(null);
@@ -202,10 +212,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
-        palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyIssueMonitorStatus: (status) => applyKnowledgeIssueMonitorStatus(status),
-        applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
         applyRuntimeHealth: (snapshot) => runtimeHealthModel.update(() => snapshot || {}),
       };
 
@@ -216,11 +224,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
       const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-control-explanation", placement: "right", passThrough: true });
 
-      // The rail owns PM navigation and launches a missing PM.
+      // The project rail leads to the agent ledger for PM operations.
       for (const id of ["op-pm-entry"]) {
         document.getElementById(id)?.addEventListener("click", (event) => {
           event.preventDefault();
-          openPmAgent();
+          openAgents("ledger");
         });
       }
 
@@ -240,6 +248,22 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         ? migrationModal.querySelector(".modal-shell")
         : null;
       const appVersionLabel = document.getElementById("app-version");
+      // Issue #7740: the shared header's destinations. A later slice adds a
+      // screen by adding its row to /app-chrome.js and its handler here.
+      const appChrome = createAppChrome({
+        document,
+        handlers: {
+          pm: () => openHomeDecisions(),
+          notifications: () => notificationCenter.toggle(),
+          // Issue #7639: the project list is the Projects view of the page at `/`.
+          projects: () => window.location.assign(HUB_PROJECTS_URL_PATH),
+          agents: () => openAgents("ledger"),
+          environments: () => openExecutionEnvironments(),
+          settings: () => openSurface("settings"),
+        },
+      });
+      appChrome.mountNav(document.getElementById("app-head-nav"));
+      appChrome.mountFooterPm(document.getElementById("app-foot-pm"));
 
       const decoderMap = new Map();
       const pendingSnapshotMap = new Map();
@@ -300,7 +324,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           const runtime = terminalMap.get(windowId);
           return runtime?.isReady === true
             && runtime.snapshotWriteCoordinator?.shouldDeferOutput() !== true
-            && (pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId));
+            && (workspaceWindowById(windowId)?.is_pm || worksSurface?.contains(windowId) || canRefreshTerminalViewport(windowId));
         },
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
@@ -312,6 +336,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
       const windowMap = new Map();
       let splitSurfaces = null;
+      let loadIssueThemes = () => {};
+      let updateThemeConnection = () => {};
       let worksSurface = null;
       let agentsSurface = null;
       let rosterHost = null;
@@ -455,21 +481,35 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // route, never from in-page selection, so reconnects rebind the same
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      // Issue #7654: the last decision-count read sent, and the counts of the
+      // newest reply: every open project's total, and this project's own.
+      let decisionCountsRequested = 0;
+      const decisionCountsModel = createUiStateStore({ applied: 0, total: null, own: null });
+      // Decisions registered by other processes appear within this period, as on Home.
+      const DECISION_COUNTS_REFRESH_MS = 5_000;
       const projectExecutionPolicy = createProjectExecutionPolicyModel(routeProjectKey);
       const projectViewReadiness = createProjectViewReadiness({ document, projectKey: routeProjectKey, send });
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
-        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
+        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename, beginAgentRosterRequest } = createAgentRosterModel(routeProjectKey, {
         onRename: request => {
           if (send(request) !== "sent") applyAgentRosterError({ project_key: routeProjectKey,
             request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
         },
       });
+      const tuningController = createMemberTuningModel(routeProjectKey, { onSave: request => {
+        if (send(request) !== "sent") throw new Error("Profile could not be sent");
+      } });
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
       const worksTelemetryModel = createUiStateStore({ sessions: [] });
       const sessionUsageModel = createUiStateStore([]);
+      // Issue #7741: the execution environment definitions and the last refusal.
+      const executionEnvironmentsModel = createUiStateStore({ view: null, refusal: null });
+      const poolLoginEventModel = createUiStateStore(null);
+      // Issue #7643: the last answer to a Themes screen request.
+      const themeRepliesModel = createUiStateStore({ reply: null });
       let routeProjectMissing = false;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
@@ -480,7 +520,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // dropped after the swap completes.
       let socketReceiveDispatcher = null;
       let socketReceiveDispatcherGeneration = 0;
-      let recoveryCenterController = null;
       let reconnectTimer = null;
       let focusedId = null;
 
@@ -807,10 +846,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         makeEl,
         clearChildren,
         focusOrSpawnPreset,
-        openReports: () => {
-          openPmAgent();
-          pmChatViews.get(pmWindowId)?.controller.showReports();
-        },
+        openReports: () => focusOrSpawnPreset("board"),
         knowledgeKindForPreset,
         // SPEC-3064 Phase 3 (E6d): these two live in the knowledge-kanban
         // surface, whose factory runs after this one — close over the
@@ -922,6 +958,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function sendOnSocket(message, socket) {
+        if (message.kind === "attach_files" || message.kind === "paste_image_uploaded") {
+          // Attachments belong to the captured target and this connection only.
+          if (!activeProjectKey() || message.expected_target?.project_key !== activeProjectKey()
+              || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
+          try { socket.send(JSON.stringify(message)); return "sent"; }
+          catch { return "outcome_unknown"; }
+        }
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -937,10 +980,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner"].includes(message.kind) ||
+        if (["add_pool_account", "sign_in_pool_account", "save_copilot_account", "move_pool_account", "use_pool_account", "delete_pool_account",
+              "resume_next_pool_account", "pool_account_login_input", "close_pool_account_login"].includes(message.kind) ||
+            ["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "answer_decision", "defer_decision", "delete_theme", "edit_issue_subtask"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
-            (message.kind === "agent_roster" && message.action.kind === "rename") ||
-            (message.kind === "get_hook_doctor" && message.repair === true)) {
+            (message.kind === "agent_roster" && message.action.kind !== "read") || message.kind === "set_pm_launch_profile" || message.kind === "set_agent_execution_environments" ||
+            (message.kind === "get_hook_doctor" && message.repair === true) || message.kind === "update_user_hooks") {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -990,109 +1035,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const traceUi = uiTraceWiring.traceUi;
       const traceMeasure = uiTraceWiring.traceMeasure;
 
-      // SPEC-2359 US-41 Phase 8b: surface Workspace projection prune through
-      // the Command Palette. The dry-run entry previews the plan; the apply
-      // entry confirms before mutating projection files on disk.
-      if (window.__operatorShell?.palette) {
-        uiTraceWiring.registerPalette(window.__operatorShell.palette);
-        window.__operatorShell.palette.register({
-          id: "workspace-projection-prune-dry-run",
-          label: "Work: Prune Stale Projections (dry-run)",
-          group: "Work",
-          handler: () => {
-            send({
-              kind: "workspace_projection_prune",
-              dry_run: true,
-              ids: [],
-            });
-          },
-        });
-        window.__operatorShell.palette.register({
-          id: "workspace-projection-prune-apply",
-          label: "Work: Prune Stale Projections (apply)",
-          group: "Work",
-          handler: () => {
-            if (
-              window.confirm(
-                "Apply Work projection prune now? Archived entries past their grace period will be physically removed.",
-              )
-            ) {
-              send({
-                kind: "workspace_projection_prune",
-                dry_run: false,
-                ids: [],
-              });
-            }
-          },
-        });
-        // #4777: all-agent stop remains in the palette after its rail entry retires.
-        window.__operatorShell.palette.register({
-          id: "stop-all-agents",
-          label: "Agents: Stop All Running Agents",
-          group: "Agents",
-          handler: () => {
-            requestStopAllWindows();
-          },
-        });
-        // SPEC-2356 Anshin Addendum (FR-043): send a line of input to the focused
-        // agent pane from the palette.
-        window.__operatorShell.palette.register({
-          id: "send-input-focused-agent",
-          label: "Agent: Send Input to Focused Agent",
-          group: "Agents",
-          handler: () => {
-            promptSendFocusedPaneInput();
-          },
-        });
-      }
-
-      // SPEC-2356 Anshin Addendum (FR-043): inject one line of input into the
-      // focused agent pane. Targets the window's session_id (not its window id)
-      // so the backend can scope the injection to the caller's own pane. Returns
-      // true when a line was actually dispatched.
-      function focusedAgentWindowData() {
-        if (!focusedId) return null;
-        const windowData = workspaceWindowById(focusedId);
-        if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) {
-          return null;
-        }
-        return windowData;
-      }
-
-      function sendPaneInput(sessionId, text) {
-        const session = String(sessionId || "").trim();
-        const line = String(text ?? "");
-        if (!session || line.length === 0) {
-          return false;
-        }
-        return send({ kind: "pane_send_input", session_id: session, text: line }) !== "unavailable";
-      }
-
-      function sendFocusedPaneInput(text) {
-        const windowData = focusedAgentWindowData();
-        const sessionId = windowData?.session_id;
-        return sendPaneInput(sessionId, text);
-      }
-
-      // SPEC-2356 Anshin Addendum (FR-043): the Command Palette entry prompts for
-      // a single line and routes it to the focused agent pane.
-      function promptSendFocusedPaneInput() {
-        const windowData = focusedAgentWindowData();
-        if (!windowData) {
-          window.alert("Focus an agent window first to send it input.");
-          return;
-        }
-        if (!String(windowData.session_id || "").trim()) {
-          window.alert("This agent has no active session to send input to.");
-          return;
-        }
-        const label = windowDisplayTitle(windowData);
-        const text = window.prompt(`Send a line of input to ${label}:`);
-        if (text === null) {
-          return;
-        }
-        sendFocusedPaneInput(text);
-      }
+      // #7879: the command palette is abolished (SPEC #7007 item 36). UI trace
+      // stays a developer diagnostic reachable from the devtools console.
+      window.__operatorShell.uiTrace = {
+        start: uiTraceWiring.start,
+        stop: uiTraceWiring.stop,
+      };
 
       const { handlePayload: applyReleaseNotesPayload, handleError: applyReleaseNotesError, ...releaseNotesWindow } = createReleaseNotesWindow({
         document,
@@ -1157,6 +1105,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const updateCheckResultModel = createUiStateStore(null);
       updateCheckResultModel.subscribe(event => event, event => {
         if (event) updateCtaController.handleUpdateCheckResult(event);
+        // Issue #7248: a failed settled apply stays in the history.
+        if (event) updateApplyResultModel.update(() => event.previous_failure ?? null);
       });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
@@ -1200,9 +1150,18 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected, recoverSnapshots = false) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); tuningController.disconnectTuning(); }
         connectionOverlay.setConnected(connected);
+        updateThemeConnection(connected);
         handleLaunchWizardTransportChange(connected);
+        if (!connected) {
+          failAgentEnvironmentPriority("Connection lost before the priority change was confirmed.");
+          executionEnvironments.connectionLost();
+        } else if (rosterHost) {
+          send({ kind: "get_execution_environments" });
+        }
+        if (connected) executionEnvironments.refreshVisibleAccounts();
+        if (connected) requestDecisionCounts();
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
         // retry owner; reconnect restarts degraded open windows at 5s.
         if (typeof handleKnowledgeTransportChange === "function") {
@@ -1216,7 +1175,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           "[data-role='connection-label']",
         );
         if (connectionStatusLabel) {
-          connectionStatusLabel.textContent = connected ? "ONLINE" : "OFFLINE";
+          connectionStatusLabel.textContent = connected ? "Connected" : "Disconnected";
         }
         if (strip) {
           strip.classList.toggle("op-status-strip--offline", !connected);
@@ -1293,7 +1252,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       function requestSocketSnapshots() {
         if (socket?.readyState !== WebSocket.OPEN) return;
         send({ kind: "frontend_ready" });
-        recoveryCenterController?.reconnect();
         releaseNotesWindow.reconnect();
         resyncSocketSurfaces();
         if (socketProjectKey) requestVisiblePmReports(true);
@@ -1346,7 +1304,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
         let replayedReleaseNotesId = null;
-        let replayedRecoveryCenterId = null;
         const replayedWorkAdvisoryIds = [];
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
@@ -1362,11 +1319,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
           socket.send(JSON.stringify(pending.message));
           if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
-          if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
           if (pending.message.kind === "request_work_advisory") replayedWorkAdvisoryIds.push(pending.message.request_id);
         }
         resyncWorkAdvisory(replayedWorkAdvisoryIds);
-        recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
@@ -1461,6 +1416,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function handleSocketClose(recoverSnapshots = false) {
+        if (typeof handleAttachmentTransportChange === "function") handleAttachmentTransportChange(false);
         closeProjectController.connectionLost();
         projectViewReadiness.connectionLost();
         projectExecutionPolicy.connectionLost();
@@ -1552,6 +1508,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return;
         }
         const previousSocket = socket;
+        if (typeof handleAttachmentTransportChange === "function") handleAttachmentTransportChange(false);
         if (force === true && socketProjectKey === projectKey) {
           if (previousSocket?.readyState === WebSocket.OPEN && previousSocket !== hubSocket) {
             closeSocketInputHandoff();
@@ -1645,6 +1602,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // modal glue (open/close/render + state) moved to /project-shell-surface.js.
 
       function presetLabel(preset) {
+        if (preset === "profile") return "Environment variables";
         return preset
           .split("_")
           .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -1659,7 +1617,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           agent: "Agent",
           branches: "Branches",
           settings: "Settings",
-          profile: "Profile",
+          profile: "Environment variables",
           logs: "Logs",
           agent_kanban: "Agent Kanban",
           // SPEC-3671 FR-014: these three presets share the Knowledge surface but
@@ -1768,6 +1726,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const PM_ROLE_BADGE = "PM";
 
       function windowDisplayTitle(windowData) {
+        if (windowData?.preset === "profile") return presetRoleLabel("profile");
         const candidates = [
           windowData?.dynamic_title,
           windowData?.purpose_title,
@@ -1776,9 +1735,21 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           windowData?.agent_id,
         ];
         if (windowData?.is_pm) {
-          // The assigned identity leads; the existing adjacent badge names
-          // the PM role independently from its current task.
-          return String(windowData?.agent_name || "").trim() || PM_WINDOW_TITLE;
+          // Issue #3823: only the registered PM's typed operation activity
+          // can change its title. Worker purpose, reports and chat stay out.
+          const name = String(windowData?.agent_name || "").trim();
+          const activity = {
+            __proto__: null,
+            starting: "Starting",
+            reconciling: "Reconciling",
+            driving_pr: "Driving PRs",
+            registering_issue: "Registering issues",
+            deciding: "Making a decision",
+            waiting: "Waiting for work",
+            stalled: "Not receiving wakes",
+          }[windowData.pm_activity] || "Starting";
+          const identity = name ? `${PM_WINDOW_TITLE} · ${name}` : PM_WINDOW_TITLE;
+          return `${identity} — ${activity}`;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
           const member = windowData?.session_id && rosterModel.read().members.find(member => !member.is_pm
@@ -1795,6 +1766,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function windowTitleTooltip(windowData) {
+        if (windowData?.is_pm) return windowDisplayTitle(windowData);
         const detail = String(windowData?.dynamic_title_detail || "").trim();
         if (detail) return detail;
         return windowDisplayTitle(windowData);
@@ -1864,13 +1836,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           UI_TRACE_EVENT.renderAppState,
           { tabs: Array.isArray(nextState?.tabs) ? nextState.tabs.length : 0 },
           () => {
-            if (nextState?.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
-            appState = mergeProjectCatalog(nextState || {
+            const nextAppState = mergeProjectCatalog(nextState || {
               app_version: "",
               tabs: [],
               active_tab_id: null,
               recent_projects: [],
             });
+            if (appState.active_tab_id !== null && nextAppState.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
+            worksSurface?.prepareWorkspaceReconciliation(nextAppState);
+            appState = nextAppState;
             // Runtime snapshots observe unmounted windows too. Reconcile
             // attention against the full catalog, never DOM membership.
             const currentWindowIds = allProjectWindowIdSet();
@@ -1929,7 +1903,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           initialSurfaceSelected = true;
           // A rail choice supersedes navigation still awaiting a window.
           pendingFrameWindowId = null;
-          pendingPmFrame = false;
         }
       }
 
@@ -1976,11 +1949,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             frameWindow(windowId, { animate: false });
           }
         }
-        // A freshly launched PM must fulfill the rail navigation request.
-        if (pendingPmFrame && pmWindowId && windowMap.has(pmWindowId)) {
-          pendingPmFrame = false;
-          frameWindow(pmWindowId, { animate: false });
-        }
+
       }
 
       const startupMetrics = createStartupMetrics({ send });
@@ -2034,6 +2003,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
+          projectViewReadiness.closed();
           closeSocketInputHandoff();
           if (reconnectTimer) clearTimeout(reconnectTimer);
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
@@ -2135,6 +2105,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             if (!runtime || !element) {
               return;
             }
+            // A reveal can precede its layout box. When ResizeObserver later
+            // requests a fit, finish readiness as well as sizing so buffered
+            // snapshots/output do not wait for another view activation.
+            if (runtime.isReady !== true) {
+              completeInitialFitHandshake(windowId);
+              return;
+            }
             return runTerminalFitRequest({
               persist,
               canFit: () => canRefreshTerminalViewport(windowId),
@@ -2148,6 +2125,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                   windowId,
                   shouldFocus: false,
                   shouldPersistGeometry: persist,
+                  syncGeometryOnGridChange: true,
+                  allowFastPath: true,
+                  pendingOutputCount: terminalOutputBatcher.pendingCount(windowId),
+                  hasPendingRefresh: runtime.viewportRefreshPending === true
+                    || terminalViewportRefreshScheduler?.hasPending?.(windowId) === true,
                   sendGeometry,
                 }),
             });
@@ -2509,6 +2491,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       let pmWindowId = null;
       const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
+      // Issue #7728: unknown until the first pm_status, so Settings never
+      // offers a stop/start action from a guessed PM state.
+      const projectAutonomyPmModel = createUiStateStore({ paused: null });
 
       function updatePmLauncher(workspace) {
         pmLauncherModel.update(state => ({ ...state, workspace }));
@@ -2517,7 +2502,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       pmLauncherModel.subscribe(state => state, ({ workspace, paused }) => {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
+        const previousPmId = pmWindowId;
         pmWindowId = pmWindow?.id ?? null;
+        if (previousPmId !== pmWindowId) {
+          if (previousPmId) applyPmReviewAttention(previousPmId, null);
+          if (pmWindowId) {
+            const current = readPmWindowState().windows[pmWindowId];
+            applyPmReviewAttention(pmWindowId, current?.current?.facts?.review_attention);
+          }
+        }
 
         const railEntry = document.getElementById("op-pm-entry");
         if (railEntry) {
@@ -2530,30 +2523,19 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               : "running";
           railEntry.dataset.pmState = state;
           railEntry.dataset.pmPaused = String(paused);
-          // Issue #4777: the hover text says what the PM is, not only its name.
-          const role = "your point of contact, not one of the agents";
-          railEntry.title =
-            state === "running"
-              ? `Project Manager: ${role}`
-              : state === "stopped"
-                ? `Project Manager (stopped): ${role}. Click to resume`
-                : `Project Manager: ${role}. Click to start`;
+          const status = state === "running" ? "" : ` (${state === "stopped" ? "stopped" : "not running"})`;
+          railEntry.title = `Project Manager${status} · Open Agents`;
           if (paused) railEntry.title += ". Autonomous loop paused";
         }
       });
 
-      // One click selects an existing PM or waits for its new window.
-      let pendingPmFrame = false;
+      function openHomeDecisions() {
+        window.location.assign(HUB_DECISIONS_URL_PATH);
+      }
 
-      function openPmAgent() {
-        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
-        if (worksHost) setWorksHost(null);
-        if (pmWindowId && windowMap.has(pmWindowId)) {
-          requestWindowFrame(pmWindowId);
-          return;
-        }
-        pendingPmFrame = true;
-        send({ kind: "open_pm_agent" });
+      function openPmMessage(messageId) {
+        const query = new URLSearchParams({ project: activeProjectKey(), message: messageId });
+        window.location.assign(`${HUB_URL_PATH}?${query}`);
       }
 
       // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
@@ -2562,7 +2544,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // RUNNING / BLOCK / IDLE / ERROR come only from the server aggregate
-        // summary, the same value the tab title and the Works heading render.
+        // summary, also used by the tab title, Works and Agents.
         const summary = projectAgentSummaryModel?.read() ?? projectAgentSummary();
         const counts = {
           running: summary.running,
@@ -2591,12 +2573,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // ---- Provider usage & rate limits (SPEC-2970) ----
-      // SPEC-3064 Phase 3 (E1): the usage snapshot state, formatters, hover
-      // popover, and Settings usage panel moved to
+      // SPEC-3064 Phase 3 (E1): the usage snapshot state, formatters, account
+      // usage card, and Settings usage link live in
       // /provider-usage-surface.js. app.js keeps the receive() and Settings
       // call sites and wires them through this factory.
-      const { applyProviderUsageUi, renderUsagePanel } = createProviderUsageSurface({
-        send,
+      const { applyProviderUsageUi, renderAccountUsage, renderUsagePanel, usageModel } = createProviderUsageSurface({
         renderWorkspaceWindows: () => workspaceOverviewSurface.renderWindows(),
         // Issue #3862 — name popover session rows by their window title.
         sessionLabel: (sessionId) => {
@@ -2882,20 +2863,36 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // Rail selection follows the active layout pane.
+      function selectSurface(surface) {
+        // Issue #7649: the header's Agents is the ledger and the rail's Agents
+        // is the project's agents screen; only the one showing is marked.
+        const ledger = surface === "agents" && agentsSurface?.view === "ledger";
+        applySurfaceSelection(document, ledger ? null : surface);
+        appChrome.setActiveSurface(surface === "agents" && !ledger ? null : surface);
+      }
+
+      // Issue #7649: `view` is "ledger" (members, order, Project Manager) or
+      // "project" (the ledger's members with this project's history and plans).
+      function openAgents(view) {
+        agentsSurface?.setView(view);
+        openSurface("agents");
+        syncSurfaceRail();
+      }
+
       function syncSurfaceRail() {
         if (splitSurfaces?.hasLayout) {
-          applySurfaceSelection(document, splitSurfaces.activeSurface());
+          selectSurface(splitSurfaces.activeSurface());
           return;
         }
         if (worksHost) {
-          applySurfaceSelection(document, "works");
+          selectSurface("works");
           return;
         }
         const focusedWindow = focusedId
           ? (activeWorkspace().windows || []).find((windowData) => windowData.id === focusedId)
           : null;
         const focused = windowWithSettingsSection(focusedWindow);
-        applySurfaceSelection(document, surfaceForWindow(focused));
+        selectSurface(surfaceForWindow(focused));
       }
 
       document.addEventListener("settings:section-changed", event => {
@@ -2915,38 +2912,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-3038 US-3: Close Guard — every window close (titlebar x and
       // tab x) confirms through one modal regardless of agent state
       // (user-confirmed decision, 2026-06-10).
-      // SPEC-2356 Anshin Addendum (FR-042): STOP ALL halts every live agent
-      // runtime, leaving windows in Agents. Count the live agent windows so
-      // the confirm is specific, and no-op when nothing is running.
-      function countRunningAgentWindows() {
-        let count = 0;
-        for (const [windowId, element] of windowMap.entries()) {
-          if (!element) continue;
-          const windowData = workspaceWindowById(windowId);
-          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
-          const runtimeState = runtimeStateForWindow(windowData);
-          if (!STOPPED_RUNTIME_STATES.has(runtimeState)) {
-            count += 1;
-          }
-        }
-        return count;
-      }
-
-      function requestStopAllWindows() {
-        const running = countRunningAgentWindows();
-        if (running === 0) {
-          return;
-        }
-        const plural = running === 1 ? "agent" : "agents";
-        if (
-          window.confirm(
-            `Stop all ${running} running ${plural}? Their windows and output stay available in Agents; you can restart each one in place.`,
-          )
-        ) {
-          send({ kind: "stop_all_windows" });
-        }
-      }
-
       let lastTitlebarClick = null;
       const TITLEBAR_DOUBLE_CLICK_MS = 300;
 
@@ -2963,6 +2928,20 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // handling moved to /terminal-attachments.js. createTerminalRuntime,
       // applyStatus, mountWindowBody, receive(), and the boot-time bridge
       // installs keep their existing call sites wired through this factory.
+      function captureAttachmentTarget(windowId) {
+        const activity = agentActivityModel.read();
+        const snapshot = activity.snapshot;
+        const data = currentNativeWindow(windowId);
+        const agent = activity.agents.find(row => row.window_id === windowId && row.session_id === data?.session_id);
+        if (!snapshot || activity.count === null || snapshot.project_key !== routeProjectKey
+            || activeProjectKey() !== routeProjectKey || !snapshot.host_id || !data
+            || !isAgentWindowPreset(data.preset) || !agent || !agent.session_id
+            || !Number.isSafeInteger(agent.runtime_incarnation) || agent.runtime_incarnation < 1) return null;
+        return { expected_target: { project_key: routeProjectKey, session_id: agent.session_id,
+          host_id: snapshot.host_id, runtime_incarnation: agent.runtime_incarnation },
+          connection_epoch: socketReceiveDispatcherGeneration };
+      }
+
       const {
         updateTerminalOverlayCopyState,
         copyTerminalOverlayMessage,
@@ -2972,10 +2951,21 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         installTerminalContextMenuHandlers,
         installTerminalViewportRefreshHandlers,
         handleAttachmentProgress,
+        reconcileAttachmentProgress,
+        handleAttachmentTransportChange,
+        disposeAttachmentProgress,
         installBrowserFileDropBridge,
         installNativeFileDropBridge,
       } = createTerminalAttachments({
         send,
+        captureAttachmentTarget,
+        reportAttachmentNotice: ({ windowId, operationId, message }) => alertsToasts.push({
+          id: `attachment-${windowId}-${operationId}`, level: "warn", title: "Attachment status",
+          message, dismissible: true, timeoutMs: 0,
+        }),
+        dismissAttachmentNotice: (windowId, operationId) => {
+          if (operationId) alertsToasts.dismiss(`attachment-${windowId}-${operationId}`);
+        },
         terminalMap,
         windowMap,
         workspaceWindowById,
@@ -2984,6 +2974,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         scheduleTerminalViewportRefresh,
         TERMINAL_SELECTION_DRAG_THRESHOLD,
       });
+
+      agentActivityModel.subscribe(state => state, reconcileAttachmentProgress);
+      windowCatalogModel.subscribe(state => state.catalog, reconcileAttachmentProgress);
 
       // SPEC-2356 — xterm content stays on the Dark Operator palette even when
       // surrounding window chrome follows the app's light theme. High-contrast
@@ -3058,6 +3051,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           terminalRoot: terminalContainer,
           terminal,
           window,
+          onUserScroll: () => terminalMap.get(windowId)?.snapshotWriteCoordinator?.recordUserScroll(),
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
           isRuntimeStopped: () => {
@@ -3122,6 +3116,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           runtime.terminal,
           { readOnly },
         );
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
         // Reparenting is a reveal even when Agents never selects this window.
         scheduleInitialFitHandshake(windowId);
         requestAnimationFrame(() => {
@@ -3136,8 +3131,117 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
       }
 
+      function currentNativeWindow(windowId, state = appState) {
+        return (state.tabs || []).filter(tab => tab.project_key === routeProjectKey)
+          .flatMap(tab => tab.workspace?.windows || []).find(data => data.id === windowId);
+      }
+
+      function nativeSessionIdentity(windowId, identity = null) {
+        const data = currentNativeWindow(windowId);
+        return { projectKey: routeProjectKey, window_id: windowId, session_id: identity?.session_id ?? data?.session_id,
+          hostId: identity?.hostId };
+      }
+
+      function sameNativeSession(left, right) {
+        return left?.projectKey === right?.projectKey && left?.window_id === right?.window_id
+          && left?.session_id === right?.session_id
+          && (!left?.hostId || !right?.hostId || left.hostId === right.hostId);
+      }
+
+      function disposeTerminalRuntime(windowId, expectedRuntime, expectedRoot) {
+        if (terminalMap.get(windowId) !== expectedRuntime || expectedRuntime?.terminalContainer !== expectedRoot) return false;
+        if (expectedRuntime.activationFrame !== null) cancelAnimationFrame(expectedRuntime.activationFrame);
+        terminalViewportRefreshScheduler?.clear(windowId);
+        expectedRuntime.cleanup?.();
+        expectedRuntime.terminal.dispose();
+        terminalMap.delete(windowId);
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
+        decoderMap.delete(windowId);
+        pendingSnapshotMap.delete(windowId);
+        terminalOutputBatcher.clear(windowId);
+        renderedTerminalPackets.delete(windowId);
+        removePmWindowState(windowId);
+        const previous = worksPreviousHosts.get(windowId);
+        if (previous?.runtime === expectedRuntime) worksPreviousHosts.delete(windowId);
+        return true;
+      }
+
+      function recordWorksPreviousHost(windowId, runtime, root, container, readOnly, identity) {
+        const previous = worksPreviousHosts.get(windowId);
+        if (previous && previous.runtime !== runtime) return;
+        worksPreviousHosts.set(windowId, { runtime, root, container, readOnly, identity });
+      }
+
+      function capturedWorksOwner(windowId, root, identity) {
+        const runtime = terminalMap.get(windowId), previous = worksPreviousHosts.get(windowId);
+        const entryIdentity = worksSurface?.nativeIdentity(windowId, root);
+        if (!runtime || !previous || previous.runtime !== runtime || previous.root !== root
+            || !sameNativeSession(runtime.nativeIdentity, identity) || !sameNativeSession(previous.identity, identity)
+            || !sameNativeSession(entryIdentity, identity)
+            || previous.identity?.hostId !== identity?.hostId || entryIdentity?.hostId !== identity?.hostId
+            || previous.identity?.runtime_incarnation !== identity?.runtime_incarnation
+            || entryIdentity?.runtime_incarnation !== identity?.runtime_incarnation) return null;
+        const currentRoot = runtime.terminalContainer;
+        const returned = currentRoot === previous.container && previous.container?.isConnected
+          && windowMap.get(windowId)?.contains(previous.container);
+        return currentRoot === root || returned ? { runtime, previous, currentRoot } : null;
+      }
+
+      function revokeWorksTerminal(windowId, root, identity) {
+        const owner = capturedWorksOwner(windowId, root, identity);
+        if (!owner) return;
+        // A terminal that returned to its window stays there while the catalog
+        // still lists that session: a transport replacement clears activity,
+        // and nothing moves the terminal back while Works is closed.
+        if (owner.currentRoot !== root && currentNativeWindow(windowId)
+            && sameNativeSession(identity, nativeSessionIdentity(windowId))) return;
+        reparentTerminalRuntime(windowId, owner.runtime, root, { readOnly: true });
+      }
+
+      function settleWorksTerminal(windowId, root, identity, cause) {
+        const owner = capturedWorksOwner(windowId, root, identity);
+        if (!owner) return;
+        const { runtime, previous, currentRoot } = owner;
+        const data = currentNativeWindow(windowId);
+        const activity = agentActivityModel.read();
+        const hostMatches = !activity.snapshot?.host_id || !identity.hostId || activity.snapshot.host_id === identity.hostId;
+        const projectMatches = !activity.snapshot?.project_key || activity.snapshot.project_key === routeProjectKey;
+        const sessionMatches = data && sameNativeSession(identity, nativeSessionIdentity(windowId));
+        const live = hostMatches && projectMatches && activity.count !== null && sessionMatches
+          && activity.agents.some(agent => agent.window_id === windowId && agent.session_id === identity.session_id
+            && agent.runtime_incarnation === identity.runtime_incarnation);
+        const validHost = previous?.runtime === runtime && previous.root === root
+          && sameNativeSession(previous.identity, identity) && sessionMatches
+          && previous.container?.isConnected && windowMap.get(windowId)?.contains(previous.container);
+        if (cause === "departure" && hostMatches && projectMatches && sessionMatches && !live) {
+          reparentTerminalRuntime(windowId, runtime, root, { readOnly: true });
+          return;
+        }
+        if (cause !== "unload" && hostMatches && projectMatches && validHost) {
+          reparentTerminalRuntime(windowId, runtime, previous.container,
+            { readOnly: cause === "departure" && live && runtime.isReady === true ? previous.readOnly : true });
+          if (cause !== "departure" && worksPreviousHosts.get(windowId) === previous) worksPreviousHosts.delete(windowId);
+          return;
+        }
+        if (cause === "departure" && hostMatches && projectMatches && (!data || (sessionMatches && !validHost))) {
+          reparentTerminalRuntime(windowId, runtime, root, { readOnly: true });
+          return;
+        }
+        if (disposeTerminalRuntime(windowId, runtime, currentRoot) && cause !== "unload" && data
+            && (!sessionMatches || !hostMatches)) requestSocketSnapshots();
+      }
+
       function createTerminalRuntime(windowId, terminalContainer, options = {}) {
-        if (options.readOnly && !options.nativeHost && worksHost && surfaceForWindow(workspaceWindowById(windowId)) === "works") {
+        let replacedSession = false;
+        const nativeIdentity = nativeSessionIdentity(windowId, options.identity);
+        const existing = terminalMap.get(windowId);
+        if (existing && !sameNativeSession(existing.nativeIdentity, nativeIdentity)) {
+          replacedSession = disposeTerminalRuntime(windowId, existing, existing.terminalContainer);
+        }
+        const nativeRoot = terminalMap.get(windowId)?.terminalContainer;
+        if (options.readOnly && !options.nativeHost
+            && (worksHost || worksSurface?.nativeIdentity(windowId, nativeRoot))
+            && surfaceForWindow(workspaceWindowById(windowId)) === "works") {
           const runtime = terminalMap.get(windowId) || createTerminalRuntime(windowId, terminalContainer);
           if (runtime) {
             queueMicrotask(cleanupTextPreviews);
@@ -3149,12 +3253,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
         }
         if (terminalMap.has(windowId)) {
-          return reparentTerminalRuntime(
-            windowId,
-            terminalMap.get(windowId),
-            terminalContainer,
-            options,
-          );
+          const runtime = terminalMap.get(windowId);
+          const owned = worksSurface?.nativeIdentity(windowId, runtime.terminalContainer);
+          if (owned && !options.nativeHost && runtime.terminalContainer !== terminalContainer) {
+            recordWorksPreviousHost(windowId, runtime, runtime.terminalContainer, terminalContainer, options.readOnly === true, owned);
+            return runtime;
+          }
+          if (options.identity?.hostId) runtime.nativeIdentity = nativeIdentity;
+          return reparentTerminalRuntime(windowId, runtime, terminalContainer, options);
         }
         const terminal = new Terminal({
           cursorBlink: true,
@@ -3165,12 +3271,18 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
           macOptionClickForcesSelection: true,
+          // The context menu copies the existing range on every platform.
+          rightClickSelectsWord: false,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
+        const commitGate = createTerminalInputCommitGate();
+        const detachCommitGate = terminal.textarea
+          ? commitGate.attach(terminal.textarea)
+          : () => {};
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const containerBindingsCleanup = attachTerminalContainerBindings(
           windowId,
@@ -3179,6 +3291,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           { readOnly: options.readOnly === true },
         );
         const cleanup = () => {
+          detachCommitGate();
           runtime.initialFitCancel?.();
           terminalMap.get(windowId)?.containerBindingsCleanup?.();
           viewportRefreshCleanup();
@@ -3208,14 +3321,25 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             });
             return;
           }
+          const settled = commitGate.accept(data);
+          if (!settled.forward) {
+            console.debug("[gwt_input_trace:onData:dropped]", {
+              seq: inputTraceSeq,
+              windowId,
+              reason: "ime-echo",
+              wsState,
+            });
+            return;
+          }
           console.debug("[gwt_input_trace:onData]", {
             seq: inputTraceSeq,
             windowId,
             wsState,
           });
-          send({ kind: "terminal_input", id: windowId, data });
+          send({ kind: "terminal_input", id: windowId, data: settled.data });
         });
         const runtime = {
+          nativeIdentity,
           terminal,
           fitAddon,
           cleanup,
@@ -3270,6 +3394,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           readOnly: options.readOnly === true,
         };
         terminalMap.set(windowId, runtime);
+        if (typeof reconcileAttachmentProgress === "function") reconcileAttachmentProgress();
         decoderMap.set(windowId, new TextDecoder());
         runtime.snapshotWriteCoordinator = createTerminalSnapshotWriteCoordinator({
           terminal,
@@ -3297,6 +3422,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             } finally {
               terminalOutputBatcher.schedulePending(windowId);
             }
+            if (window.__gwtPlaywrightTestBridge === true) {
+              runtime.playwrightSnapshotApplied = runtime.playwrightSnapshotAccepted ?? 0;
+            }
           },
           onError: (error, stage) => {
             console.warn(`terminal snapshot ${stage} failed for ${windowId}`, error);
@@ -3313,6 +3441,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // handshake then completes on the next hidden → visible
         // transition via scheduleTerminalFocusActivation.
         scheduleInitialFitHandshake(windowId);
+        if (replacedSession) requestSocketSnapshots();
 
         return runtime;
       }
@@ -3400,6 +3529,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function replaceTerminalSnapshot(windowId, base64) {
         const runtime = terminalMap.get(windowId);
+        if (runtime && window.__gwtPlaywrightTestBridge === true) {
+          runtime.playwrightSnapshotAccepted = (runtime.playwrightSnapshotAccepted ?? 0) + 1;
+        }
         terminalOutputBatcher.beginSnapshot(windowId);
         pendingSnapshotMap.set(windowId, base64);
         if (base64 && runtime) {
@@ -3425,15 +3557,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                 ["Theme", "Operator"],
                 ["Agents", "Claude / Codex"],
                 ["Transport", "Local server"],
-              ],
-            };
-          case "profile":
-            return {
-              heading: "Active Profile",
-              rows: [
-                ["Profile", "default"],
-                ["Model", "Mixed"],
-                ["Shell", "Interactive"],
               ],
             };
           case "logs":
@@ -3615,6 +3738,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
+        parentThemeForIssue: number => projectThemes.parentTheme(number),
+        loadIssueThemes: () => loadIssueThemes(),
         currentProjectRoot: () => activeProjectTab()?.project_root,
         sendKnowledgeSemanticSearchNow,
         createNode,
@@ -3736,24 +3861,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         activeProjectTab,
         getActiveWorkProjection: () => activeWorkProjection,
         projectWindowContextById,
-      });
-
-      recoveryCenterController = createRecoveryCenterController({
-        document,
-        modalEl: document.getElementById("recovery-center-modal"),
-        dialogEl: document.querySelector("#recovery-center-modal > .modal-shell"),
-        send,
-        focusBoardEntry,
-      });
-
-      const recoveryCenterStateModel = createUiStateStore(null);
-      recoveryCenterStateModel.subscribe(state => state, response => {
-        if (response) recoveryCenterController?.handleState(response);
-      });
-
-      const recoveryCenterBoardModel = createUiStateStore(null);
-      recoveryCenterBoardModel.subscribe(state => state, response => {
-        if (response) recoveryCenterController?.handleBoardEntry(response);
       });
 
       function openIssueLaunchWizard(windowId, issueNumber) {
@@ -4006,40 +4113,56 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
       const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
-        document,
-        send,
+        document, send, projectKey: routeProjectKey,
+        projectName: () => {
+          const project = (appState?.tabs || []).find(tab => tab.project_key === routeProjectKey);
+          return project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "";
+        },
+        onReloadProfile: () => requestAgentRoster(),
+        onOpenAgents: memberId => { openSurface("agents"); agentsSurface?.openPmSettings(memberId); },
+        onRender: () => agentsSurface?.syncPreview(),
+        onOpenMember: memberId => { openSurface("agents"); agentsSurface.selectMember(memberId); },
+        onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         confirm: (message) => window.confirm(message),
         executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey,
       });
       pmSettingsPanel.bindEntryPoints({ document });
 
-      // SPEC #3206 v2 — notification center: bell (rail System group) + unread
+      // SPEC #3206 v2 — notification center: bell (shared header) + unread
       // badge + history drawer. The drawer mounts on <body>, never inside
-      // .op-rail (its stacking context would clamp the drawer under toasts and
-      // modals). It is a pure sink; firing/dedup/gating stay in the controllers.
+      // the chrome (its stacking context would clamp the drawer under toasts
+      // and modals). It is a pure sink; firing/dedup/gating stay in the controllers.
       const notificationCenter = createNotificationCenter({ document });
       notificationCenter.mount(document.body);
-      const notificationBellButton = document.getElementById("op-notifications-button");
-      const notificationBellBadge =
-        notificationBellButton?.querySelector(".op-rail__badge") ?? null;
-      notificationCenter.onUnreadChange((count, hasError) => {
-        renderNotificationBell({
-          button: notificationBellButton,
-          badge: notificationBellBadge,
-          count,
-          hasError,
-          open: notificationCenter.isOpen(),
-        });
+      // Issue #7248: a settled apply result arrives again with every Settings
+      // refresh and header check; record each recorded failure once.
+      const recordedUpdateResultKeys = new Set();
+      function recordUpdateFailureNotice(notice) {
+        if (!notice || recordedUpdateResultKeys.has(notice.key)) return;
+        recordedUpdateResultKeys.add(notice.key);
+        notificationCenter.recordError(notice);
+      }
+      const updateApplyResultModel = createUiStateStore(null);
+      updateApplyResultModel.subscribe(result => result, result => {
+        recordUpdateFailureNotice(updateApplyResultNotice(result));
       });
-      notificationCenter.onOpenChange(() => {
-        renderNotificationBell({
-          button: notificationBellButton,
-          badge: notificationBellBadge,
-          count: notificationCenter.unreadCount(),
-          hasError: notificationCenter.unreadHasError(),
-          open: notificationCenter.isOpen(),
-        });
+      // Issue #7248 AC-1: the CTA modal opens only for the flow it is
+      // showing; every failure, in any CTA status, is recorded in the
+      // notification center and Settings status.
+      const updateApplyFailureModel = createUiStateStore(null);
+      updateApplyFailureModel.subscribe(failure => failure, failure => {
+        if (!failure) return;
+        notificationCenter.recordError(updateApplyFailureNotice(failure));
+        applyUpdateApplyFailure(failure);
       });
+      // Issue #7740: the bell is the shared header's Notifications entry.
+      const syncNotificationBell = () => appChrome.setNotifications({
+        count: notificationCenter.unreadCount(),
+        hasError: notificationCenter.unreadHasError(),
+        open: notificationCenter.isOpen(),
+      });
+      notificationCenter.onUnreadChange(syncNotificationBell);
+      notificationCenter.onOpenChange(syncNotificationBell);
 
       // SPEC #3206 — one shared bottom-right `alerts` stack for the transient
       // notifications that used to be three hand-offset systems (agent
@@ -4201,8 +4324,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return parts.join("");
       }
 
-      const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4217,122 +4339,22 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
           renderedTerminalPackets.set(state.windowId, packet);
         }
-        const view = pmChatViews.get(state.windowId);
-        if (view) view.logHost.dataset.stateVersion = String(state.revision);
       });
-
-      function disposePmChat(windowId) {
-        const view = pmChatViews.get(windowId);
-        if (!view) return;
-        view.unsubscribe();
-        view.unsubscribeLog?.();
-        view.controller.dispose();
-        applyPmDecisions(windowId, null);
-        applyPmReviewAttention(windowId, null);
-        view.body.classList.remove("pm-conversation-body");
-        // Return the terminal nodes to their original body when PM ownership ends.
-        view.body.append(...view.logHost.childNodes);
-        view.logHost.remove();
-        view.root.remove();
-        pmChatViews.delete(windowId);
-      }
-
-      function syncPmChat(windowData, element) {
-        const eligible = windowData.is_pm && presetSurface(windowData.preset) === "terminal";
-        let view = pmChatViews.get(windowData.id);
-        if (!eligible) {
-          disposePmChat(windowData.id);
-          return;
-        }
-        if (view) {
-          if (view.sessionId !== windowData.session_id) {
-            view.sessionId = windowData.session_id;
-            bindPmWindowState(windowData.id, windowData.session_id);
-            requestVisiblePmReports();
-          }
-          return;
-        }
-        const body = element.querySelector(".window-body");
-        const terminalRoot = body.querySelector(".terminal-root");
-        if (!terminalRoot) return;
-        const root = document.createElement("div");
-        const logHost = document.createElement("div");
-        logHost.className = "pm-conversation-log";
-        logHost.append(terminalRoot);
-        const overlay = body.querySelector(".terminal-overlay");
-        if (overlay) logHost.append(overlay);
-        body.classList.add("pm-conversation-body");
-        body.append(root, logHost);
-        view = { root, body, logHost, sessionId: windowData.session_id };
-        view.controller = createPmChat({
-          document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          onChatVisible: () => requestVisiblePmReports(false, windowData.id),
-          onTaskDetail: key => {
-            const request = requestPmTaskDetail(windowData.id, key);
-            if (!request) return;
-            if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowData.id, request.request_id);
-            window.setTimeout(() => markPmTaskDetailUnavailable(windowData.id, request.request_id), 30000);
-          },
-          onOpenTerminal: sessionId => {
-            if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
-            openSurface("works");
-            return true;
-          },
-          onSend: text => {
-            const request = requestPmChatSend(windowData.id, text);
-            if (!request) return;
-            if (send(request) === "unavailable") return markPmChatSendUnavailable(windowData.id);
-            const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
-            window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
-          },
-          onLogVisibility: (visible) => {
-            logHost.hidden = !visible;
-            if (!visible) requestVisiblePmReports(true);
-            if (visible) requestAnimationFrame(() => {
-              scheduleTerminalFit(windowData.id, false);
-              activateTerminalOnReveal(windowData.id);
-            });
-          },
-          // SPEC #7007 T-013: a Log group opens the notification drawer at
-          // its original record (keyed rows focus their history row).
-          onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
-          // SPEC #5016 HSK: unanswered decisions join the shared attention count.
-          onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
-          // SPEC #5016 HSV: unresolved reviews join the same shared count.
-          onReviewAttention: items => applyPmReviewAttention(windowData.id, items),
-        });
-        pmChatViews.set(windowData.id, view);
-        // SPEC #7007 T-013: the Log view mirrors this page's notification
-        // history (#5016 groups). The subscription fires immediately with
-        // the current rows, then on every history change.
-        view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
-          view.controller.receiveLog(logGroupsFromHistoryRows(rows));
-        });
-        bindPmWindowState(windowData.id, windowData.session_id);
-        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
-          view.controller.update(state);
-          if (state) view.logHost.dataset.stateVersion = String(state.revision);
-        });
-        requestVisiblePmReports();
-      }
+      subscribePmWindowState(state => state.windows[pmWindowId]?.current?.facts?.review_attention, items => {
+        if (pmWindowId) applyPmReviewAttention(pmWindowId, items);
+      });
 
       function requestVisiblePmReports(resync = false, onlyWindowId = null) {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
-          if (onlyWindowId !== null && windowData.id !== onlyWindowId) continue;
-          const view = pmChatViews.get(windowData.id);
-          if (windowData.is_pm && view && view.logHost.hidden) {
-            const request = requestPmReports(windowData.id, resync);
-            if (request) send(request);
-            const conversation = view.controller?.isChatVisible() ? requestPmConversation(windowData.id) : null;
-            if (conversation) send(conversation);
-          }
+          if (!windowData.is_pm || (onlyWindowId !== null && windowData.id !== onlyWindowId)) continue;
+          const request = requestPmReports(windowData.id, resync);
+          if (request) send(request);
         }
       }
       window.setInterval(requestVisiblePmReports, 5000);
 
       function mountWindowBody(windowData, element) {
-        disposePmChat(windowData.id);
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
         const surface = presetSurface(windowData.preset);
@@ -4494,13 +4516,17 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // case arms, the frontendUnits registry entries, and the delegated
       // document-level <select> guard listeners, wired through this
       // factory.
+      const projectEnvironmentSetsModel = createUiStateStore({});
       const {
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
+        applyUpdateApplyFailure,
         applyIssueSettingsStatus,
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,
         applyIssueMonitorProfiles,
+        applyExecutionEnvironments,
+        applyExecutionEnvironmentError,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
         applyAgentBackendsReceiveEvent,
@@ -4516,6 +4542,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         resyncHookDoctor,
         resyncSettings,
         renderSettingsWindow,
+        disposeSettingsBody,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
@@ -4533,8 +4560,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         focusOrSpawnPreset,
         renderUsagePanel,
         getIndexStatus,
-        pmSettingsPanel,
-        rosterModel,
+        onOpenAgents: () => pmSettingsPanel.openAgents(),
+        rosterModel, tuningController, onReloadProfile: () => requestAgentRoster(),
+        renderProjectEnvironments: renderProjectExecutionEnvironments,
+        renderPmEnvironments: renderPmExecutionEnvironments,
+        projectEnvironmentSetsModel,
+        projectAutonomyPmModel,
+        createProjectAutonomyControl: options => createProjectAutonomyControl({ ...options, document }),
       });
 
       function ensureWindow(windowData) {
@@ -4555,6 +4587,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                 </span>
               </div>
               <div class="window-actions">
+                <button class="icon-button" data-action="pm-home" aria-label="Back to Home" title="Back to Home" hidden>⌂</button>
+                <button class="icon-button" data-action="pm-agents" aria-label="Back to Agents" title="Back to Agents" hidden>←</button>
                 <button class="icon-button" data-action="restart" aria-label="Restart agent" title="Restart agent" hidden>↻</button>
                 <button class="icon-button" data-action="open-issue" aria-label="Open Issue" title="Open Issue" hidden>⧉</button>
               </div>
@@ -4566,6 +4600,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
           const titlebar = element.querySelector(".titlebar");
 
+          element.querySelector("[data-action='pm-home']").addEventListener("click", () => window.location.assign(HUB_URL_PATH));
+          element.querySelector("[data-action='pm-agents']").addEventListener("click", () => openAgents("ledger"));
           const restartButton = element.querySelector("[data-action='restart']");
           const openIssueButton = element.querySelector("[data-action='open-issue']");
 
@@ -4613,7 +4649,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             renderedAgentKanbanBodyKeys.set(windowData.id, nextAgentKanbanBodyKey);
           }
         }
-        syncPmChat(windowData, element);
+        if (windowData.is_pm && surface === "terminal") {
+          bindPmWindowState(windowData.id, windowData.session_id);
+          requestVisiblePmReports(false, windowData.id);
+        }
         // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
         // into Agents without changing its preset, so `mountWindowBody` does not
         // run again. Reclaim the live terminal into this window's own body.
@@ -4647,6 +4686,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
         }
 
+        element.querySelector("[data-action='pm-home']").hidden = !windowData.is_pm;
+        element.querySelector("[data-action='pm-agents']").hidden = !windowData.is_pm;
         const nextWindowElementKey = windowElementRenderKey(windowData);
         if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey) {
           return;
@@ -4683,6 +4724,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function renderWorkspace(workspace) {
+        worksSurface?.prepareWorkspaceReconciliation(appState);
+        let replacedSession = false;
+        for (const [id, runtime] of terminalMap) {
+          const incoming = currentNativeWindow(id);
+          if (incoming && runtime.nativeIdentity?.session_id !== incoming.session_id) {
+            replacedSession = disposeTerminalRuntime(id, runtime, runtime.terminalContainer) || replacedSession;
+          }
+        }
+        if (replacedSession) requestSocketSnapshots();
         const wasReconciling = reconcilingWindowCatalog;
         reconcilingWindowCatalog = true;
         let result;
@@ -4725,18 +4775,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                   isolate("remove_window", visibility.removed, (windowId) => {
                     const element = windowMap.get(windowId);
                     if (!element) return;
-                    disposePmChat(windowId);
-                    removePmWindowState(windowId);
-                    renderedTerminalPackets.delete(windowId);
                     const runtime = terminalMap.get(windowId);
-                    if (runtime && runtime.activationFrame !== null) {
-                      cancelAnimationFrame(runtime.activationFrame);
+                    const retainNative = runtime && worksSurface?.retainsNativeRoot(windowId, runtime.terminalContainer, appState);
+                    if (runtime && !retainNative) disposeTerminalRuntime(windowId, runtime, runtime.terminalContainer);
+                    if (!runtime) {
+                      removePmWindowState(windowId);
+                      renderedTerminalPackets.delete(windowId);
+                      decoderMap.delete(windowId);
+                      pendingSnapshotMap.delete(windowId);
+                      terminalOutputBatcher.clear(windowId);
                     }
-                    terminalViewportRefreshScheduler?.clear(windowId);
-                    runtime?.cleanup?.();
-                    runtime?.terminal.dispose();
-                    terminalMap.delete(windowId);
-                    decoderMap.delete(windowId);
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
@@ -4750,8 +4798,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                       return next;
                     });
                     renderedIssueWindowHeaderKeys.delete(windowId);
-                    pendingSnapshotMap.delete(windowId);
-                    terminalOutputBatcher.clear(windowId);
                     disposeProfileWindow(windowId);
                     branchListStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
@@ -4761,8 +4807,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     workspaceOverviewSurface.deleteState(windowId);
                     clearBranchCleanupForWindow(windowId);
 
-                    pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
-                    element.querySelector(".window-body")?.settingsExplanations?.dispose();
+                    disposeSettingsBody(element.querySelector(".window-body"));
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -4858,23 +4903,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
-      const workspaceProjectionPruneModel = createUiStateStore(null);
-      function renderWorkspaceProjectionPruneFeedback(feedback) {
-        if (!feedback) return;
-        if (feedback.kind === "workspace_projection_prune_error") {
-          window.alert(`Work Projection Prune error: ${feedback.message}`);
-          return;
-        }
-        const modeLabel = feedback.mode === "dry_run" ? "dry-run" : "applied";
-        window.alert(
-          `Work Projection Prune (${modeLabel})\n` +
-            `  archived: ${feedback.archived}\n` +
-            `  deleted: ${feedback.deleted}\n` +
-            `  skipped: ${feedback.skipped}`,
-        );
-      }
-      workspaceProjectionPruneModel.subscribe(feedback => feedback, renderWorkspaceProjectionPruneFeedback);
-
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
@@ -4921,7 +4949,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
           if (diagnostic) {
             const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
-            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
+            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error", transition: event.notification_transition };
             if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
             else notificationCenter.recordError(notice);
           }
@@ -4952,10 +4980,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // inbox snapshots never generate a second notification.
         notificationCenter.record({
           kind: "issue-monitor",
+          transition: event?.notification_transition,
           level: event?.level,
           title: monitorNotice?.title || "Issues",
           message: event?.message,
           issueNumber: event?.issue_number,
+          identity: monitorNoticeIdentity(event?.message),
         });
       });
 
@@ -5173,16 +5203,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             workspaceStateModel.update(() => ({ workspace: event.workspace }));
             break;
           }
-          case "workspace_projection_prune_result": {
-            workspaceProjectionPruneModel.update(() => ({
-              kind: event.kind, mode: event.mode, archived: event.archived,
-              deleted: event.deleted, skipped: event.skipped,
-            }));
-            break;
-          }
-          case "workspace_projection_prune_error":
-            workspaceProjectionPruneModel.update(() => ({ kind: event.kind, message: event.message }));
-            break;
           case "ui_trace_saved":
           case "ui_trace_error":
             applyUiTraceReceiveEvent(event);
@@ -5203,12 +5223,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           // The backend snapshot gates only the List; both views read the catalog.
           case "agent_roster_error":
+            tuningController.applyRosterTuningError(event);
             applyAgentRosterError(event);
             break;
-          case "agent_roster":
-            applyAgentRosterSnapshot(event.roster, event.request_id);
-            refreshProfilesAfterRoster(event.roster);
+          case "agent_roster": {
+            const accepted = applyAgentRosterSnapshot(event.roster, event.request_id);
+            tuningController.applyRosterTuningSnapshot(event.roster, event.request_id, { accepted });
+            if (accepted) refreshProfilesAfterRoster(event.roster);
             break;
+          }
           case "agent_switch":
             applyAgentSwitchSnapshot(event.snapshot);
             break;
@@ -5227,6 +5250,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               accounts: event.accounts || [],
               sessions: (event.sessions || []).filter(session => session.active !== false),
               consumption: event.consumption || [],
+              providers: event.providers || [],
             });
             break;
           case "runtime_health":
@@ -5235,14 +5259,23 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "pm_reports":
           case "pm_conversation":
           case "pm_request_task":
-          case "pane_send_result": {
+          case "pane_send_result":
+          case "decision_result": {
             applyPmWindowReceiveEvent(event);
             break;
           }
+          case "decision_counts":
+            decisionCountsModel.update(current => decisionCountsFrom(current, event));
+            break;
+          case "pm_launch_profile_result":
+            tuningController.applyPmTuningResult(event);
+            break;
           case "pm_status":
+            tuningController.applyPmTuningStatus(event);
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             applyPmSettingsReceiveEvent(event);
             pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
+            projectAutonomyPmModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
@@ -5255,6 +5288,27 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "issue_monitor_profiles":
             applyIssueMonitorProfiles(event);
+            break;
+          case "execution_environments":
+            applyExecutionEnvironments(event.view);
+            executionEnvironmentsModel.update(state => ({ ...state, view: event.view, agentPriorityPending: null, agentPriorityError: null }));
+            break;
+          case "pool_account_login_started":
+          case "pool_account_login_output":
+          case "pool_account_login_finished":
+            poolLoginEventModel.update(() => event);
+            break;
+          case "project_environment_set":
+            projectEnvironmentSetsModel.update(state => ({ ...state, [event.project_root]: event }));
+            break;
+          case "themes":
+          case "theme_error":
+            themeRepliesModel.update(() => ({ reply: event }));
+            break;
+          case "execution_environment_error":
+            applyExecutionEnvironmentError(event);
+            failAgentEnvironmentPriority(event.message);
+            executionEnvironmentsModel.update(state => ({ ...state, refusal: { message: event.message } }));
             break;
           case "issue_monitor_profiles_write_failed":
             applyIssueMonitorProfilesError(event);
@@ -5337,12 +5391,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "log_entries":
           case "log_entry_appended":
             applyBoardLogsReceiveEvent(event);
-            break;
-          case "recovery_center_state":
-            recoveryCenterStateModel.update(() => ({ ...event }));
-            break;
-          case "recovery_center_board_entry":
-            recoveryCenterBoardModel.update(() => ({ ...event }));
             break;
           case "project_board_config":
             // SPEC-2963 FR-030: per-project Board routing → Board window chip.
@@ -5461,13 +5509,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               asset_path: event.asset_path,
             });
             break;
-          case "update_apply_error":
-            applyUpdateApplyError({
+          case "update_apply_error": {
+            const failure = {
               stage: event.stage,
               reason: event.reason || event.message,
               log_path: event.log_path,
-            });
+            };
+            updateApplyFailureModel.update(() => failure);
+            applyUpdateApplyError(failure);
             break;
+          }
           case "update_apply_pending_persisted":
             applyUpdateApplyPendingPersisted({
               version: event.version,
@@ -5513,6 +5564,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "update_settings":
             applyGlobalUpdateSettings(event);
+            updateApplyResultModel.update(() => event.status?.last_apply_result ?? null);
             break;
           case "hook_doctor":
             applyHookDoctorEvent(event);
@@ -5549,7 +5601,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       installBrowserFileDropBridge();
       installNativeFileDropBridge();
 
-      window.addEventListener("unload", () => {
+      // Chromium no longer allows unload handlers (Permissions Policy), and
+      // registering one logs a console error. pagehide also fires when the
+      // page enters the back/forward cache; it may be restored from there, so
+      // only a page that is really going away is disposed.
+      window.addEventListener("pagehide", (event) => {
+        if (event.persisted) return;
+        disposeAttachmentProgress();
         disposeProjectShellSurface();
 
         worksSurface?.dispose();
@@ -5560,7 +5618,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         agentActivityModel.dispose();
         switchModel.dispose();
         launchWizardVisibilityModel.dispose();
-      }, { once: true });
+      });
 
       window.addEventListener(
         "keydown",
@@ -5684,12 +5742,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (host) { worksSurface.sync(); requestAgentRoster(); }
         else {
           for (const [id, previous] of worksPreviousHosts) {
-            const runtime = terminalMap.get(id);
-            if (runtime && previous.container.isConnected) {
-              reparentTerminalRuntime(id, runtime, previous.container, { readOnly: previous.readOnly });
+            if (worksPreviousHosts.get(id) === previous) {
+              settleWorksTerminal(id, previous.root, previous.identity, "departure");
             }
           }
-          worksPreviousHosts.clear();
           cleanupTextPreviews(true);
         }
         worksSurface.setPreviewHost(previewHost);
@@ -5697,6 +5753,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
       worksSurface = createWorksSurface({
+        projectKey: routeProjectKey,
         systemSettingsModel,
         summaryModel: projectAgentSummaryModel,
         workProjectionModel: activeWorkProjectionModel,
@@ -5709,20 +5766,28 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           ...data, status: catalog.runtimeStates[data.id] ?? data.status,
         })),
         isMounted: () => Boolean(worksHost),
+        onRevokeTerminal: revokeWorksTerminal,
+        onReleaseTerminal: settleWorksTerminal,
         mountTerminal: (id, root, options = {}) => {
           const runtime = terminalMap.get(id);
-          if (runtime && runtime.terminalContainer !== root && !worksPreviousHosts.get(id)?.container.isConnected) {
-            worksPreviousHosts.set(id, { container: runtime.terminalContainer, readOnly: runtime.readOnly });
+          if (runtime && runtime.terminalContainer !== root && !worksPreviousHosts.get(id)?.container?.isConnected) {
+            recordWorksPreviousHost(id, runtime, root, runtime.terminalContainer, runtime.readOnly, options.identity);
           }
-          createTerminalRuntime(id, root, { ...options, nativeHost: true });
+          const mounted = createTerminalRuntime(id, root, { ...options, nativeHost: true });
+          if (mounted && !worksPreviousHosts.has(id)) recordWorksPreviousHost(id, mounted, root, null, true, options.identity);
+          return mounted;
         },
         mountPreview: (id, root, options = {}) => {
           const terminal = terminalMap.get(id)?.terminal;
           return terminal ? createTerminalTextPreview({ document, terminal, container: root, ...options }) : () => {};
         },
         onSelectMember: (memberId) => {
-          openSurface("agents");
+          openAgents("project");
           agentsSurface.selectMember(memberId);
+        },
+        onSelectReview: (target) => {
+          openAgents("project");
+          agentsSurface.selectReview(target);
         },
         getTelemetry: () => worksTelemetryModel.read(),
         onFocus: focusWindowLocally,
@@ -5742,7 +5807,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               if (worksSurface.isVisible(id)) {
                 terminalOutputBatcher.schedulePending(id);
                 completeInitialFitHandshake(id);
-                scheduleTerminalFit(id, true);
+                scheduleTerminalFit(id, terminalMap.get(id)?.viewportRefreshPending === true);
               }
             }
           });
@@ -5765,6 +5830,46 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updateWorksTelemetry(sessions);
       });
       rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      // Issue #7740: the header's PM entry and the footer name the PM (the
+      // running window, else the ledger's designated PM) and count the
+      // decisions waiting for the user.
+      // Issue #7646 AC-6: the project settings' PM row follows the same PM.
+      function syncAppChromePm() {
+        const pmWindow = (pmLauncherModel.read().workspace?.windows || []).find(windowData => windowData?.is_pm);
+        const { name, avatar } = projectPm(rosterModel.read(), pmWindow);
+        appChrome.setPm({ name, avatar, decisions: decisionCountsModel.read().total });
+        pmSettingsPanel.setPmMember({ name, avatar });
+      }
+
+      // A reply older than the newest one applied changes nothing.
+      function decisionCountsFrom(current, event) {
+        if (!Number.isSafeInteger(event.request_id) || event.request_id <= current.applied) return current;
+        const known = (event.projects || []).filter(project => Number.isSafeInteger(project.waiting_count));
+        const own = known.find(project => project.project_key === routeProjectKey);
+        return {
+          applied: event.request_id,
+          total: known.length ? known.reduce((sum, project) => sum + project.waiting_count, 0) : null,
+          own: own ? own.waiting_count : null,
+        };
+      }
+
+      // Issue #7654: the header and the status bar count the decisions of the
+      // project queues themselves, as Home does, whether or not a PM window is
+      // open. The header's PM is the device's, so it counts every open
+      // project; the status bar counts this project's queue.
+      function requestDecisionCounts() {
+        if (document.visibilityState === "hidden") return;
+        send({ kind: "load_decision_counts", request_id: ++decisionCountsRequested });
+      }
+      decisionCountsModel.subscribe(state => state.total, syncAppChromePm);
+      decisionCountsModel.subscribe(state => state.own, own => {
+        applyPmDecisions("decision-queue", own == null ? null : { waiting: own });
+      });
+      // A hidden page skips the read; the next tick after it shows again catches up.
+      window.setInterval(requestDecisionCounts, DECISION_COUNTS_REFRESH_MS);
+      pmLauncherModel.subscribe(state => state.workspace, syncAppChromePm);
+      rosterModel.subscribe(state => state.revision, syncAppChromePm);
+      issueMonitorModel.subscribe(model => model.pmDecisionAttention.count, syncAppChromePm);
       let renderedRosterNames = null;
       rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
         [member.member_id, member.name, member.assignment?.session_id])), names => {
@@ -5780,7 +5885,22 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       windowCatalogModel.subscribe(state => state.catalog, () => recomputeOperatorTelemetry());
       activeWorkProjectionModel.subscribe(state => state, () => updateWorksTelemetry());
       function requestAgentRoster(action = { kind: "read" }) {
-        send({ kind: "agent_roster", action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision });
+        const request = { kind: "agent_roster", project_key: routeProjectKey, request_id: createLaunchOperationId("roster"), action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision };
+        if (!beginAgentRosterRequest(request)) return;
+        if (send(request) !== "sent" && action.kind !== "read") applyAgentRosterError({ project_key: routeProjectKey,
+          request_id: request.request_id, message: "Member change could not be sent. Reload members and retry when connected." });
+      }
+      function failAgentEnvironmentPriority(message) {
+        executionEnvironmentsModel.update(state => state.agentPriorityPending
+          ? { ...state, agentPriorityPending: null, agentPriorityError: { memberId: state.agentPriorityPending, message } }
+          : state);
+      }
+      function setAgentEnvironmentPriority(memberId, environmentIds) {
+        if (executionEnvironmentsModel.read().agentPriorityPending) return;
+        executionEnvironmentsModel.update(state => ({ ...state, agentPriorityPending: memberId, agentPriorityError: null }));
+        if (send({ kind: "set_agent_execution_environments", member_id: memberId, environment_ids: environmentIds }) !== "sent") {
+          failAgentEnvironmentPriority("Reconnect before changing the execution environment priority.");
+        }
       }
       function requestAgentSchedule(action = { kind: "read" }) {
         if (action.kind !== "read" && action.expected_roster_revision !== rosterModel.read().revision) {
@@ -5800,7 +5920,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
         if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch();
-          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); }
+          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); send({ kind: "get_execution_environments" }); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -5809,15 +5929,21 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, executionModel: projectExecutionPolicy.model,
-        projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, executionEnvironmentsModel, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+        onReloadProfile: () => requestAgentRoster(),
+        onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
+        onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
-        onAddMember: (agentId, name) => {
+        onAddMember: name => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
-          requestAgentRoster({ kind: "add", agent_id: agentId, name });
+          requestAgentRoster({ kind: "add", name });
         },
-        onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onMoveMember: (memberId, direction) => requestAgentRoster({ kind: "move", member_id: memberId, direction }),
+        onRemoveMember: memberId => requestAgentRoster({ kind: "remove", member_id: memberId }),
+        onSetTraits: (memberId, traits) => requestAgentRoster({ kind: "set_traits", member_id: memberId, traits }),
+        onSetEnvironmentPriority: setAgentEnvironmentPriority,
+        onSetAvatar: (memberId, avatar) => requestAgentRoster({ kind: "set_avatar", member_id: memberId, avatar }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
         onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),
@@ -5825,9 +5951,83 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         onReassign: requestAgentSchedule,
         onRefreshSchedule: () => { requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); },
         onOpenWork: openAssignedWork,
+        onOpenPmTerminal: (windowId, sessionId) => {
+          const pm = workspaceWindowById(windowId);
+          if (pm?.is_pm && pm.session_id === sessionId) requestWindowFrame(windowId);
+        },
       });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
+      // Issue #7646: the header and Application settings both lead to the ledger.
+      document.addEventListener("agents:open", () => openAgents("ledger"));
+      // Issue #7648: Execution environments is the one screen that shows
+      // provider usage, reset times and limit state, opened from the top bar.
+      const executionEnvironments = createExecutionEnvironments({
+        document, usageModel, supportedAgentsModel, renderAccountUsage, send,
+        definitionsModel: executionEnvironmentsModel,
+        loginEventModel: poolLoginEventModel,
+        openLoginTerminal: (element, onData) => {
+          const terminal = new Terminal({
+            cols: 80, rows: 24, theme: XTERM_THEME_DARK,
+            fontFamily: resolveTerminalFontFamily(), fontSize: 13, scrollback: 0,
+          });
+          terminal.open(element);
+          terminal.focus();
+          const input = terminal.onData(onData);
+          return {
+            appendOutput: data => terminal.write(decodeBase64(data)),
+            dispose: () => { input.dispose(); terminal.dispose(); },
+          };
+        },
+        onOpenToolManagement: () => document.dispatchEvent(
+          new CustomEvent("settings:open", { detail: { target: "supported-agents" } })),
+        onSetUsageCollection: (provider, enabled) => {
+          if (provider === "claude_code") send({ kind: "set_claude_account_usage_enabled", enabled });
+        },
+      });
+      executionEnvironments.element.hidden = true;
+      document.querySelector(".surface-area").appendChild(executionEnvironments.element);
+      function setEnvironmentsHost(host) {
+        const changed = executionEnvironments.element.hidden === Boolean(host);
+        executionEnvironments.element.hidden = !host;
+        if (!host && changed) executionEnvironments.closeLogin(false);
+        const targetHost = host || document.querySelector(".surface-area");
+        if (executionEnvironments.element.parentElement !== targetHost) targetHost.appendChild(executionEnvironments.element);
+        if (host && changed) {
+          send({ kind: "list_supported_agents" });
+          executionEnvironments.reload();
+        }
+      }
+      function openExecutionEnvironments(view = "environments") {
+        executionEnvironments.open(view);
+        openSurface("environments");
+      }
+      windowCatalogModel.subscribe(state => JSON.stringify(
+        catalogActiveWindows(state.catalog).map(window => [window.id, window.session_id])
+      ), () => executionEnvironments.refreshVisibleAccounts());
+      document.addEventListener("environments:open", event => openExecutionEnvironments(event.detail?.view));
+      // Issue #7643: Themes groups the project's Issues; opened from the rail.
+      const projectThemes = createProjectThemes({
+        document, send, repliesModel: themeRepliesModel, // An issue under a theme opens in the Issues screen, like an Issue link
+        // in a window header.
+        onOpenIssue: number => runIssueWindowHeaderAction("open-issue", { linked_issue_number: number }),
+        onOpenConversation: ({ messageId }) => openPmMessage(messageId),
+        getProjectKey: activeProjectKey,
+        onHierarchyChange: renderAllKnowledgeBridgeWindows,
+      });
+      loadIssueThemes = projectThemes.loadHierarchy;
+      updateThemeConnection = projectThemes.updateConnection;
+      const themesElement = projectThemes.element;
+      themesElement.hidden = true;
+      document.querySelector(".surface-area").appendChild(themesElement);
+      function setThemesHost(host) {
+        const changed = themesElement.hidden === Boolean(host);
+        themesElement.hidden = !host;
+        const targetHost = host || document.querySelector(".surface-area");
+        if (themesElement.parentElement !== targetHost) targetHost.appendChild(themesElement);
+        // Progress is GitHub's, read each time the screen opens.
+        if (host && changed) projectThemes.reload();
+      }
       // Telemetry updates keep the current native terminal host.
       worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync(false));
       splitSurfaces = createSplitSurfaces({
@@ -5838,6 +6038,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         getElement: (id) => windowMap.get(id),
         onWorksHost: setWorksHost,
         onAgentsHost: setRosterHost,
+        onEnvironmentsHost: setEnvironmentsHost,
+        onThemesHost: setThemesHost,
 
         openSurface: (surface) => {
           const preset = surface === "issues" ? "issue" : surface;
@@ -5865,7 +6067,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (splitSurfaces.containsWindow(id) || (worksHost && worksSurface.isVisible(id))) scheduleTerminalFit(id, true);
         }
       });
-      installSurfaceRail(document, { openSurface });
+      installSurfaceRail(document, { openSurface: surface => surface === "agents" ? openAgents("project") : openSurface(surface) });
       launchWizardVisibilityModel.subscribe(model => model.open, open => {
         if (open) openSurface("works");
       });
@@ -5884,11 +6086,23 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       pmLauncherModel.subscribe(state => state, () => {
         if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
       });
+      // Issue #7646 AC-7: the Hub's header opens this page on the ledger. It
+      // runs once the surfaces exist, before the initial window is restored,
+      // which it supersedes.
+      {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get("view") === "agents") {
+          url.searchParams.delete("view");
+          window.history?.replaceState?.(null, "", `${url.pathname}${url.search}${url.hash}`);
+          openAgents("ledger");
+        }
+      }
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {
+          // Preserve a rail choice made before the first project is hydrated.
+          if (initialSurfaceTabId !== null) initialSurfaceSelected = false;
           initialSurfaceTabId = tabId;
-          initialSurfaceSelected = false;
         }
         const pending = windowCatalogModel.read().pendingSurface;
         if (pending && pending.tabId === catalog.appState.active_tab_id) {
@@ -5914,8 +6128,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
       });
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
-      // Without this, Esc only worked for the Hotkey overlay and Command
-      // Palette; users were trapped in branch-cleanup / migration / wizard
+      // Without this, Esc only worked for the Hotkey overlay; users were trapped in branch-cleanup / migration / wizard
       // with pointer escape only. The window list dropdown also gets Esc
       // close so the operator chrome offers consistent keyboard escape.
       document.addEventListener("keydown", (event) => {
@@ -6000,7 +6213,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         refreshVisibleKnowledgeWindows();
       });
       window.addEventListener("pageshow", () => requestVisiblePmReports(true));
-      // SPEC-2356 — bridge Command Palette + hotkey commands into existing
+      // SPEC-2356 — bridge rail + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the existing socket transport.
 
@@ -6082,14 +6295,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             focusOrSpawnPreset("issue");
             send({ kind: "open_issue_monitor" });
             return;
-          case "open-recovery-center":
-            recoveryCenterController?.open();
-            return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");
-            return;
-          case "stop-all-windows":
-            requestStopAllWindows();
             return;
           case "toggle-notifications":
             notificationCenter.toggle();
@@ -6157,6 +6364,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               isReady: runtime?.isReady ?? null,
               readOnly: runtime?.readOnly ?? null,
               viewportRefreshPending: runtime?.viewportRefreshPending === true,
+              snapshotAccepted: runtime?.playwrightSnapshotAccepted ?? 0,
+              snapshotApplied: runtime?.playwrightSnapshotApplied ?? 0,
+              snapshotPending: runtime?.snapshotWriteCoordinator?.shouldDeferOutput() ?? false,
+              outputPending: (socketReceiveDispatcher?.pendingCount() ?? 0) > 0
+                || terminalOutputBatcher.pendingCount(windowId) > 0
+                || (runtime?.outputWrites ?? 0) > 0,
               cols: terminal?.cols ?? 0,
               rows: terminal?.rows ?? 0,
               baseY: buffer?.baseY ?? 0,
@@ -6191,9 +6404,36 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }
             return lines.join("\n");
           },
+          logicalBufferLines(windowId) {
+            const buffer = terminalMap.get(windowId)?.terminal?.buffer?.active;
+            if (!buffer) return { lines: [], scrollbackLineCount: 0 };
+            const lines = [];
+            const ends = [];
+            for (let index = 0; index < buffer.length; index += 1) {
+              const line = buffer.getLine(index);
+              if (!line) continue;
+              const text = line.translateToString(true);
+              if (line.isWrapped && lines.length) {
+                lines[lines.length - 1] += text;
+              } else {
+                lines.push(text);
+              }
+              ends[lines.length - 1] = index;
+            }
+            return {
+              lines,
+              scrollbackLineCount: ends.filter((end) => end < buffer.baseY).length,
+            };
+          },
         });
       }
 
+      // Issue #7880 (design item 137): Works has no rail entry; a person opens
+      // the terminal host from the Issue detail or the Agents screen. Specs of
+      // the host itself, including native and managed browsers that cannot
+      // install the test bridge before load, open it through the same
+      // openSurface the split view selector reaches.
+      window.__gwtSurfaceTestApi = Object.freeze({ open: surface => openSurface(surface) });
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       installPlaywrightTestBridge();
       frontendUnits.socketTransport.connect();

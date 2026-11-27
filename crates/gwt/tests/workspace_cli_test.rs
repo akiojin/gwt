@@ -9,6 +9,8 @@
 //! assignment, active Work/container, and tracked Work event. All ops run the
 //! real `gwtd` binary through the stdin JSON envelope with an isolated HOME.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -31,7 +33,6 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use chrono::Utc;
 use gwt_agent::{
     AgentId, Session, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
@@ -496,6 +497,16 @@ impl DisconnectServer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseLoss {
+    /// The Host applies, then drops the connection without a response.
+    AfterApply,
+    /// The Host applies, then breaks the response body.
+    PartialBody,
+    /// #7330: the response is lost while the Host is still publishing.
+    BeforeApply,
+}
+
 #[derive(Debug)]
 struct AppliedDisconnectObservation {
     accepted: usize,
@@ -517,7 +528,7 @@ impl ApplyThenDisconnectServer {
         project_root: &Path,
         session_id: &str,
         bearer_token: &str,
-        partial_body: bool,
+        loss: ResponseLoss,
     ) -> Self {
         let listener =
             StdTcpListener::bind(("127.0.0.1", 0)).expect("bind apply-then-disconnect server");
@@ -553,6 +564,13 @@ impl ApplyThenDisconnectServer {
                             let (authorization, operation_id, body) =
                                 read_http_json_request(&mut stream);
                             assert_eq!(authorization, format!("Bearer {bearer_token}"));
+                            let stream = if loss == ResponseLoss::BeforeApply {
+                                drop(stream);
+                                std::thread::sleep(Duration::from_millis(1500));
+                                None
+                            } else {
+                                Some(stream)
+                            };
                             let request =
                                 serde_json::from_slice::<gwt::AgentWorkspaceUpdateRequest>(&body)
                                     .expect("parse apply-then-disconnect Host request");
@@ -577,7 +595,7 @@ impl ApplyThenDisconnectServer {
                                 .expect("apply Host update before dropping response");
                             applied_receipt =
                                 Some((operation_id, receipt.work_id, receipt.journal_entry_id));
-                            if partial_body {
+                            if let (ResponseLoss::PartialBody, Some(mut stream)) = (loss, stream) {
                                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{").unwrap();
                                 stream.flush().unwrap();
                             }
@@ -1034,7 +1052,7 @@ fn assert_reconcile_git(repo: &Path, args: &[&str]) {
 fn legacy_supersession(host: &str) -> WorkEvent {
     let parent = "reconcile-parent";
     let successor = gwt_core::workspace_projection::successor_work_id(parent);
-    let mut event = WorkEvent::new(WorkEventKind::Discard, &successor, Utc::now());
+    let mut event = WorkEvent::new(WorkEventKind::Discard, &successor, UtcTimestamp::now());
     event.id = format!("superseded-{successor}");
     event.related_work_item_id = Some(parent.to_string());
     event.execution_container = Some(WorkspaceExecutionContainerRef {
@@ -1341,6 +1359,17 @@ fn mutation_state_snapshot(fixture: &Fixture) -> MutationStateSnapshot {
     MutationStateSnapshot(entries)
 }
 
+/// #7816: a settled lost update leaves only its `not_applied` claim marker.
+fn without_operation_receipts(snapshot: MutationStateSnapshot) -> MutationStateSnapshot {
+    MutationStateSnapshot(
+        snapshot
+            .0
+            .into_iter()
+            .filter(|(path, _, _)| !path.contains("workspace-update-receipts"))
+            .collect(),
+    )
+}
+
 fn container_home_state_snapshot(fixture: &Fixture) -> MutationStateSnapshot {
     let mut entries = Vec::new();
     snapshot_tree(
@@ -1494,7 +1523,7 @@ fn switch_current_projection_away_from_exact_work(
         "switching current must preserve the exact durable Session assignment"
     );
 
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut works = load_workspace_work_items_from_path(&works_path)
         .expect("load exact WorkItems before current switch")
         .expect("exact WorkItems exist before current switch");
@@ -1675,7 +1704,7 @@ fn register_agent_at_home(home: &Path, project: &Path) {
         .join(".gwt/projects")
         .join(project_scope_hash(&project_root).as_str())
         .join("project-state");
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut projection = WorkspaceProjection::default_for_project(&project_root);
     projection.agents.push(WorkspaceAgentSummary {
         session_id: SESSION.to_string(),
@@ -2581,20 +2610,27 @@ fn workspace_update_proxy_response_loss_never_replays_locally_or_to_the_host() {
 
     assert!(
         !output.status.success(),
-        "response loss must remain an unknown outcome: {}",
+        "response loss must not report success: {}",
+        output_text(&output)
+    );
+    assert!(
+        output_text(&output).contains("outcome=not_applied"),
+        "#7816: an update the Host never reserved must settle as not_applied: {}",
         output_text(&output)
     );
     assert_secret_redacted(&output, FORWARD_TOKEN);
     server.receive();
     assert_eq!(
-        mutation_state_snapshot(&fixture),
+        without_operation_receipts(mutation_state_snapshot(&fixture)),
         before,
         "response loss must not trigger a local compatibility continuation"
     );
 }
 
+/// #7816: an operation the Host never reserved settles as final `not_applied`
+/// without touching delivery state, so a stalled update never stays unconfirmed.
 #[test]
-fn workspace_receipt_missing_is_read_only_and_unconfirmed() {
+fn workspace_receipt_missing_settles_not_applied_without_delivery() {
     let fixture = fixture();
     prepare_exact_ensured_host(&fixture);
     let before = workspace_delivery_state_snapshot(&fixture);
@@ -2602,23 +2638,33 @@ fn workspace_receipt_missing_is_read_only_and_unconfirmed() {
         &fixture,
         r#"{"schema_version":1,"operation":"workspace.receipt","params":{"operation_id":"aafc5f24-e5a5-4270-956d-86ac31dafb88"}}"#,
     );
-    assert_ok(&result, "read-only receipt query");
+    assert_ok(&result, "receipt settlement");
     let receipt: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
-    assert_eq!(receipt["status"], "unconfirmed");
-    assert_eq!(workspace_delivery_state_snapshot(&fixture), before);
+    assert_eq!(receipt["status"], "not_applied");
+    assert_eq!(
+        without_operation_receipts(workspace_delivery_state_snapshot(&fixture)),
+        before
+    );
 }
 
 #[test]
 fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
-    assert_applied_response_loss_delivers_once(false);
+    assert_applied_response_loss_delivers_once(ResponseLoss::AfterApply);
 }
 
 #[test]
 fn workspace_update_proxy_body_loss_after_host_apply_delivers_once() {
-    assert_applied_response_loss_delivers_once(true);
+    assert_applied_response_loss_delivers_once(ResponseLoss::PartialBody);
 }
 
-fn assert_applied_response_loss_delivers_once(partial_body: bool) {
+/// #7330 / #6241: the response is lost before the Host finishes publishing, so
+/// the receipt is absent at the first inspection but applied moments later.
+#[test]
+fn workspace_update_proxy_response_loss_before_host_publication_delivers_once() {
+    assert_applied_response_loss_delivers_once(ResponseLoss::BeforeApply);
+}
+
+fn assert_applied_response_loss_delivers_once(loss: ResponseLoss) {
     let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
@@ -2627,7 +2673,7 @@ fn assert_applied_response_loss_delivers_once(partial_body: bool) {
         fixture.project.path(),
         SESSION,
         FORWARD_TOKEN,
-        partial_body,
+        loss,
     );
     let output = run_ws_raw_with_forward_env(
         &fixture,
@@ -3737,7 +3783,11 @@ fn store_consolidate_dry_runs_then_folds_the_split_store_into_the_canonical_one(
     let orphan_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
     let orphan_state = projects.join(orphan_hash.as_str()).join("project-state");
     fs::create_dir_all(&orphan_state).expect("orphan store");
-    let mut split_event = WorkEvent::new(WorkEventKind::Start, "work-split-store", Utc::now());
+    let mut split_event = WorkEvent::new(
+        WorkEventKind::Start,
+        "work-split-store",
+        UtcTimestamp::now(),
+    );
     split_event.id = "event-split-store".to_string();
     split_event.title = Some("Work stranded in the split store".to_string());
     let mut split_projection = WorkItemsProjection::empty(split_event.updated_at);
@@ -4019,7 +4069,8 @@ fn store_consolidate_refuses_an_apply_that_no_dry_run_issued() {
     let orphan_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
     let orphan_state = projects.join(orphan_hash.as_str()).join("project-state");
     fs::create_dir_all(&orphan_state).expect("orphan store");
-    let mut split_event = WorkEvent::new(WorkEventKind::Start, "work-unreviewed", Utc::now());
+    let mut split_event =
+        WorkEvent::new(WorkEventKind::Start, "work-unreviewed", UtcTimestamp::now());
     split_event.id = "event-unreviewed".to_string();
     let mut split_projection = WorkItemsProjection::empty(split_event.updated_at);
     split_projection.apply_event(split_event.clone());

@@ -3,7 +3,9 @@
 //! Pure functions with injected `now` so the state machine is deterministic
 //! under test.
 
-use chrono::{DateTime, Duration, Utc};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 
 use super::types::UsageState;
 
@@ -19,7 +21,7 @@ pub const DEFAULT_STALE_AFTER_SECS: i64 = 600;
 /// Whether a Claude account fetch is allowed now given the last fetch instant.
 /// Returns `true` when never fetched or when at least [`CLAUDE_MIN_FETCH_SECS`]
 /// have elapsed.
-pub fn should_fetch_claude(last_fetch: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+pub fn should_fetch_claude(last_fetch: Option<UtcTimestamp>, now: UtcTimestamp) -> bool {
     match last_fetch {
         None => true,
         Some(last) => now.signed_duration_since(last) >= Duration::seconds(CLAUDE_MIN_FETCH_SECS),
@@ -27,12 +29,12 @@ pub fn should_fetch_claude(last_fetch: Option<DateTime<Utc>>, now: DateTime<Utc>
 }
 
 /// Age in whole seconds since `fetched_at`, clamped to `0`.
-pub fn age_secs(fetched_at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
-    now.signed_duration_since(fetched_at).num_seconds().max(0) as u64
+pub fn age_secs(fetched_at: UtcTimestamp, now: UtcTimestamp) -> u64 {
+    now.signed_duration_since(fetched_at).whole_seconds().max(0) as u64
 }
 
 /// True when `fetched_at` is older than `stale_after_secs`.
-pub fn is_stale(fetched_at: DateTime<Utc>, now: DateTime<Utc>, stale_after_secs: i64) -> bool {
+pub fn is_stale(fetched_at: UtcTimestamp, now: UtcTimestamp, stale_after_secs: i64) -> bool {
     now.signed_duration_since(fetched_at) > Duration::seconds(stale_after_secs)
 }
 
@@ -40,8 +42,8 @@ pub fn is_stale(fetched_at: DateTime<Utc>, now: DateTime<Utc>, stale_after_secs:
 /// Non-`Ok` states pass through unchanged.
 pub fn apply_staleness(
     state: UsageState,
-    fetched_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    fetched_at: Option<UtcTimestamp>,
+    now: UtcTimestamp,
     stale_after_secs: i64,
 ) -> UsageState {
     match (&state, fetched_at) {
@@ -56,8 +58,8 @@ pub fn apply_staleness(
 mod tests {
     use super::*;
 
-    fn t(secs: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_780_000_000 + secs, 0).unwrap()
+    fn t(secs: i64) -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(1_780_000_000 + secs, 0).unwrap()
     }
 
     #[test]

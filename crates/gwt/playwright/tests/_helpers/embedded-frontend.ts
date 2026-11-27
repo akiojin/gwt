@@ -8,6 +8,8 @@
  * `tests/kanban.spec.ts` and `tests/index-status.spec.ts` for examples.
  */
 import path from "node:path";
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 
 const WEB_ROOT = path.resolve(process.cwd(), "crates/gwt/web");
 
@@ -18,6 +20,8 @@ export const ORIGIN_URL = "http://gwt-playwright.local/";
 export const APP_PROJECT_KEY = "0123456789abcdef";
 export const APP_URL = `${ORIGIN_URL}p/${APP_PROJECT_KEY}`;
 export const HUB_URL = ORIGIN_URL;
+// Issue #7639: `/` opens on Home; the picker is its Projects view.
+export const HUB_PROJECTS_URL = `${ORIGIN_URL}?view=projects`;
 
 const ROOT_MODULES = new Set([
   "app.js",
@@ -29,7 +33,17 @@ const ROOT_MODULES = new Set([
   // SPEC #7007 — task-centered Progress island host imported by pm-chat.js.
   "task-progress.js",
   // SPEC #7007 — task-centered Log island host imported by pm-chat.js and app.js.
-  "task-log.js",
+  // Issue #7648 — Execution environments island host imported by app.js.
+  "execution-environments.js",
+  // Issue #7740 — shared header and footer imported by app.js, hub-app.js and frontend-route.js.
+  "app-chrome.js",
+  // Issue #7639 — Home conversation host imported by hub-app.js.
+  "home-conversation.js",
+  "attachment-upload.js",
+  // Issue #7731 — first-run setup host imported by hub-app.js and settings-surface.js.
+  "first-run-setup.js",
+  "project-execution-environments.js",
+  "project-themes.js",
   // SPEC #7007 T-014 — typed window command error presentation imported by app.js.
   "window-command-error.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
@@ -49,7 +63,6 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",
-  "recovery-center-modal.js",
   "branch-cleanup-modal.js",
   // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
   // self-heal / last-known retention / stale-load guard.
@@ -59,6 +72,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
   "close-project-confirm-modal.js",
+  "project-autonomy.js",
   "project-execution-policy-model.js",
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
@@ -68,6 +82,7 @@ const ROOT_MODULES = new Set([
   "surface-rail.js",
   "split-surfaces.js",
   "agents-surface.js",
+  "agent-avatar.js",
   "works-surface.js",
   "terminal-text-preview.js",
   "focus-trap.js",
@@ -127,6 +142,8 @@ const ROOT_MODULES = new Set([
   "terminal-output-buffer.js",
   "terminal-wheel-scroll.js",
   "terminal-viewport-reflow.js",
+  // Issue #7702 — IME commit gate imported by app.js.
+  "terminal-input-commit.js",
   "theme-manager.js",
   "theme-toggle.js",
   "ui-trace-profiler.js",
@@ -154,6 +171,38 @@ export async function installEmbeddedRoutes(page: any): Promise<void> {
       contentType: contentTypeFor(assetPath),
     });
   });
+}
+
+// Native CDP pages deliberately avoid Playwright's page and route fixtures.
+export async function serveEmbeddedFrontend() {
+  const server = createServer(async (request, response) => {
+    const pathname = new URL(request.url ?? "/", ORIGIN_URL).pathname;
+    if (pathname === "/favicon.ico") {
+      response.writeHead(204).end();
+      return;
+    }
+    const assetPath = resolveAssetPath(pathname);
+    try {
+      if (assetPath) {
+        const body = await readFile(assetPath);
+        response.writeHead(200, { "Content-Type": contentTypeFor(assetPath) }).end(body);
+        return;
+      }
+    } catch { /* Report a missing fixture asset to the browser. */ }
+    response.writeHead(404).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing embedded fixture server address");
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    }),
+  };
 }
 
 function resolveAssetPath(pathname: string): string | null {

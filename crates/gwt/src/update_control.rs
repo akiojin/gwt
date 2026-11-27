@@ -81,7 +81,7 @@ mod tests {
         let mut owner = TrayLockFile {
             pid: std::process::id(),
             url: format!("http://{}/", listener.local_addr().unwrap()),
-            started_at: chrono::Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             version: "9.122.0".to_string(),
             control_token: Some("private-control-token".to_string()),
         };

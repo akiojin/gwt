@@ -13,6 +13,9 @@ thread_local! {
     static HOME_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
+/// Leaf prefix of the per-command temporary directory verify.run creates.
+pub const VERIFICATION_COMMAND_TEMP_PREFIX: &str = "gwt-verify-";
+
 pub fn gwt_home_override() -> Option<PathBuf> {
     HOME_OVERRIDE.with(|home| home.borrow().clone())
 }
@@ -45,6 +48,21 @@ pub fn user_home() -> Option<PathBuf> {
         );
     }
     home
+}
+
+/// Keep a derived third-party config path, such as Codex's, in test storage.
+///
+/// Cargo test processes redirect an unisolated path to the same relative
+/// location under [`user_home`], as `user_home` does for HOME, so fixtures and
+/// their worker threads cannot write the real account config. Production
+/// returns the path unchanged (SPEC #5082 AC-22).
+pub fn test_isolated_config_path(path: PathBuf, home_relative: &Path) -> PathBuf {
+    if (is_test_process() || gwt_home_override().is_some()) && !is_isolated(&path) {
+        if let Some(home) = user_home() {
+            return home.join(home_relative);
+        }
+    }
+    path
 }
 
 pub(crate) fn resolve_config_home_dir(
@@ -119,6 +137,12 @@ fn is_isolated(path: &Path) -> bool {
     {
         return true;
     }
+    // verify.run may relocate a command's temp base to another volume (#7344).
+    // Trust only its fresh per-command leaf, never the base or another TEMP.
+    if verification_command_temp_dir().is_some_and(|temporary| is_isolated_under(path, &temporary))
+    {
+        return true;
+    }
     // Socket fixtures deliberately use the OS short temp root when TMPDIR
     // is a long per-user or per-verification directory. Resolve /tmp's macOS
     // alias, and apply the same parent/leaf checks to this trusted root.
@@ -131,6 +155,15 @@ fn is_isolated(path: &Path) -> bool {
         return true;
     }
     false
+}
+
+fn verification_command_temp_dir() -> Option<PathBuf> {
+    let temporary = std::env::temp_dir().canonicalize().ok()?;
+    temporary
+        .file_name()?
+        .to_str()?
+        .starts_with(VERIFICATION_COMMAND_TEMP_PREFIX)
+        .then_some(temporary)
 }
 
 #[cfg(windows)]
@@ -230,7 +263,13 @@ fn resolved_path(path: &Path) -> Option<PathBuf> {
                 resolved.push(component.as_os_str());
                 match std::fs::symlink_metadata(&resolved) {
                     Ok(_) => resolved = resolved.canonicalize().ok()?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    // Below a regular file nothing can be created, so keep
+                    // the lexical remainder like a missing path.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
                     Err(_) => return None,
                 }
             }
@@ -310,6 +349,44 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // Same child-process shape as configured_temp_root_cannot_disable_the_guard.
+    #[allow(clippy::disallowed_methods)]
+    fn relocated_verification_command_temp_isolates_only_its_own_leaf() {
+        // #7344: verify.run may place a command's temp base on another volume.
+        // The target dir stands in for that volume: it is outside the OS temp roots.
+        let exe = std::env::current_exe().unwrap();
+        let base = exe.parent().unwrap().parent().unwrap();
+        let run_child = |temporary: &Path| {
+            std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "home::tests::scoped_home_is_nested_and_thread_local",
+                ])
+                .env("TMPDIR", temporary)
+                .env("TMP", temporary)
+                .env("TEMP", temporary)
+                .output()
+                .unwrap()
+        };
+        let command_temp = tempfile::Builder::new()
+            .prefix(VERIFICATION_COMMAND_TEMP_PREFIX)
+            .tempdir_in(base)
+            .unwrap();
+        let output = run_child(command_temp.path());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let other = tempfile::Builder::new()
+            .prefix("gwt-other-")
+            .tempdir_in(base)
+            .unwrap();
+        assert!(!run_child(other.path()).status.success());
     }
 
     #[test]

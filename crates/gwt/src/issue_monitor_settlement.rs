@@ -127,9 +127,15 @@ pub fn render_settlement_comment(
         MergedIssueSettlementAction::AwaitMeasurement { unmet } => {
             body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} の未達 AC は実測専用です。Autonomous が on なら実測待ち（awaiting_measurement）、off なら needs_human として判断を待ちます。測定後に AC を更新するか、明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
         }
+        MergedIssueSettlementAction::AwaitVerification { unmet } => {
+            body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} の残条件はリリース・main・別ホストでの確認です。Autonomous が on なら確認待ち（awaiting_verification）、off なら needs_human として判断を待ちます。残条件と確認主体は Issue の各 AC に記録します。確認可能になったら明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
+        }
     }
     body.push_str("\nManaged by gwt Issues.\n");
-    body
+    crate::session_launch::stamp_github_body(
+        &body,
+        Some(&crate::session_launch::issues_github_writer()),
+    )
 }
 
 /// Shared delivery check for merge settlements. A conflict is advisory:
@@ -314,6 +320,18 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
     let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(&source);
     let effective_action = match action {
         MergedIssueSettlementAction::UnmetAcceptance { .. }
+        | MergedIssueSettlementAction::AwaitClose { .. }
+        | MergedIssueSettlementAction::Close { .. }
+        | MergedIssueSettlementAction::ContinueWork { .. }
+        | MergedIssueSettlementAction::AwaitMeasurement { .. }
+        | MergedIssueSettlementAction::AwaitVerification { .. }
+            if criteria.only_external_verification_remaining() =>
+        {
+            Some(MergedIssueSettlementAction::AwaitVerification {
+                unmet: criteria.unchecked.clone(),
+            })
+        }
+        MergedIssueSettlementAction::UnmetAcceptance { .. }
             if criteria.only_measurement_remaining() =>
         {
             Some(MergedIssueSettlementAction::AwaitMeasurement {
@@ -332,7 +350,8 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             })
         }
         MergedIssueSettlementAction::ContinueWork { .. }
-        | MergedIssueSettlementAction::AwaitMeasurement { .. } => {
+        | MergedIssueSettlementAction::AwaitMeasurement { .. }
+        | MergedIssueSettlementAction::AwaitVerification { .. } => {
             Some(if criteria.only_measurement_remaining() {
                 MergedIssueSettlementAction::AwaitMeasurement {
                     unmet: criteria.unchecked.clone(),
@@ -489,6 +508,32 @@ mod tests {
     }
 
     #[test]
+    fn settlement_comment_names_gwt_issues_once() {
+        let body = render_settlement_comment(
+            42,
+            7,
+            Some("abc"),
+            &MergedIssueSettlementAction::Close { delegated: false },
+        );
+        assert!(body.contains("gwt Issues が Issue #42 を close します"));
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.trim() == "— gwt Issues")
+                .count(),
+            1,
+            "{body}"
+        );
+        assert!(body.contains("\"role\":\"issues\""));
+        assert_eq!(
+            crate::session_launch::stamp_github_body(
+                &body,
+                Some(&crate::session_launch::issues_github_writer())
+            ),
+            body
+        );
+    }
+
+    #[test]
     fn close_settlement_comments_then_closes_with_readback() {
         // Issue #3917 AC-1: close + comment carrying merge SHA and PR number.
         let client = FakeIssueClient::new();
@@ -605,6 +650,43 @@ mod tests {
             .comments(IssueNumber(42))
             .iter()
             .any(|comment| comment.body.contains("fresh launch")));
+    }
+
+    #[test]
+    fn issue_7536_live_external_verification_reclassifies_a_pending_continuation() {
+        let client = FakeIssueClient::new();
+        let repo = delivery_repo();
+        seed_open_issue(&client, 42, vec![]);
+        let FetchResult::Updated(mut snapshot) = client.fetch(IssueNumber(42), None).unwrap()
+        else {
+            panic!("snapshot")
+        };
+        snapshot.body =
+            "## Acceptance Criteria\n- [ ] AC-1: PM checks released main [main-verification]\n"
+                .into();
+        client.seed(snapshot);
+        let outcome = settle_merged_issue(
+            &client,
+            &repository(),
+            repo.path(),
+            42,
+            7,
+            Some("abc123"),
+            &MergedIssueSettlementAction::ContinueWork {
+                unmet: vec!["AC-1".into()],
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(!outcome.closed);
+        assert_eq!(
+            serde_json::to_value(outcome.rechecked_acceptance.unwrap().0).unwrap()["kind"],
+            "await_verification"
+        );
+        assert!(client
+            .comments(IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("awaiting_verification")));
     }
 
     #[test]

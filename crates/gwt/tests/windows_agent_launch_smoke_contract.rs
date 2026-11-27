@@ -4,6 +4,9 @@
 
 use std::{fs, path::PathBuf};
 
+#[path = "support/installed_provider_fixture.rs"]
+mod installed_provider_fixture;
+
 #[path = "windows_shell_observer.rs"]
 mod shell_observer;
 
@@ -37,6 +40,30 @@ fn repo_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("workspace root")
         .to_path_buf()
+}
+
+#[test]
+fn windows_startup_restore_waits_for_previous_gui_before_stopping_owner() {
+    let e2e = fs::read_to_string(repo_root().join("crates/gwt/tests/windows_agent_launch_e2e.rs"))
+        .expect("read Windows E2E source");
+    let (restart, _) = e2e
+        .split_once("fn windows_startup_restored_provider_tree_closes_through_public_gui()")
+        .and_then(|(_, test)| test.split_once("let restored_app = WindowsRealGwtFixture::start"))
+        .expect("cold restart setup");
+    let mut remaining = restart;
+    for step in [
+        "first_app.root.terminate();",
+        "first_app.root.assert_exited_by(",
+        "first.owner.terminate();",
+        "first.owner.assert_exited_by(",
+        "first.assert_tree_exited();",
+        "drop(first_app);",
+    ] {
+        remaining = remaining
+            .split_once(step)
+            .unwrap_or_else(|| panic!("cold restart is missing or reorders {step}"))
+            .1;
+    }
 }
 
 #[test]

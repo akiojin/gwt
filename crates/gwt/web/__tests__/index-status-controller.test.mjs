@@ -101,7 +101,7 @@ test("Index health commits an immutable project snapshot and ignores unrelated p
   assert.equal(frames.length, 1, 'both views share one pending frame despite unrelated trailing status');
   frames.shift()();
   assert.ok(settingsSnapshot === latest, 'Settings pulls the latest committed snapshot');
-  assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
+  assert.match(document.querySelector('.index-search-health-summary').textContent, /Ready 1\/9/);
   assert.match(document.querySelector("tr[data-scope='issues']").textContent, /50 docs/);
   controller.setIndexStatus('/other', { state: 'error' });
   assert.equal(settingsRenders, 1);
@@ -293,7 +293,7 @@ test("Index health still renders a committed snapshot when another view fails", 
     callback => { frames.push(callback); return () => {}; });
   controller.setIndexStatus('/repo', { state: 'ready', scopes: { issues: { healthy: true } } });
   assert.throws(() => frames.shift()(), /settings failed/);
-  assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
+  assert.match(document.querySelector('.index-search-health-summary').textContent, /Ready 1\/9/);
   assert.equal(controller.getIndexStatus('/repo').scopes.issues.healthy, true);
 });
 
@@ -517,9 +517,9 @@ test("Index search tab renders abnormal-first health summary without repair cont
   );
   assert.ok(
     indexSurfaceSource.includes("buildIndexHealthSummary(") &&
-      indexSurfaceSource.includes("readyCount") &&
-      indexSurfaceSource.includes("degradedScopes"),
-    "Search health summary should be built from ready/degraded scope counts",
+      indexSurfaceSource.includes("scopeReadyCount") &&
+      indexSurfaceSource.includes("attentionScopes"),
+    "Search health summary should be built from the nine-scope ready/attention counts",
   );
   assert.ok(
     !indexSurfaceSource.includes('data-action="open-project"') &&

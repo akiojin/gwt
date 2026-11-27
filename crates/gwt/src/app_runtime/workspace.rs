@@ -20,6 +20,8 @@
 //! GUI view and cleanup adapters remain here. Launch publication and successor
 //! transitions use the single implementation in `gwt::project_runtime::workspace`.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -39,7 +41,7 @@ use super::{
 pub(super) fn merge_active_sessions_into_projection<'a>(
     projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
     sessions: impl IntoIterator<Item = &'a ActiveAgentSession>,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) {
     for session in sessions {
         let existing = projection
@@ -71,7 +73,7 @@ pub(super) fn merge_active_sessions_into_projection<'a>(
 pub(super) fn retain_live_workspace_agents(
     projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
     sessions: &[&ActiveAgentSession],
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) {
     // SPEC-2359 US-80 (FR-429): live agent sessions have no authority over
     // shell liveness, so keep every Shell Work here — otherwise the broadcast
@@ -87,7 +89,7 @@ pub(super) fn workspace_projection_for_current_resume(
     mut projection: gwt_core::workspace_projection::WorkspaceProjection,
     sessions: &[&ActiveAgentSession],
     tab_title: &str,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> gwt_core::workspace_projection::WorkspaceProjection {
     merge_active_sessions_into_projection(&mut projection, sessions.iter().copied(), updated_at);
     retain_live_workspace_agents(&mut projection, sessions, updated_at);
@@ -206,7 +208,7 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                             gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
                                 &project_root,
                                 &branch,
-                                chrono::Utc::now(),
+                                UtcTimestamp::now(),
                             );
                         if let Some(event) =
                             clear_workspace_cleanup_git_details_event(&project_root)
@@ -235,7 +237,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
         match gwt_core::workspace_projection::mutate_existing_workspace_projection_for_cleanup(
             project_root,
             |projection| {
-                projection.clear_git_details_to_idle(chrono::Utc::now());
+                projection.clear_git_details_to_idle(UtcTimestamp::now());
                 Ok(projection.clone())
             },
         ) {
@@ -532,7 +534,10 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: format!("Window preset {:?} is not a Work surface", window.preset),
+                    message: format!(
+                        "{} is not a Work surface. Open Works to use this action.",
+                        window.preset.title()
+                    ),
                 },
             )];
         }

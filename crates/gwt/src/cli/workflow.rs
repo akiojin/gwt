@@ -8,9 +8,8 @@
 //! `workflow_bypass_armed_at` is fresh, so a forgotten disarm expires on its
 //! own.
 
-use chrono::Utc;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, update_session, Session, WorkflowBypass};
-use gwt_core::paths::gwt_sessions_dir;
+use gwt_core::{paths::gwt_sessions_dir, timestamp::UtcTimestamp};
 use gwt_github::{ApiError, SpecOpsError};
 
 use super::{CliEnv, WorkflowCommand};
@@ -69,18 +68,18 @@ fn apply_bypass(
         match mode {
             WorkflowBypassMode::Release => {
                 session.workflow_bypass = Some(WorkflowBypass::Release);
-                session.workflow_bypass_armed_at = Some(Utc::now());
+                session.workflow_bypass_armed_at = Some(UtcTimestamp::now());
             }
             WorkflowBypassMode::Chore => {
                 session.workflow_bypass = Some(WorkflowBypass::Chore);
-                session.workflow_bypass_armed_at = Some(Utc::now());
+                session.workflow_bypass_armed_at = Some(UtcTimestamp::now());
             }
             WorkflowBypassMode::Off => {
                 session.workflow_bypass = None;
                 session.workflow_bypass_armed_at = None;
             }
         }
-        session.updated_at = Utc::now();
+        session.updated_at = UtcTimestamp::now();
         Ok(())
     })
     .map_err(|err| config_error(format!("failed to update session {session_id}: {err}")))

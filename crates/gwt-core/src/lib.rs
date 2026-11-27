@@ -13,6 +13,7 @@ pub mod coordination;
 pub mod daemon;
 pub mod daemon_pipe_name;
 pub mod deadline_budget;
+pub mod decision_queue;
 pub mod error;
 pub mod error_ledger;
 pub mod fd_limit;
@@ -46,6 +47,7 @@ pub mod runtime;
 pub mod skill_state;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod timestamp;
 pub mod update;
 pub mod usage;
 pub mod user_instruction;

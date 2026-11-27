@@ -134,8 +134,11 @@ test.describe("Issue preview placement", () => {
     await page.locator(".surface-knowledge [data-issue-view='list']").click(); await openIssueOutput(page);
     await page.getByRole("combobox", { name: "Left pane surface" }).focus();
     await page.getByRole("button", { name: "Close split", exact: true }).click();
-    await expect(page.locator(".issue-preview .xterm")).toBeVisible();
-    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview").readOnly)).toBe(true);
+    await expect(preview).toBeVisible();
+    await expect(page.locator(".issue-preview-mode")).toHaveText("Read-only preview");
+    const inputCount = await page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input").length);
+    await preview.click(); await page.keyboard.type("preview remains read only");
+    expect(await page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input").length)).toBe(inputCount);
     await page.evaluate(() => window.__emitAgentOutput("RESTORED READ ONLY"));
     await expect(page.locator(".issue-preview")).toContainText("RESTORED READ ONLY");
   });
@@ -505,7 +508,7 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator("#op-strip-running")).toHaveText("3");
     const inline = page.locator("#op-strip-running-inline");
     await expect(inline).toBeVisible();
-    await expect(inline).toHaveText("3 inline");
+    await expect(inline).toHaveText("3 in Issues");
     await expect(page.locator(".op-status-strip__cell--running")).toHaveAttribute(
       "title",
       "3 of 3 running agents are inline terminals in the Issue window",
@@ -520,7 +523,7 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".works-terminal[data-window-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect(page.locator("#canvas, #fleet-minimap")).toHaveCount(0);
     await expect(page.locator("#op-strip-running")).toHaveText("3");
-    await expect(inline).toHaveText("2 inline");
+    await expect(inline).toHaveText("2 in Issues");
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
 
     // SPEC #3885 T-005 / FR-012: the row keeps the Issue ↔ agent link as a

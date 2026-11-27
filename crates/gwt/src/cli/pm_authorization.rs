@@ -141,7 +141,11 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
                 return Err(invalid());
             }
         }
-        "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
+        "pr.reopen"
+        | "pr.review.submit"
+        | "release.metadata.set"
+        | "repository.settings.set"
+        | "repository.branch_protection.update" => {
             gwt_github::client::http::validate_pm_settings(&intent.operation, &intent.params)
                 .map_err(io::Error::other)?;
         }
@@ -294,9 +298,10 @@ fn request_with(
         "project.execution.choose" => "Continue preserves this project's admitted work. Stop blocks new admission and gracefully drains this project while preserving its work and history.",
         "board.config.set" | "discussion.create" => "Board synchronization can publish this project's Board entries to its repository Discussion.",
         "repository.required_checks.update" => "This changes required check contexts on the selected develop/main branch.",
+        "repository.branch_protection.update" => "This rewrites only the named protection fields on the selected develop/main branch; every other protection field is carried through unchanged.",
         "actions.release_policy.add" | "actions.release_policy.rollback" => "This changes only prepare-release.yml permission for the current repository. It does not dispatch a workflow. Rollback requires the original successful add receipt and unchanged post-state.",
         "actions.diagnostic.policy.add" | "actions.diagnostic.policy.rollback" => "This changes only windows-diagnostic.yml permission for akiojin/gwt. It does not submit or rerun a diagnostic. Rollback requires this target's successful add receipt and unchanged post-state.",
-        "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed external fork head. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
+        "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed PR head, including recovery when merge automation cannot start. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
         _ => "The existing operation's ownership and safety checks still apply.",
     };
     let approval_scope = if intent.operation == "project.execution.choose" {
@@ -519,20 +524,22 @@ fn validate_checks_response(desired: &Value, after: &Value) -> io::Result<()> {
     Ok(())
 }
 
-fn reviewed_external_pr<E: CliEnv>(env: &mut E, p: &AutoMergeInput) -> io::Result<Value> {
+fn reviewed_auto_merge_pr<E: CliEnv>(env: &mut E, p: &AutoMergeInput) -> io::Result<Value> {
     let snapshot = env.fetch_auto_merge_pr(p.number)?;
     let pr = &snapshot.inventory;
     let refuse = |reason| {
         io::Error::new(io::ErrorKind::PermissionDenied, format!(
-        "external fork auto-merge refused: {reason}; review the current PR before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks"
+        "auto-merge refused: {reason}; review the current PR before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks or fail to start"
     ))
     };
     if pr.number != p.number
         || snapshot.state != gwt_git::pr_status::PrState::Open
         || pr.is_draft
-        || pr.is_cross_repository != Some(true)
+        || pr.is_cross_repository.is_none()
     {
-        return Err(refuse("a current OPEN, Ready external fork PR is required"));
+        return Err(refuse(
+            "a current OPEN, Ready PR with known repository identity is required",
+        ));
     }
     if snapshot.head_sha != p.reviewed_head_sha
         || pr.head_sha.as_deref() != Some(p.reviewed_head_sha.as_str())
@@ -555,14 +562,19 @@ fn reviewed_external_pr<E: CliEnv>(env: &mut E, p: &AutoMergeInput) -> io::Resul
             "current mergeability and passing CI must be measured",
         ));
     }
-    if !pr.review_status.eq_ignore_ascii_case("APPROVED") || pr.unresolved_review_threads != Some(0)
-    {
-        return Err(refuse(
-            "current approval and zero unresolved review threads must be measured",
-        ));
+    if pr.is_cross_repository == Some(true) {
+        if !pr.review_status.eq_ignore_ascii_case("APPROVED")
+            || pr.unresolved_review_threads != Some(0)
+        {
+            return Err(refuse(
+                "current approval and zero unresolved review threads must be measured",
+            ));
+        }
+    } else if let Some(blocker) = pr.completion_blocker() {
+        return Err(refuse(blocker));
     }
     Ok(
-        json!({"number":p.number,"reviewed_head_sha":snapshot.head_sha,"is_cross_repository":true,
+        json!({"number":p.number,"reviewed_head_sha":snapshot.head_sha,"is_cross_repository":pr.is_cross_repository,
         "state":"OPEN","ci_status":pr.ci_status,"review_status":pr.review_status,
         "auto_merge_enabled":pr.auto_merge_enabled}),
     )
@@ -602,8 +614,12 @@ fn execute<E: CliEnv>(
             let p: ChecksInput = decode(&intent.params)?;
             checks_projection(&env.required_status_checks(&p.branch)?)?
         }
-        "pr.auto_merge.enable" => reviewed_external_pr(env, &decode(&intent.params)?)?,
-        "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
+        "pr.auto_merge.enable" => reviewed_auto_merge_pr(env, &decode(&intent.params)?)?,
+        "pr.reopen"
+        | "pr.review.submit"
+        | "release.metadata.set"
+        | "repository.settings.set"
+        | "repository.branch_protection.update" => {
             env.pm_settings_snapshot(&intent.operation, &intent.params)?
         }
         "discussion.create" | "board.config.set" => {
@@ -703,7 +719,11 @@ fn execute<E: CliEnv>(
             let p: AutoMergeInput = decode(&intent.params)?;
             env.enable_pr_auto_merge(p.number, &p.reviewed_head_sha)
         }
-        "pr.reopen" | "pr.review.submit" | "release.metadata.set" | "repository.settings.set" => {
+        "pr.reopen"
+        | "pr.review.submit"
+        | "release.metadata.set"
+        | "repository.settings.set"
+        | "repository.branch_protection.update" => {
             env.pm_settings_mutate(&intent.operation, &intent.params, &before)
         }
         _ => unreachable!(),
@@ -770,6 +790,68 @@ mod tests {
     }
 
     #[test]
+    fn same_repository_auto_merge_recovery_keeps_ready_gates() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        let sha = "a".repeat(40);
+        let input = super::AutoMergeInput {
+            number: 17,
+            reviewed_head_sha: sha.clone(),
+        };
+        let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
+            &json!([{
+                "number":17,"state":"OPEN","isDraft":false,"isCrossRepository":false,
+                "headRefOid":sha,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+                "reviewDecision":"","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],
+                "body":"Agent Visual Check: n/a (no UI surface)",
+            }])
+            .to_string(),
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )
+        .unwrap()
+        .remove(0);
+        inventory.unresolved_review_threads = Some(0);
+        inventory.coderabbit_review_complete = Some(true);
+        let snapshot = gwt_git::pr_status::PrCompletionSnapshot {
+            state: gwt_git::pr_status::PrState::Open,
+            head_sha: sha,
+            inventory,
+        };
+        env.completion_prs.insert(17, snapshot.clone());
+        let before = super::reviewed_auto_merge_pr(&mut env, &input)
+            .expect("a Ready same-repository PR can recover from workflow startup failure");
+        assert_eq!(before["is_cross_repository"], false);
+        // Issue #7810 AC-1b: no CodeRabbit review (never posted, unread, or
+        // rate-limited) does not refuse the authorization.
+        for coderabbit in [None, Some(false)] {
+            let mut unreviewed = snapshot.clone();
+            unreviewed.inventory.coderabbit_review_complete = coderabbit;
+            env.completion_prs.insert(17, unreviewed);
+            assert!(
+                super::reviewed_auto_merge_pr(&mut env, &input).is_ok(),
+                "CodeRabbit {coderabbit:?} is not an auto-merge condition"
+            );
+        }
+        for blocker in ["draft", "head_changed", "ci_failing", "visual_failed"] {
+            let mut invalid = snapshot.clone();
+            match blocker {
+                "draft" => invalid.inventory.is_draft = true,
+                "head_changed" => invalid.head_sha = "b".repeat(40),
+                "ci_failing" => invalid.inventory.ci_status = "FAILURE".into(),
+                "visual_failed" => {
+                    invalid.inventory.body = "Agent Visual Check: fail(error)".into()
+                }
+                _ => unreachable!(),
+            }
+            env.completion_prs.insert(17, invalid);
+            assert!(
+                super::reviewed_auto_merge_pr(&mut env, &input).is_err(),
+                "{blocker}"
+            );
+        }
+    }
+
+    #[test]
     fn external_auto_merge_requires_fresh_gates_and_audits_exact_permission() {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
@@ -792,7 +874,7 @@ mod tests {
                 "statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],
             }])
             .to_string(),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
         .unwrap()
         .remove(0);
@@ -827,7 +909,7 @@ mod tests {
         for blocker in [
             "head_changed",
             "draft",
-            "same_repository",
+            "repository_unknown",
             "ci_unknown",
             "checks_unknown",
             "review_unknown",
@@ -837,7 +919,7 @@ mod tests {
             match blocker {
                 "head_changed" => invalid.head_sha = "b".repeat(40),
                 "draft" => invalid.inventory.is_draft = true,
-                "same_repository" => invalid.inventory.is_cross_repository = Some(false),
+                "repository_unknown" => invalid.inventory.is_cross_repository = None,
                 "ci_unknown" => invalid.inventory.ci_status = "UNKNOWN".into(),
                 "checks_unknown" => invalid.inventory.check_counts = None,
                 "review_unknown" => invalid.inventory.review_status = "UNKNOWN".into(),
@@ -949,6 +1031,10 @@ mod tests {
                 "repository.settings.set",
                 json!({"description":"Coordination","has_discussions":true}),
             ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop","allow_force_pushes":false,"required_conversation_resolution":true,"enforce_admins":false,"strict":false}),
+            ),
         ] {
             assert!(super::parse(operation, &params).is_ok(), "{operation}");
             let mut foreign = params.clone();
@@ -969,6 +1055,22 @@ mod tests {
             (
                 "repository.settings.set",
                 json!({"required_status_checks":{}}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"feature","allow_force_pushes":false}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop"}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop","allow_deletions":true}),
+            ),
+            (
+                "repository.branch_protection.update",
+                json!({"branch":"develop","enforce_admins":"yes"}),
             ),
         ] {
             assert!(super::parse(operation, &params).is_err(), "{operation}");

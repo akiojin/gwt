@@ -1,6 +1,6 @@
 //! `ProcessLine` — a single stdout / stderr line emitted by an external process.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::kind::ProcessKind;
@@ -39,7 +39,7 @@ pub struct ProcessLine {
     /// `git clone`) are split into one line per CR by the spawn loop.
     pub message: String,
     /// Local time at which `spawn_logged` observed the line.
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTimestamp,
 }
 
 impl ProcessLine {
@@ -54,7 +54,7 @@ impl ProcessLine {
             spawn_id,
             stream,
             message: message.into(),
-            timestamp: Utc::now(),
+            timestamp: UtcTimestamp::now(),
         }
     }
 }

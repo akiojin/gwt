@@ -14,7 +14,6 @@
 //! - Block hook returning `None`       → 0 (allow)
 //! - Block hook returning `Some(..)`   → 2 (block + stdout JSON)
 
-use chrono::Utc;
 use gwt::cli::hook::{event_dispatcher, runtime_state::RuntimeState, HookOutput};
 use gwt::cli::{dispatch, TestEnv};
 use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
@@ -368,7 +367,7 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
             start_evidence: None,
             active: true,
             owner_spec: Some(2077),
-            started_at: Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             phase: Some("red".to_string()),
             session_id: session_id.clone(),
         },

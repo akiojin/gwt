@@ -6,8 +6,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::Utc;
-
 #[derive(Debug)]
 pub enum BackupError {
     Io(io::Error),
@@ -75,7 +73,12 @@ pub fn create_with_external_roots(
     if backup_dir.exists() {
         let stamped = project_root.join(format!(
             "{BACKUP_DIR_NAME}-{}",
-            Utc::now().format("%Y%m%dT%H%M%S")
+            crate::timestamp::UtcTimestamp::now()
+                .utc_datetime()
+                .format(time::macros::format_description!(
+                    "[year][month][day]T[hour][minute][second]"
+                ))
+                .expect("format UTC backup timestamp")
         ));
         fs::rename(&backup_dir, &stamped)?;
     }

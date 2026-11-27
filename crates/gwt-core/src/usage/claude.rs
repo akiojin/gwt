@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -38,7 +38,7 @@ pub struct ClaudeCreds {
     pub account_label: Option<String>,
 }
 
-fn claude_window(obj: &Value, kind: WindowKind, _now: DateTime<Utc>) -> Option<UsageWindow> {
+fn claude_window(obj: &Value, kind: WindowKind, _now: UtcTimestamp) -> Option<UsageWindow> {
     if obj.is_null() {
         return None;
     }
@@ -46,14 +46,13 @@ fn claude_window(obj: &Value, kind: WindowKind, _now: DateTime<Utc>) -> Option<U
     let reset = obj
         .get("resets_at")
         .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
+        .and_then(UtcTimestamp::parse_rfc3339);
     Some(UsageWindow::new(kind, util, reset))
 }
 
 /// Parse the `/api/oauth/usage` JSON body into account windows. Missing/`null`
 /// sub-windows (e.g. `seven_day_opus`) are skipped.
-pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount> {
+pub fn parse_oauth_usage(body: &str, now: UtcTimestamp) -> Option<ClaudeAccount> {
     let v: Value = serde_json::from_str(body).ok()?;
     let mut windows = Vec::new();
     for (key, kind) in [
@@ -194,15 +193,24 @@ fn creds_from_file(home: &Path) -> Option<ClaudeCreds> {
     parse_creds_json(&text)
 }
 
+/// The Keychain item Claude Code keeps its OAuth credentials in. With
+/// `CLAUDE_CONFIG_DIR` set, Claude Code suffixes the item with the first 8 hex
+/// digits of the directory's SHA-256, so every credential home has its own
+/// item (Issue #7841). `None` is the default home's item.
+pub fn claude_keychain_service(config_dir: Option<&Path>) -> String {
+    match config_dir {
+        None => "Claude Code-credentials".to_string(),
+        Some(dir) => {
+            let digest = format!("{:x}", Sha256::digest(dir.to_string_lossy().as_bytes()));
+            format!("Claude Code-credentials-{}", &digest[..8])
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
-fn creds_from_keychain() -> Option<ClaudeCreds> {
+fn creds_from_keychain(service: &str) -> Option<ClaudeCreds> {
     let out = crate::process::hidden_command("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
+        .args(["find-generic-password", "-s", service, "-w"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -213,7 +221,7 @@ fn creds_from_keychain() -> Option<ClaudeCreds> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn creds_from_keychain() -> Option<ClaudeCreds> {
+fn creds_from_keychain(_service: &str) -> Option<ClaudeCreds> {
     None
 }
 
@@ -223,7 +231,19 @@ fn creds_from_keychain() -> Option<ClaudeCreds> {
 /// fallback. On other platforms the Keychain reader is a no-op and the file is
 /// authoritative.
 pub fn resolve_claude_creds(home: &Path) -> Option<ClaudeCreds> {
-    let mut creds = creds_from_keychain().or_else(|| creds_from_file(home))?;
+    resolve_claude_creds_in(home, None)
+}
+
+/// Resolve the credentials of the account whose `CLAUDE_CONFIG_DIR` is
+/// `config_dir` (Issue #7841). Only that home's own Keychain item and file are
+/// read, so another account's token is never used for it.
+pub fn resolve_claude_config_dir_creds(config_dir: &Path) -> Option<ClaudeCreds> {
+    resolve_claude_creds_in(config_dir, Some(config_dir))
+}
+
+fn resolve_claude_creds_in(home: &Path, config_dir: Option<&Path>) -> Option<ClaudeCreds> {
+    let mut creds = creds_from_keychain(&claude_keychain_service(config_dir))
+        .or_else(|| creds_from_file(home))?;
     // Claude stores account metadata separately from refreshed OAuth tokens.
     let profile = if home.file_name().is_some_and(|name| name == ".claude") {
         home.with_extension("json")
@@ -284,7 +304,7 @@ pub fn map_status_to_state(status: u16) -> UsageState {
 pub async fn fetch_claude_account(
     creds: &ClaudeCreds,
     user_agent: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> ProviderUsage {
     let plan = creds.subscription_type.clone();
     let account_label = creds.account_label.clone();
@@ -308,6 +328,8 @@ pub async fn fetch_claude_account(
             match parse_oauth_usage(&body, now) {
                 Some(acc) => ProviderUsage {
                     provider: UsageProvider::ClaudeCode,
+                    pool_account_id: None,
+                    last_limit: None,
                     account_id,
                     account_label,
                     plan,
@@ -320,6 +342,8 @@ pub async fn fetch_claude_account(
                 },
                 None => ProviderUsage {
                     provider: UsageProvider::ClaudeCode,
+                    pool_account_id: None,
+                    last_limit: None,
                     account_id,
                     account_label,
                     plan,
@@ -336,6 +360,8 @@ pub async fn fetch_claude_account(
         }
         Ok(r) => ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            pool_account_id: None,
+            last_limit: None,
             account_id,
             account_label,
             plan,
@@ -348,6 +374,8 @@ pub async fn fetch_claude_account(
         },
         Err(_) => ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            pool_account_id: None,
+            last_limit: None,
             account_id,
             account_label,
             plan,
@@ -533,6 +561,30 @@ pub fn read_claude_session(home: &Path, session_id: &str) -> Option<SessionUsage
 mod tests {
     use super::*;
 
+    // Issue #7841 T-301: an added account's home has a Keychain item of its
+    // own, never the default home's.
+    #[test]
+    fn each_credential_home_has_its_own_keychain_item() {
+        assert_eq!(claude_keychain_service(None), "Claude Code-credentials");
+        assert_eq!(
+            claude_keychain_service(Some(Path::new("/Users/me/.gwt/accounts/claude/claude-2"))),
+            "Claude Code-credentials-d8bb6d14"
+        );
+    }
+
+    #[test]
+    fn a_config_dir_without_its_own_credentials_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_claude_config_dir_creds(dir.path()).is_none());
+        fs::write(
+            dir.path().join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"token-2","subscriptionType":"max"}}"#,
+        )
+        .unwrap();
+        let creds = resolve_claude_config_dir_creds(dir.path()).expect("own credentials");
+        assert_eq!(creds.access_token, "token-2");
+    }
+
     #[test]
     fn parses_live_fable_weekly_limit() {
         let acc = parse_oauth_usage(
@@ -669,8 +721,8 @@ mod tests {
         assert!(!acc.limit_reached);
     }
 
-    fn now() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(1_780_000_000, 0).unwrap()
     }
 
     #[test]

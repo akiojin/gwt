@@ -1,6 +1,7 @@
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use gwt_agent::{ExecutionBindingIdentity, LaunchRuntimeTarget, Session, SessionExecutionBinding};
 use gwt_core::{
     error::{GwtError, Result},
@@ -570,10 +571,15 @@ fn terminal_work_error(
             details.recovery_operation = None;
         }
     }
-    let mut error = AgentWorkspaceUpdateError::new(
-        AgentWorkspaceUpdateErrorCode::TerminalWork,
-        "the assigned Work is terminal; inspect its terminal event before recovery",
-    );
+    // Issue #7339 (#6419): a retried Done update lands here after the first
+    // attempt succeeded. Say so, so the caller stops instead of escalating.
+    let message = if item.discarded {
+        "the assigned Work is terminal; inspect its terminal event before recovery"
+    } else {
+        "the assigned Work is terminal (Done); if its terminal event is this Session's own earlier Done update, that update already succeeded and must not be retried; otherwise inspect its terminal event before recovery"
+    };
+    let mut error =
+        AgentWorkspaceUpdateError::new(AgentWorkspaceUpdateErrorCode::TerminalWork, message);
     error.recovery_operations = details
         .as_ref()
         .and_then(|details| details.recovery_operation.clone())
@@ -1100,7 +1106,7 @@ pub fn apply_bound_authenticated_workspace_reopen(
                     Vec::new(),
                 ));
             }
-            let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, Utc::now());
+            let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, UtcTimestamp::now());
             event.agent_session_id = Some(session_id.to_string());
             event.agent_id = Some(target.agent_id.clone());
             event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -2176,7 +2182,7 @@ fn continue_authenticated_execution_inner(
             session_binding_id: format!("execution-continue-{}", request.operation_id),
             initial_session_id: session.id.clone(),
             entrypoint: "execution.continue".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         },
         |attempt| attempt.request,
     );
@@ -3554,7 +3560,7 @@ fn apply_authenticated_work_terminalization_with_binding(
             expected_work_id,
             close_kind,
             policy,
-            Utc::now(),
+            UtcTimestamp::now(),
             terminal_provenance(&primary, match authority {
                 BoundWorkTerminalizationAuthority::BlockedBuildAbort => "build.abort",
                 BoundWorkTerminalizationAuthority::Active => match terminal_kind {
@@ -3567,7 +3573,7 @@ fn apply_authenticated_work_terminalization_with_binding(
         None => gwt_core::workspace_projection::emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
             &target,
             close_kind,
-            Utc::now(),
+            UtcTimestamp::now(),
             terminal_provenance(&primary, match authority {
                 BoundWorkTerminalizationAuthority::BlockedBuildAbort => "build.abort",
                 BoundWorkTerminalizationAuthority::Active => match terminal_kind {
@@ -3943,7 +3949,7 @@ fn persist_workspace_transaction_error(error: &GwtError) -> std::io::Result<()> 
     directory.create(&log_dir)?;
     let mut file = options.open(gwt_core::logging::current_log_file(&log_dir))?;
     let mut line = serde_json::to_vec(&serde_json::json!({
-        "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": UtcTimestamp::now().to_rfc3339(),
         "level": "WARN",
         "target": module_path!(),
         "fields": {
@@ -4326,16 +4332,34 @@ pub(crate) fn snapshot_bound_terminal_compatibility_authority(
     }))
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TerminalCompatibilityError {
+    #[error("{0}")]
+    Authority(&'static str),
+    #[error("terminal compatibility continuation was refused: {0}")]
+    Workspace(#[from] AgentWorkspaceUpdateError),
+}
+
+impl TerminalCompatibilityError {
+    pub(crate) fn is_workspace_operation_in_flight(&self) -> bool {
+        matches!(
+            self,
+            Self::Workspace(error)
+                if error.code == AgentWorkspaceUpdateErrorCode::TransactionConflict
+                    && error.diagnostic_reason.as_deref() == Some("workspace_operation_in_flight")
+        )
+    }
+}
+
 pub(crate) fn confirm_bound_terminal_compatibility_authority(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
-) -> Result<()> {
+) -> std::result::Result<(), TerminalCompatibilityError> {
     let mut confirmation = authority.clone();
     confirmation.disposition = BoundTerminalCompatibilityDisposition::ConfirmOnly;
-    let receipt =
-        continue_bound_terminal_compatibility(&confirmation, request).map_err(mutation_error)?;
+    let receipt = continue_bound_terminal_compatibility(&confirmation, request)?;
     if receipt.outcome != AgentWorkTerminalizationOutcome::AlreadyMatching {
-        return Err(mutation_error(
+        return Err(TerminalCompatibilityError::Authority(
             "canonical Work terminal readback does not match the pre-request authority",
         ));
     }
@@ -4346,17 +4370,16 @@ pub(crate) fn confirm_bound_terminal_compatibility_authority_held_global_lease(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
     held_trusted_dir: &Path,
-) -> Result<()> {
+) -> std::result::Result<(), TerminalCompatibilityError> {
     let mut confirmation = authority.clone();
     confirmation.disposition = BoundTerminalCompatibilityDisposition::ConfirmOnly;
     let receipt = continue_bound_terminal_compatibility_held_global_lease(
         &confirmation,
         request,
         held_trusted_dir,
-    )
-    .map_err(mutation_error)?;
+    )?;
     if receipt.outcome != AgentWorkTerminalizationOutcome::AlreadyMatching {
-        return Err(mutation_error(
+        return Err(TerminalCompatibilityError::Authority(
             "canonical Work terminal readback does not match the pre-request authority",
         ));
     }
@@ -4366,7 +4389,7 @@ pub(crate) fn confirm_bound_terminal_compatibility_authority_held_global_lease(
 pub(crate) fn continue_bound_terminal_compatibility(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     continue_bound_terminal_compatibility_inner(authority, request, None)
 }
 
@@ -4374,7 +4397,7 @@ pub(crate) fn continue_bound_terminal_compatibility_held_global_lease(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
     held_trusted_dir: &Path,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     continue_bound_terminal_compatibility_inner(authority, request, Some(held_trusted_dir))
 }
 
@@ -4382,14 +4405,13 @@ fn continue_bound_terminal_compatibility_inner(
     authority: &BoundTerminalCompatibilityAuthority,
     request: AgentWorkTerminalizationRequest,
     held_trusted_dir: Option<&Path>,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     if request.claimed_session_id != authority.identity.session_id
         || request.terminal_kind != authority.requested_terminal
     {
-        return Err(
-            "terminal compatibility continuation request does not match its authority snapshot"
-                .to_string(),
-        );
+        return Err(TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation request does not match its authority snapshot",
+        ));
     }
     let expected_identity = authority.identity.clone();
     let project_state_root = authority.project_state_root.clone();
@@ -4408,8 +4430,9 @@ fn continue_bound_terminal_compatibility_inner(
         authority
             .requires_blocked_build_abort_bridge()
             .map_err(|_| {
-                "terminal compatibility continuation could not inspect Blocked abort authority"
-                    .to_string()
+                TerminalCompatibilityError::Authority(
+                    "terminal compatibility continuation could not inspect Blocked abort authority",
+                )
             })?;
     let result = if use_blocked_build_abort {
         if let Some(held_trusted_dir) = held_trusted_dir {
@@ -4481,19 +4504,19 @@ fn continue_bound_terminal_compatibility_inner(
         )
     }
     .map_err(|_| {
-            "terminal compatibility continuation could not validate the durable authority"
-                .to_string()
+            TerminalCompatibilityError::Authority(
+                "terminal compatibility continuation could not validate the durable authority",
+            )
         })?;
-    let receipt = result.ok_or_else(|| {
-        "terminal compatibility continuation authority changed before commit".to_string()
-    })??;
+    let receipt = result.ok_or(TerminalCompatibilityError::Authority(
+        "terminal compatibility continuation authority changed before commit",
+    ))??;
     match receipt.outcome {
         AgentWorkTerminalizationOutcome::Emitted
         | AgentWorkTerminalizationOutcome::AlreadyMatching => Ok(receipt),
-        _ => Err(
-            "terminal compatibility continuation did not reach the requested canonical terminal"
-                .to_string(),
-        ),
+        _ => Err(TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation did not reach the requested canonical terminal",
+        )),
     }
 }
 
@@ -4505,9 +4528,11 @@ fn apply_terminal_compatibility_under_lease(
     policy: gwt_core::workspace_projection::ExactWorkspaceTerminalPolicy,
     request: AgentWorkTerminalizationRequest,
     blocked_build_abort: bool,
-) -> std::result::Result<AgentWorkTerminalizationReceipt, String> {
+) -> std::result::Result<AgentWorkTerminalizationReceipt, TerminalCompatibilityError> {
     let current = Session::load(session_path).map_err(|_| {
-        "terminal compatibility continuation could not reload the durable Session".to_string()
+        TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation could not reload the durable Session",
+        )
     })?;
     if current.runtime_target != LaunchRuntimeTarget::Host
         || current.docker_runtime_binding.is_some()
@@ -4517,9 +4542,9 @@ fn apply_terminal_compatibility_under_lease(
             .as_ref()
             != Some(expected_identity)
     {
-        return Err(
-            "terminal compatibility continuation authority changed before commit".to_string(),
-        );
+        return Err(TerminalCompatibilityError::Authority(
+            "terminal compatibility continuation authority changed before commit",
+        ));
     }
     let result = if blocked_build_abort {
         apply_bound_authenticated_blocked_build_abort_for_exact_work(
@@ -4540,7 +4565,7 @@ fn apply_terminal_compatibility_under_lease(
             request,
         )
     };
-    result.map_err(|error| format!("terminal compatibility continuation was refused: {error}"))
+    result.map_err(TerminalCompatibilityError::from)
 }
 
 /// Prove that an active, exact-owner Host build has no canonical Work to abort.
@@ -4865,7 +4890,32 @@ pub(crate) struct WorkspaceUpdateApplicabilityFailure {
 /// Read-only classification for the same target resolver used by
 /// `workspace.update`. Stable reasons let `execution.status` distinguish
 /// provenance failures without weakening the mutation authority check.
+///
+/// A Docker Session's `workspace.update` is forwarded to the authenticated
+/// Host gateway, which revalidates the claim; the native refusal only means
+/// "no local route". A complete gateway capability therefore makes the update
+/// applicable, while a missing or malformed one keeps `host_bridge_required`
+/// (Issue #7854).
 pub(crate) fn diagnose_session_work_mutation_target(
+    invocation_cwd: &Path,
+    session_id: &str,
+) -> std::result::Result<(), WorkspaceUpdateApplicabilityFailure> {
+    let result = diagnose_native_session_work_mutation_target(invocation_cwd, session_id);
+    match result {
+        Err(failure)
+            if failure.reason == WorkspaceUpdateApplicabilityReason::HostBridgeRequired
+                && matches!(
+                    crate::daemon_runtime::HookForwardTarget::from_env_strict(),
+                    Ok(Some(_))
+                ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn diagnose_native_session_work_mutation_target(
     invocation_cwd: &Path,
     session_id: &str,
 ) -> std::result::Result<(), WorkspaceUpdateApplicabilityFailure> {
@@ -5503,18 +5553,31 @@ fn durable_session_work_authority(
     branch_authority: SessionBranchAuthority,
 ) -> Result<(Option<String>, String)> {
     let owner = if let Some(binding) = session.execution_binding.as_ref() {
-        Some(match binding.owner_kind.as_str() {
-            "spec" => format!("SPEC-{}", binding.owner_number),
-            "issue" => format!("Issue #{}", binding.owner_number),
+        let kind = match binding.owner_kind.as_str() {
+            "spec" => crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            "issue" => crate::cli::execution_state::ExecutionOwnerKind::Issue,
             _ => {
                 return Err(workspace_ensure_error(
                     &session.id,
                     "durable execution owner kind is invalid",
                 ))
             }
-        })
+        };
+        Some(
+            crate::cli::execution_state::ExecutionOwnerKey {
+                kind,
+                number: binding.owner_number,
+            }
+            .canonical_work_owner_label(),
+        )
     } else if let Some(number) = session.linked_issue_number {
-        Some(format!("Issue #{number}"))
+        Some(
+            crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number,
+            }
+            .canonical_work_owner_label(),
+        )
     } else if branch_authority == SessionBranchAuthority::DetachedResidentPm {
         None
     } else {
@@ -5963,12 +6026,12 @@ pub(crate) fn repair_split_agent_state_if_needed(
         let agent_updated_at = canonical_agent.updated_at;
         let changed = repair_agent_from_split(canonical_agent, &split_agent);
         if changed {
-            let repaired_floor = Utc::now()
+            let repaired_floor = UtcTimestamp::now()
                 .max(projection_updated_at)
                 .max(agent_updated_at)
                 .max(split_agent.updated_at);
             let repaired_at = repaired_floor
-                .checked_add_signed(chrono::Duration::nanoseconds(1))
+                .checked_add(time::Duration::nanoseconds(1))
                 .ok_or_else(|| {
                     gwt_core::GwtError::Other(
                         "split Agent repair timestamp exceeds the supported range".to_string(),
@@ -6337,7 +6400,7 @@ mod tests {
         session_id: &str,
         title_summary: Option<&str>,
         current_focus: Option<&str>,
-        updated_at: chrono::DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             session_id: session_id.to_string(),
@@ -6398,7 +6461,7 @@ mod tests {
     fn assigned_session_agent(
         session: &Session,
         work_id: &str,
-        updated_at: chrono::DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> WorkspaceAgentSummary {
         let mut agent = agent_summary(&session.id, None, None, updated_at);
         agent.worktree_path = Some(session.worktree_path.clone());
@@ -6422,7 +6485,7 @@ mod tests {
         session: &Session,
         work_id: &str,
     ) -> gwt_core::workspace_projection::WorkItemsProjection {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut projection = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
@@ -6498,7 +6561,11 @@ mod tests {
     ) {
         save_project_assignments(
             project_state_root,
-            vec![assigned_session_agent(session, work_id, Utc::now())],
+            vec![assigned_session_agent(
+                session,
+                work_id,
+                UtcTimestamp::now(),
+            )],
         );
         save_mutation_work_items_with_tracked_events(
             project_state_root,
@@ -6508,7 +6575,7 @@ mod tests {
     }
 
     fn save_completed_execution_fixture(worktree: &Path, session_id: &str) {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         crate::cli::execution_state::save(
             worktree,
             &crate::cli::execution_state::ExecutionControlRecord {
@@ -6940,7 +7007,7 @@ mod tests {
         seed_work_mutation_surfaces(&workspace_home, &worktree);
         save_mutation_work_items(
             &workspace_home,
-            &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+            &gwt_core::workspace_projection::WorkItemsProjection::empty(UtcTimestamp::now()),
         );
 
         test(&workspace_home, &worktree, &nested, &sibling, &session);
@@ -7549,7 +7616,7 @@ mod tests {
             session.agent_session_id = Some("private-claude-primary".to_string());
             save_session_fixture(&session);
             let work_id = "work-unbound-claude";
-            let mut agent = assigned_session_agent(&session, work_id, Utc::now());
+            let mut agent = assigned_session_agent(&session, work_id, UtcTimestamp::now());
             agent.agent_id = session.agent_id.command().to_string();
             agent.display_name = session.agent_id.display_name().to_string();
             save_project_assignments(repo, vec![agent]);
@@ -7618,6 +7685,20 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let done_at = items.work_items[0].completed_at.unwrap();
+            let producer_done: WorkEvent =
+                serde_json::from_slice(&std::fs::read(&closes_path).unwrap()).unwrap();
+            let mut board_ref = WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Update,
+                "work-primary-proof-repair",
+                done_at - time::Duration::seconds(1),
+            );
+            board_ref.board_entry_id = Some("compacted-producer-board-ref".into());
+            items.apply_event(board_ref.clone());
+            gwt_core::workspace_projection::append_workspace_work_event_to_path(
+                &closes_path,
+                &board_ref,
+            )
+            .unwrap();
             let mut shared = items.work_items[0]
                 .events
                 .iter()
@@ -7628,7 +7709,7 @@ mod tests {
                 let event = gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Update,
                     "work-primary-proof-repair",
-                    done_at + chrono::Duration::seconds(index as i64 + 1),
+                    done_at + time::Duration::seconds(index as i64 + 1),
                 );
                 items.apply_event(event.clone());
                 shared.push(event);
@@ -7701,7 +7782,7 @@ mod tests {
             )
             .expect("current Active primary can discover proof repair"));
             for foreign_generation in [false, true] {
-                let mut close: WorkEvent = serde_json::from_slice(&close_before).unwrap();
+                let mut close = producer_done.clone();
                 if foreign_generation {
                     close.execution_generation = Some("stale-producer-generation".into());
                 } else {
@@ -7815,7 +7896,7 @@ mod tests {
             assert_eq!(std::fs::read(&proof_path).unwrap(), discarded_proof);
             assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
             save_mutation_work_items(repo, &repaired);
-            let close: WorkEvent = serde_json::from_slice(&close_before).unwrap();
+            let close = producer_done;
             apply_authenticated_workspace_reopen(
                 repo,
                 &session.id,
@@ -8063,7 +8144,7 @@ mod tests {
                     start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: Some("verify".to_string()),
                     session_id: session.id.clone(),
                 },
@@ -9028,6 +9109,29 @@ mod tests {
                 Some("recovery_exhausted")
             );
             assert!(diagnosis.available_recoveries.is_empty(), "{diagnosis:?}");
+            // Issue #7630 AC-1: no recovery the gate admits remains, so the
+            // diagnosis carries what a PM needs to take over without asking
+            // the agent again: owner, Session, both generations, and why each
+            // probed recovery (workspace.update included) was refused.
+            let exhausted = diagnosis
+                .warnings
+                .iter()
+                .find(|warning| warning.starts_with("recovery_exhausted:"))
+                .expect("recovery_exhausted warning");
+            let generation = diagnosis.generation_id.clone().expect("ECR generation");
+            for required in [
+                "pm_handoff:",
+                "owner=issue #2359",
+                &format!("session={}", session.id),
+                &format!("execution_generation={generation}"),
+                "session_generation=stale-generation",
+                "workspace.update=",
+            ] {
+                assert!(
+                    exhausted.contains(required),
+                    "missing {required}: {exhausted}"
+                );
+            }
 
             let observations =
                 crate::issue_monitor_worker::read_execution_observations(repo, &[2359]);
@@ -9773,7 +9877,7 @@ mod tests {
                 from_session_id: bound.id.clone(),
                 to_session_id: "session-adopting".to_string(),
                 reason: "explicit handoff".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
                 .expect("prepare takeover suffix");
@@ -9983,7 +10087,7 @@ mod tests {
                 from_session_id: session.id.clone(),
                 to_session_id: "post-ledger-takeover-winner".to_string(),
                 reason: "legal handoff after response-loss publication".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
                 .expect("prepare legal takeover suffix");
@@ -10079,7 +10183,7 @@ mod tests {
                 session_binding_id: "execution-continue-byte-loser".to_string(),
                 initial_session_id: stale_unbound.id.clone(),
                 entrypoint: "execution.continue".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
 
             assert!(
@@ -10132,7 +10236,7 @@ mod tests {
                 session_binding_id: "execution-continue-distinct-session-winner".to_string(),
                 initial_session_id: session_b.id.clone(),
                 entrypoint: "execution.continue".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             crate::cli::execution_state::activate_successor_with_session_rebind(
                 repo,
@@ -10159,7 +10263,7 @@ mod tests {
                 session_binding_id: "execution-continue-distinct-session-loser".to_string(),
                 initial_session_id: session_a.id.clone(),
                 entrypoint: "execution.continue".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             let loser = crate::cli::execution_state::activate_successor_with_session_rebind(
                 repo,
@@ -10763,7 +10867,7 @@ mod tests {
                 principal_id: "host-instance-prepared-probe".to_string(),
                 work_id: Some("work-prepared-probe".to_string()),
                 source: "continue-work".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
                 session_binding_id: "binding-prepared-probe".to_string(),
                 initial_session_id: session.id.clone(),
                 entrypoint: "continue-work".to_string(),
@@ -11081,10 +11185,11 @@ mod tests {
                 vec![assigned_session_agent(
                     &session,
                     "work-build-orphan",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )],
             );
-            let empty = gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now());
+            let empty =
+                gwt_core::workspace_projection::WorkItemsProjection::empty(UtcTimestamp::now());
             save_mutation_work_items(repo, &empty);
             let before = WorkMutationSnapshot::capture(repo, repo);
             assert!(
@@ -11144,10 +11249,10 @@ mod tests {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
             seed_work_mutation_surfaces(repo, repo);
-            let assignment = assigned_session_agent(&session, "missing-work", Utc::now());
+            let assignment = assigned_session_agent(&session, "missing-work", UtcTimestamp::now());
             save_mutation_work_items(
                 repo,
-                &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+                &gwt_core::workspace_projection::WorkItemsProjection::empty(UtcTimestamp::now()),
             );
             let mut foreign = assignment.clone();
             foreign.agent_id = "claude".to_string();
@@ -11332,7 +11437,7 @@ mod tests {
                 vec![assigned_session_agent(
                     &session,
                     "work-assigned-but-missing",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )],
             );
             save_mutation_work_items(repo, &mutation_work_items(repo, &session, "work-different"));
@@ -11546,7 +11651,7 @@ mod tests {
                             start_evidence: None,
                             active: true,
                             owner_spec: Some(terminal_binding.owner_number),
-                            started_at: Utc::now(),
+                            started_at: UtcTimestamp::now(),
                             phase: Some("verify".to_string()),
                             session_id: session.id.clone(),
                         },
@@ -11625,7 +11730,7 @@ mod tests {
                     start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: Some("verify".to_string()),
                     session_id: session.id.clone(),
                 },
@@ -11709,7 +11814,7 @@ mod tests {
                             } else {
                                 binding.owner_number
                             }),
-                            started_at: Utc::now(),
+                            started_at: UtcTimestamp::now(),
                             phase: Some("verify".to_string()),
                             session_id: if case == "foreign-build-session" {
                                 "foreign-session".to_string()
@@ -12109,6 +12214,67 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
+        });
+    }
+
+    /// #7816: a Host stalled past the bridge timeout leaves the operation unreserved.
+    /// Settlement must finalize it as `not_applied` and the late Host apply must refuse it.
+    #[test]
+    fn workspace_operation_lost_before_reservation_settles_not_applied() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_unique_mutation_target(repo, repo, &session, "work-operation-lost");
+            std::fs::write(
+                gwt_core::paths::gwt_workspace_journal_path_for_repo_path(repo),
+                b"",
+            )
+            .unwrap();
+            let request = AgentWorkspaceUpdateRequest {
+                schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session.id.clone(),
+                primary_provider_session_id: None,
+                observation: observe_agent_runtime(repo).unwrap(),
+                intent: AgentWorkspaceUpdateIntent {
+                    summary: Some("response lost while the Host stalled".to_string()),
+                    ..Default::default()
+                },
+            };
+            let settle = |id: &str| {
+                serde_json::to_value(
+                    crate::workspace_update_receipt::settle(repo, &session.id, id, None).unwrap(),
+                )
+                .unwrap()["status"]
+                    .clone()
+            };
+
+            let lost = uuid::Uuid::new_v4().to_string();
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            assert_eq!(settle(&lost), "not_applied");
+            let late = apply_bound_authenticated_workspace_update_with_operation_id(
+                repo,
+                &session.id,
+                &binding,
+                request.clone(),
+                Some(&lost),
+            )
+            .unwrap_err();
+            assert_eq!(
+                late.code,
+                AgentWorkspaceUpdateErrorCode::TransactionConflict
+            );
+            assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            assert_eq!(settle(&lost), "not_applied");
+
+            let applied = uuid::Uuid::new_v4().to_string();
+            apply_bound_authenticated_workspace_update_with_operation_id(
+                repo,
+                &session.id,
+                &binding,
+                request,
+                Some(&applied),
+            )
+            .unwrap();
+            assert_eq!(settle(&applied), "applied");
         });
     }
 
@@ -12514,7 +12680,8 @@ mod tests {
             let close_events_path =
                 gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo);
 
-            let mut unassigned = assigned_session_agent(session, "work-unassigned", Utc::now());
+            let mut unassigned =
+                assigned_session_agent(session, "work-unassigned", UtcTimestamp::now());
             unassigned.affiliation_status =
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
             unassigned.workspace_id = None;
@@ -12540,7 +12707,7 @@ mod tests {
                 vec![assigned_session_agent(
                     session,
                     "work-assigned-but-missing",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )],
             );
             save_mutation_work_items(repo, &mutation_work_items(repo, session, "work-different"));
@@ -12821,9 +12988,9 @@ mod tests {
                 "missing",
             );
 
-            let older = Utc::now();
+            let older = UtcTimestamp::now();
             let mut unassigned =
-                assigned_session_agent(session, work_id, older + chrono::Duration::seconds(1));
+                assigned_session_agent(session, work_id, older + time::Duration::seconds(1));
             unassigned.affiliation_status =
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
             unassigned.workspace_id = None;
@@ -12839,7 +13006,11 @@ mod tests {
 
             save_project_assignments(
                 repo,
-                vec![assigned_session_agent(session, work_id, Utc::now())],
+                vec![assigned_session_agent(
+                    session,
+                    work_id,
+                    UtcTimestamp::now(),
+                )],
             );
             assert_workspace_ensure_error(
                 resolve_session_work_mutation_target(repo, &session.id)
@@ -12974,7 +13145,7 @@ mod tests {
                 history.status_category = status;
                 history.completed_at = (status
                     == gwt_core::workspace_projection::WorkspaceStatusCategory::Done)
-                    .then(Utc::now);
+                    .then(UtcTimestamp::now);
                 history.agents[0].session_id = "historical-session".to_string();
                 work_items.work_items.push(history);
                 save_mutation_work_items(repo, &work_items);
@@ -13308,6 +13479,64 @@ mod tests {
         );
     }
 
+    /// Issue #7854: a Docker Session's `workspace.update` is forwarded to the
+    /// authenticated Host gateway, so applicability must follow that route
+    /// instead of the native resolver that always refuses Docker Sessions.
+    #[test]
+    fn docker_session_applicability_follows_authenticated_host_gateway() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let branch = "work/docker-gateway";
+        let repo = init_git_repo(
+            temp.path(),
+            "repo",
+            "https://example.invalid/acme/docker-gateway.git",
+            branch,
+        );
+        let mut session = session_fixture("docker-gateway", &repo, branch);
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        save_session_fixture(&session);
+
+        let no_gateway = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+        ];
+        assert_eq!(
+            diagnose_session_work_mutation_target(&repo, &session.id)
+                .expect_err("Docker Session without a gateway cannot update Work")
+                .reason,
+            WorkspaceUpdateApplicabilityReason::HostBridgeRequired,
+        );
+        drop(no_gateway);
+
+        let _url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            "http://127.0.0.1:9/internal/hook-live",
+        );
+        let _token =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "t");
+        diagnose_session_work_mutation_target(&repo, &session.id)
+            .expect("the authenticated Host gateway is the canonical workspace.update route");
+        assert!(
+            probe_session_work_mutation_target(&repo, &session.id).advertise(),
+            "workspace.update must be an available recovery, not relaunch only"
+        );
+
+        let _partial =
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        assert_eq!(
+            diagnose_session_work_mutation_target(&repo, &session.id)
+                .expect_err("an incomplete gateway capability is unusable")
+                .reason,
+            WorkspaceUpdateApplicabilityReason::HostBridgeRequired,
+        );
+    }
+
     #[test]
     fn workspace_update_dispatch_rejects_invalid_session_provenance_without_mutation() {
         const RAW_PROVIDER_ACTOR_ID: &str = "provider-thread-private-sentinel-86";
@@ -13583,15 +13812,15 @@ mod tests {
         save_project_assignments(
             &repo,
             vec![
-                assigned_session_agent(&provider_present, work_id, Utc::now()),
-                assigned_session_agent(&provider_absent, work_id, Utc::now()),
+                assigned_session_agent(&provider_present, work_id, UtcTimestamp::now()),
+                assigned_session_agent(&provider_absent, work_id, UtcTimestamp::now()),
             ],
         );
         let mut provider_neutral_work = mutation_work_items(&repo, &provider_present, work_id);
         let mut second_session_claim = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Claim,
             work_id,
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         second_session_claim.agent_session_id = Some(provider_absent.id.clone());
         second_session_claim.agent_id = Some(provider_absent.agent_id.command().to_string());
@@ -13767,8 +13996,8 @@ mod tests {
 
     #[test]
     fn repair_agent_from_split_prefers_newer_title_and_focus() {
-        let older = Utc::now();
-        let newer = older + chrono::Duration::seconds(1);
+        let older = UtcTimestamp::now();
+        let newer = older + time::Duration::seconds(1);
         let mut canonical = agent_summary(
             "session-1",
             Some("Old canonical title"),
@@ -13789,8 +14018,8 @@ mod tests {
 
     #[test]
     fn repair_agent_from_split_keeps_newer_canonical_title_and_focus() {
-        let older = Utc::now();
-        let newer = older + chrono::Duration::seconds(1);
+        let older = UtcTimestamp::now();
+        let newer = older + time::Duration::seconds(1);
         let mut canonical = agent_summary(
             "session-1",
             Some("New canonical title"),
@@ -13828,7 +14057,7 @@ mod tests {
         let split_root = temp.path().join("split");
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
-        let base = Utc::now();
+        let base = UtcTimestamp::now();
 
         let canonical_stale = agent_summary(
             "duplicate-session",
@@ -13840,19 +14069,19 @@ mod tests {
             "duplicate-session",
             Some("Current canonical title"),
             Some("Current canonical focus"),
-            base + chrono::Duration::seconds(1),
+            base + time::Duration::seconds(1),
         );
         let split_stale = agent_summary(
             "duplicate-session",
             Some("Stale split title"),
             Some("Stale split focus"),
-            base + chrono::Duration::seconds(2),
+            base + time::Duration::seconds(2),
         );
         let split_current = agent_summary(
             "duplicate-session",
             Some("Latest split title"),
             Some("Latest split focus"),
-            base + chrono::Duration::seconds(3),
+            base + time::Duration::seconds(3),
         );
 
         let mut canonical_projection =
@@ -13927,11 +14156,11 @@ mod tests {
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
 
-        let future = Utc::now() + chrono::Duration::days(1);
-        let competing_at = future + chrono::Duration::hours(1);
-        let canonical_at = future + chrono::Duration::hours(2);
-        let split_at = future + chrono::Duration::hours(3);
-        let projection_at = future + chrono::Duration::hours(4);
+        let future = UtcTimestamp::now() + time::Duration::days(1);
+        let competing_at = future + time::Duration::hours(1);
+        let canonical_at = future + time::Duration::hours(2);
+        let split_at = future + time::Duration::hours(3);
+        let projection_at = future + time::Duration::hours(4);
         let competing = agent_summary(
             "duplicate-session",
             Some("Competing canonical title"),
@@ -14013,7 +14242,7 @@ mod tests {
         let split_root = temp.path().join("split");
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
-        let tied_at = Utc::now() + chrono::Duration::days(1);
+        let tied_at = UtcTimestamp::now() + time::Duration::days(1);
 
         let competing = agent_summary(
             "duplicate-session",
@@ -14081,7 +14310,7 @@ mod tests {
         let split_root = temp.path().join("split");
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
-        let max = chrono::DateTime::<Utc>::MAX_UTC;
+        let max = UtcTimestamp::MAX;
 
         let mut canonical =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(

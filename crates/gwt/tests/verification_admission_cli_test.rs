@@ -301,16 +301,20 @@ impl CanonicalRun {
             child: Some(child),
             release,
         };
+        run.wait_until_ready(&ready);
+        run
+    }
+
+    fn wait_until_ready(&mut self, ready: &Path) {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !ready.exists() {
-            if run.child.as_mut().unwrap().try_wait().unwrap().is_some() {
-                let (_, output) = collect_gwtd(run.child.take().unwrap());
+            if self.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                let (_, output) = collect_gwtd(self.child.take().unwrap());
                 panic!("canonical run exited before its command started: {output}");
             }
             assert!(Instant::now() < deadline, "canonical command did not start");
             std::thread::sleep(Duration::from_millis(100));
         }
-        run
     }
 
     fn finish(mut self) -> (bool, String) {
@@ -576,6 +580,86 @@ fn cancel_envelope(attempt_id: &str) -> String {
     .to_string()
 }
 
+#[test]
+fn admission_deadline_reports_cleanup_before_returning_deferred() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let arena = Arena::new();
+    let _holder = CanonicalRun::start_for_session(&arena, &arena.sibling, FOREIGN_SESSION);
+    let package = arena.repo.join("crates/gwt");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        arena.repo.join("Cargo.toml"),
+        "[workspace]\nmembers=['crates/gwt']\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("Cargo.toml"),
+        "[package]\nname='gwt'\n[features]\ntest-gh-guard=[]\n[[bin]]\nname='gwtd'\npath='src/bin/gwtd.rs'\n",
+    )
+    .unwrap();
+    let bin = arena.home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        r#"#!/bin/sh
+case "$1" in
+  metadata) printf '{"target_directory":"%s/target"}\n' "$PWD" ;;
+  build) exec "$ADMISSION_TEST_BIN" --ignored --exact verification_admission_cli_test::canonical_command_parks ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let ready = arena.home.path().join("restoration-ready");
+    let release = arena.home.path().join("restoration-release");
+    let child = spawn_gwtd(
+        arena.home.path(),
+        &arena.repo,
+        &verify_command("cargo test --target-dir target", 1),
+        &[
+            ("PATH", Path::new(&path)),
+            ("ADMISSION_TEST_BIN", &std::env::current_exe().unwrap()),
+            ("ADMISSION_READY", &ready),
+            ("ADMISSION_RELEASE", &release),
+        ],
+    );
+    let mut restoration = CanonicalRun {
+        child: Some(child),
+        release,
+    };
+    restoration.wait_until_ready(&ready);
+    let (status_ok, status) = arena.run_in(&arena.repo, &attempt_envelope("verify.status", None));
+    let (run_ok, output) = restoration.finish();
+    assert!(status_ok, "{status}");
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["status"], "running", "{status}");
+    assert!(
+        status["reason"]
+            .as_str()
+            .unwrap()
+            .contains("deferral cleanup"),
+        "{status}"
+    );
+    assert!(run_ok && output.contains("verify: deferred"), "{output}");
+    assert!(
+        output.contains("artifact restoration: restored"),
+        "{output}"
+    );
+    let id = status["attempt_id"].as_str().unwrap();
+    wait_for_attempt(&arena, &arena.repo, Some(id), "deferred", true);
+    assert!(!arena
+        .repo
+        .join(".gwt/skill-state/verification-run.json")
+        .exists());
+}
+
 fn collect_cancelled_runner(mut child: Child) -> (bool, String) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -602,6 +686,8 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
     let holder = CanonicalRun::start_for_session(&arena, &arena.sibling, FOREIGN_SESSION);
     let waiter = spawn_gwtd(arena.home.path(), &arena.repo, &verify_run(30), &[]);
     let waiting = wait_for_attempt(&arena, &arena.repo, None, "waiting", true);
+    assert_eq!(waiting["current_command"], "git --version");
+    let wait_elapsed = waiting["command_wait_elapsed_secs"].as_u64().unwrap();
     let id = waiting["attempt_id"].as_str().unwrap();
     assert_eq!(std::fs::read(&predecessor_path).unwrap(), predecessor);
 
@@ -623,7 +709,10 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
             !ok && output.contains("not your verification attempt"),
             "{output}"
         );
-        let unchanged = wait_for_attempt(&arena, &arena.repo, Some(id), "waiting", true);
+        let mut unchanged = wait_for_attempt(&arena, &arena.repo, Some(id), "waiting", true);
+        let elapsed = unchanged["command_wait_elapsed_secs"].as_u64().unwrap();
+        assert!(elapsed >= wait_elapsed);
+        unchanged["command_wait_elapsed_secs"] = wait_elapsed.into();
         assert_eq!(
             unchanged, waiting,
             "foreign cancellation changed the attempt"
@@ -633,6 +722,8 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
     let (ok, output) = arena.run_in(&arena.repo, &cancel_envelope(id));
     assert!(ok, "cancel own waiting attempt: {output}");
     let interrupted = wait_for_attempt(&arena, &arena.repo, Some(id), "interrupted", false);
+    assert!(interrupted.get("current_command").is_none());
+    assert!(interrupted.get("command_wait_elapsed_secs").is_none());
     assert_eq!(
         interrupted["reason"],
         "caller cancellation: superseded matrix"

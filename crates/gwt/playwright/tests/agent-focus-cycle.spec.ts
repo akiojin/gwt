@@ -161,7 +161,7 @@ function expectNavigationOnly(messages: SentMessage[]): void {
     "activate_window_tab", "update_viewport", "update_window_geometry", "cycle_focus",
     "dock_window_tab", "detach_window_tab", "place_agent_window_in_kanban",
     "move_agent_kanban_card", "undock_agent_window", "dock_agent_window_to_issue",
-    "create_window", "close_window", "stop_window", "stop_all_windows", "restart_window",
+    "create_window", "close_window", "stop_window", "restart_window",
     "open_pm_agent", "arrange_windows",
   ]);
   expect(messages.filter(message => forbidden.has(message.kind ?? "")

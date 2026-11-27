@@ -50,8 +50,10 @@ Resume references the immutable predecessor by record id/content hash, keeps
 the original start timestamp (`started_at`), and copies measured per-command
 headed/nextest/admission evidence. Run outstanding Light commands first,
 preserve Heavy commands' original relative order, and keep artifact restoration last.
-The full registered matrix and required headed Chromium evidence in dark/light
-must pass before `Overall: PASS` or Ready; retained results alone are incomplete.
+The full registered local matrix must pass. A protected gwt PR may collect its
+required headed Chromium evidence in CI, as described in [Agent Visual Check](agent-visual.md).
+In that mode the Ready PR starts CI and the required WebView check stays pending
+until both themes pass and the agent reviews the matching run's images.
 
 ### gwtd bootstrap order
 
@@ -60,6 +62,12 @@ first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
 heavy verification command. The order is build → `verify.plan` → `verify.run`:
 build the checkout binary without holding or waiting for any lease, and only
 then run canonical verification through it.
+
+Identity comes first: `pane.name` → `workspace.ensure` → `cargo build -p gwt --bin gwtd`.
+The Workspace identity gate refuses every other command, the bootstrap build
+included, until `workspace.ensure` succeeds, so run that first `pane.name` and
+`workspace.ensure` through the resolved installed gwtd. The checkout-binary
+rule below applies from the build onward.
 
 Decide first whether the checkout binary is needed. Only operations that
 execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,

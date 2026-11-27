@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { expect, test, type Page } from "@playwright/test";
 import { clearLiveLaunchWizard, gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || "";
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME || "";
@@ -64,7 +65,7 @@ test.describe("Runtime output batching (live backend)", () => {
           const pane = message?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows).find((pane: any) => pane.id === id);
           return pane?.session_id === session && !["stopped", "error"].includes(pane.status);
         }, { id, session: launched.session_id }), { message: "same live Agent Session remains in the workspace", timeout: 30_000 }).toBe(true);
-        await surfacePage.locator('.op-rail__surface[data-surface="works"]').click();
+        await openWorks(surfacePage);
         if (await surfacePage.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
           await surfacePage.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
         await expect(surfacePage.locator('.work-row[data-window-id="' + id + '"] .terminal-text-preview'))
@@ -265,7 +266,7 @@ async function launch(page: Page, index: number, branch: string): Promise<{ id: 
   };
   let roster = await rosterRequest({ kind: "read" });
   const available = () => roster.members.some((member: any) =>
-    member.agent_id === agent && member.enabled && !member.assignment);
+    member.agent_id === agent && !member.assignment);
   if (!available()) roster = await rosterRequest({ kind: "add", agent_id: agent }, roster.revision);
   expect(available(), "normally allocated command-tool member").toBe(true);
   const request = (detail: unknown, requireOpen = false) => page.evaluate(({ detail, requireOpen }) => {

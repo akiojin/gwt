@@ -187,6 +187,12 @@ fn observe_terminal_windows_with_monitor_loader(
         .map(|snapshot| {
             let session_path = sessions_dir.join(format!("{}.toml", snapshot.session_id));
             let eligibility = match gwt_agent::Session::load(&session_path) {
+                // Issue #7035: a review window shares its Issue with the bound
+                // implementation window without being its duplicate. The
+                // Monitor's review ledger closes it (verdict, exit, or loss).
+                Ok(session) if session.review_dispatch => {
+                    TerminalCloseEligibility::Ineligible("review_window")
+                }
                 Ok(session) => {
                     let monitor = if session.linked_issue_number.is_some() {
                         let prefs_path =
@@ -628,6 +634,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Issue #7035 AC-2: an idle independent-review window shares its Issue
+    /// with the bound implementation window, so the duplicate-launch predicate
+    /// read it as `lost_ownership` and closed it before its verdict. The
+    /// review ledger alone decides when a review window closes.
+    #[test]
+    fn idle_review_window_is_not_closed_as_a_duplicate_launch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let sessions_dir = temp.path().join("sessions");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let observe = |review_dispatch: bool| {
+            let mut session =
+                gwt_agent::Session::new(&project, "work/issue-42", gwt_agent::AgentId::Codex);
+            session.linked_issue_number = Some(42);
+            session.review_dispatch = review_dispatch;
+            session.update_status(gwt_agent::AgentStatus::Idle);
+            session.save(&sessions_dir).expect("save session");
+            observe_terminal_windows_with_monitor_loader(
+                &sessions_dir,
+                vec![TerminalWindowSnapshot {
+                    window_id: "tab-1::agent-5".to_string(),
+                    monitor_window_id: "tab-1::agent-5".to_string(),
+                    session_id: session.id.clone(),
+                    project_root: project.clone(),
+                    worktree_path: project.clone(),
+                    window_status: WindowProcessStatus::Idle,
+                    lifecycle_generation: Some(1),
+                }],
+                Duration::from_secs(5),
+                |_| {
+                    Some(gwt::IssueMonitorState::with_prefs(
+                        gwt::IssueMonitorConfig::default(),
+                        gwt::IssueMonitorPrefs {
+                            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                                issue_number: 42,
+                                window_id: "tab-1::impl-42".to_string(),
+                            }],
+                            ..Default::default()
+                        },
+                    ))
+                },
+            )
+            .remove(0)
+            .eligibility
+        };
+        assert_eq!(
+            observe(false),
+            TerminalCloseEligibility::Eligible(TerminalCloseReason::LostOwnership),
+            "the fixture is an idle duplicate of the bound implementation window"
+        );
+        assert_eq!(
+            observe(true),
+            TerminalCloseEligibility::Ineligible("review_window")
+        );
     }
 
     /// Issue #4783 AC-R1/R4: a fresh launch sees its predecessor's

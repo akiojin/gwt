@@ -1,0 +1,1353 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gwt 全画面刷新モック v2（全画面網羅）</title>
+<style>
+  :root{
+    --bg:#f2f3f5; --panel:#ffffff; --panel2:#e9ebee; --ink:#1b1e24; --ink2:#4c5462; --ink3:#7c8594;
+    --line:#d8dce2; --line2:#c3c9d2;
+    --accent:#0f766e; --accent-ink:#0b5a53; --accent-soft:#e2f1ee;
+    --amber:#b45309; --amber-soft:#fbf0dd;
+    --red:#b3261e; --red-soft:#fbe9e7;
+    --blue:#2563eb; --blue-soft:#e5ecfd;
+    --gray-soft:#eceef1;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
+    --shadow:0 10px 30px rgba(20,26,38,.10),0 2px 6px rgba(20,26,38,.06);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.65;font-size:15px}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 18px 90px}
+  button,[role="button"],select,summary,input:not([type="checkbox"],[type="radio"]){min-height:2rem}
+  [hidden]{display:none!important}
+
+  /* ---------- document header ---------- */
+  header.doc{padding:40px 0 6px}
+  .doc-kicker{font-size:12.5px;letter-spacing:.14em;color:var(--accent-ink);font-weight:700}
+  h1{font-size:29px;line-height:1.3;margin:8px 0 10px;font-weight:800;letter-spacing:-.01em}
+  .lead{font-size:15px;color:var(--ink2);max-width:48em;margin:0}
+  .lead strong{color:var(--ink)}
+  nav.screens{position:sticky;top:0;z-index:40;background:rgba(242,243,245,.88);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);margin:26px -18px 0;padding:10px 18px}
+  nav.screens .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;max-width:1060px;margin:0 auto}
+  nav.screens a{color:var(--ink2);text-decoration:none;font-size:13px;font-weight:600;padding:7px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel);cursor:pointer}
+  nav.screens a:hover{color:var(--ink);border-color:var(--line2)}
+  nav.screens .sep{font-size:11.5px;color:var(--ink3);font-weight:700;margin:0 2px}
+
+  /* ---------- mock window ---------- */
+  .mock{background:var(--panel);border:1px solid var(--line2);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;font-size:13.5px;margin-top:22px;position:relative}
+  .mock-head{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .dots{display:flex;gap:6px}
+  .dots i{width:11px;height:11px;border-radius:50%;display:block}
+  .mock-title{font-size:12.8px;color:var(--ink2);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mock-title b{color:var(--ink)}
+  .mock-body{display:flex;min-height:120px}
+  .content{flex:1;padding:18px 20px;min-width:0}
+  @media (max-width:640px){.content{padding:14px}}
+
+  /* app header / footer (shared by all pages) */
+  .app-head{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .app-head .brand{font-size:15px;font-weight:800}
+  .app-head .proj{font-size:13px;font-weight:700;color:var(--ink2)}
+  .app-head .hnav{margin-left:auto;display:flex;align-items:center;gap:6px}
+  .hpm{display:flex;align-items:center;gap:8px;font:inherit;background:none;border:none;border-radius:8px;padding:4px 6px;cursor:pointer;color:var(--ink)}
+  .hpm .hname{font-size:13px;font-weight:800}
+  .app-foot{display:flex;align-items:center;gap:8px;padding:6px 14px;border-top:1px solid var(--line);background:var(--panel2);color:var(--ink2);font-size:12px}
+  .app-foot .fstat{margin-left:auto}
+
+  /* shared status bar */
+  .app-status{position:sticky;bottom:0;z-index:30}
+  .statusbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border-top:1px solid var(--line2);padding:9px 16px;background:var(--panel);font-size:13px}
+  .statusbar .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:none}
+  .statusbar .sep{width:1px;height:18px;background:var(--line2)}
+  .statusbar .r{margin-left:auto;color:var(--ink3);font-size:12.5px}
+  .statusbar b.you{color:var(--amber)}
+  .statusbar a{color:var(--accent-ink);font-weight:700;cursor:pointer;text-decoration:none}
+  .statusbar a:hover{text-decoration:underline}
+
+  /* pages & screens */
+  .pagehead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .pagerow{display:flex;flex:1;min-width:0}
+  .pagegroup{display:none;flex:1;min-width:0;flex-direction:column}
+  .pagegroup.on{display:flex}
+  .screen-pane{display:none}
+  .screen-pane.on{display:block}
+  .set-pane{display:none}
+  .set-pane.on{display:block}
+  [data-nav],[data-openpage]{cursor:pointer}
+
+  /* rail */
+  .rail{width:196px;flex:none;border-right:1px solid var(--line);padding:14px 10px;background:var(--panel);display:flex;flex-direction:column;gap:2px}
+  @media (max-width:640px){.rail{display:none}}
+  .rail a{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;color:var(--ink2);text-decoration:none;font-weight:600;font-size:13.5px;min-height:36px}
+  .rail a.on{background:var(--gray-soft);color:var(--ink)}
+  .rail a .cnt{margin-left:auto;background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px}
+  .rail a .cnt.gray{background:var(--ink3)}
+  .rail .foot{margin-top:auto;font-size:11.5px;color:var(--ink3);padding:8px 10px 2px;border-top:1px solid var(--line)}
+  .proj-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--gray-soft)}
+  .proj-card .sub{font-size:11.5px;color:var(--ink2);margin-top:5px;line-height:1.4}
+
+  /* PM face / avatars */
+  .pm-face{position:relative;width:36px;height:36px;border-radius:50%;flex:none;background:radial-gradient(circle at 36% 42%,var(--panel) 0 2.5px,transparent 3.4px),radial-gradient(circle at 64% 42%,var(--panel) 0 2.5px,transparent 3.4px),var(--accent)}
+  .pm-face::after{content:"";position:absolute;left:50%;top:53%;width:34%;height:17%;transform:translateX(-50%);border:2px solid var(--panel);border-top:0;border-radius:0 0 999px 999px}
+  .pm-face.sm{width:26px;height:26px}
+  .pm-face .dot{position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--accent);border:2px solid var(--panel)}
+  .pm-face .dot.wait{background:var(--amber)}
+  .pm-face .dot.stop{background:var(--red)}
+  .pm-ava{width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;flex:none}
+  .ava{width:34px;height:34px;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex:none;position:relative}
+  .ava.sm{width:26px;height:26px;font-size:11px}
+  @keyframes avabob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+  .ava.working{animation:avabob 1.6s ease-in-out infinite}
+  .ava.stuck::after{content:"";position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--red);border:2px solid var(--panel)}
+  .ava-presets{display:flex;gap:8px;flex-wrap:wrap}
+  .ava-presets .ava{cursor:pointer;border:2px solid transparent}
+  .ava-presets .ava.sel{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+  .pm-byline{display:flex;align-items:center;gap:9px;margin:0 0 12px}
+  .pm-byline .who{font-size:13px;color:var(--ink2)}
+  .pm-byline .who b{color:var(--ink);font-size:13.5px}
+  .pm-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:var(--accent-soft)}
+  .pm-card .who{display:flex;align-items:center;gap:9px}
+  .pm-card .nm{font-weight:800;font-size:13.5px;line-height:1.25}
+  .pm-card .sub{font-size:11.5px;color:var(--ink2);line-height:1.35}
+
+  /* content primitives */
+  .h-big{font-size:20px;font-weight:800;margin:0 0 4px;line-height:1.35}
+  .h-sub{color:var(--ink2);margin:0 0 16px;font-size:13.5px}
+  .h-sec{font-size:12px;font-weight:800;letter-spacing:.09em;color:var(--ink3);margin:20px 0 8px}
+  .h-sec:first-child{margin-top:0}
+  .stat-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+  .stat{flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .stat .num{font-size:24px;font-weight:800;line-height:1.1}
+  .stat .lab{font-size:12px;color:var(--ink2);font-weight:600}
+  .stat.warn{border-color:var(--amber);background:var(--amber-soft)}
+  .stat.bad{border-color:var(--red);background:var(--red-soft)}
+  .rowitem{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;background:var(--panel);flex-wrap:wrap}
+  .rowitem .grow{flex:1;min-width:180px}
+  .rowitem .t{font-weight:700;line-height:1.4}
+  .rowitem .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+  .lrow{display:flex;align-items:center;gap:10px;padding:12px 2px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .lrow:last-child{border-bottom:none}
+  .lrow .grow{flex:1;min-width:180px}
+  .lrow .t{font-weight:700;line-height:1.4}
+  .lrow .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+  .ptag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:800;padding:2px 9px;border-radius:999px;background:var(--gray-soft);color:var(--ink);white-space:nowrap}
+  .ptag i{width:8px;height:8px;border-radius:50%;display:block;flex:none}
+  .badge{display:inline-flex;align-items:center;font-size:11.5px;font-weight:800;padding:2px 9px;border-radius:999px;white-space:nowrap}
+  .b-run{background:var(--accent-soft);color:var(--accent-ink)}
+  .b-wait{background:var(--amber-soft);color:var(--amber)}
+  .b-block{background:var(--red-soft);color:var(--red)}
+  .b-done{background:var(--gray-soft);color:var(--ink2)}
+  .b-queue{background:var(--blue-soft);color:var(--blue)}
+  .b-plan{background:var(--blue-soft);color:var(--blue)}
+  .btn{font:inherit;font-size:12.8px;font-weight:700;border-radius:8px;border:1px solid var(--line2);background:var(--panel);color:var(--ink);padding:7px 13px;cursor:pointer;min-height:36px}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.amber{background:var(--amber);border-color:var(--amber);color:#fff}
+  .btn.danger{background:var(--red);border-color:var(--red);color:#fff}
+  .btn.ghost{border-color:transparent;color:var(--ink2)}
+  .btnrow{display:flex;gap:8px;flex-wrap:wrap}
+  .rel{color:var(--ink3);font-size:12px}
+  .bar{height:8px;border-radius:99px;background:var(--gray-soft);overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
+  .bar i.amb{background:var(--amber)} .bar i.red{background:var(--red)} .bar i.blu{background:var(--blue)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+  .chip{font-size:12.5px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink2);border-radius:999px;padding:6px 13px;cursor:pointer;min-height:36px}
+  .chip.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+  .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px;margin:0 0 12px}
+  .seg button{border:0;background:transparent;font:inherit;font-size:13px;font-weight:700;color:var(--ink2);padding:6px 18px;border-radius:999px;cursor:pointer;min-height:36px}
+  .seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.18)}
+  .field{font:inherit;font-size:13.5px;padding:9px 11px;border:1px solid var(--line2);border-radius:8px;background:var(--panel);color:var(--ink)}
+  .f-label{font-size:12.5px;font-weight:700;color:var(--ink2);display:block;margin:0 0 5px}
+  .plink{color:var(--accent-ink);font-weight:800;cursor:pointer;text-decoration:none}
+  .plink:hover{text-decoration:underline}
+  .countline{font-size:13.5px;color:var(--ink2)}
+  .countline b{color:var(--ink)}
+  .notice{background:var(--accent-soft);border:1px solid var(--line);border-radius:10px;padding:11px 14px;margin:16px 0 4px;font-size:13.5px}
+  .hero{border:1px solid var(--amber);background:var(--amber-soft);border-radius:12px;padding:18px 20px}
+  .hero .t{font-size:16.5px;font-weight:800;line-height:1.45;margin:7px 0 5px}
+  .hero .d{color:var(--ink2);font-size:13.5px;line-height:1.6;margin:0 0 13px}
+
+  /* start screen */
+  .start-wrap{flex:1;padding:24px 28px 28px;min-width:0}
+  @media (max-width:640px){.start-wrap{padding:16px}}
+  .start-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(320px,1fr);gap:26px;align-items:start}
+  @media (max-width:920px){.start-grid{grid-template-columns:1fr}}
+  .statebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px}
+  .statebar .lab{font-size:13px;font-weight:700;color:var(--ink2)}
+  .statebar .seg{margin:0}
+  .chat-head{display:flex;align-items:center;gap:11px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
+  .chat-head .nm{font-weight:800;font-size:15px;line-height:1.3}
+  .chat-head .sub{font-size:12px;color:var(--ink2)}
+  .pblock{border:1px solid var(--line);border-radius:12px;padding:11px 13px 6px;margin-bottom:10px;background:var(--panel)}
+  .pblock .phead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .pblock .phead .rel{margin-left:auto}
+  .wline{display:flex;gap:9px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line)}
+  .wline .grow{flex:1;min-width:0}
+  .wline .t{font-weight:700;font-size:13px;line-height:1.4}
+  .wline .d{font-size:12px;color:var(--ink2);line-height:1.45}
+  .wcard{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:9px 11px;margin-top:9px;cursor:pointer}
+  .wcard:hover{border-color:var(--accent)}
+  .wcard .grow{flex:1;min-width:0}
+  .wcard .t{font-weight:700;font-size:13px;line-height:1.4;color:var(--ink)}
+  .wcard .d{font-size:12px;color:var(--ink2);line-height:1.45}
+  .empty-col{max-width:660px}
+  .opt{display:block;width:100%;text-align:left;font:inherit;font-size:13.8px;font-weight:700;border:1px solid var(--line2);background:var(--panel);color:var(--ink);border-radius:10px;padding:13px 14px;min-height:48px;cursor:pointer;margin-top:8px}
+  .opt small{display:block;font-weight:500;color:var(--ink2);font-size:12.3px;margin-top:2px}
+  .opt.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .opt.primary small{color:#cdeee8}
+  .many-search{margin:10px 0 4px}
+  .mrow{display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid var(--line)}
+  .mrow .badge{margin-left:auto}
+
+  /* chat */
+  .chat{display:flex;flex-direction:column;gap:12px}
+  .msg{max-width:88%;border-radius:14px;padding:11px 14px;line-height:1.55}
+  .msg .meta{font-size:11.5px;font-weight:800;margin-bottom:3px;display:flex;align-items:center;gap:7px}
+  .msg.pm{background:var(--gray-soft);border-bottom-left-radius:4px;align-self:flex-start}
+  .msg.me{background:var(--accent);color:#fff;border-bottom-right-radius:4px;align-self:flex-end}
+  .msg.me .meta{color:#cdeee8}
+  .msg .btnrow{margin-top:9px}
+  .msg .route{display:inline-block;margin-top:7px;font-size:11.8px;font-weight:700;background:var(--panel);border:1px solid var(--line2);border-radius:999px;padding:3px 10px;color:var(--ink)}
+  .composer{border:1px solid var(--line2);border-radius:12px;padding:10px 12px;margin-top:16px;background:var(--panel)}
+  .composer .scope{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:9px;font-size:12.5px;color:var(--ink2)}
+  .composer textarea{width:100%;border:0;resize:none;font:inherit;font-size:14px;background:transparent;color:var(--ink);min-height:44px;outline:none}
+  .composer .send{display:flex;justify-content:flex-end;align-items:center;gap:10px;flex-wrap:wrap}
+
+  /* board */
+  .post{padding:11px 2px;border-bottom:1px solid var(--line)}
+  .post:last-child{border-bottom:none}
+  .post .meta{font-size:11.8px;font-weight:800;color:var(--ink2);margin-bottom:2px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .post .body{font-size:13.5px;line-height:1.55}
+  .post .body .d{color:var(--ink2);font-size:12.8px}
+  .fold{border:1px solid var(--red);background:var(--red-soft);border-radius:10px;padding:11px 14px;margin-bottom:14px}
+  .fold .t{font-weight:800;color:var(--red)}
+  .fold .lrow{border-color:rgba(179,38,30,.25)}
+
+  /* decide */
+  .dcard{border:1px solid var(--line);border-radius:12px;padding:13px 14px;margin-bottom:12px;background:var(--panel)}
+  .dcard .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .dcard .t{font-weight:800;line-height:1.45;font-size:14.3px}
+  .dcard .d{font-size:13px;color:var(--ink2);line-height:1.55}
+  .dcard .rec{border-left:3px solid var(--accent);padding:2px 0 2px 10px;margin:9px 0}
+  .dcard .rec .k{font-size:11.5px;font-weight:800;color:var(--accent-ink);letter-spacing:.05em}
+  .dcard dl{display:grid;grid-template-columns:64px 1fr;gap:2px 10px;margin:8px 0;font-size:12.8px}
+  .dcard dt{font-weight:800;color:var(--ink2)}
+  .dcard dd{margin:0;color:var(--ink2)}
+
+  /* settings */
+  .set-group{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px}
+  .set-group h4{margin:0 0 4px;font-size:14.5px}
+  .set-group .d{font-size:12.8px;color:var(--ink2);margin:0 0 10px}
+  .set-head{font-size:14.5px;font-weight:800;margin:0 0 4px}
+  .set-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+  .set-row:first-of-type{border-top:none}
+  .set-row .grow{flex:1;min-width:200px}
+  .set-row .t{font-weight:700;font-size:13.5px}
+  .set-row .d2{font-size:12.3px;color:var(--ink2)}
+  .switch{width:46px;height:26px;border-radius:99px;background:var(--accent);position:relative;flex:none;display:inline-block}
+  .switch::after{content:"";position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;background:#fff}
+  .switch.off{background:var(--line2)} .switch.off::after{right:auto;left:3px}
+  .use{margin-top:5px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
+  .use .bar{width:110px;flex:none}
+
+  /* index health table */
+  table.health{width:100%;border-collapse:collapse;font-size:12.8px;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  table.health th,table.health td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  table.health tr:last-child td{border-bottom:none}
+  table.health th{background:var(--panel2);font-size:12px;color:var(--ink2)}
+  table.health td.num{font-family:var(--mono);font-size:12.3px;white-space:nowrap}
+
+  footer.doc{margin-top:56px;border-top:1px solid var(--line);padding-top:18px;color:var(--ink2);font-size:13.5px}
+  footer.doc h3{color:var(--ink);font-size:16px;margin:0 0 8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="doc">
+    <div class="doc-kicker">gwt — Issue #7007</div>
+    <h1>全画面刷新モック v2</h1>
+    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。下のボタンから全画面へ移動できます。</p>
+  </header>
+
+  <nav class="screens" aria-label="画面一覧">
+    <div class="row">
+      <a data-openpage="start">開始画面</a>
+      <a data-openpage="settings">アプリ設定</a>
+      <span class="sep">gwt：</span>
+      <a data-openpage="gwt" data-openscreen="g-ask">相談</a>
+      <a data-openpage="gwt" data-openscreen="g-issues">課題</a>
+      <a data-openpage="gwt" data-openscreen="g-issue">課題詳細</a>
+      <a data-openpage="gwt" data-openscreen="g-works">作業</a>
+      <a data-openpage="gwt" data-openscreen="g-agents">エージェント</a>
+      <a data-openpage="gwt" data-openscreen="g-board">掲示板</a>
+      <a data-openpage="gwt" data-openscreen="g-branches">ブランチ</a>
+      <a data-openpage="gwt" data-openscreen="g-decide">判断待ち</a>
+      <a data-openpage="gwt" data-openscreen="g-index">検索</a>
+      <a data-openpage="gwt" data-openscreen="g-settings">プロジェクト設定</a>
+      <span class="sep">KeibaDB：</span>
+      <a data-openpage="keibadb" data-openscreen="k-decide">判断待ち</a>
+      <a data-openpage="keibadb" data-openscreen="k-issues">課題</a>
+    </div>
+  </nav>
+
+  <div class="mock" id="app">
+    <div class="mock-head">
+      <span class="dots"><i style="background:#e0655f"></i><i style="background:#e5b95c"></i><i style="background:#63b06a"></i></span>
+      <span class="mock-title"><b>gwt</b> — <span id="appTitle">開始画面</span></span>
+    </div>
+    <div class="app-head">
+      <span class="brand">gwt</span>
+      <span class="proj" id="appProj" hidden></span>
+      <div class="hnav">
+        <button class="hpm" type="button" data-openpage="start"><span class="pm-face sm"><span class="dot wait"></span></span><span class="hname">ツムギ</span><span class="badge b-wait">判断待ち 5件</span></button>
+        <button class="btn ghost" type="button" data-openpage="settings" data-settingstab="launch">エージェント</button>
+        <button class="btn ghost" type="button" data-openpage="settings">設定</button>
+      </div>
+    </div>
+    <div class="mock-body">
+
+      <!-- ================= 開始画面 ================= -->
+      <div class="pagegroup on" data-page="start">
+        <div class="start-wrap">
+          <div class="statebar">
+            <span class="lab">状態：</span>
+            <div class="seg" role="group" aria-label="開始画面の状態切替">
+              <button type="button" data-startstate="has" aria-pressed="true">プロジェクトあり</button>
+              <button type="button" data-startstate="empty" aria-pressed="false">プロジェクトなし</button>
+              <button type="button" data-startstate="many" aria-pressed="false">プロジェクトが多い（20件）</button>
+            </div>
+          </div>
+
+          <!-- あり -->
+          <div data-startpane="has">
+            <div class="start-grid">
+              <div>
+                <div class="chat-head">
+                  <span class="pm-face"><span class="dot wait"></span></span>
+                  <div>
+                    <div class="nm">ツムギ</div>
+                    <div class="sub">あなたの PM · 判断待ち 5件</div>
+                  </div>
+                </div>
+                <div class="chat" id="startChat">
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>おはようございます。昨夜の間に、gwt の共有状態モデル（#7048）が終わってレビュー待ちになりました。実装は Haruto です。KeibaDB は、Sora が夜の分まで取り込みを完了しています。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-works"><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">gwt · Haruto · Codex</div></div><span class="badge b-wait">レビュー待ち</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>いま 9件の作業が進んでいます。止まっているのは 3件 — gwt の #7047 はチェック4件の失敗、KeibaDB の毎日の取り込み（#121）は形式の変更、unity-cli は3日動きがありません。まだ読まれていない報告が 9件あります。
+                    <div class="wcard" data-openpage="gwt" data-openscreen="g-board"><div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">gwt · Haruto · チェック4件が失敗して停止中</div></div><span class="badge b-block">止まっている</span></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>判断をお願いします。KeibaDB の取り込み形式で、対応表の食い違いが見つかりました。対応表を直せば取り込みはそのまま続けられます。
+                    <div class="wcard" data-openpage="keibadb" data-openscreen="k-decide"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">KeibaDB · 48分待ち · 対応表の判断待ち</div></div><span class="badge b-block">要対応</span></div>
+                    <div class="btnrow"><button class="btn primary" type="button" data-say="対応表を直して、取り込みを続けて" data-reply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直す</button><button class="btn" type="button" data-say="取り込みを止めて" data-reply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 判断待ち</span></div>gwt にも判断が 2件あります。「全画面刷新のホームと判断の画面」（#7007）の計画の承認と、保存されていない変更の扱いです。
+                    <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button></div></div>
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>プロジェクトの中身の相談は、そのプロジェクトのページの「相談」が早いです。たとえばメモリの課題（#5561）の詳しい話は、gwt の相談で聞いてください。
+                    <div class="btnrow"><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-ask">gwt の相談へ</button></div></div>
+                </div>
+                <div class="composer">
+                  <textarea id="startInput" placeholder="ツムギに話しかける…"></textarea>
+                  <div class="send"><button class="btn primary" type="button" id="startSend">送る</button></div>
+                </div>
+              </div>
+              <div>
+                <p class="h-sec">プロジェクトの今</p>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                    <span class="badge b-run">作業中</span>
+                    <span class="badge b-wait">判断待ち 2件</span>
+                    <span class="rel">未解決132件</span>
+                  </div>
+                  <div class="wline"><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">Haruto · Codex · 実装が入ってレビュー待ち</div></div><span class="badge b-wait">レビュー待ち</span></div>
+                  <div class="wline"><div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">Yui · Claude Code · 1時間12分実行中</div><div class="bar" style="margin-top:5px"><i style="width:62%"></i></div></div><span class="badge b-run">実行中</span></div>
+                  <div class="wline"><div class="grow"><div class="t">変更でチェックが失敗している（#7047）</div><div class="d">Haruto · チェック4件が失敗 — 修正を準備中</div></div><span class="badge b-block">要対応</span></div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                    <span class="badge b-block">止まっている</span>
+                    <span class="badge b-wait">判断待ち 1件</span>
+                    <span class="rel">未解決48件</span>
+                  </div>
+                  <div class="wline"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">Sora · 対応表の判断待ち · 48分経過</div></div><span class="badge b-block">要対応</span></div>
+                  <div class="wline"><div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">Sora · 夜の分まで完了</div></div><span class="badge b-done">完了</span></div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span>
+                    <span class="badge b-done">静か</span>
+                    <span class="rel">未解決12件</span>
+                  </div>
+                  <div class="wline"><div class="grow"><div class="t">3日動きがありません</div><div class="d">最後の作業は月曜日に完了しています</div></div></div>
+                </div>
+                <p class="h-sec">プロジェクトを開く</p>
+                <div class="btnrow">
+                  <button class="btn" type="button" data-openpage="gwt">gwt を開く</button>
+                  <button class="btn" type="button" data-openpage="keibadb">KeibaDB を開く</button>
+                  <button class="btn ghost" type="button">フォルダを開く…</button>
+                  <button class="btn ghost" type="button">GitHub から取り込む…</button>
+                </div>
+                <p class="rel" style="margin-top:8px">プロジェクトは新しいブラウザタブで開きます。</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- なし（空状態） -->
+          <div data-startpane="empty" hidden>
+            <div class="empty-col">
+              <div class="chat-head">
+                <span class="pm-face"><span class="dot"></span></span>
+                <div>
+                  <div class="nm">ツムギ</div>
+                  <div class="sub">あなたの PM</div>
+                </div>
+              </div>
+              <div class="chat">
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ</div>はじめまして、ツムギです。まだプロジェクトがありません。最初のプロジェクトを開くと、ここで様子をお知らせできるようになります。</div>
+              </div>
+              <button class="opt primary" type="button">GitHub から取り込む<small>リポジトリを選ぶと、そのままプロジェクトになります</small></button>
+              <button class="opt" type="button">フォルダを開く<small>この端末にあるフォルダをプロジェクトにします</small></button>
+              <button class="opt" type="button">URL から複製する<small>Git の URL を貼ると、複製してから開きます</small></button>
+            </div>
+          </div>
+
+          <!-- 多い（20件） -->
+          <div data-startpane="many" hidden>
+            <div class="start-grid">
+              <div>
+                <div class="chat-head">
+                  <span class="pm-face"><span class="dot wait"></span></span>
+                  <div>
+                    <div class="nm">ツムギ</div>
+                    <div class="sub">あなたの PM · 判断待ち 5件</div>
+                  </div>
+                </div>
+                <div class="chat">
+                  <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400"> · 今朝 7:02</span></div>プロジェクトは 20件ありますが、様子を知らせるのは注意が要る 3件だけに絞ります。gwt は判断が 2件、KeibaDB は取り込みが止まっています。残りの 17件は静かです。
+                    <div class="btnrow"><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断へ</button><button class="btn" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断へ</button></div></div>
+                </div>
+                <div class="composer">
+                  <textarea placeholder="ツムギに話しかける…"></textarea>
+                  <div class="send"><button class="btn primary" type="button">送る</button></div>
+                </div>
+              </div>
+              <div>
+                <p class="h-sec">プロジェクトの今（注意が要るもの）</p>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="gwt"><span class="ptag"><i style="background:#0f766e"></i>gwt</span></a>
+                    <span class="badge b-run">作業中</span>
+                    <span class="badge b-wait">判断待ち 2件</span>
+                    <span class="rel">未解決132件</span>
+                  </div>
+                  <div class="wline"><div class="grow"><div class="t">変更でチェックが失敗している（#7047）</div><div class="d">Haruto · チェック4件が失敗 — 修正を準備中</div></div><span class="badge b-block">要対応</span></div>
+                </div>
+                <div class="pblock">
+                  <div class="phead">
+                    <a class="plink" data-openpage="keibadb"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span></a>
+                    <span class="badge b-block">止まっている</span>
+                    <span class="badge b-wait">判断待ち 1件</span>
+                    <span class="rel">未解決48件</span>
+                  </div>
+                  <div class="wline"><div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">Sora · 対応表の判断待ち · 48分経過</div></div><span class="badge b-block">要対応</span></div>
+                </div>
+                <p class="h-sec">すべてのプロジェクト（20件）</p>
+                <input class="field many-search" type="text" placeholder="プロジェクトを探す…" aria-label="プロジェクトを探す" style="width:100%">
+                <div class="mrow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="rel">未解決9件</span><span class="badge b-done">静か</span></div>
+                <div class="mrow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="rel">未解決21件</span><span class="badge b-done">静か</span></div>
+                <div class="mrow"><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><span class="rel">未解決12件</span><span class="badge b-done">静か</span></div>
+                <div class="mrow"><span class="ptag"><i style="background:#a16207"></i>155-Demi</span><span class="rel">未解決4件</span><span class="badge b-done">静か</span></div>
+                <div class="mrow"><span class="ptag"><i style="background:#475569"></i>160-Idina</span><span class="rel">未解決7件</span><span class="badge b-done">静か</span></div>
+                <p class="rel" style="margin-top:8px">静かなプロジェクト あと12件 — 動きがあったものだけ上に来ます。</p>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ================= アプリ設定 ================= -->
+      <div class="pagegroup" data-page="settings">
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a></div>
+        <div class="content">
+          <div class="screen-pane on" data-screen="appsettings">
+            <p class="h-big">設定</p>
+            <p class="h-sub">この端末全体の設定です。プロジェクトごとの設定は、各プロジェクトページの「設定」にあります。</p>
+            <div class="chips" role="group" aria-label="設定のタブ"><button class="chip on" type="button" data-tab="yourpm">あなたの PM</button><button class="chip" type="button" data-tab="tools">ツール</button><button class="chip" type="button" data-tab="launch">エージェント台帳</button><button class="chip" type="button" data-tab="projects">プロジェクト</button></div>
+
+            <div class="set-pane on" data-pane="yourpm">
+              <div class="set-group">
+                <h4>あなたの PM — この端末</h4>
+                <p class="d">PM を務めるエージェントの振る舞いの設定です。誰が PM を務めるかは、「エージェント台帳」で決めます。</p>
+                <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">PM の名前とアバター</div><div class="d2">いまはこの顔と名前（ツムギ）です。アバターはエージェント台帳の各エージェント設定から変えます。</div></div><button class="btn" type="button">変える</button></div>
+                <div class="set-row"><div class="grow"><div class="t">判断は、出てきた時点で知らせる</div><div class="d2">オフにすると、判断は朝と夜の報告にまとめられます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">止まった作業は、理由と次の手つきで知らせる</div><div class="d2">「止まりました」だけで終わらせず、原因の見立てと PM が次にやることを添えます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">23:00〜7:00 は、止まった作業と判断だけを知らせます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">相談の内容から、担当プロジェクトを自動で決める</div><div class="d2">開始画面の会話の内容から PM が候補を出し、必ずあなたに見せてから決めます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+              </div>
+              <div class="set-group">
+                <h4>アプリの更新 — gwt 本体</h4>
+                <div class="set-row"><div class="grow"><div class="t">現在のバージョン</div><div class="d2">9.170.0 — 最新です。</div></div><button class="btn" type="button">今すぐ確認</button></div>
+                <div class="set-row"><div class="grow"><div class="t">更新を自動で適用する</div><div class="d2">更新の準備ができたら、動いている作業を安全に終わらせてから gwt を再起動して適用します。適用前なら取り消せます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+              </div>
+              <div class="set-group">
+                <h4>性能とシステム — この端末</h4>
+                <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">担当者のプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button">バランス ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">ログイン時に gwt を起動する</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">作業の出力行数</div><div class="d2">作業セッションで表示する出力の行数です（3〜10）。</div></div><button class="btn" type="button">6 ▾</button></div>
+              </div>
+            </div>
+
+            <div class="set-pane" data-pane="tools">
+              <div class="set-group">
+                <h4>ツール — アカウント単位の実体</h4>
+                <p class="d">ツールはアカウントごとに管理します。使用率とリセット時刻はここで見ます。エージェントへの割り当ては、セッション開始時に空いているツールから自動で行われます。</p>
+                <div class="set-row"><div class="grow"><div class="t">ツールを自動で更新する</div><div class="d2">次回起動時に、更新の経路が確認できていて新しいバージョンがあるツールだけを更新します。勝手にインストールはしません。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">インストール済み · バージョン 2.1.326 — 最新です</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div><span class="badge b-done">最新</span></div>
+                <div class="set-row"><div class="grow"><div class="t">Claude Code 2（個人メール）</div><div class="d2">インストール済み · バージョン 2.1.326 — 最新です</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 金曜 18:00にリセット · いまは割り当て対象外</span></div></div><span class="badge b-block">上限</span></div>
+                <div class="set-row"><div class="grow"><div class="t">Codex 1（会社メール）</div><div class="d2">インストール済み · バージョン 0.164.0 · 最新 0.169.0 — 更新があります</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · いまは割り当て対象外</span></div></div><span class="badge b-wait">要確認</span><button class="btn" type="button">更新</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Codex 3</div><div class="d2">インストール済み · サインインが必要です</div></div><button class="btn" type="button">サインイン</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Grok Build</div><div class="d2">未インストール</div><div class="use"><div class="bar"><i style="width:2%"></i></div><span>週間2%使用</span></div></div><button class="btn primary" type="button">インストール</button></div>
+              </div>
+            </div>
+
+            <div class="set-pane" data-pane="launch">
+              <div class="set-group">
+                <h4>エージェント台帳 — 並び順が利用優先度です</h4>
+                <p class="d">エージェントは名前・役割・アバターを持つ担当者です。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</p>
+                <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. ツムギ — PM · Claude Code · Auto · 推論 標準</div><div class="d2">実行環境：ホスト · セッション：常駐 · いま、この端末の PM</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。</div></div><input type="checkbox" checked aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+                <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。すべての画面にすぐ反映されます。</div></div></div>
+                <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                  <span class="ava sel" style="background:#0f766e">ツ</span>
+                  <span class="ava" style="background:#2563eb">ツ</span>
+                  <span class="ava" style="background:#be123c">ツ</span>
+                  <span class="ava" style="background:#a16207">ツ</span>
+                  <span class="ava" style="background:#6d28d9">ツ</span>
+                </div><button class="btn" type="button">画像をアップロード</button></div>
+                <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">2. Haruto — 実装 · Codex · gpt-6-sol · 推論 xhigh</div><div class="d2">実行環境：ホスト · セッション：通常 · 得意：実装 · いま作業中</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><span class="ava" style="background:#c2410c">Y</span><div class="grow"><div class="t">3. Yui — 実装 · Claude Code · Auto · 推論 標準</div><div class="d2">実行環境：Docker · セッション：通常 · いま作業中</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">4. Sora — データ取り込み · Claude Code · Auto · 推論 標準</div><div class="d2">実行環境：ホスト · セッション：通常 · 得意：データ取り込み</div></div><button class="btn" type="button">編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button">追加</button></div>
+              </div>
+            </div>
+
+            <div class="set-pane" data-pane="projects">
+              <div class="set-group">
+                <h4>プロジェクト</h4>
+                <div class="set-row"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="d2">違うところ2件：報告はチームのチャンネルへ · 今週は画面刷新の作業が優先</div></div><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-settings">ページを開く</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="d2">違うところ1件：取り込みは毎日 6:00</div></div><button class="btn" type="button" data-openpage="keibadb" data-openscreen="k-settings">ページを開く</button></div>
+                <div class="set-row"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><span class="ptag"><i style="background:#6d28d9"></i>unity-cli</span><div class="grow"><div class="d2">違いなし — 端末全体の設定をそのまま使用</div></div></div>
+              </div>
+              <div class="set-group">
+                <h4>掲示板の共有 — この端末</h4>
+                <div class="set-row"><div class="grow"><div class="t">掲示板の共有先</div><div class="d2">この端末のみ、Slack、Teams から選びます。GitHub Discussions の受け渡し（判断・止まった報告・引き継ぎ）は、共有先が「この端末のみ」のときだけ有効です。</div></div><button class="btn" type="button">この端末のみ ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">Slack / Teams の接続</div><div class="d2">サインインとサインアウトもここです。</div></div><button class="btn" type="button">設定する</button></div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= プロジェクト：gwt ================= -->
+      <div class="pagegroup" data-page="gwt">
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">このプロジェクトは独立したページです（URL: /p/gwt）— ブラウザのタブで並べて開けます</span></div>
+        <div class="pagerow">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#0f766e"></i>gwt</span>
+              <div class="sub">プロジェクトページ · ポリシー：実行中</div>
+            </div>
+            <a href="#" data-nav="g-ask">相談</a>
+            <a href="#" data-nav="g-issues" class="on">課題</a>
+            <a href="#" data-nav="g-works">作業</a>
+            <a href="#" data-nav="g-decide">判断<span class="cnt">2</span></a>
+            <a href="#" data-nav="g-agents">担当者</a>
+            <a href="#" data-nav="g-board">掲示板</a>
+            <a href="#" data-nav="g-index">検索</a>
+            <a href="#" data-nav="g-branches">ブランチ</a>
+            <a href="#" data-nav="g-settings">設定</a>
+            <div class="foot">担当 PM：ツムギ</div>
+          </div>
+          <div class="content">
+
+            <div class="screen-pane" data-screen="g-ask">
+              <p class="h-big">相談 — gwt</p>
+              <div class="chat">
+                <div class="msg me"><div class="meta">あなた · たった今</div>メモリの課題（#5561）はどうなってる？</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>待ち行列に入っていて、次に始まります。計画は承認済みで、妨げるものはありません。修正が入ったら、メモリの記録を掲示板に投稿します。
+                  <br><span class="route">範囲：gwt</span>
+                  <div class="btnrow"><button class="btn" type="button" data-nav="g-issue">課題 #5561 を開く</button><button class="btn ghost" type="button" data-nav="g-works">作業を見る</button></div></div>
+                <div class="msg me"><div class="meta">あなた · たった今</div>全画面刷新（#7007）の残りは？</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>残りは共有ステータスバーと、E2E・回帰確認です。計画の承認が「判断」に 1件あります。承認されれば Yui がそのまま再開します。
+                  <div class="btnrow"><button class="btn primary" type="button" data-nav="g-decide">判断へ（2件）</button></div></div>
+              </div>
+              <div class="composer">
+                <div class="scope"><span>範囲：<b>gwt</b></span><span class="rel">開始画面の会話と同じ PM です。文脈だけが違います。</span></div>
+                <textarea placeholder="gwt のことを聞く…"></textarea>
+                <div class="send"><button class="btn primary" type="button">送る</button></div>
+              </div>
+            </div>
+
+            <div class="screen-pane on" data-screen="g-issues">
+              <p class="h-big">課題</p>
+              <p class="h-sub">gwt · 未解決132件</p>
+              <div class="stat-row">
+                <div class="stat warn"><div class="num">2</div><div class="lab">判断待ち（あなた）</div></div>
+                <div class="stat bad"><div class="num">1</div><div class="lab">止まっている</div></div>
+                <div class="stat"><div class="num">2</div><div class="lab">実行中</div></div>
+                <div class="stat"><div class="num">5</div><div class="lab">今日完了</div></div>
+              </div>
+              <p class="countline" style="margin-bottom:8px">段階 — 未着手 <b>118</b> · 待ち <b>3</b> · 計画中 <b>1</b> · 実装中 <b>2</b> · レビュー中 <b>1</b> · 今日完了 <b>5</b></p>
+              <div class="chips"><span class="chip on">すべて</span><span class="chip">止まっている</span><span class="chip">実行中</span><span class="chip">開始待ち</span><span class="chip">バグ</span></div>
+              <div class="lrow">
+                <div class="grow"><div class="t">変更でチェックが失敗している（#7047）</div><div class="d">レビュー · チェック4件が失敗 — 修正を準備中 · Haruto</div></div>
+                <span class="badge b-block">要対応</span>
+                <button class="btn" type="button" data-nav="g-board">掲示板で見る</button>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">長時間のセッションでメモリが増え続ける（#5561）</div><div class="d">バグ · 6日前に報告 · 拾われて開始待ち</div></div>
+                <span class="badge b-queue">開始待ち</span>
+                <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">実装 · Haruto が作業中 · レビュー待ち</div></div>
+                <span class="badge b-run">実行中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">実装 · Yui が作業中 · 計画の承認待ち</div></div>
+                <span class="badge b-run">実行中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">gwtd が落ちない問題（#7541）</div><div class="d">バグ · 修正はマージ済み · リリース後の実機確認待ち</div></div>
+                <span class="badge b-wait">確認待ち</span>
+              </div>
+              <p class="rel" style="margin-top:12px">+ gwt の課題があと127件 — 止まっているもの・実行中のものが上に来ます。</p>
+            </div>
+
+            <div class="screen-pane" data-screen="g-issue">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="g-issues">&larr; 課題一覧へ</button></div>
+              <p class="h-big">長時間のセッションでメモリが増え続ける</p>
+              <p class="h-sub">課題 #5561 · <b>gwt</b> · バグ · 6日前に報告 · PM が拾いました — 「作業」で開始待ちです。</p>
+              <div class="set-group">
+                <h4>目的</h4>
+                <p class="d">長時間のセッションで GUI のメモリが増えないようにします（約4時間で 0.85 GB から 2.7 GB へ）。再起動なしで一日中 gwt を開いておけるようにします。</p>
+                <div class="set-row"><div class="grow"><div class="t">受け入れ条件</div><div class="d2">同じ作業量で4時間動かしても、メモリが横ばいのまま。この端末だけでなく Windows でも確認します。</div></div><span class="badge b-queue">作業の中</span></div>
+                <div class="set-row"><div class="grow"><div class="t">段階</div><div class="d2">待ち — 開始を待っています。待ち行列の先頭です。</div></div><button class="btn" type="button" data-nav="g-works">作業へ</button></div>
+              </div>
+              <div class="set-group">
+                <h4>やり取り</h4>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">ツムギ（あなたの PM）</div><div class="d2">フィードバックの待ち行列から拾いました。Windows でも同じ遅さに気づいていたので、両方の報告をここに結びました。</div></div><span class="rel">2日前</span></div>
+                <div class="set-row"><div class="grow"><div class="t">あなた</div><div class="d2">長時間動かすと GUI が入力を受け付けなくなることもある — 同じ仲間として扱って。</div></div><span class="rel">2日前</span></div>
+              </div>
+              <div class="set-group">
+                <h4>実行</h4>
+                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">開始待ち — まだ誰も作業していません。</div></div><span class="badge b-queue">開始待ち</span></div>
+                <div class="set-row"><div class="grow"><div class="t">担当者とセッション</div><div class="d2">まだありません。空きが出たら、台帳の並び順で割り当てます。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">ありません。</div></div><span class="badge b-done">なし</span></div>
+              </div>
+              <div class="set-group">
+                <h4>検証と成果物</h4>
+                <div class="set-row"><div class="grow"><div class="t">検証</div><div class="d2">まだ実行していません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">成果物</div><div class="d2">まだ何もありません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">未処理の義務</div><div class="d2">この課題に付いた未処理の義務（レビュー、チェック、判断）はありません。</div></div></div>
+              </div>
+              <div class="set-group">
+                <h4>経過と文脈</h4>
+                <div class="set-row"><div class="grow"><div class="t">経過</div><div class="d2">報告 → PM が拾う → 開始待ち。</div></div></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-works">
+              <p class="h-big">作業</p>
+              <p class="h-sub">今 gwt で動いているセッションです。</p>
+              <div class="lrow">
+                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">Codex · Haruto · 42分実行中 · 最後の活動は2分前 · 実装が入ってレビュー待ち</div></div>
+                <span class="badge b-wait">レビュー待ち</span>
+                <button class="btn" type="button">セッションを開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">Claude Code · Yui · 1時間12分実行中 · 最後の活動はたった今</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:62%"></i></div></div>
+                <span class="badge b-run">実行中</span>
+                <button class="btn" type="button">セッションを開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">Codex · Haruto · チェック4件が失敗して停止中 · PM が見ています</div></div>
+                <span class="badge b-block">止まっている</span>
+                <button class="btn" type="button" data-nav="g-board">掲示板で見る</button>
+              </div>
+              <p class="h-sec">待ち行列</p>
+              <div class="lrow">
+                <div class="grow"><div class="t">長時間のセッションでメモリが増え続ける（#5561）</div><div class="d">先頭 — 空きが出たら自動で始まります</div></div>
+                <span class="badge b-queue">開始待ち</span>
+                <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
+              </div>
+              <p class="h-sec">過去のセッション</p>
+              <div class="lrow">
+                <div class="grow"><div class="t">過去のセッションを再開する</div><div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div></div>
+                <button class="btn" type="button">セッションを選ぶ…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-decide">
+              <p class="h-big">判断待ち — gwt</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です · 2件</span></div>
+              <div class="dcard">
+                <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">判断待ち</span><span class="rel">1時間待ち</span></div>
+                <div class="t">「全画面刷新のホームと判断の画面」（#7007）の計画を承認しますか？</div>
+                <div class="d">設計は終わり、待っていた土台（共有状態モデル #7048）も入りました。承認すると、Yui がすぐに実装を再開します。</div>
+                <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>承認して始める</b> — 残りのスライスはステータスバーと E2E 確認だけで、依存はすべて解けています。</div></div>
+                <dl>
+                  <dt>理由</dt><dd>土台のマージで前提が揃い、これ以上待っても計画は変わりません。遅れるほど他の画面との差分が広がります。</dd>
+                  <dt>影響範囲</dt><dd>gwt の全画面（開始画面・プロジェクト画面群・設定）。作業中のセッション 2件は影響を受けません。</dd>
+                </dl>
+                <div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn" type="button">変更を求める</button><button class="btn ghost" type="button" data-nav="g-ask">相談で聞く</button></div>
+              </div>
+              <div class="dcard">
+                <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">判断待ち</span><span class="rel">26分待ち</span></div>
+                <div class="t">保存されていない変更を、保存しますか？</div>
+                <div class="d">このプロジェクトには、まだ保存（コミット）も送信（プッシュ）もされていない変更が2件あります。この端末が初期化されると、その作業は失われます。</div>
+                <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>保存して送信する</b> — 変更は設計書とモックだけで、コードには触れていません。</div></div>
+                <dl>
+                  <dt>理由</dt><dd>6th のフォーマット前救済と同じ形の喪失リスクがあります。2件とも内容は確認済みです。</dd>
+                  <dt>影響範囲</dt><dd>ブランチ work/issue-7007 のみ。他のセッション・ブランチには影響しません。</dd>
+                </dl>
+                <div class="btnrow"><button class="btn amber" type="button">保存して送信する</button><button class="btn" type="button">あとで</button></div>
+              </div>
+              <p class="rel">判断待ちは以上です。決めた内容は、開始画面の会話にも同じ結果が残ります。</p>
+            </div>
+
+            <div class="screen-pane" data-screen="g-agents">
+              <p class="h-big">担当者</p>
+              <p class="h-sub">このプロジェクトで動いているエージェントです。台帳と並び順はアプリ設定の「エージェント台帳」にあります。</p>
+              <div class="rowitem">
+                <span class="pm-face"><span class="dot wait"></span></span>
+                <div class="grow">
+                  <div class="t">ツムギ <span class="rel">· あなたの PM · Claude Code（ツール）</span></div>
+                  <div class="d">このプロジェクトも見ています · 判断待ち 2件を運んでいます</div>
+                </div>
+                <span class="badge b-wait">判断待ち 2件</span>
+                <button class="btn ghost" type="button" data-nav="g-ask">相談する</button>
+              </div>
+              <div class="rowitem">
+                <span class="ava working" style="background:#2563eb">H</span>
+                <div class="grow">
+                  <div class="t">Haruto <span class="rel">· Codex（ツール）</span></div>
+                  <div class="d">作業中：#7048、共有状態モデル · ここまで42分 · #7047 の修正も準備中</div>
+                  <div class="use"><div class="bar"><i style="width:64%"></i></div><span>Codex アカウント — 週間64%使用 · 金曜18:00にリセット</span></div>
+                </div>
+                <span class="badge b-run">作業中</span>
+                <button class="btn ghost" type="button">一時停止</button>
+              </div>
+              <div class="rowitem">
+                <span class="ava working" style="background:#c2410c">Y</span>
+                <div class="grow">
+                  <div class="t">Yui <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="d">作業中：#7007、全画面刷新 · ここまで1時間12分</div>
+                  <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude アカウント — 週間31%使用 · 金曜18:00にリセット</span></div>
+                </div>
+                <span class="badge b-run">作業中</span>
+                <button class="btn ghost" type="button">一時停止</button>
+              </div>
+              <div class="rowitem">
+                <span class="ava" style="background:#0e7490">S</span>
+                <div class="grow">
+                  <div class="t">Sora <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="d">いまは KeibaDB の取り込みを担当しています · このプロジェクトでは待機中</div>
+                </div>
+                <span class="badge b-done">待機中</span>
+              </div>
+              <p class="rel" style="margin-top:10px">アバターはエージェントごとに固定です。使うツール（アカウント）が替わっても、顔と名前は変わりません。</p>
+            </div>
+
+            <div class="screen-pane" data-screen="g-board">
+              <p class="h-big">掲示板</p>
+              <p class="countline" style="margin-bottom:6px">あなた待ち <b>2</b> · 要対応 <b>1</b> · 進行中 <b>4</b> · 開始待ち <b>9</b></p>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">あなた宛て</span><span class="chip">全体</span><span class="chip">一斉</span>
+              </div>
+              <div class="fold">
+                <div class="t">未解決の詰まり（索引）— 1件</div>
+                <div class="lrow">
+                  <div class="grow"><div class="t">#7047 — 状態モデルの変更でチェック4件が失敗</div><div class="d">Haruto の申告 · 12:03 · PM が見ています · 次の手：失敗ログの切り分け結果を待って再実行</div></div>
+                  <span class="badge b-block">要対応</span>
+                  <button class="btn" type="button" data-nav="g-works">作業で見る</button>
+                </div>
+                <p class="rel" style="margin-top:6px">詰まりは時系列に埋もれさせず、ここに残り続けます。解けたら索引から消えます。</p>
+              </div>
+              <div class="post">
+                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-run">判断</span> · 12:12</div>
+                <div class="body">判断：設定のセクションは1つの PR で出します（#7039）。</div>
+              </div>
+              <div class="post">
+                <div class="meta"><span class="ava sm stuck" style="background:#2563eb">H</span>Haruto · <span class="badge b-block">要対応</span> · PM 宛て · 12:03</div>
+                <div class="body">#7047 で止まっています：状態モデルの変更でチェック4件が失敗。<span class="d">エージェントの投稿は、自分の状態申告だけを PM 宛てに出します。調整は PM 経由です。</span></div>
+              </div>
+              <div class="post">
+                <div class="meta">引き継ぎ · <span class="badge b-plan">別のマシンから · GitHub Discussions</span> · 11:48</div>
+                <div class="body">Windows のセッションが #7047 の修正を試し終えました — 詳しくは課題にあります。</div>
+              </div>
+              <div class="post">
+                <div class="meta"><span class="ava sm" style="background:#c2410c">Y</span>Yui · <span class="badge b-run">進捗</span> · PM 宛て · 11:20</div>
+                <div class="body">#7007 の共有ステータスバーに着手しました。判断（計画の承認）が出たら残りを進めます。</div>
+              </div>
+              <p class="rel" style="margin-top:12px">掲示板の共有先：この端末のみ（判断・止まった報告・引き継ぎは GitHub Discussions で受け渡し中。この受け渡しは共有先が「この端末のみ」のときだけ有効です）</p>
+              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="gwt の掲示板に投稿…">
+                <button class="btn" type="button">投稿</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-index">
+              <p class="h-big">検索</p>
+              <p class="rel" style="margin-bottom:10px">範囲：gwt — このプロジェクトの中だけを探します（プロジェクトを横断した検索はしません）</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:220px" type="text" value="memory growth long session" aria-label="gwt を検索">
+                <button class="btn primary" type="button">検索</button>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip">意味で探す</span><span class="chip on">全ての語を含む</span>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">課題</span><span class="chip on">仕様</span><span class="chip on">掲示板</span><span class="chip on">議論</span><span class="chip on">作業</span><span class="chip on">報告</span><span class="chip on">メモリ</span><span class="chip">ファイル</span><span class="chip">ドキュメント</span>
+              </div>
+              <p class="rel" style="margin-bottom:10px">ファイルとドキュメントは既定では外れています。ファイル系を選ぶと、作業ツリーの選択が出ます。</p>
+              <p class="h-sec">厳密な結果</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">長時間のセッションでメモリが増え続ける（#5561）</div>
+                  <div class="d">課題 · 一致した語：memory、growth、session · 不足する語：long</div>
+                  <div class="d">プレビュー：長時間のセッションでメモリ使用量が増え続け、再起動するまで戻らない…</div>
+                </div>
+                <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">長時間セッションのメモリ調査</div>
+                  <div class="d">作業 · 一致した語：memory、session · 不足する語：growth、long</div>
+                </div>
+                <button class="btn" type="button" data-nav="g-works">作業を開く</button>
+              </div>
+              <p class="h-sec">意味の候補</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">長時間セッションのメモリ記録 — 報告</div>
+                  <div class="d">報告 · 一致度88% · 一致した語：memory、session</div>
+                </div>
+                <button class="btn" type="button">開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">メモリ調査の進め方</div>
+                  <div class="d">掲示板 · 一致度81% · 一致した語：memory</div>
+                </div>
+                <button class="btn" type="button" data-nav="g-board">掲示板で開く</button>
+              </div>
+              <p class="h-sec">索引の健全性（要約）</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">準備完了 8/9 — 要対応 1</div>
+                  <div class="d">状態を取得できないセル：ファイル（work/issue-5561）。索引が未準備の範囲は「結果が無い」とは別に表示します。</div>
+                </div>
+                <button class="btn" type="button">状態を更新</button>
+                <button class="btn" type="button" data-nav="g-settings">設定で開く</button>
+              </div>
+              <table class="health" aria-label="索引の健全性">
+                <thead><tr><th>範囲</th><th>単位</th><th>文書の数</th><th>最後の修復</th><th>状態</th><th></th></tr></thead>
+                <tbody>
+                  <tr><td>課題（仕様と共通の索引）</td><td>リポジトリ共有</td><td class="num">8,214</td><td>2日前</td><td><span class="badge b-run">準備完了</span></td><td><button class="btn" type="button">再構築</button></td></tr>
+                  <tr><td>掲示板</td><td>リポジトリ共有</td><td class="num">1,102</td><td>2日前</td><td><span class="badge b-run">準備完了</span></td><td><button class="btn" type="button">再構築</button></td></tr>
+                  <tr><td>ファイル</td><td>土台（git の木ごと）</td><td class="num">—</td><td>—</td><td><span class="badge b-done">土台</span></td><td><button class="btn" type="button">すべて再構築</button></td></tr>
+                  <tr><td>ファイル · work/issue-7007</td><td>作業ツリーの差分</td><td class="num">3,864</td><td>昨日</td><td><span class="badge b-run">準備完了</span></td><td><button class="btn" type="button">再構築</button></td></tr>
+                  <tr><td>ファイル · work/issue-5561</td><td>作業ツリーの差分</td><td class="num">—</td><td>—</td><td><span class="badge b-block">状態を取得できません</span></td><td><button class="btn" type="button">再構築</button></td></tr>
+                </tbody>
+              </table>
+              <div class="btnrow" style="margin-top:10px"><button class="btn" type="button">範囲ごとに再構築</button><button class="btn" type="button">すべて再構築</button></div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-branches">
+              <p class="h-big">ブランチ</p>
+              <p class="h-sub">gwt のブランチです。作業中のブランチは担当者と一緒に表示します。</p>
+              <div class="lrow">
+                <div class="grow"><div class="t">develop</div><div class="d">12:44に更新 · origin と一致</div></div>
+                <span class="badge b-done">現在</span>
+                <span class="badge b-plan">保護</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">work/issue-7048</div><div class="d">Haruto のセッション · 2分前に更新</div></div>
+                <span class="badge b-run">作業中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">work/issue-7007</div><div class="d">Yui のセッション · たった今更新 · 保存されていない変更 2件</div></div>
+                <span class="badge b-run">作業中</span>
+                <span class="badge b-wait">未保存</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">work/issue-5561</div><div class="d">開始待ち — セッションはまだありません</div></div>
+                <span class="badge b-queue">開始待ち</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">chore/old-cleanup</div><div class="d">30日間動きなし — 片付けて安全です</div></div>
+                <button class="btn ghost" type="button">片付ける…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="g-settings">
+              <p class="h-big">設定 — gwt</p>
+              <p class="h-sub">このプロジェクトだけの設定です。端末全体の設定は、アプリ設定にあります。</p>
+              <div class="set-group">
+                <div class="set-head">実行ポリシー</div>
+                <div class="set-row">
+                  <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトの担当者が終わるのを待ってから止めます。</div></div>
+                  <button class="btn ghost" type="button">このプロジェクトを止める</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">作業の進め方</div>
+                <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。オフにすると、このプロジェクトには触りません。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">タスクが終わると、次の課題が自分で始まります（上限 3件）。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：bug、docs。</div></div><button class="btn" type="button">ラベルを編集</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">PM とフック</div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM のツムギです。ツール、モデル、指示、利用量の上限は、エージェント台帳（アプリ設定）にあります。</div></div><button class="btn" type="button" data-openpage="settings" data-settingstab="launch">開く</button></div>
+                <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">このプロジェクトの状態が変わったときにスクリプトを動かします — 開始、終了、停止など。</div></div><button class="btn" type="button">開く</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">プロジェクトの検索索引</div>
+                <p class="d">検索の画面と同じ健全性を、ここでも見ます（二重配置）。</p>
+                <div class="set-row"><div class="grow"><div class="t">索引の健全性</div><div class="d2">準備完了 8/9 · 文書12,480件 · 最後の修復は2日前 · 要対応：ファイル（work/issue-5561）は状態を取得できません。</div></div><button class="btn" type="button">状態を更新</button><button class="btn" type="button">再構築</button></div>
+                <div class="set-row"><div class="grow"><div class="t">すべて再構築</div><div class="d2">範囲×作業ツリーの全セルを作り直します。終わるまで検索は古い索引で続きます。</div></div><button class="btn" type="button">すべて再構築</button></div>
+                <div class="set-row"><div class="grow"><div class="t">検索の画面で開く</div><div class="d2">健全性の表（範囲×作業ツリー）は検索の画面にあります。</div></div><button class="btn" type="button" data-nav="g-index">検索へ</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">掲示板の共有</div>
+                <div class="set-row"><div class="grow"><div class="t">共有先は端末全体の設定に従います</div><div class="d2">いまは「この端末のみ」。GitHub Discussions の受け渡しは、このときだけ有効です。</div></div><button class="btn" type="button" data-openpage="settings" data-settingstab="projects">アプリ設定で開く</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">閉じる</div>
+                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、gwt の担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button">閉じる…</button></div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= プロジェクト：KeibaDB ================= -->
+      <div class="pagegroup" data-page="keibadb">
+        <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">このプロジェクトは独立したページです（URL: /p/keibadb）— ブラウザのタブで並べて開けます</span></div>
+        <div class="pagerow">
+          <div class="rail">
+            <div class="proj-card">
+              <span class="ptag"><i style="background:#be123c"></i>KeibaDB</span>
+              <div class="sub">プロジェクトページ · ポリシー：実行中</div>
+            </div>
+            <a href="#" data-nav="k-ask">相談</a>
+            <a href="#" data-nav="k-issues" class="on">課題</a>
+            <a href="#" data-nav="k-works">作業</a>
+            <a href="#" data-nav="k-decide">判断<span class="cnt">1</span></a>
+            <a href="#" data-nav="k-agents">担当者</a>
+            <a href="#" data-nav="k-board">掲示板</a>
+            <a href="#" data-nav="k-index">検索</a>
+            <a href="#" data-nav="k-branches">ブランチ</a>
+            <a href="#" data-nav="k-settings">設定</a>
+            <div class="foot">担当 PM：ツムギ</div>
+          </div>
+          <div class="content">
+
+            <div class="screen-pane" data-screen="k-ask">
+              <p class="h-big">相談 — KeibaDB</p>
+              <div class="chat">
+                <div class="msg me"><div class="meta">あなた · たった今</div>取り込みが止まった理由は？</div>
+                <div class="msg pm"><div class="meta"><span class="pm-face sm"><span class="dot wait"></span></span>ツムギ<span style="font-weight:400">（あなたの PM）</span></div>相手先の形式が変わり、対応表と食い違う行が 3件出ました。データ自体は壊れていません。対応表を直せば、そのまま続けられます。判断を「判断」に置いてあります。
+                  <br><span class="route">範囲：KeibaDB</span>
+                  <div class="btnrow"><button class="btn primary" type="button" data-nav="k-decide">判断へ（1件）</button></div></div>
+              </div>
+              <div class="composer">
+                <div class="scope"><span>範囲：<b>KeibaDB</b></span><span class="rel">開始画面の会話と同じ PM です。文脈だけが違います。</span></div>
+                <textarea placeholder="KeibaDB のことを聞く…"></textarea>
+                <div class="send"><button class="btn primary" type="button">送る</button></div>
+              </div>
+            </div>
+
+            <div class="screen-pane on" data-screen="k-issues">
+              <p class="h-big">課題</p>
+              <p class="h-sub">KeibaDB · 未解決48件</p>
+              <div class="stat-row">
+                <div class="stat warn"><div class="num">1</div><div class="lab">判断待ち（あなた）</div></div>
+                <div class="stat bad"><div class="num">1</div><div class="lab">止まっている</div></div>
+                <div class="stat"><div class="num">1</div><div class="lab">実行中</div></div>
+                <div class="stat"><div class="num">2</div><div class="lab">今日完了</div></div>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div><div class="d">取り込み · 対応表の判断待ち · 48分経過 · Sora</div></div>
+                <span class="badge b-block">要対応</span>
+                <button class="btn" type="button" data-nav="k-issue">課題を開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">取り込み · Sora が作業中 · 夜の分まで完了</div></div>
+                <span class="badge b-run">実行中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">開催日の表記ゆれをそろえる（#118）</div><div class="d">データ整備 · 開始待ち</div></div>
+                <span class="badge b-queue">開始待ち</span>
+              </div>
+              <p class="rel" style="margin-top:12px">+ KeibaDB の課題があと45件</p>
+            </div>
+
+            <div class="screen-pane" data-screen="k-issue">
+              <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-issues">&larr; 課題一覧へ</button></div>
+              <p class="h-big">毎日の取り込みが停止 — 形式が変わった</p>
+              <p class="h-sub">課題 #121 · <b>KeibaDB</b> · 取り込み · 今朝 6:00 の定期実行で停止 · あなたの判断待ちです。</p>
+              <div class="set-group">
+                <h4>目的</h4>
+                <p class="d">相手先の新しい形式に合わせて対応表を直し、毎日の取り込みを再開します。取り込めなかった分は、再開後にまとめて取り込みます。</p>
+                <div class="set-row"><div class="grow"><div class="t">受け入れ条件</div><div class="d2">新しい形式の行がすべて取り込め、食い違いが 0件。欠けた日付がないこと。</div></div><span class="badge b-block">判断待ち</span></div>
+                <div class="set-row"><div class="grow"><div class="t">段階</div><div class="d2">判断待ち — 「判断」で決めると、Sora がそのまま再開します。</div></div><button class="btn" type="button" data-nav="k-decide">判断へ</button></div>
+              </div>
+              <div class="set-group">
+                <h4>実行</h4>
+                <div class="set-row"><span class="ava sm stuck" style="background:#0e7490">S</span><div class="grow"><div class="t">担当者とセッション</div><div class="d2">Sora · 停止中（安全に止まっています。データの破損はありません）。</div></div><span class="badge b-block">止まっている</span></div>
+                <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">対応表の食い違い 3件 — あなたの判断待ち。</div></div><span class="badge b-wait">判断待ち</span></div>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-works">
+              <p class="h-big">作業</p>
+              <p class="h-sub">今 KeibaDB で動いているセッションです。</p>
+              <div class="lrow">
+                <div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">Claude Code · Sora · 25分実行中 · 夜の分まで完了</div></div>
+                <span class="badge b-run">実行中</span>
+                <button class="btn" type="button">セッションを開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">毎日の取り込み（#121）</div><div class="d">Claude Code · Sora · 形式の変更で停止中 · 判断待ち</div></div>
+                <span class="badge b-block">止まっている</span>
+                <button class="btn" type="button" data-nav="k-decide">判断へ</button>
+              </div>
+              <p class="h-sec">過去のセッション</p>
+              <div class="lrow">
+                <div class="grow"><div class="t">過去のセッションを再開する</div><div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div></div>
+                <button class="btn" type="button">セッションを選ぶ…</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-decide">
+              <p class="h-big">判断待ち — KeibaDB</p>
+              <div class="pm-byline"><span class="pm-face sm"><span class="dot wait"></span></span><span class="who"><b>ツムギ</b>（あなたの PM）からの判断です · 1件</span></div>
+              <div class="dcard">
+                <div class="top"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><span class="badge b-block">要対応</span><span class="rel">48分待ち</span></div>
+                <div class="t">毎日の取り込みが停止 — 対応表を直して続けますか？</div>
+                <div class="d">相手先の形式が変わり、対応表と食い違う行が 3件あります。データは壊れていません。直せば取り込みはそのまま続けられ、止めれば安全に止まります。</div>
+                <div class="rec"><div class="k">ツムギのおすすめ</div><div class="d"><b>対応表を直して続ける</b> — 食い違いは項目名の変更だけで、値の意味は変わっていません。</div></div>
+                <dl>
+                  <dt>理由</dt><dd>3件とも項目名の対応づけの問題で、データ側の欠落ではありません。今朝の分は再開後にまとめて取り込めます。</dd>
+                  <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクト・gwt の作業には影響しません。</dd>
+                </dl>
+                <div class="btnrow"><button class="btn primary" type="button">対応表を直して続ける</button><button class="btn" type="button">取り込みを止める</button><button class="btn ghost" type="button" data-nav="k-ask">相談で聞く</button></div>
+              </div>
+              <p class="rel">判断待ちは以上です。開始画面の会話からも、同じ判断をその場で決められます。</p>
+            </div>
+
+            <div class="screen-pane" data-screen="k-agents">
+              <p class="h-big">担当者</p>
+              <p class="h-sub">このプロジェクトで動いているエージェントです。</p>
+              <div class="rowitem">
+                <span class="pm-face"><span class="dot wait"></span></span>
+                <div class="grow"><div class="t">ツムギ <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div></div>
+                <span class="badge b-wait">判断待ち 1件</span>
+                <button class="btn ghost" type="button" data-nav="k-ask">相談する</button>
+              </div>
+              <div class="rowitem">
+                <span class="ava stuck" style="background:#0e7490">S</span>
+                <div class="grow">
+                  <div class="t">Sora <span class="rel">· Claude Code（ツール）</span></div>
+                  <div class="d">作業中：#130、レース結果の取り込み · #121 は判断待ちで停止中</div>
+                  <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude アカウント — 週間31%使用 · 金曜18:00にリセット</span></div>
+                </div>
+                <span class="badge b-run">作業中</span>
+                <button class="btn ghost" type="button">一時停止</button>
+              </div>
+              <p class="rel" style="margin-top:10px">アバターはエージェントごとに固定です。使うツール（アカウント）が替わっても、顔と名前は変わりません。</p>
+            </div>
+
+            <div class="screen-pane" data-screen="k-board">
+              <p class="h-big">掲示板</p>
+              <p class="countline" style="margin-bottom:6px">あなた待ち <b>1</b> · 要対応 <b>1</b> · 進行中 <b>1</b> · 開始待ち <b>3</b></p>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">あなた宛て</span><span class="chip">全体</span><span class="chip">一斉</span>
+              </div>
+              <div class="fold">
+                <div class="t">未解決の詰まり（索引）— 1件</div>
+                <div class="lrow">
+                  <div class="grow"><div class="t">#121 — 形式の変更で毎日の取り込みが停止</div><div class="d">Sora の申告 · 48分前 · PM が見ています · 次の手：あなたの判断（対応表を直す／止める）</div></div>
+                  <span class="badge b-block">要対応</span>
+                  <button class="btn" type="button" data-nav="k-decide">判断へ</button>
+                </div>
+                <p class="rel" style="margin-top:6px">詰まりは時系列に埋もれさせず、ここに残り続けます。解けたら索引から消えます。</p>
+              </div>
+              <div class="post">
+                <div class="meta"><span class="ava sm stuck" style="background:#0e7490">S</span>Sora · <span class="badge b-block">要対応</span> · PM 宛て · 48分前</div>
+                <div class="body">#121 で止まっています：形式が変わり、対応表と食い違う行が 3件。データの破損はありません。</div>
+              </div>
+              <div class="post">
+                <div class="meta"><span class="pm-face sm"></span>ツムギ · <span class="badge b-wait">判断</span> · 47分前</div>
+                <div class="body">判断を用意しました。おすすめは「対応表を直して続ける」です — 「判断」から決められます。</div>
+              </div>
+              <p class="rel" style="margin-top:12px">掲示板の共有先：この端末のみ（判断・止まった報告・引き継ぎは GitHub Discussions で受け渡し中。この受け渡しは共有先が「この端末のみ」のときだけ有効です）</p>
+              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="KeibaDB の掲示板に投稿…">
+                <button class="btn" type="button">投稿</button>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-index">
+              <p class="h-big">検索</p>
+              <p class="rel" style="margin-bottom:10px">範囲：KeibaDB — このプロジェクトの中だけを探します</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                <input class="field" style="flex:1;min-width:220px" type="text" value="取り込み 形式" aria-label="KeibaDB を検索">
+                <button class="btn primary" type="button">検索</button>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">意味で探す</span><span class="chip">全ての語を含む</span>
+              </div>
+              <div class="chips" style="margin-bottom:6px">
+                <span class="chip on">課題</span><span class="chip on">仕様</span><span class="chip on">掲示板</span><span class="chip on">議論</span><span class="chip on">作業</span><span class="chip on">報告</span><span class="chip on">メモリ</span><span class="chip">ファイル</span><span class="chip">ドキュメント</span>
+              </div>
+              <p class="h-sec">意味の候補</p>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">毎日の取り込みが停止 — 形式が変わった（#121）</div>
+                  <div class="d">課題 · 一致度92% · プレビュー：相手先の形式が変わり、対応表と食い違う行が 3件…</div>
+                </div>
+                <button class="btn" type="button" data-nav="k-issue">課題を開く</button>
+              </div>
+              <div class="lrow">
+                <div class="grow">
+                  <div class="t">対応表の直し方 — 報告</div>
+                  <div class="d">報告 · 一致度78%</div>
+                </div>
+                <button class="btn" type="button">開く</button>
+              </div>
+              <p class="h-sec">索引の健全性（要約）</p>
+              <div class="notice" style="margin-top:0"><b>ドキュメントの索引はまだ準備中です。</b> 準備中の範囲は「結果が無い」とは別に表示します。終わるまで、他の範囲の検索はそのまま使えます。</div>
+              <table class="health" aria-label="索引の健全性" style="margin-top:10px">
+                <thead><tr><th>範囲</th><th>単位</th><th>文書の数</th><th>最後の修復</th><th>状態</th><th></th></tr></thead>
+                <tbody>
+                  <tr><td>課題（仕様と共通の索引）</td><td>リポジトリ共有</td><td class="num">2,310</td><td>昨日</td><td><span class="badge b-run">準備完了</span></td><td><button class="btn" type="button">再構築</button></td></tr>
+                  <tr><td>掲示板</td><td>リポジトリ共有</td><td class="num">486</td><td>昨日</td><td><span class="badge b-run">準備完了</span></td><td><button class="btn" type="button">再構築</button></td></tr>
+                  <tr><td>ドキュメント</td><td>リポジトリ共有</td><td class="num">—</td><td>—</td><td><span class="badge b-wait">準備中</span></td><td><button class="btn" type="button">状態を更新</button></td></tr>
+                  <tr><td>ファイル · work/issue-121</td><td>作業ツリーの差分</td><td class="num">912</td><td>今朝</td><td><span class="badge b-run">準備完了</span></td><td><button class="btn" type="button">再構築</button></td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="screen-pane" data-screen="k-branches">
+              <p class="h-big">ブランチ</p>
+              <p class="h-sub">KeibaDB のブランチです。</p>
+              <div class="lrow">
+                <div class="grow"><div class="t">main</div><div class="d">昨日更新 · origin と一致</div></div>
+                <span class="badge b-done">現在</span>
+                <span class="badge b-plan">保護</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">work/issue-130</div><div class="d">Sora のセッション · 5分前に更新</div></div>
+                <span class="badge b-run">作業中</span>
+              </div>
+              <div class="lrow">
+                <div class="grow"><div class="t">work/issue-121</div><div class="d">Sora のセッション · 停止中（判断待ち）</div></div>
+                <span class="badge b-block">止まっている</span>
+              </div>
+            </div>
+
+            <div class="screen-pane" data-screen="k-settings">
+              <p class="h-big">設定 — KeibaDB</p>
+              <p class="h-sub">このプロジェクトだけの設定です。</p>
+              <div class="set-group">
+                <div class="set-head">作業の進め方</div>
+                <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まった担当者を再起動します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">取り込みは毎日 6:00</div><div class="d2">このプロジェクトだけの違いです（端末全体の設定とは別に持っています）。</div></div><button class="btn" type="button">変える</button></div>
+                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：import、bug。</div></div><button class="btn" type="button">ラベルを編集</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">PM とフック</div>
+                <div class="set-row"><span class="pm-face sm"><span class="dot"></span></span><div class="grow"><div class="t">このプロジェクトを見ている PM</div><div class="d2">端末 PM のツムギです。PM の設定はエージェント台帳（アプリ設定）にあります。</div></div><button class="btn" type="button" data-openpage="settings" data-settingstab="launch">開く</button></div>
+                <div class="set-row"><div class="grow"><div class="t">フック</div><div class="d2">取り込みの開始・終了・停止でスクリプトを動かします。</div></div><button class="btn" type="button">開く</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">プロジェクトの検索索引</div>
+                <div class="set-row"><div class="grow"><div class="t">索引の健全性</div><div class="d2">準備完了 7/9 · 文書3,708件 · 最後の修復は昨日 · ドキュメントは準備中です。検索の画面と同じ健全性をここでも見ます。</div></div><button class="btn" type="button">状態を更新</button><button class="btn" type="button">再構築</button></div>
+                <div class="set-row"><div class="grow"><div class="t">検索の画面で開く</div><div class="d2">健全性の表（範囲×作業ツリー）は検索の画面にあります。</div></div><button class="btn" type="button" data-nav="k-index">検索へ</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">閉じる</div>
+                <div class="set-row"><div class="grow"><div class="t">このプロジェクトを閉じる</div><div class="d2">閉じるときは、担当者が終わるのを待ってから閉じます。</div></div><button class="btn ghost" type="button">閉じる…</button></div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /mock-body -->
+
+    <!-- shared status bar -->
+    <div class="app-status">
+      <div class="statusbar" role="status">
+        <span class="dot"></span><span><b>稼働中</b> · 作業 9件</span>
+        <span class="sep"></span>
+        <span class="pm-face sm"><span class="dot wait"></span></span><span>ツムギ</span>
+        <span><b class="you">判断待ち 5件</b>（<a data-openpage="gwt" data-openscreen="g-decide">gwt 2</a> · <a data-openpage="keibadb" data-openscreen="k-decide">KeibaDB 1</a> · ほか 2）</span>
+        <span class="sep"></span>
+        <span>止まっている 3件</span>
+        <span class="r">gwt 9.170.0 · この端末</span>
+      </div>
+    </div>
+    <div class="app-foot">
+      <span>gwt 9.170.0</span>
+      <span>·</span><span>端末 PM：ツムギ（Claude Code）</span>
+      <span class="fstat">稼働状態：正常 · 最終確認 たった今</span>
+    </div>
+  </div><!-- /mock -->
+
+  <footer class="doc">
+    <h3>このモックについて</h3>
+    <p>全画面刷新モック v2（Issue #7007）。開始画面、アプリ設定、プロジェクト画面群（相談／課題／課題詳細／作業／判断待ち／エージェント／掲示板／検索／ブランチ／プロジェクト設定）を、gwt と KeibaDB の2プロジェクトで網羅しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var pageLabels = { start: "開始画面", settings: "設定", gwt: "gwt", keibadb: "KeibaDB" };
+  var screenTitles = {
+    appsettings: "設定",
+    "g-ask": "相談", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
+    "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-settings": "設定",
+    "k-ask": "相談", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
+    "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-settings": "設定"
+  };
+  var current = { start: "start", settings: "appsettings", gwt: "g-issues", keibadb: "k-issues" };
+  var activePage = "start";
+  function titleFor(p) {
+    if (p === "start") return "開始画面";
+    if (p === "settings") return "設定";
+    return pageLabels[p] + " — " + (screenTitles[current[p]] || "");
+  }
+  function renderTitle() {
+    var t = document.getElementById("appTitle");
+    if (t) t.textContent = titleFor(activePage);
+    var proj = document.getElementById("appProj");
+    if (proj) {
+      var isProj = activePage === "gwt" || activePage === "keibadb";
+      proj.hidden = !isProj;
+      if (isProj) proj.textContent = pageLabels[activePage];
+    }
+  }
+  function showPage(p) {
+    activePage = p;
+    document.querySelectorAll(".pagegroup").forEach(function (el) {
+      el.classList.toggle("on", el.getAttribute("data-page") === p);
+    });
+    renderTitle();
+  }
+  function showScreen(p, name) {
+    current[p] = name;
+    var pageEl = document.querySelector('.pagegroup[data-page="' + p + '"]');
+    if (!pageEl) return;
+    pageEl.querySelectorAll(".screen-pane").forEach(function (pane) {
+      pane.classList.toggle("on", pane.getAttribute("data-screen") === name);
+    });
+    var railName = name.replace(/-issue$/, "-issues");
+    pageEl.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
+      a.classList.toggle("on", a.getAttribute("data-nav") === railName);
+    });
+    if (p === activePage) renderTitle();
+  }
+  function openPage(p, screen) {
+    if (screen) showScreen(p, screen);
+    showPage(p);
+  }
+  document.querySelectorAll("[data-nav]").forEach(function (el) {
+    el.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      var pageEl = el.closest(".pagegroup");
+      if (!pageEl) return;
+      showScreen(pageEl.getAttribute("data-page"), el.getAttribute("data-nav"));
+    });
+  });
+  document.querySelectorAll("[data-openpage]").forEach(function (el) {
+    el.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      openPage(el.getAttribute("data-openpage"), el.getAttribute("data-openscreen"));
+      var stab = el.getAttribute("data-settingstab");
+      if (stab) {
+        var chip = document.querySelector('.screen-pane[data-screen="appsettings"] [data-tab="' + stab + '"]');
+        if (chip) chip.click();
+      }
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  });
+  document.querySelectorAll("[data-tab]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var scope = b.closest(".screen-pane");
+      if (!scope) return;
+      scope.querySelectorAll("[data-tab]").forEach(function (x) { x.classList.toggle("on", x === b); });
+      var target = b.getAttribute("data-tab");
+      scope.querySelectorAll(".set-pane").forEach(function (p) {
+        p.classList.toggle("on", p.getAttribute("data-pane") === target);
+      });
+    });
+  });
+  /* start screen states */
+  document.querySelectorAll("[data-startstate]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll("[data-startstate]").forEach(function (x) {
+        x.setAttribute("aria-pressed", x === b ? "true" : "false");
+      });
+      var target = b.getAttribute("data-startstate");
+      document.querySelectorAll("[data-startpane]").forEach(function (p) {
+        p.hidden = p.getAttribute("data-startpane") !== target;
+      });
+    });
+  });
+  /* chat: quick replies + composer on the start screen */
+  function appendMsg(chat, cls, metaHTML, text) {
+    var d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.innerHTML = '<div class="meta">' + metaHTML + "</div>" + text;
+    chat.appendChild(d);
+    return d;
+  }
+  var startChat = document.getElementById("startChat");
+  document.querySelectorAll("[data-say]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (!startChat) return;
+      appendMsg(startChat, "me", "あなた · たった今", b.getAttribute("data-say"));
+      var reply = b.getAttribute("data-reply");
+      if (reply) {
+        setTimeout(function () {
+          appendMsg(startChat, "pm", '<span class="pm-face sm"><span class="dot"></span></span>ツムギ', reply);
+        }, 450);
+      }
+    });
+  });
+  var startInput = document.getElementById("startInput");
+  var startSend = document.getElementById("startSend");
+  if (startSend && startInput && startChat) {
+    startSend.addEventListener("click", function () {
+      var v = startInput.value.trim();
+      if (!v) return;
+      appendMsg(startChat, "me", "あなた · たった今", v.replace(/</g, "&lt;"));
+      startInput.value = "";
+      setTimeout(function () {
+        appendMsg(startChat, "pm", '<span class="pm-face sm"><span class="dot"></span></span>ツムギ', "かしこまりました。内容を確認して、担当プロジェクトの「相談」と「作業」に反映します。");
+      }, 450);
+    });
+  }
+})();
+</script>
+</body>
+</html>

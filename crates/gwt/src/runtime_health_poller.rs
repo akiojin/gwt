@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use gwt::protocol::{RuntimeHealthProcessView, RuntimeHealthQueueView, RuntimeHealthSnapshotView};
 use gwt::BackendEvent;
+use gwt_core::timestamp::UtcTimestamp;
 use sysinfo::{
     CpuRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind,
 };
@@ -53,7 +53,7 @@ async fn run(clients: ClientHub) {
             continue;
         };
         let scope = poller.budget.begin_tick();
-        let snapshot = poller.poll_once(Utc::now(), &clients, scope);
+        let snapshot = poller.poll_once(gwt_core::timestamp::UtcTimestamp::now(), &clients, scope);
         if poller
             .budget
             .should_broadcast(&comparable_snapshot(&snapshot))
@@ -151,7 +151,7 @@ impl Poller {
 
     fn poll_once(
         &mut self,
-        generated_at: DateTime<Utc>,
+        generated_at: UtcTimestamp,
         clients: &ClientHub,
         scope: RefreshScope,
     ) -> RuntimeHealthSnapshotView {
@@ -1020,7 +1020,11 @@ mod tests {
             poller.system.cpus().len().max(1),
             "the cached normalization capacity must come from the initialized logical CPU list"
         );
-        let full = poller.poll_once(Utc::now(), &clients, RefreshScope::FullReconcile);
+        let full = poller.poll_once(
+            gwt_core::timestamp::UtcTimestamp::now(),
+            &clients,
+            RefreshScope::FullReconcile,
+        );
         assert!(
             full.process_count >= 1,
             "the poller must at least observe this process: {full:?}"
@@ -1029,14 +1033,22 @@ mod tests {
             !poller.known_pids.is_empty(),
             "full reconciliation must seed the known PID set"
         );
-        let known = poller.poll_once(Utc::now(), &clients, RefreshScope::KnownPids);
+        let known = poller.poll_once(
+            gwt_core::timestamp::UtcTimestamp::now(),
+            &clients,
+            RefreshScope::KnownPids,
+        );
         assert!(
             known.process_count >= 1,
             "known-PID refresh keeps reporting the runtime set: {known:?}"
         );
         poller.known_pids.clear();
         OBSERVED_PROCESS_COUNT.set(0);
-        let root_only = poller.poll_once(Utc::now(), &clients, RefreshScope::KnownPids);
+        let root_only = poller.poll_once(
+            gwt_core::timestamp::UtcTimestamp::now(),
+            &clients,
+            RefreshScope::KnownPids,
+        );
         assert_eq!(root_only.process_count, 1);
         assert_eq!(
             OBSERVED_PROCESS_COUNT.get(),

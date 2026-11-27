@@ -1,13 +1,13 @@
 //! Current PM explanation and independently observed project facts.
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 mod reports;
 mod tasks;
-pub use reports::PmReportsReader;
+pub use reports::{load_decisions, PmReportsReader};
 pub use tasks::{task_detail, PmTaskDetail, PmTaskOverview};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ pub struct PmMonitorFacts {
     pub queue_head: Option<PmIssueFact>,
     pub needs_human_count: Option<usize>,
     pub release: Option<PmReleaseFact>,
-    pub release_observed_at: Option<DateTime<Utc>>,
+    pub release_observed_at: Option<UtcTimestamp>,
     pub pending_update: Option<String>,
     pub update_known: bool,
     pub error: Option<String>,
@@ -65,7 +65,7 @@ fn facts_from_monitor(
             title: title(*number),
             last_activity_at: None,
         }),
-        needs_human_count: Some(status.needs_human.len()),
+        needs_human_count: status.needs_human_count,
         ..Default::default()
     }
 }
@@ -90,7 +90,7 @@ fn fingerprint_from_prefs(prefs: &crate::IssueMonitorPrefs) -> String {
 
 fn release_from_cache(
     cache: &gwt_git::pr_status::PrInventoryCache,
-) -> (Option<PmReleaseFact>, Option<DateTime<Utc>>) {
+) -> (Option<PmReleaseFact>, Option<UtcTimestamp>) {
     let release = cache
         .rows
         .iter()
@@ -207,7 +207,7 @@ pub fn latest_status(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmCurrentSnapshot {
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     pub status: Option<gwt_core::pm_status::PmCurrentStatus>,
     pub stale_minutes: Option<i64>,
     pub facts: PmMonitorFacts,
@@ -221,7 +221,7 @@ pub fn snapshot(
     repo: &Path,
     update: Option<&gwt_core::update::UpdateState>,
 ) -> Result<PmCurrentSnapshot, String> {
-    let observed_at = Utc::now();
+    let observed_at = gwt_core::timestamp::UtcTimestamp::now();
     let inventory =
         crate::session_inventory::observe_sessions(repo, &gwt_core::paths::gwt_sessions_dir());
     snapshot_from_inventory(repo, update, observed_at, &inventory)
@@ -230,7 +230,7 @@ pub fn snapshot(
 fn snapshot_from_inventory(
     repo: &Path,
     update: Option<&gwt_core::update::UpdateState>,
-    observed_at: DateTime<Utc>,
+    observed_at: UtcTimestamp,
     inventory: &crate::session_inventory::SessionInventory,
 ) -> Result<PmCurrentSnapshot, String> {
     let monitor = crate::cli::issue::load_monitor_agent_status(repo, inventory.sessions.len()).map(
@@ -315,7 +315,7 @@ fn snapshot_from_inventory(
         .map_err(|error| format!("PM current status could not be loaded: {error}"))?;
     let stale_minutes = status
         .as_ref()
-        .and_then(|status| status.stale_minutes(Utc::now()));
+        .and_then(|status| status.stale_minutes(gwt_core::timestamp::UtcTimestamp::now()));
     Ok(PmCurrentSnapshot {
         observed_at,
         status,
@@ -569,7 +569,7 @@ mod tests {
     fn reports_poll_skips_acknowledged_loads_but_hydrates_independent_cursors() {
         use super::reports::{PmReportsData, PmReportsReader};
         let mut reader = PmReportsReader::default();
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let data = PmReportsData::default();
         let (first, _) = reader
             .poll_with(Some(vec![]), None, now, || data.clone())
@@ -639,11 +639,11 @@ mod tests {
             .poll_with(
                 task_input.clone(),
                 Some(&failed),
-                now + chrono::Duration::seconds(5),
+                now + time::Duration::seconds(5),
                 || changed,
             )
             .is_none());
-        let retry_at = now + chrono::Duration::seconds(10);
+        let retry_at = now + time::Duration::seconds(10);
         let (recovered, _) = reader
             .poll_with(task_input.clone(), Some(&failed), retry_at, || data)
             .expect("task reads recover on the shared retry deadline without a stamp change");
@@ -689,6 +689,7 @@ mod tests {
         let mut status = crate::IssueMonitorState::new(Default::default()).agent_status();
         status.queue = vec![5342, 5341];
         status.needs_human = vec![20, 21];
+        status.refresh_needs_human_count(true);
         let windows = vec![PmIssueFact {
             issue_number: Some(5349),
             title: Some("Current PM".into()),

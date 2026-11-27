@@ -2,7 +2,7 @@
 
 use super::{project_dir, snapshot_from_inventory, status_path, PmCurrentSnapshot};
 use crate::protocol::PmReportsVersion;
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -22,14 +22,16 @@ pub struct PmReportsData {
     pub error: Option<String>,
     /// A failed Current card never freezes independently readable reports.
     pub current_error: Option<String>,
-    refresh_at: Option<DateTime<Utc>>,
+    /// The gwtd decision queue (Issue #7742); `None` when it is unreadable.
+    pub decisions: Option<gwt_core::decision_queue::QueueSnapshot>,
+    refresh_at: Option<UtcTimestamp>,
     processes: Vec<(u32, u64)>,
     uncertain: bool,
     payload: Option<PathBuf>,
 }
 
 impl PmReportsData {
-    fn refresh_stale(&mut self, now: DateTime<Utc>) -> bool {
+    fn refresh_stale(&mut self, now: UtcTimestamp) -> bool {
         let Some(current) = &mut self.current else {
             return false;
         };
@@ -46,6 +48,7 @@ impl PmReportsData {
         self.reports == other.reports
             && self.error == other.error
             && self.current_error == other.current_error
+            && self.decisions == other.decisions
             && match (&self.current, &other.current) {
                 (Some(a), Some(b)) => {
                     a.status == b.status
@@ -109,6 +112,7 @@ impl PmReportsReader {
             self.paths = Some((
                 vec![
                     gwt_core::pm_report::reports_path(repo),
+                    gwt_core::decision_queue::queue_path(repo),
                     gwt_core::user_instruction::instructions_path(repo),
                     home.join("pm-peer-messages.json"),
                     status_path(repo),
@@ -148,6 +152,7 @@ impl PmReportsReader {
         match crate::daemon_publisher::read_issue_monitor_status(repo) {
             Ok(status) => inputs.push(SourceStamp::Monitor(status.map(|status| serde_json::json!({
                 "queue": status["queue"], "needs_human": status["needs_human"],
+                "needs_human_count": status["needs_human_count"],
                 "activity": status["inbox"].as_array().map(|rows| rows.iter().map(|row| (&row["issue_number"], &row["last_activity_at"])).collect::<Vec<_>>()),
             })).unwrap_or(Value::Null))),
             Err(_) => readable = false,
@@ -155,16 +160,19 @@ impl PmReportsReader {
         inputs.push(SourceStamp::Update(
             serde_json::to_value(update).unwrap_or(Value::Null),
         ));
-        self.poll_with(readable.then_some(inputs), version, Utc::now(), || {
-            load(repo, update)
-        })
+        self.poll_with(
+            readable.then_some(inputs),
+            version,
+            gwt_core::timestamp::UtcTimestamp::now(),
+            || load(repo, update),
+        )
     }
 
     pub(super) fn poll_with(
         &mut self,
         inputs: Option<Vec<SourceStamp>>,
         version: Option<&PmReportsVersion>,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         load: impl FnOnce() -> PmReportsData,
     ) -> Option<(PmReportsVersion, PmReportsData)> {
         let due = self
@@ -189,7 +197,7 @@ impl PmReportsReader {
             if task_failed {
                 // Share the existing retry cadence across viewers instead of
                 // rebuilding the whole projection on every failed Task poll.
-                let retry_at = now + chrono::Duration::seconds(5);
+                let retry_at = now + time::Duration::seconds(5);
                 next.refresh_at = Some(
                     next.refresh_at
                         .map_or(retry_at, |deadline| deadline.min(retry_at)),
@@ -357,8 +365,29 @@ fn relevant_tree_change(event: &notify::Event, roots: &[PathBuf]) -> bool {
             }))
 }
 
+/// Decisions the PM raised through its reports are bridged into the queue
+/// first, so the snapshot never loses a decision that was already waiting.
+pub fn load_decisions(repo: &Path) -> Option<gwt_core::decision_queue::QueueSnapshot> {
+    if let Err(error) = gwt_core::decision_queue::sync_pm_report_decisions(repo) {
+        tracing::warn!(
+            error = %gwt_core::error_ledger::sanitize_error_message(&error.to_string()),
+            "PM report decisions could not be bridged into the decision queue"
+        );
+    }
+    match gwt_core::decision_queue::snapshot(repo) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            tracing::warn!(
+                error = %gwt_core::error_ledger::sanitize_error_message(&error.to_string()),
+                "decision queue is unreadable"
+            );
+            None
+        }
+    }
+}
+
 fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReportsData {
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut data = PmReportsData::default();
     match gwt_core::pm_report::load_reports_with_deadline(repo) {
         Ok((reports, deadline)) => {
@@ -367,6 +396,8 @@ fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReport
         }
         Err(error) => data.error = Some(format!("PM reports could not be loaded: {error}")),
     }
+    data.decisions = load_decisions(repo);
+    crate::pm_report_board::publish_best_effort(repo);
     let inventory =
         crate::session_inventory::observe_sessions(repo, &gwt_core::paths::gwt_sessions_dir());
     data.processes = inventory
@@ -402,11 +433,9 @@ fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReport
         &project_dir(repo).join(gwt_git::PR_INVENTORY_CACHE_FILE),
     );
     let refresh = cache.fetched_at.unwrap_or(now)
-        + chrono::Duration::seconds(
-            settings.pr_inventory.cache_ttl_secs.min(i64::MAX as u64) as i64
-        );
+        + time::Duration::seconds(settings.pr_inventory.cache_ttl_secs.min(i64::MAX as u64) as i64);
     // Retry a failed/budget-denied refresh on the existing five-second cadence.
-    let refresh = refresh.max(now + chrono::Duration::seconds(5));
+    let refresh = refresh.max(now + time::Duration::seconds(5));
     data.refresh_at = Some(
         data.refresh_at
             .map_or(refresh, |deadline| deadline.min(refresh)),
@@ -455,7 +484,7 @@ mod tests {
     #[test]
     fn snapshots_are_resent_until_the_client_acknowledges_them() {
         let mut reader = PmReportsReader::default();
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let (version, _) = reader
             .poll_with(Some(vec![]), None, now, PmReportsData::default)
             .unwrap();
@@ -474,7 +503,7 @@ mod tests {
 
     #[test]
     fn a_new_reader_or_revision_limit_starts_a_new_epoch() {
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let (old, _) = PmReportsReader::default()
             .poll_with(Some(vec![]), None, now, PmReportsData::default)
             .unwrap();
@@ -550,10 +579,10 @@ mod tests {
 
     #[test]
     fn clock_changes_refresh_deadlines_and_advance_stale_without_store_reads() {
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let status = serde_json::from_value(serde_json::json!({
             "items": [{"kind":"waiting", "text":"CI", "started_at":now}],
-            "next_trigger":"CI", "updated_at":now - chrono::Duration::minutes(15),
+            "next_trigger":"CI", "updated_at":now - time::Duration::minutes(15),
             "stale_after_minutes":15,
         }))
         .unwrap();
@@ -565,7 +594,7 @@ mod tests {
                 facts: Default::default(),
                 request_tasks: None,
             }),
-            refresh_at: Some(now + chrono::Duration::minutes(2)),
+            refresh_at: Some(now + time::Duration::minutes(2)),
             ..Default::default()
         };
         let mut reader = PmReportsReader::default();
@@ -576,7 +605,7 @@ mod tests {
             .poll_with(
                 Some(vec![]),
                 Some(&version),
-                now + chrono::Duration::minutes(1),
+                now + time::Duration::minutes(1),
                 || panic!("stale clock uses cached status"),
             )
             .unwrap();
@@ -587,7 +616,7 @@ mod tests {
         reader.poll_with(
             Some(vec![]),
             Some(&later.0),
-            now + chrono::Duration::minutes(2),
+            now + time::Duration::minutes(2),
             || {
                 refreshed = true;
                 data.clone()
@@ -601,7 +630,7 @@ mod tests {
 
     #[test]
     fn metadata_changes_reload_but_observation_time_alone_is_not_resent() {
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime/host/session.json");
         let fingerprint = || {
@@ -635,7 +664,7 @@ mod tests {
             .poll_with(fingerprint(), Some(&version), now, || {
                 loaded = true;
                 let mut next = data.clone();
-                next.current.as_mut().unwrap().observed_at = now + chrono::Duration::seconds(5);
+                next.current.as_mut().unwrap().observed_at = now + time::Duration::seconds(5);
                 next
             })
             .is_none());

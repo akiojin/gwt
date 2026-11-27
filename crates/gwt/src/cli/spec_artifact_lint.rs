@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// Reference prefixes whose numbering this lint tracks (FR-188 minimum set).
@@ -113,7 +113,7 @@ pub struct LintReport {
     pub owner_number: u64,
     pub sections_scanned: Vec<String>,
     pub findings: Vec<LintFinding>,
-    pub ran_at: DateTime<Utc>,
+    pub ran_at: UtcTimestamp,
 }
 
 impl LintReport {
@@ -170,7 +170,7 @@ pub struct ArtifactInput {
 
 /// Run every deterministic check over one artifact.
 #[must_use]
-pub fn lint(input: &ArtifactInput, ran_at: DateTime<Utc>) -> LintReport {
+pub fn lint(input: &ArtifactInput, ran_at: UtcTimestamp) -> LintReport {
     let mut raw: Vec<(LintCode, String, Vec<String>, String)> = Vec::new();
 
     let definitions = collect_definitions(&input.sections);

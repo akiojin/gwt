@@ -21,7 +21,6 @@ import {
   gotoLiveGwt,
   openLiveGwtProject,
   openLiveLaunchWizardForBranch,
-  type LiveLaunchWizardFixture,
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
@@ -36,7 +35,6 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
   test.setTimeout(120_000);
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
-  let wizardFixture: LiveLaunchWizardFixture | undefined;
   let errors: ReturnType<typeof collectErrors>;
 
   test.beforeEach(async ({ page }, testInfo) => {
@@ -53,13 +51,8 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
   test.afterEach(async ({ page }) => {
     if (!releaseBackendLock) return;
     try {
-      try {
-        await clearLiveLaunchWizard(page);
-      } finally {
-        await wizardFixture?.cleanup();
-      }
+      await clearLiveLaunchWizard(page);
     } finally {
-      wizardFixture = undefined;
       await releaseBackendLock();
       releaseBackendLock = undefined;
     }
@@ -69,7 +62,7 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
 
   for (const [agentId, displayName] of [["claude", "Claude Code"], ["codex", "Codex"]]) {
     test(`${displayName} shows detected version and Update without a Version picker`, async ({ page }, testInfo) => {
-      wizardFixture = await openLiveLaunchWizardForBranch(page);
+      await openLiveLaunchWizardForBranch(page);
       await enterManualSetupSettings(page);
       await selectWizardAgent(page, agentId);
       const wizard = page.locator("#wizard-modal");
@@ -81,7 +74,9 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
       const setup = wizard.locator(`.launch-agent-setup[data-agent-id="${agentId}"]`);
       await expect(setup).toBeVisible();
       await expect(setup).toHaveAttribute("data-setup-kind", "update");
-      await expect(setup).toContainText("Launch uses the detected CLI directly");
+      // A detected CLI updates in place; the shell-pane wording is install-only.
+      await expect(setup).toContainText("in the background on the Host");
+      await expect(setup).not.toContainText("host shell pane");
       await expect(setup).not.toContainText("package runner");
       await expect(setup.getByRole("button", { name: `Update ${displayName}`, exact: true })).toBeVisible();
       await page.evaluate(() => new Promise(requestAnimationFrame));
@@ -95,7 +90,7 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
   test("uninstalled built-ins are absent for installer and npm distribution routes", async ({
     page,
   }) => {
-    wizardFixture = await openLiveLaunchWizardForBranch(page);
+    await openLiveLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await enterManualSetupSettings(page);
 
@@ -112,7 +107,7 @@ test.describe.serial("Launch Wizard agent setup affordance (live backend)", () =
   test("installed Hermes retains first-time Configure without a Version picker", async ({
     page,
   }, testInfo) => {
-    wizardFixture = await openLiveLaunchWizardForBranch(page);
+    await openLiveLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await enterManualSetupSettings(page);
 

@@ -147,11 +147,15 @@ impl ProjectRuntimeClient {
         let gwt_home = gwt_core::paths::gwt_home();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
+            if supervisor.update_in_progress() {
+                return Err("Project owner is preparing for a GWT update".into());
+            }
             let error = match Self::from_current_project(&project_root, &gwt_home).await {
-                Ok(client) => match client.gui_events().await {
+                Ok(client) if !supervisor.update_in_progress() => match client.gui_events().await {
                     Ok(presence) => return Ok((client, presence)),
                     Err(error) => error,
                 },
+                Ok(_) => return Err("Project owner is preparing for a GWT update".into()),
                 Err(error) => error,
             };
             if tokio::time::Instant::now() >= deadline {

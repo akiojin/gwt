@@ -259,7 +259,7 @@ fn prepared_continuation_issues_observation_only_capability_without_activating_s
         session_binding_id: uuid::Uuid::new_v4().to_string(),
         initial_session_id: continuation_session_id.clone(),
         entrypoint: "resume".to_string(),
-        requested_at: chrono::Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_successor(&predecessor.project, predecessor.owner, &request)
         .expect("prepare successor");
@@ -613,7 +613,7 @@ fn terminalized_genesis_compensation_does_not_synthesize_state_for_unrelated_wor
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "unrelated-work",
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.agent_session_id = Some("unrelated-session".to_string());
     gwt_core::workspace_projection::record_workspace_work_event(&repo, unrelated)

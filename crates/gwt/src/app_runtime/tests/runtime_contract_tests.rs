@@ -358,484 +358,6 @@ fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
 }
 
 #[test]
-fn recovery_center_project_reload_preserves_other_project_handles() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tabs = vec![
-        sample_project_tab(
-            "tab-a",
-            "A",
-            temp.path().join("a"),
-            ProjectKind::NonRepo,
-            &[],
-        ),
-        sample_project_tab(
-            "tab-b",
-            "B",
-            temp.path().join("b"),
-            ProjectKind::NonRepo,
-            &[],
-        ),
-    ];
-    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-a"));
-    let a = runtime.project_context("tab-a").unwrap();
-    let b = runtime.project_context("tab-b").unwrap();
-    runtime
-        .project_state_mut(&a)
-        .unwrap()
-        .recovery_center_handles
-        .insert(
-            "handle-a".to_string(),
-            super::super::RecoveryCenterAction {
-                client_id: "client-a".to_string(),
-                generation: 1,
-                board_entry_id: Some("entry-a".to_string()),
-            },
-        );
-    runtime.load_recovery_center_events(&b, "client-b", "load-b");
-    let a_reply =
-        runtime.open_recovery_center_board_entry_events(&a, "client-a", "open-a", 1, "handle-a");
-    assert!(
-        matches!(&a_reply[0].event, BackendEvent::RecoveryCenterBoardEntry { board_entry_id: Some(id), .. } if id == "entry-a")
-    );
-    let b_reply =
-        runtime.open_recovery_center_board_entry_events(&b, "client-b", "open-b", 1, "handle-a");
-    assert!(matches!(
-        &b_reply[0].event,
-        BackendEvent::RecoveryCenterBoardEntry {
-            board_entry_id: None,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn recovery_center_missing_authority_is_not_found_without_creating_storage() {
-    let temp = tempdir().unwrap();
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let session = gwt_agent::Session::new(&repo, "work/issue-4252", gwt_agent::AgentId::Codex);
-    session.save(&runtime.sessions_dir).unwrap();
-    // The project has recovery storage, but this Session has none.
-    RecoveryStore::for_repo(&repo, "another-session").unwrap();
-    let intents = gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("recovery/intents");
-    for _ in 0..2 {
-        let context = runtime.project_context("tab-1").unwrap();
-        let events = runtime.load_recovery_center_events(&context, "client", "load");
-        assert_eq!(
-            serde_json::to_value(&events[0].event).unwrap()["status"],
-            "not_found"
-        );
-        assert_eq!(fs::read_dir(&intents).unwrap().count(), 1);
-    }
-}
-
-#[test]
-fn recovery_center_discovers_saved_project_store_after_worktree_deletion() {
-    let temp = tempdir().unwrap();
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    init_repo_with_initial_commit(&repo);
-    let worktree = temp.path().join("deleted-worktree");
-    run_git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "work/recovery",
-            worktree.to_str().unwrap(),
-        ],
-    );
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let mut session =
-        gwt_agent::Session::new(&worktree, "work/recovery", gwt_agent::AgentId::Codex);
-    session.project_state_root = Some(repo.clone());
-    session.repo_hash = Some(
-        gwt_core::paths::project_scope_hash(&repo)
-            .as_str()
-            .to_owned(),
-    );
-    session.save(&runtime.sessions_dir).unwrap();
-    RecoveryStore::for_repo(&worktree, &session.id)
-        .unwrap()
-        .prepare(
-            "prepare-deleted",
-            recovery_center_test_intent(
-                &session.id,
-                "recovery-deleted",
-                "board-deleted",
-                BoardWorktreeForm::BranchBacked,
-                "Retained delivery",
-            ),
-        )
-        .unwrap();
-    fs::remove_dir_all(&worktree).unwrap();
-    let context = runtime.project_context("tab-1").unwrap();
-    let events = runtime.load_recovery_center_events(&context, "client", "load");
-    assert!(matches!(&events[0].event,
-        BackendEvent::RecoveryCenterState { items, .. } if items.len() == 1
-    ));
-}
-
-#[test]
-fn recovery_center_projects_only_active_project_records_without_rewriting_sessions() {
-    let temp = tempdir().expect("tempdir");
-    let home = temp.path().join("home");
-    fs::create_dir_all(&home).expect("home");
-    let _gwt_home = ScopedGwtHome::set(&home);
-    let active_repo = temp.path().join("active");
-    let foreign_repo = temp.path().join("foreign");
-    fs::create_dir_all(&active_repo).expect("active repo");
-    fs::create_dir_all(&foreign_repo).expect("foreign repo");
-    let tab = sample_project_tab(
-        "tab-1",
-        "Active",
-        active_repo.clone(),
-        ProjectKind::Git,
-        &[],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let mut active_session =
-        gwt_agent::Session::new(&active_repo, "work/issue-1974", gwt_agent::AgentId::Codex);
-    active_session.id = "recovery-session-active".to_string();
-    active_session
-        .save(&runtime.sessions_dir)
-        .expect("save active Session");
-    let active_session_path = runtime
-        .sessions_dir
-        .join(format!("{}.toml", active_session.id));
-    let session_before = fs::read(&active_session_path).expect("read Session before projection");
-
-    let active_store = RecoveryStore::for_repo(&active_repo, &active_session.id).expect("store");
-    let pending = active_store
-        .prepare(
-            "prepare-pending",
-            recovery_center_test_intent(
-                &active_session.id,
-                "recovery-pending",
-                "board-pending",
-                BoardWorktreeForm::Ephemeral,
-                "pending public body",
-            ),
-        )
-        .expect("prepare pending")
-        .record;
-    let acknowledged_pending = active_store
-        .prepare(
-            "prepare-acknowledged",
-            recovery_center_test_intent(
-                &active_session.id,
-                "recovery-acknowledged",
-                "board-acknowledged",
-                BoardWorktreeForm::BranchBacked,
-                "acknowledged public body",
-            ),
-        )
-        .expect("prepare acknowledged")
-        .record;
-    let acknowledgement = RecoveryAcknowledgement::for_record(
-        &acknowledged_pending,
-        RecoveryProviderReceipt::new("board-acknowledged").expect("receipt"),
-    )
-    .expect("acknowledgement");
-    active_store
-        .acknowledge(
-            "recovery-acknowledged",
-            acknowledged_pending.revision,
-            "ack-acknowledged",
-            acknowledgement,
-        )
-        .expect("acknowledge");
-    let conflict_pending = active_store
-        .prepare(
-            "prepare-conflicted",
-            recovery_center_test_intent(
-                &active_session.id,
-                "recovery-conflicted",
-                "board-conflicted",
-                BoardWorktreeForm::Unknown,
-                "conflicted public body",
-            ),
-        )
-        .expect("prepare conflicted")
-        .record;
-    active_store
-        .mark_conflicted(
-            "recovery-conflicted",
-            conflict_pending.revision,
-            "conflict-conflicted",
-            RecoveryConflictKind::StorageUncertain,
-        )
-        .expect("mark conflicted");
-
-    let mut foreign_session =
-        gwt_agent::Session::new(&foreign_repo, "work/foreign", gwt_agent::AgentId::Codex);
-    foreign_session.id = "recovery-session-foreign".to_string();
-    foreign_session
-        .save(&runtime.sessions_dir)
-        .expect("save foreign Session");
-    RecoveryStore::for_repo(&foreign_repo, &foreign_session.id)
-        .expect("foreign store")
-        .prepare(
-            "prepare-foreign",
-            recovery_center_test_intent(
-                &foreign_session.id,
-                "recovery-foreign",
-                "board-foreign",
-                BoardWorktreeForm::BranchBacked,
-                "foreign private sentinel",
-            ),
-        )
-        .expect("prepare foreign");
-
-    // One unreadable ledger entry must not hide the valid recovery records.
-    fs::write(runtime.sessions_dir.join("broken.toml"), "id = [").unwrap();
-    let events = runtime.handle_frontend_event(
-        "client-recovery".to_string(),
-        FrontendEvent::LoadRecoveryCenter {
-            request_id: "request-1".to_string(),
-        },
-    );
-    let (generation, items) = events
-        .iter()
-        .find_map(|outbound| match &outbound.event {
-            BackendEvent::RecoveryCenterState {
-                request_id,
-                generation,
-                status: gwt::RecoveryCenterLoadStatus::Ready,
-                items,
-            } if request_id == "request-1" => Some((*generation, items.clone())),
-            _ => None,
-        })
-        .expect("ready Recovery Center projection");
-    assert!(generation > 0);
-    assert_eq!(items.len(), 3);
-    assert!(items.iter().any(|item| {
-        item.state == gwt::RecoveryCenterItemState::Pending
-            && item.worktree_form == BoardWorktreeForm::Ephemeral
-    }));
-    assert!(items.iter().any(|item| {
-        item.state == gwt::RecoveryCenterItemState::Acknowledged
-            && item.worktree_form == BoardWorktreeForm::BranchBacked
-    }));
-    assert!(items.iter().any(|item| {
-        item.state == gwt::RecoveryCenterItemState::Conflicted
-            && item.worktree_form == BoardWorktreeForm::Unknown
-    }));
-    assert!(items.iter().all(|item| {
-        !item.action_handle.contains("recovery-")
-            && !item.action_handle.contains(&active_session.id)
-            && !item.summary.contains("foreign private sentinel")
-    }));
-    assert_eq!(
-        fs::read(&active_session_path).expect("read Session after projection"),
-        session_before,
-        "Recovery Center must use Session::load without migration or mutation"
-    );
-    assert_eq!(pending.state, RecoveryState::Pending);
-}
-
-#[test]
-fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle() {
-    let temp = tempdir().expect("tempdir");
-    let home = temp.path().join("home");
-    fs::create_dir_all(&home).expect("home");
-    let _gwt_home = ScopedGwtHome::set(&home);
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("repo");
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let mut session = gwt_agent::Session::new(&repo, "work/issue-1974", gwt_agent::AgentId::Codex);
-    session.id = "recovery-action-session".to_string();
-    session.save(&runtime.sessions_dir).expect("save Session");
-    let store = RecoveryStore::for_repo(&repo, &session.id).expect("store");
-    let pending = store
-        .prepare(
-            "prepare-pending-action",
-            recovery_center_test_intent(
-                &session.id,
-                "recovery-pending-action",
-                "board-pending-action",
-                BoardWorktreeForm::Ephemeral,
-                "pending action",
-            ),
-        )
-        .expect("pending")
-        .record;
-    let ack_pending = store
-        .prepare(
-            "prepare-ack-action",
-            recovery_center_test_intent(
-                &session.id,
-                "recovery-ack-action",
-                "board-ack-action",
-                BoardWorktreeForm::BranchBacked,
-                "ack action",
-            ),
-        )
-        .expect("prepare ack")
-        .record;
-    store
-        .acknowledge(
-            "recovery-ack-action",
-            ack_pending.revision,
-            "ack-action",
-            RecoveryAcknowledgement::for_record(
-                &ack_pending,
-                RecoveryProviderReceipt::new("board-ack-action").expect("receipt"),
-            )
-            .expect("acknowledgement"),
-        )
-        .expect("acknowledge");
-
-    let load = runtime.handle_frontend_event(
-        "client-recovery".to_string(),
-        FrontendEvent::LoadRecoveryCenter {
-            request_id: "request-load".to_string(),
-        },
-    );
-    let (generation, pending_handle, acknowledged_handle) = load
-        .iter()
-        .find_map(|outbound| match &outbound.event {
-            BackendEvent::RecoveryCenterState {
-                generation, items, ..
-            } => Some((
-                *generation,
-                items
-                    .iter()
-                    .find(|item| item.state == gwt::RecoveryCenterItemState::Pending)?
-                    .action_handle
-                    .clone(),
-                items
-                    .iter()
-                    .find(|item| item.state == gwt::RecoveryCenterItemState::Acknowledged)?
-                    .action_handle
-                    .clone(),
-            )),
-            _ => None,
-        })
-        .expect("projection handles");
-
-    let open = |runtime: &mut AppRuntime, generation, action_handle: String| {
-        runtime.handle_frontend_event(
-            "client-recovery".to_string(),
-            FrontendEvent::OpenRecoveryCenterBoardEntry {
-                request_id: "request-open".to_string(),
-                generation,
-                action_handle,
-            },
-        )
-    };
-    let pending_result = open(&mut runtime, generation, pending_handle);
-    assert!(matches!(
-        &pending_result[0].event,
-        BackendEvent::RecoveryCenterBoardEntry {
-            board_entry_id: None,
-            ..
-        }
-    ));
-    let acknowledged_result = open(&mut runtime, generation, acknowledged_handle.clone());
-    assert!(matches!(
-        &acknowledged_result[0].event,
-        BackendEvent::RecoveryCenterBoardEntry {
-            board_entry_id: Some(entry_id),
-            ..
-        } if entry_id == "board-ack-action"
-    ));
-
-    let context = runtime.project_context("tab-1").unwrap();
-    let foreign_result = runtime.open_recovery_center_board_entry_events(
-        &context,
-        "client-other",
-        "foreign-open",
-        generation,
-        &acknowledged_handle,
-    );
-    let foreign_wire = serde_json::to_value(&foreign_result[0].event).unwrap();
-    assert!(foreign_wire.get("board_entry_id").is_none());
-    assert!(foreign_wire["error"]
-        .as_str()
-        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("client")));
-
-    runtime.load_recovery_center_events(&context, "client-other", "other-load");
-    assert!(
-        matches!(
-            &open(&mut runtime, generation, acknowledged_handle.clone())[0].event,
-            BackendEvent::RecoveryCenterBoardEntry { board_entry_id: Some(id), .. }
-                if id == "board-ack-action"
-        ),
-        "another client's load must preserve the original client's handle"
-    );
-    let stale_result = open(
-        &mut runtime,
-        generation.saturating_sub(1),
-        acknowledged_handle.clone(),
-    );
-    assert!(matches!(
-        &stale_result[0].event,
-        BackendEvent::RecoveryCenterBoardEntry {
-            board_entry_id: None,
-            ..
-        }
-    ));
-    let stale_wire = serde_json::to_value(&stale_result[0].event).unwrap();
-    assert!(stale_wire["error"]
-        .as_str()
-        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("generation")));
-
-    runtime.load_recovery_center_events(&context, "client-recovery", "reload");
-    let reloaded = open(&mut runtime, generation, acknowledged_handle.clone());
-    let reloaded_wire = serde_json::to_value(&reloaded[0].event).unwrap();
-    assert!(reloaded_wire.get("board_entry_id").is_none());
-    assert!(reloaded_wire["error"]
-        .as_str()
-        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("handle")));
-
-    // A captured context cannot authorize actions after the tab is closed.
-    runtime.project_tab_incarnations.remove("tab-1");
-    for closed in [
-        runtime.handle_frontend_event_in_scope(
-            "client-recovery".into(),
-            FrontendEvent::OpenRecoveryCenterBoardEntry {
-                request_id: "closed-open".into(),
-                generation,
-                action_handle: acknowledged_handle.clone(),
-            },
-            &ClientScope::Project(context.project_key.clone()),
-        ),
-        runtime.handle_frontend_event_for_project(
-            &context,
-            "client-recovery".into(),
-            FrontendEvent::OpenRecoveryCenterBoardEntry {
-                request_id: "stale-open".into(),
-                generation,
-                action_handle: acknowledged_handle.clone(),
-            },
-        ),
-    ] {
-        assert_eq!(
-            closed.len(),
-            1,
-            "closed project actions require an explicit refusal"
-        );
-        let closed_wire = serde_json::to_value(&closed[0].event).unwrap();
-        assert!(
-            closed_wire["error"].as_str().is_some_and(
-                |error| error.contains(&acknowledged_handle) && error.contains("project")
-            )
-        );
-    }
-    assert_eq!(pending.state, RecoveryState::Pending);
-}
-
-#[test]
 fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
     let _env_lock = env_test_lock()
         .lock()
@@ -923,13 +445,59 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
             .any(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: true, .. })),
         "pane.write into the actual resumed agent must succeed: {pane_send_events:?}"
     );
-    let attachment_events =
-        runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("pasted.png"));
+    let uploaded_path = temp.path().join("resumed-image-upload");
+    fs::write(&uploaded_path, [1_u8]).unwrap();
+    runtime
+        .attachment_uploads
+        .insert(
+            "resumed-image-upload".into(),
+            UploadedAttachment {
+                path: uploaded_path,
+                filename: "pasted.png".into(),
+                mime_type: Some("image/png".into()),
+                size: 1,
+            },
+        )
+        .unwrap();
+    let event = super::work_projection_tests::qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind":"paste_image_uploaded", "id":window_id, "operation_id":"resumed-attachment",
+            "upload_id":"resumed-image-upload", "mime_type":"image/png", "filename":"pasted.png", "size":1
+        }),
+    );
+    let attachment_before = probe.pty.ordinary_input_revision().unwrap();
+    let attachment_events = runtime.handle_frontend_event("client-1".into(), event);
     assert!(
-        attachment_events.is_empty(),
+        attachment_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Queued,
+                ..
+            }
+        )),
         "restored attachment staging must not be denied: {attachment_events:?}"
     );
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    let completed = super::work_projection_tests::drain_attachment_work(&mut runtime);
+    assert!(
+        completed.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Attached,
+                ..
+            }
+        )),
+        "the resumed owner must acknowledge its physical attachment write: {completed:?}"
+    );
+    assert_eq!(
+        probe.pty.ordinary_input_revision().unwrap(),
+        attachment_before + 1
+    );
+    assert!(
+        probe.pty.has_unsent_user_input(),
+        "attachment never appends CR"
+    );
     assert!(
         worktree.join(".gwt/drop-files").exists(),
         "attachment bytes are staged in the actual resumed worktree"
@@ -1014,6 +582,7 @@ fn browser_terminal_input_ignores_unrelated_acks_and_discards_a_failed_tail() {
             },
             approval_resolution_started: false,
             input_command_id,
+            attachment_outcome: None,
             result,
         };
     for unrelated in [None, Some(uuid::Uuid::new_v4())] {
@@ -1068,6 +637,7 @@ fn browser_terminal_input_discards_the_tail_when_next_worker_cannot_start() {
         },
         approval_resolution_started: false,
         input_command_id: Some(token),
+        attachment_outcome: None,
         result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
             revision: 1,
             has_unsent_user_input: false,
@@ -1112,6 +682,7 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
             request_id: None,
         },
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id: Some(token),
         result: Ok(None),
     };
@@ -1168,6 +739,7 @@ fn browser_terminal_final_ack_reconciles_a_newer_input_observation() {
             request_id: None,
         },
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id,
         result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
             revision,
@@ -1435,10 +1007,22 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
 
 #[test]
 fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics() {
+    retained_diagnostic_contract(false);
+}
+
+#[test]
+fn explicit_restart_drains_retained_diagnostic_before_exact_restore() {
+    retained_diagnostic_contract(true);
+}
+
+fn retained_diagnostic_contract(restart: bool) {
     use gwt::project_runtime::{
         events::{OwnerCommand, OwnerEvent},
         test_support::ProjectOwnerHarness,
     };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1458,6 +1042,16 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         ],
     );
     seed_owner_fixture_roster(&repo, 1);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
+    if restart {
+        gwt_agent::save_stored_custom_agents_to_path(
+            &gwt_core::paths::gwt_config_path(),
+            &[gwt_agent::StoredCustomAgent::new(
+                super::pane_control_tests::control_custom_agent(),
+            )],
+        )
+        .expect("persist the actual Custom provider used by saved-Session restart");
+    }
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start(&repo)).unwrap();
     let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
     config.pending_initial_prompt =
@@ -1550,6 +1144,30 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     );
     let prompt_path = &prompt_paths[0];
     let session = probe.session.as_ref().unwrap();
+    if restart {
+        let hook = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "retained-diagnostic-native",
+            "cwd": session.worktree_path,
+        })
+        .to_string();
+        probe.with_agent_environment(|| {
+            gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
+            gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
+        });
+        let learned = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        )
+        .unwrap();
+        assert_eq!(
+            learned.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        assert!(learned
+            .session_history
+            .iter()
+            .any(|entry| entry.agent_session_id == "retained-diagnostic-native"));
+    }
     let mut idle = runtime_hook_state_for_event("Idle", "Stop", &session.id);
     idle.project_root = Some(repo.display().to_string());
     idle.branch = Some(session.branch.clone());
@@ -1640,6 +1258,65 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     assert!(generation
         .write_input(b"late input after confirmed exit")
         .is_err());
+    if restart {
+        gui.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        gui.blocking_tasks = spawner;
+        let source =
+            gwt_agent::Session::load(&gui.sessions_dir.join(format!("{}.toml", session.id)))
+                .unwrap();
+        assert_eq!(
+            source.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        gui.restart_window_events(&gui_id);
+        assert!(
+            gui.active_agent_sessions.contains_key(&gui_id),
+            "routing must keep the old source reserved until the exact Closed ACK"
+        );
+        assert!(
+            gui.pending_launch_completions.contains_key(&gui_id),
+            "a confirmed retained diagnostic must reach the existing owner launch adapter"
+        );
+        let events = drain_owner_launch_fixtures(&mut gui, &tasks);
+        assert!(
+            gui.runtimes.contains_key(&gui_id),
+            "actual restore receipts: {events:?}"
+        );
+        let projection = &gui.runtimes[&gui_id];
+        assert_eq!(projection.owner_identity, identity);
+        let successor =
+            owner_fixture_block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+                .expect("the captured owner owns the exact replacement projection");
+        assert!(
+            successor.incarnation > probe.incarnation,
+            "actual restore receipts: {events:?}"
+        );
+        assert_eq!(
+            successor
+                .session
+                .as_ref()
+                .unwrap()
+                .exact_resume_session_id(),
+            source.exact_resume_session_id()
+        );
+        assert_eq!(
+            successor.session.as_ref().unwrap().agent_member_id,
+            source.agent_member_id
+        );
+        assert!(probe.pty.tree_exit_confirmed());
+        assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
+        assert!(generation.write_input(b"late input after restart").is_err());
+        assert!(successor.pty.try_wait().unwrap().is_none());
+        owner_fixture_block_on(owner.command(OwnerCommand::Close {
+            id: successor.id.clone(),
+            incarnation: successor.incarnation,
+        }))
+        .expect("close the exact successor through its captured physical owner");
+        assert!(successor.pty.tree_exit_confirmed());
+        owner_fixture_block_on(owner.shutdown());
+        return;
+    }
     owner_fixture_block_on(owner.command(OwnerCommand::Close {
         id: probe.id.clone(),
         incarnation: probe.incarnation,
@@ -1877,4 +1554,240 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         load_workspace_state(&workspace_state_path(&repo)).expect("persisted Work singleton state");
     assert_eq!(persisted.windows.len(), 1);
     assert_eq!(persisted.windows[0].id, first.id);
+}
+
+/// Run the queued decision-queue workers and feed their completions through
+/// the production handlers, the way the event loop does.
+fn drain_decision_queue(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued decision fixture workers");
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("decision fixture event sink");
+    };
+    let completions = Arc::clone(completions);
+    let mut events = Vec::new();
+    loop {
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        let had_tasks = !queued.is_empty();
+        for task in queued {
+            task();
+        }
+        let completed = std::mem::take(&mut *completions.lock().unwrap());
+        let had_completions = !completed.is_empty();
+        for event in completed {
+            match runtime.accept_project_completion(event) {
+                Some(UserEvent::DecisionAnswersPending {
+                    project_root,
+                    deliveries,
+                }) => events.extend(runtime.deliver_decision_answers(&project_root, deliveries)),
+                Some(UserEvent::Dispatch(dispatched)) => events.extend(dispatched),
+                Some(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
+                    events.extend(runtime.handle_remote_runtime_command_complete(*completion))
+                }
+                _ => {}
+            }
+        }
+        if !had_tasks && !had_completions {
+            break;
+        }
+    }
+    events
+}
+
+fn decision_registration(session_id: &str, target: &str) -> gwt_core::decision_queue::Registration {
+    gwt_core::decision_queue::Registration {
+        issue: Some(7742),
+        kind: Some("product".into()),
+        target: Some(target.into()),
+        question: Some("Which storage should the queue use?".into()),
+        materials: Some("Both options pass the existing tests.".into()),
+        options: vec!["Keep JSON".into(), "Move to SQLite".into()],
+        recommendation: Some("Keep JSON".into()),
+        reason: None,
+        session_id: Some(session_id.into()),
+    }
+}
+
+/// Issue #7742 AC-2: the answer goes from gwtd straight into the pane of the
+/// session that waits for it. No PM session takes part in the delivery.
+#[test]
+fn decision_answer_is_delivered_to_the_waiting_session_without_a_pm() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let repo = temp.path().join("browser-input-project");
+    let session_id = probe.session.as_ref().unwrap().id.clone();
+    // The PM is gone: neither the registry nor this runtime knows one.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        &session_id,
+    )
+    .unwrap();
+    let context = runtime.test_context();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .pm_sessions
+        .clear();
+    assert!(
+        runtime.pm_session_for_root(&repo).is_none(),
+        "the delivery must not depend on a running PM"
+    );
+    let item = queue::register(&repo, &decision_registration(&session_id, "storage"))
+        .unwrap()
+        .item;
+    let queued = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::AnswerDecision {
+            id: window_id.clone(),
+            request_id: 5,
+            decision_id: item.id.clone(),
+            answer: "1. Keep JSON".into(),
+        },
+    );
+    assert!(
+        queued.is_empty(),
+        "the answer is recorded off the event loop"
+    );
+    // The answer is durable before any pane is written.
+    {
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            panic!("queued decision fixture workers");
+        };
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in queued {
+            task();
+        }
+    }
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+    let events = drain_decision_queue(&mut runtime);
+    let result = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::DecisionResult {
+                request_id: 5,
+                ok,
+                error,
+                decisions,
+                ..
+            } => Some((*ok, error.clone(), decisions.clone())),
+            _ => None,
+        })
+        .expect("the answer is acknowledged to its client");
+    assert_eq!((result.0, result.1), (true, None));
+    assert_eq!(result.2.unwrap().waiting_count, 0);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::WindowCommandError { .. })),
+        "the waiting session's own pane accepted the answer: {events:?}"
+    );
+    // The receipt is written only after the pane owner acknowledged the write.
+    assert!(
+        queue::pending_deliveries(&repo).unwrap().is_empty(),
+        "the answer reached the waiting session and is not delivered again"
+    );
+    assert!(runtime.decision_answers_in_flight.is_empty());
+    runtime.scan_decision_answers();
+    assert!(drain_decision_queue(&mut runtime).is_empty());
+
+    // An answer recorded by another process (the PM closing a decision through
+    // gwtd) is picked up by the scan and delivered the same way.
+    let second = queue::register(&repo, &decision_registration(&session_id, "ordering"))
+        .unwrap()
+        .item;
+    queue::answer(&repo, &second.id, "Newest first", queue::AnsweredBy::Pm).unwrap();
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+    runtime.scan_decision_answers();
+    drain_decision_queue(&mut runtime);
+    assert!(queue::pending_deliveries(&repo).unwrap().is_empty());
+
+    // A waiter without a live pane keeps its answer pending instead of losing it.
+    let third = queue::register(&repo, &decision_registration("gone-session", "retention"))
+        .unwrap()
+        .item;
+    queue::answer(&repo, &third.id, "Keep all", queue::AnsweredBy::Pm).unwrap();
+    runtime.scan_decision_answers();
+    drain_decision_queue(&mut runtime);
+    assert_eq!(queue::pending_deliveries(&repo).unwrap().len(), 1);
+
+    // A foreign or missing window never reaches another project's queue.
+    let refused = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::DeferDecision {
+            id: "missing::window".into(),
+            request_id: 6,
+            decision_id: item.id,
+        },
+    );
+    assert!(refused
+        .iter()
+        .all(|event| !matches!(&event.event, BackendEvent::DecisionResult { ok: true, .. })));
+}
+
+/// Issue #7742 AC-3 / AC-4: the queue belongs to the project. Replacing the PM
+/// changes neither the waiting decisions nor their count, and deferring keeps
+/// the count while moving the decision to the tail.
+#[test]
+fn decision_queue_survives_pm_reassignment_and_defer_keeps_the_count() {
+    use gwt_core::decision_queue as queue;
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let repo = temp.path().join("browser-input-project");
+    let session_id = probe.session.as_ref().unwrap().id.clone();
+    let first = queue::register(&repo, &decision_registration("waiting-agent", "storage"))
+        .unwrap()
+        .item;
+    let second = queue::register(&repo, &decision_registration("waiting-agent", "ordering"))
+        .unwrap()
+        .item;
+    let before = gwt::pm_current::load_decisions(&repo).unwrap();
+    assert_eq!(before.waiting_count, 2);
+
+    // The fixture's PM leaves and a different session takes over.
+    let prefs = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::deregister_pm(&prefs, &session_id).unwrap();
+    assert_eq!(gwt::pm_current::load_decisions(&repo).unwrap(), before);
+    let mut replacement = pm_registration_fixture("replacement-pm", &repo);
+    replacement.agent_id = "claude".into();
+    gwt::pm_registry::try_register_pm(&prefs, replacement, |_| false).unwrap();
+    assert_eq!(gwt::pm_current::load_decisions(&repo).unwrap(), before);
+
+    let queued = runtime.handle_frontend_event(
+        "origin".into(),
+        FrontendEvent::DeferDecision {
+            id: window_id,
+            request_id: 9,
+            decision_id: second.id.clone(),
+        },
+    );
+    assert!(queued.is_empty());
+    let events = drain_decision_queue(&mut runtime);
+    let after = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::DecisionResult {
+                request_id: 9,
+                ok: true,
+                action,
+                decisions,
+                ..
+            } if action == "defer" => decisions.clone(),
+            _ => None,
+        })
+        .expect("the deferral is acknowledged with the reordered queue");
+    assert_eq!(after.waiting_count, 2, "deferring is not a decision");
+    assert_eq!(
+        after
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.id.as_str(), second.id.as_str()],
+        "the deferred decision waits at the tail"
+    );
 }

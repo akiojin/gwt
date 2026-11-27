@@ -148,12 +148,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::RetryWorkspaceStateLoad => {
             FrontendUserActionLog::new("retry_workspace_state_load", "workspace")
         }
-        FrontendEvent::LoadRecoveryCenter { .. } => {
-            FrontendUserActionLog::new("load_recovery_center", "recovery")
-        }
-        FrontendEvent::OpenRecoveryCenterBoardEntry { .. } => {
-            FrontendUserActionLog::new("open_recovery_center_board_entry", "recovery")
-        }
         FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
             FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
                 .mode(if *enabled { "on" } else { "off" })
@@ -246,9 +240,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::StopWindow { id } => {
             FrontendUserActionLog::new("stop_window", "window").window(id)
-        }
-        FrontendEvent::StopAllWindows {} => {
-            FrontendUserActionLog::new("stop_all_windows", "window")
         }
         FrontendEvent::RestartWindow { id } => {
             FrontendUserActionLog::new("restart_window", "window").window(id)
@@ -404,6 +395,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .window(id)
             .mode(format!("{knowledge_kind:?}"))
             .target(number.to_string()),
+        FrontendEvent::EditIssueSubtask { id, number, .. } => {
+            FrontendUserActionLog::new("edit_issue_subtask", "knowledge")
+                .window(id)
+                .target(number.to_string())
+        }
         FrontendEvent::UpdateKnowledgeBridgePhase {
             id,
             issue_number,
@@ -413,6 +409,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .window(id)
             .target(issue_number.to_string())
             .mode(target_phase.as_deref().unwrap_or("backlog")),
+        FrontendEvent::SetIssueAutonomousTarget {
+            id,
+            issue_number,
+            enabled,
+            ..
+        } => FrontendUserActionLog::new("set_issue_autonomous_target", "knowledge")
+            .window(id)
+            .target(issue_number.to_string())
+            .mode(if *enabled { "include" } else { "exclude" }),
         FrontendEvent::RebuildIndexCell {
             project_root,
             scope,
@@ -573,6 +578,39 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("list_agent_backends", "agent_backends")
                 .agent(agent.as_str())
         }
+        FrontendEvent::SaveFirstRunSetup { pm_member_id, .. } => {
+            let action = FrontendUserActionLog::new("save_first_run_setup", "first_run_setup");
+            match pm_member_id {
+                Some(member_id) => action.target(member_id.clone()),
+                None => action,
+            }
+        }
+        FrontendEvent::AddExecutionEnvironment { via_tool, .. } => {
+            FrontendUserActionLog::new("add_execution_environment", "execution_environments")
+                .agent(via_tool)
+        }
+        FrontendEvent::UpdateExecutionEnvironment { environment_id, .. } => {
+            FrontendUserActionLog::new("update_execution_environment", "execution_environments")
+                .target(environment_id.clone())
+        }
+        FrontendEvent::DeleteExecutionEnvironment { environment_id } => {
+            FrontendUserActionLog::new("delete_execution_environment", "execution_environments")
+                .target(environment_id.clone())
+        }
+        FrontendEvent::DeleteTheme { number, .. } => {
+            FrontendUserActionLog::new("delete_theme", "themes").target(number.to_string())
+        }
+        FrontendEvent::SetProjectExecutionEnvironments { .. } => FrontendUserActionLog::new(
+            "set_project_execution_environments",
+            "execution_environments",
+        ),
+        FrontendEvent::SetPmExecutionEnvironments { .. } => {
+            FrontendUserActionLog::new("set_pm_execution_environments", "execution_environments")
+        }
+        FrontendEvent::SetAgentExecutionEnvironments { member_id, .. } => {
+            FrontendUserActionLog::new("set_agent_execution_environments", "execution_environments")
+                .target(member_id.clone())
+        }
         FrontendEvent::AddAgentBackend { agent, profile } => {
             FrontendUserActionLog::new("add_agent_backend", "agent_backends")
                 .agent(agent.as_str())
@@ -615,6 +653,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 "audit"
             })
         }
+        FrontendEvent::UpdateUserHooks { change, .. } => {
+            FrontendUserActionLog::new("update_user_hooks", "settings").mode(match change {
+                gwt::user_hooks::UserHookChange::Register { .. } => "register",
+                gwt::user_hooks::UserHookChange::Remove { .. } => "remove",
+            })
+        }
         FrontendEvent::GetBoardAuthStatus => {
             FrontendUserActionLog::new("get_board_auth_status", "settings")
         }
@@ -651,11 +695,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::UpdateAutostart { enabled } => {
             FrontendUserActionLog::new("update_autostart", "settings").force(*enabled)
         }
-        FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
-            FrontendUserActionLog::new("workspace_projection_prune", "workspace")
-                .mode(if *dry_run { "dry_run" } else { "apply" })
-                .count(ids.len())
-        }
         FrontendEvent::SaveUiTrace { trace } => {
             let entries = trace.entries().map(|entries| entries.len()).unwrap_or(0);
             FrontendUserActionLog::new("save_ui_trace", "diagnostics")
@@ -680,6 +719,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
+        FrontendEvent::HomePmSend { project_key, .. } => {
+            FrontendUserActionLog::new("home_pm_send", "pm").target(project_key)
+        }
+        FrontendEvent::HomeAnswerDecision { decision_id, .. } => {
+            FrontendUserActionLog::new("home_answer_decision", "pm").target(decision_id)
+        }
+        FrontendEvent::HomeDeferDecision { decision_id, .. } => {
+            FrontendUserActionLog::new("home_defer_decision", "pm").target(decision_id)
+        }
         FrontendEvent::ReopenPmRequestTask { id, .. } => {
             FrontendUserActionLog::new("reopen_pm_request_task", "pm").window(id)
         }
@@ -695,9 +743,27 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PmPaneSendInput { window_id, .. } => {
             FrontendUserActionLog::new("pm_pane_send_input", "terminal").target(window_id)
         }
+        // The answer text stays out of the action log, like pane input.
+        FrontendEvent::AnswerDecision {
+            id, decision_id, ..
+        } => FrontendUserActionLog::new("answer_decision", "pm")
+            .window(id)
+            .target(decision_id),
+        FrontendEvent::DeferDecision {
+            id, decision_id, ..
+        } => FrontendUserActionLog::new("defer_decision", "pm")
+            .window(id)
+            .target(decision_id),
         FrontendEvent::SetIssueMonitorEnabled { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::SetProjectAutonomy { running, .. } => {
+            FrontendUserActionLog::new("set_project_autonomy", "project").mode(if *running {
+                "start"
+            } else {
+                "stop"
+            })
         }
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
@@ -818,9 +884,25 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
+        | FrontendEvent::LoadHomeConversation { .. }
+        | FrontendEvent::LoadDecisionCounts { .. }
+        | FrontendEvent::LoadThemes { .. }
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::LoadPmRequestTask { .. }
         | FrontendEvent::GetIssueMonitorProfiles
+        | FrontendEvent::GetExecutionEnvironments
+        | FrontendEvent::AddPoolAccount { .. }
+        | FrontendEvent::SignInPoolAccount { .. }
+        | FrontendEvent::SaveCopilotAccount { .. }
+        | FrontendEvent::MovePoolAccount { .. }
+        | FrontendEvent::UsePoolAccount { .. }
+        | FrontendEvent::DeletePoolAccount { .. }
+        | FrontendEvent::ResumeNextPoolAccount { .. }
+        | FrontendEvent::PoolAccountLoginInput { .. }
+        | FrontendEvent::ClosePoolAccountLogin { .. }
+        | FrontendEvent::GetProjectEnvironmentSet
+        | FrontendEvent::SetProjectEnvironmentSet { .. }
+        | FrontendEvent::GetFirstRunSetup { .. }
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }

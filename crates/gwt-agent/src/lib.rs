@@ -4,6 +4,7 @@
 //! launching, and tracking coding agent sessions (Claude Code, Codex,
 //! OpenCode, Copilot, and custom agents).
 
+pub mod antigravity_models;
 pub mod audit;
 pub mod backend;
 pub mod backend_store;
@@ -29,6 +30,10 @@ pub mod types;
 #[cfg(test)]
 pub(crate) mod test_capture;
 
+pub use antigravity_models::{
+    antigravity_model, antigravity_model_arg, antigravity_model_launch_error, AntigravityModel,
+    ANTIGRAVITY_MODELS,
+};
 pub use audit::{
     is_secret_env_key, redact_env_value_for_audit, redact_secrets_in_agent, REDACTED_PLACEHOLDER,
 };
@@ -49,9 +54,9 @@ pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::{CodexAuthRoot, CodexAuthRootOrigin, LaunchEnvironment};
 pub use launch::{
-    canonical_launch_args, normalize_launch_args, AgentLaunchBuilder, CodexSpeed,
-    ExecutionLaunchIntent, LaunchConfig, ManualLaunchRuntimeEvidence, ManualLaunchRuntimeProof,
-    ManualLaunchSuccessorPredecessor,
+    canonical_launch_args, codex_reasoning_effort, normalize_launch_args, validate_native_tuning,
+    AgentLaunchBuilder, CodexSpeed, ExecutionLaunchIntent, LaunchConfig,
+    ManualLaunchRuntimeEvidence, ManualLaunchRuntimeProof, ManualLaunchSuccessorPredecessor,
 };
 pub use permission_mode::{
     decide as decide_permission_mode, provider_key, provider_skip_mapping,
@@ -100,15 +105,15 @@ pub use session::{
     update_session_if_changed, update_session_if_matches_with, update_session_if_unchanged_with,
     update_session_with_wait, validate_docker_runtime_worktree_path,
     validate_session_id_path_component, with_session_lease, with_session_lease_wait,
-    with_session_path_lease, with_session_path_lease_wait, AgentSessionHistoryEntry,
-    DockerRuntimeBinding, ExecutionBindingIdentity, PendingDiscussionResume, Session,
-    SessionActiveLaunchHandshake, SessionActiveLaunchPhase, SessionExecutionBinding,
-    SessionExecutionIdentity, SessionExitReceipt, SessionLaunchOrigin, SessionManualHandoffFence,
-    SessionPathLeases, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
-    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
-    EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
-    GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
-    GWT_SESSION_RUNTIME_PATH_ENV,
+    with_session_path_lease, with_session_path_lease_wait, AccountSwitch, AccountSwitchReason,
+    AgentSessionHistoryEntry, DockerRuntimeBinding, ExecutionAccount, ExecutionBindingIdentity,
+    PendingDiscussionResume, Session, SessionActiveLaunchHandshake, SessionActiveLaunchPhase,
+    SessionExecutionBinding, SessionExecutionIdentity, SessionExitReceipt, SessionLaunchOrigin,
+    SessionManualHandoffFence, SessionPathLeases, SessionPathState, SessionRuntimeState,
+    SessionSnapshotUpdateOutcome, ToolRuntimeProvenance, ToolRuntimeResolutionReason,
+    ToolRuntimeRunnerKind, EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV,
+    GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
+    GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,

@@ -37,7 +37,7 @@ pub(super) fn run<E: CliEnv>(
             let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
             out.push_str(&json!({
                 "min_reset_wait_secs": min_reset_wait_secs,
-                "proposals": provider_reset::proposals(&prefs.provider_quota_holds, chrono::Utc::now(), min_reset_wait_secs),
+                "proposals": provider_reset::proposals(&prefs.provider_quota_holds, gwt_core::timestamp::UtcTimestamp::now(), min_reset_wait_secs),
                 "notice": CLAUDE_NOTICE,
             }).to_string());
             out.push('\n');
@@ -266,7 +266,7 @@ impl Audit {
 
     fn record(&mut self, phase: &str, detail: &str) -> Result<(), String> {
         let record = json!({
-            "at": chrono::Utc::now().to_rfc3339(),
+            "at": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             "context": self.context,
             "phase": phase,
             "detail": detail,

@@ -482,9 +482,11 @@ mod tests {
             managed_hooks: vec![make_hook("pre-commit", "old-lint", true)],
             user_hooks: vec![make_hook("post-merge", "notify", false)],
         };
-        std::fs::write(&hooks_file, serde_json::to_string(&initial).unwrap()).unwrap();
-        backup_hooks(&hooks_file).unwrap();
-        std::fs::remove_file(hooks_file.with_extension("json.bak")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks.json.20261117T184312007Z.bak"),
+            serde_json::to_string(&initial).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&hooks_file, "").unwrap();
 
         let managed = vec![make_hook("pre-commit", "new-lint", true)];
@@ -521,7 +523,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn merge_hooks_safe_preserves_symlink_target() {
+    fn merge_hooks_safe_rejects_symlink_target() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -540,7 +542,12 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         let managed = vec![make_hook("pre-commit", "new-lint", true)];
-        merge_hooks_safe(&link, &managed).unwrap();
+        let error = merge_hooks_safe(&link, &managed).unwrap_err();
+        assert!(error.to_string().contains("write"), "{error}");
+        assert!(
+            error.to_string().contains(&link.display().to_string()),
+            "{error}"
+        );
 
         assert!(std::fs::symlink_metadata(&link)
             .unwrap()
@@ -548,7 +555,7 @@ mod tests {
             .is_symlink());
         let cfg: HooksConfig =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
-        assert_eq!(cfg.managed_hooks[0].command, "new-lint");
+        assert_eq!(cfg.managed_hooks[0].command, "old-lint");
         assert_eq!(cfg.user_hooks, initial.user_hooks);
     }
 
@@ -1664,6 +1671,8 @@ mod tests {
             "`pr.*`",
             "`board.*`",
             "`GWT_BIN_PATH`",
+            // Issue #7335 (#6252): identity precedes the bootstrap build.
+            "`pane.name` \u{2192} `workspace.ensure` \u{2192} `cargo build -p gwt --bin gwtd`",
         ];
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
@@ -1858,7 +1867,9 @@ mod tests {
                     && content.contains("autonomous_mode=true")
                     && content.contains("including the registered PM")
                     && content.contains("next scan")
-                    && content.contains("params.targets")
+                    && content.contains("params.mentions")
+                    && content.contains("params.broadcast:true")
+                    && !content.contains("params.targets")
                     && content.contains("handoff")
                     && content.contains("request"),
                 "expected agent Board coordination and JSON pane contract in {relative}"
@@ -2416,6 +2427,33 @@ mod tests {
                 );
                 assert!(content.contains("full") && content.contains("pre-pr"));
             }
+        }
+    }
+
+    #[test]
+    fn materialized_verify_plan_guidance_separates_derivation_from_explicit_commands() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let content = std::fs::read_to_string(
+                materialized
+                    .path()
+                    .join(provider)
+                    .join("skills/gwt-verify/references/contract-modes.md"),
+            )
+            .unwrap();
+            let examples: Vec<_> = content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|example| example["operation"] == "verify.plan")
+                .collect();
+            let pre_pr = examples
+                .iter()
+                .find(|example| example["params"]["mode"] == "pre-pr")
+                .expect("expected a pre-pr verify.plan example");
+            assert_eq!(pre_pr["params"]["derive"], true);
+            assert!(pre_pr["params"].get("commands").is_none());
+            assert!(content.contains("register the complete list with `params.commands` alone"));
         }
     }
 

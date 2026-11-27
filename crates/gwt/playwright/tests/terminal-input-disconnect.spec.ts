@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase
@@ -39,6 +40,7 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
     };
     const sent = [];
     let online = true;
+    let disconnectedSockets = [];
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -74,8 +76,14 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
       sent,
       disconnect() {
         online = false;
-        FixtureWebSocket.instances.filter(socket => socket.readyState === FixtureWebSocket.OPEN)
-          .forEach(socket => socket.close());
+        disconnectedSockets = FixtureWebSocket.instances.filter(socket => socket.readyState === FixtureWebSocket.OPEN);
+        // The transport can stop accepting input before its close event arrives.
+        disconnectedSockets.forEach(socket => { socket.readyState = FixtureWebSocket.CLOSING; });
+      },
+      notifyDisconnect() {
+        const sockets = disconnectedSockets;
+        disconnectedSockets = [];
+        sockets.forEach(socket => socket.close());
       },
       reconnect() {
         online = true;
@@ -85,7 +93,7 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
     };
   });
   await page.goto(appUrl);
-  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await openWorks(page);
   await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   const tile = page.locator(".works-surface:not(.works-surface--preview) .works-terminal[data-window-id='agent-1']");
   await expect(tile).toBeVisible();
@@ -112,7 +120,11 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
   await expect(page.locator(".connection-overlay")).toHaveCount(0);
   expect(await received()).toBe("before");
 
+  // Now deliver close for exactly the captured sockets, revoking Works input.
+  await page.evaluate(() => window.__disconnectFixture.notifyDisconnect());
+  const terminalStatus = page.locator(".works-surface:not(.works-surface--preview) .works-full-meta");
   await page.clock.runFor(1600);
+  await expect(terminalStatus).toContainText("Input unavailable");
   await expect(page.locator(".connection-overlay")).toBeVisible();
   await page.evaluate(() => window.__disconnectFixture.reconnect());
   await page.clock.runFor(100);
@@ -121,8 +133,9 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
   await expect(notice).toContainText("Connection restored");
   await expect(notice).toContainText("Input typed while disconnected was discarded and was not resent. Retype it when ready.");
   expect(await received()).toBe("before");
-  // Disconnect makes membership Unknown; reopening revalidates the fresh census.
-  await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+  // The fresh same-session census restores input in the retained Works terminal.
+  await expect(tile).toBeVisible();
+  await expect(terminalStatus).toContainText("Interactive");
   await terminal.focus();
   await page.keyboard.type("after");
   await expect.poll(received).toBe("beforeafter");

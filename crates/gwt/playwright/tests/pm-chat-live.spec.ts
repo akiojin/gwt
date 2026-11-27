@@ -6,8 +6,9 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { basename, join, resolve } from 'node:path';
 import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
 import { gotoLiveGwt, installLiveGwtInitScript, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
-import { startManagedBrowserSource } from './_helpers/managed-browser-source';
+import { startManagedBrowserSource, useManagedBrowserSource } from './_helpers/managed-browser-source';
 import { withNativeHiddenPage } from './_helpers/native-chromium';
+import { openWorks } from './_helpers/works-entry';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
@@ -41,6 +42,7 @@ async function refreshPmReports(page: Page) {
 }
 
 test.describe('PM reports', () => {
+  if (process.env.GWT_PLAYWRIGHT_PM_SCROLL_MANAGED_SOURCE === '1') useManagedBrowserSource(test);
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL || !HOME, 'requires isolated checkout fixture');
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(90_000);
@@ -84,7 +86,7 @@ test.describe('PM reports', () => {
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
 
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         await expect(body).toBeHidden();
         appendFileSync(history, report(37) + '\n');
         await refreshPmReports(page);
@@ -93,7 +95,7 @@ test.describe('PM reports', () => {
         await expect(body).toBeVisible();
         await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
         await body.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         appendFileSync(history, report(38) + '\n');
         await refreshPmReports(page);
         await expect(messages).toHaveCount(39);
@@ -333,7 +335,7 @@ test.describe('PM reports', () => {
         await expect(pane.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
         await expect(draft).toHaveValue('Keep this unsent PM draft');
         await info.attach(`Chat terminal action ${theme}`, { body: await pane.screenshot(), contentType: 'image/png' });
-        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await openWorks(page);
         await full.getByRole('button', { name: 'Back to Works' }).click();
         const row = works.locator(`.work-row[data-window-id="${id}"]`);
         await expect(row.locator('.window-role-badge')).toHaveText('PM');
@@ -464,7 +466,7 @@ test.describe('PM reports', () => {
       await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
       await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 220');
       await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
-      await page.getByRole('button', { name: 'Works', exact: true }).click();
+      await openWorks(page);
       await emit('terminal_snapshot', 240);
       await page.locator('#op-pm-entry').click();
       await expect(pane.locator('.pm-conversation-log')).toBeVisible();
@@ -1134,10 +1136,12 @@ test.describe('PM reports', () => {
         cwd: ROOT, env: childEnv, encoding: 'utf8', timeout: 30_000,
         input: JSON.stringify({ schema_version: 1, operation: 'pm.report.post', params }),
       });
-      const refused = post({ kind: 'qa', question: '$gwt-pm', body: 'No change from the automatic prompt' });
-      expect(refused.error).toBeUndefined();
-      expect(refused.status).toBe(1);
-      expect(refused.stdout + refused.stderr).toContain('Automatic PM prompts');
+      for (const question of ['$gwt-pm', '$gwt-pm\n$gwt-pm']) {
+        const refused = post({ kind: 'qa', question, body: 'No change from the automatic prompt' });
+        expect(refused.error).toBeUndefined();
+        expect(refused.status).toBe(1);
+        expect(refused.stdout + refused.stderr).toContain('Automatic PM prompts');
+      }
       await refreshPmReports(page);
       await expect(reports.locator('article')).toHaveCount(originalRows);
       await expect(reports.getByText('No change from the automatic prompt')).toHaveCount(0);
@@ -1363,6 +1367,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     let ownedState = '';
     let targetEnv: NodeJS.ProcessEnv = {};
     const target = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, env, preferences }) {
         ownedState = preferences;
         targetEnv = { ...env };
@@ -1397,18 +1402,24 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       page.on('websocket', socket => {
         socket.on('framesent', ({ payload }) => {
           const event = JSON.parse(String(payload));
-          if (event.kind === 'pane_send_input') choiceRequests.push(event);
+          if (['answer_decision', 'defer_decision', 'pane_send_input'].includes(event.kind)) choiceRequests.push(event);
         });
         socket.on('framereceived', ({ payload }) => {
           const event = JSON.parse(String(payload));
-          if (event.kind === 'pane_send_result') choiceResults.push(event);
+          if (event.kind === 'decision_result') choiceResults.push(event);
         });
       });
       await gotoPmReports(page, undefined, BASE);
       const primaryKey = new URL(page.url()).pathname.split('/').at(-1)!;
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
-      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
+      // T-023 / Issue #7742 AC-5: a decision is drawn only by Decide and the PM
+      // conversation, both from the gwtd decision queue. The unanswered legacy
+      // decision report is bridged into that queue, so it still waits there
+      // after the restart, not in Reports.
+      await expect(pane.locator('.task-decisions__card').filter({ hasText: 'Persisted before restart' }))
+        .toHaveCount(1);
+      await expect(reports.locator('article[data-report-id="persisted-before-restart"]')).toHaveCount(0);
       const originalCount = await reports.locator('article').count();
       const state = ownedState;
       const fixture = { repo_hash: basename(join(state, '..')) };
@@ -1561,63 +1572,82 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         expect(listed.receipts.find((row: any) => row.request_id === unchanged.request_id)).toEqual(unchanged);
         expect(listed.events.find((row: any) => row.event_id === initialEvent.event_id)).toMatchObject({ revision: 3, state: { status: 'resolved' } });
         await refreshPmReports(page);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
         await expect(details).toHaveAttribute('open', '');
+        const decisionId = mixed.reports[1].id;
         for (const receipt of [mixed, resolved]) {
-          for (const row of receipt.reports) await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(1);
+          for (const row of receipt.reports) {
+            await expect(reports.locator(`article[data-report-id="${row.id}"]`)).toHaveCount(row.id === decisionId ? 0 : 1);
+          }
         }
-        const decisionRow = reports.locator(`article[data-report-id="${mixed.reports[1].id}"]`);
-        await expect(decisionRow).toContainText('1. Retry — repeat the check\n2. Wait — keep the current state\n3. Investigate — collect more evidence\n4. Cancel — stop this attempt');
-        await expect(decisionRow).toContainText('Reply with the option number, or Other: your own answer.');
-        await decisionRow.getByRole('button', { name: 'Copy report' }).click();
-        await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('4. Cancel — stop this attempt');
-        await saveEvidence('four-choice-decision', await decisionRow.screenshot(), 'image/png');
+        await expect(reports.locator('.pm-chat__decision-controls')).toHaveCount(0);
 
-        // T-ASK-SURFACE: actual Reports -> existing send path -> stopped-pane
-        // refusal. This fixture proves the request and visible failure, never
-        // a provider-accepted answer or a human Q&A capture.
-        const choices = decisionRow.locator('.pm-chat__decision-option');
-        await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
-        await choices.nth(1).focus();
-        await page.keyboard.press('Enter');
-        await expect.poll(() => choiceRequests.length).toBe(1);
-        expect(choiceRequests[0]).toEqual({ kind: 'pane_send_input', session_id: SESSION,
-          text: 'Answer to "Which recovery?": 2. Wait — keep the current state\r', request_id: expect.any(Number) });
-        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
-          .toMatchObject({ ok: false, request_id: choiceRequests[0].request_id });
-        await expect(decisionRow.getByRole('alert')).not.toBeEmpty();
-        await expect(choices.nth(1)).toBeEnabled();
-        await expect(choices.nth(1)).toBeFocused();
-        const refusal = await decisionRow.getByRole('alert').innerText();
+        // T-ASK-SURFACE / T-023 / Issue #7742: the PM conversation and Decide
+        // read the gwtd decision queue. A deferral and an answer are queue
+        // requests; nothing travels through the (stopped) PM pane, and the
+        // answer is accepted even though the PM session is not running.
         await pane.getByRole('button', { name: 'Chat', exact: true }).click();
-        const chatDecisions = pane.getByRole('region', { name: 'Decision reports', exact: true });
-        const chatDecision = chatDecisions.locator(`[data-decision-id="${mixed.reports[1].id}"]`);
-        await expect(chatDecision.getByRole('alert')).toHaveText(refusal);
-        await expect(chatDecision.locator('.pm-chat__decision-option')).toHaveCount(4);
+        await expect(pane.getByRole('region', { name: 'Decision reports', exact: true })).toHaveCount(0);
+        const conversation = pane.getByRole('log', { name: 'PM conversation messages' });
+        const chatDecision = conversation.locator('.pm-chat__decision').filter({ hasText: 'Which recovery?' });
+        await expect(chatDecision).toHaveCount(1);
+        await expect(chatDecision).toContainText('I recommend: Retry.');
+        const queueId = await chatDecision.getAttribute('data-decision-id');
+        expect(queueId, 'the queue owns the decision identity, not the report').not.toBe(decisionId);
+        await saveEvidence('four-choice-decision', await chatDecision.screenshot(), 'image/png');
+        const choices = chatDecision.locator('.pm-chat__decision-option');
+        await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
         const draft = pane.getByRole('textbox', { name: 'Message to PM' });
         await draft.fill('Keep this original reply');
-        await chatDecision.getByRole('button', { name: 'Other: reply in chat', exact: true }).click();
+        await chatDecision.getByRole('button', { name: 'Other: write a reply', exact: true }).click();
         await expect(draft).toBeFocused();
         await expect(draft).toHaveValue('Keep this original reply');
-        expect(choiceRequests).toHaveLength(1);
-        await chatDecision.locator('.pm-chat__decision-option').nth(0).click();
-        await expect.poll(() => choiceRequests.length).toBe(2);
-        expect(choiceRequests[1].text).toBe('Answer to "Which recovery?": 1. Retry — repeat the check\r');
-        expect(choiceRequests[1].request_id).not.toBe(choiceRequests[0].request_id);
-        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
-          .toMatchObject({ ok: false });
-        await expect(chatDecision.getByRole('alert')).not.toBeEmpty();
-        await expect(draft).toHaveValue('Keep this original reply');
+        const replyTarget = pane.locator('.pm-chat__reply-target');
+        await expect(replyTarget).toContainText('Replying to: Which recovery?');
+        expect(choiceRequests).toHaveLength(0);
+        await replyTarget.getByRole('button', { name: 'Cancel reply', exact: true }).click();
+        await expect(replyTarget).toBeHidden();
         await page.setViewportSize({ width: 404, height: 1000 });
         await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(400);
-        await expect.poll(() => chatDecisions.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+        await expect.poll(() => conversation.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
         await chatDecision.scrollIntoViewIfNeeded();
         await saveEvidence('chat-decision-narrow', await pane.screenshot(), 'image/png');
         await page.setViewportSize({ width: 1440, height: 1000 });
-        const retryRefusal = choiceResults.find(result => result.request_id === choiceRequests[1].request_id).error;
+        // AC-4: "Decide later" keeps the decision waiting at the end of the
+        // queue, and the waiting count does not change.
         await pane.getByRole('button', { name: 'Decide', exact: true }).click();
-        await expect(pane.locator(`.task-decisions__card[data-decision-id="${mixed.reports[1].id}"]`)
-          .getByRole('alert')).toContainText(retryRefusal);
+        const decideCard = pane.locator(`.task-decisions__card[data-decision-id="${queueId}"]`);
+        const waitingCount = await pane.locator('.task-decisions__count').innerText();
+        const waitingBefore = Number(waitingCount.match(/^(\d+) decisions? waiting$/)?.[1]);
+        expect(waitingBefore, 'the bridged legacy decision and the typed one both wait').toBeGreaterThanOrEqual(2);
+        await decideCard.getByRole('button', { name: 'Decide later', exact: true }).click();
+        await expect.poll(() => choiceRequests.length).toBe(1);
+        expect(choiceRequests[0]).toEqual({ kind: 'defer_decision', id: expect.any(String),
+          request_id: expect.any(Number), decision_id: queueId });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
+          .toMatchObject({ ok: true, action: 'defer', decision_id: queueId });
+        await expect(pane.locator('.task-decisions__card').last()).toHaveAttribute('data-decision-id', queueId!);
+        await expect(pane.locator('.task-decisions__notice')).toContainText('Kept waiting');
+        await expect(pane.locator('.task-decisions__count')).toHaveText(waitingCount);
+        // AC-2: the answer is recorded by the queue while the PM is stopped;
+        // the decision leaves both surfaces and the count drops by one.
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        await choices.nth(1).focus();
+        await page.keyboard.press('Enter');
+        await expect.poll(() => choiceRequests.length).toBe(2);
+        expect(choiceRequests[1]).toEqual({ kind: 'answer_decision', id: expect.any(String),
+          request_id: expect.any(Number), decision_id: queueId, answer: '2. Wait — keep the current state' });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
+          .toMatchObject({ ok: true, action: 'answer', decision_id: queueId });
+        await expect(chatDecision).toHaveCount(0);
+        await expect(draft).toHaveValue('Keep this original reply');
+        await pane.getByRole('button', { name: 'Decide', exact: true }).click();
+        await expect(decideCard).toHaveCount(0);
+        await expect(pane.locator('.task-decisions__count'))
+          .toHaveText(`${waitingBefore - 1} decision${waitingBefore - 1 === 1 ? '' : 's'} waiting`);
+        await expect(pane.locator('.task-decisions__notice')).toHaveText('Answer sent. The waiting session continues with it.');
+        expect(choiceRequests.filter(request => request.kind === 'pane_send_input'),
+          'a decision never travels through the PM pane').toEqual([]);
         await pane.getByRole('button', { name: 'Reports', exact: true }).click();
         await saveEvidence('decision-controls-requests', JSON.stringify({ choiceRequests, choiceResults }), 'application/json');
         const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
@@ -1693,7 +1723,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
         await saveEvidence('second-project-reports', await pane.screenshot(), 'image/png');
         await gotoPmReports(page, primaryKey, BASE);
-        await expect(reports.locator('article')).toHaveCount(originalCount + 7);
+        await expect(reports.locator('article')).toHaveCount(originalCount + 6);
         await expect(reports).not.toContainText(`RPT-F second project only ${theme}`);
         expect(invoke('pm.report.list', {}).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(3);
         expect(invoke('pm.report.list', {}, secondSession, secondRoot).output.events.find((row: any) => row.event_id === 'supervision').revision).toBe(1);
@@ -1724,7 +1754,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-KEY-COMPLETE T-TASK-REOPEN-UI T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1739,6 +1769,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     let statePath = '';
     let seed: any;
     const target = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, preferences }) {
         const projectKey = basename(join(preferences, '..'));
         const at = '2026-11-06T00:00:00Z';
@@ -1812,17 +1843,28 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const loaded = await exchange('load_pm_request_task', { task_id: taskId });
       expect(loaded).toMatchObject({ state: 'ready', revision: 3, task: completedTask });
       expect(loaded.receipt ?? null).toBeNull();
+      const taskKey = createHash('sha256').update(taskId).digest('hex');
       const completeRequest = { operation_id: `browser-complete-${theme}`, expected_revision: 3,
-        reason: 'The browser user verified the original outcome.', task_id: taskId,
+        reason: 'The browser user verified the original outcome.', task_id: '',
         condition_revision: 1, review_generation: 1, evidence: ['synthetic:browser-verified-outcome'] };
-      const completed = await exchange('complete_pm_request_task', { request: completeRequest });
+      const beforeComplete = readFileSync(statePath, 'utf8');
+      for (const [task_key, request, code] of [
+        ['', completeRequest, 'invalid_request'],
+        [taskKey, { ...completeRequest, task_id: taskId }, 'invalid_request'],
+        ['unknown', completeRequest, 'missing_task'],
+      ] as const) {
+        expect(await exchange('complete_pm_request_task', { task_key, request }))
+          .toMatchObject({ state: 'error', code, recovery_operation: 'load_pm_request_task' });
+        expect(readFileSync(statePath, 'utf8')).toBe(beforeComplete);
+      }
+      const completed = await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest });
       expect(completed).toMatchObject({ state: 'ready', revision: 4,
         task: { ...completedTask, completion: { ...completedTask.completion, evidence: completeRequest.evidence } },
         receipt: { action: 'complete', revision: 4, reason: completeRequest.reason, actor: { kind: 'user' } } });
       expect(completed.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
-      expect(await exchange('complete_pm_request_task', { request: completeRequest })).toEqual(completed);
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest })).toEqual(completed);
       const completeNoop = await exchange('complete_pm_request_task', { request: { ...completeRequest,
-        operation_id: `browser-complete-noop-${theme}`, expected_revision: 4 } });
+        task_id: taskId, operation_id: `browser-complete-noop-${theme}`, expected_revision: 4 } });
       expect(completeNoop).toMatchObject({ state: 'ready', revision: 5, task: completed.task,
         receipt: { action: 'complete', revision: 5, tasks: [], actor: completed.receipt.actor } });
       const completeState = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -1830,9 +1872,96 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(completeState.receipts).toEqual(completionReceipts);
       expect(completeState.sources).toEqual(seed.sources);
       expect(completeState.tasks[taskId]).toEqual(completed.task);
-      const request = { operation_id: `browser-reopen-${theme}`, expected_revision: 5,
-        reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: taskId };
-      const reopened = await exchange('reopen_pm_request_task', { request });
+      let request = { operation_id: `browser-reopen-${theme}`, expected_revision: 5,
+        reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: '' };
+      const beforeReopen = readFileSync(statePath, 'utf8');
+      for (const [task_key, selectedRequest, code] of [
+        ['', request, 'invalid_request'],
+        [taskKey, { ...request, task_id: taskId }, 'invalid_request'],
+        ['unknown', request, 'missing_task'],
+      ] as const) {
+        expect(await exchange('reopen_pm_request_task', { task_key, request: selectedRequest }))
+          .toMatchObject({ state: 'error', code, recovery_operation: 'load_pm_request_task' });
+        expect(readFileSync(statePath, 'utf8')).toBe(beforeReopen);
+      }
+      const reopenChat = page.locator('.pm-chat');
+      await reopenChat.getByRole('button', { name: 'Chat', exact: true }).click();
+      const reopenDraft = reopenChat.locator('.pm-chat__draft');
+      const preservedDraft = 'Keep this chat draft while reopening the completed task';
+      await reopenDraft.fill(preservedDraft);
+      await reopenChat.getByRole('button', { name: 'Tasks', exact: true }).click();
+      const reopenTasksView = reopenChat.getByRole('region', { name: 'Request tasks', exact: true });
+      await reopenTasksView.getByRole('button', { name: 'Include completed', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      const reopenRow = reopenTasksView.locator(`[data-task-key="${taskKey}"]`);
+      await reopenRow.getByRole('button', { name: 'View task details', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      const reopenDetail = reopenTasksView.getByRole('region', { name: 'Selected task details', exact: true });
+      await expect(reopenDetail).toContainText('Selected snapshot revision 5.');
+      await expect(reopenDetail).toContainText(original);
+      await expect(reopenDetail).toContainText(completeRequest.evidence[0]);
+      const reopenReason = reopenDetail.getByRole('textbox', { name: 'Reason for this task change', exact: true });
+      const reopenButton = reopenDetail.getByRole('button', { name: 'Reopen task', exact: true });
+      await page.setViewportSize({ width: 404, height: 1000 });
+      const reopenPane = page.locator('.workspace-window').filter({ has: reopenChat });
+      await expect.poll(async () => Math.round((await reopenPane.boundingBox())!.width)).toBe(400);
+      await expect(reopenButton).toBeVisible();
+      await expect(reopenButton).toHaveAttribute('aria-disabled', 'true');
+      // Hold this one real browser mutation, preserving its generated operation
+      // ID and exact bytes while asserting the pending UI never changes storage.
+      await page.evaluate(() => {
+        const host = window as any;
+        for (const socket of new Set<WebSocket>(host.__gwtPlaywrightSockets || [])) {
+          if (socket.readyState !== WebSocket.OPEN || !new URL(socket.url).searchParams.has('repo_hash')) continue;
+          const originalSend = socket.send;
+          socket.send = function(data: string) {
+            const event = JSON.parse(String(data));
+            if (event.kind === 'reopen_pm_request_task') {
+              socket.send = originalSend;
+              host.__heldTaskReopen = event;
+              host.__releaseTaskReopen = () => originalSend.call(socket, data);
+              return;
+            }
+            return originalSend.call(socket, data);
+          };
+        }
+      });
+      await reopenButton.focus();
+      await page.keyboard.press('Enter');
+      expect(await page.evaluate(() => (window as any).__heldTaskReopen ?? null)).toBeNull();
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeReopen, 'blank reopen reason never writes');
+      await reopenReason.fill(request.reason);
+      await expect(reopenButton).toHaveAttribute('aria-disabled', 'false');
+      await reopenButton.focus();
+      await expect(reopenButton).toBeInViewport({ ratio: 1 });
+      expect(await reopenDetail.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const reopenImage = info.outputPath(`task-reopen-${theme}-400.png`);
+      await reopenChat.screenshot({ path: reopenImage });
+      await info.attach(`T-TASK-REOPEN-UI ${theme} controls 400px`, { path: reopenImage, contentType: 'image/png' });
+      await page.keyboard.press('Enter');
+      const heldReopen = await page.waitForFunction(() => (window as any).__heldTaskReopen).then(handle => handle.jsonValue());
+      expect(heldReopen).toMatchObject({ kind: 'reopen_pm_request_task', task_key: taskKey,
+        request: { expected_revision: 5, task_id: '', reason: request.reason } });
+      expect(heldReopen.request.operation_id).toEqual(expect.any(String));
+      expect(heldReopen.request.operation_id).not.toBe('');
+      request = { ...request, operation_id: heldReopen.request.operation_id };
+      await expect(reopenButton).toHaveAttribute('aria-disabled', 'true');
+      await expect(reopenReason).toHaveAttribute('readonly', '');
+      await expect(reopenDetail.locator('.pm-chat__task-cancel-status')).toContainText('Reopening task…');
+      await expect(reopenRow.locator('.pm-chat__task-meta').first()).toContainText('Completed');
+      await expect(reopenDetail).toContainText(completeRequest.evidence[0]);
+      await page.keyboard.press('Enter');
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeReopen, 'pending reopen is neither optimistic nor duplicated');
+      await expect(reopenDraft).toHaveValue(preservedDraft);
+      const reopenCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await page.evaluate(() => (window as any).__releaseTaskReopen());
+      const reopenReply = await page.waitForFunction(({ cursor, id, requestId }) =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > cursor
+          && entry.payload.kind === 'pm_request_task' && entry.payload.id === id
+          && entry.payload.request_id === requestId)?.payload,
+      { cursor: reopenCursor, id: heldReopen.id, requestId: heldReopen.request_id }).then(handle => handle.jsonValue());
+      exchanges.push({ request: heldReopen, response: reopenReply });
+      const reopened = reopenReply.result;
       expect(reopened).toMatchObject({ state: 'ready', revision: 6, task: {
         ...pendingTask, review_generation: 2, review_required: true,
       }, receipt: { operation_id: request.operation_id, action: 'reopen', revision: 6,
@@ -1846,18 +1975,34 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(saved.tasks[taskId]).toEqual(reopened.task);
       expect(saved.sources).toEqual(seed.sources);
       expect(saved.sources[pendingTask.source_id].original).toBe(original);
-      expect(await exchange('reopen_pm_request_task', { request })).toEqual(reopened);
+      await expect(reopenDetail.locator('.pm-chat__task-cancel-status'))
+        .toContainText('Reopen recorded. This action requests a fresh PM review.');
+      await expect(reopenDetail).toContainText('Selected snapshot revision 6.');
+      await expect(reopenDetail).toContainText(request.reason);
+      await expect(reopenDetail).toContainText(original);
+      await expect(reopenRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
+      await expect(reopenRow).toContainText('PM reassessment required');
+      await expect(reopenButton).not.toBeVisible();
+      await expect(reopenDraft).toHaveValue(preservedDraft);
+      const reloadAfterReopen = reopenDetail.getByRole('button', { name: 'Reload details', exact: true });
+      await expect(reloadAfterReopen).toBeFocused();
+      await expect(reloadAfterReopen).toBeInViewport({ ratio: 1 });
+      const reopenedImage = info.outputPath(`task-reopen-confirmed-${theme}-400.png`);
+      await reopenChat.screenshot({ path: reopenedImage });
+      await info.attach(`T-TASK-REOPEN-UI ${theme} confirmed 400px`, { path: reopenedImage, contentType: 'image/png' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request })).toEqual(reopened);
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
-      expect(await exchange('reopen_pm_request_task', { request: { ...request,
+      expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request: { ...request,
         operation_id: `${request.operation_id}-stale` } })).toMatchObject({ state: 'error', code: 'conflict',
         current_revision: 6, recovery_operation: 'load_pm_request_task' });
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
-      expect(await exchange('complete_pm_request_task', { request: completeRequest }))
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest }))
         .toEqual({ ...reopened, receipt: completed.receipt });
-      expect(await exchange('complete_pm_request_task', { request: { ...completeRequest,
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: { ...completeRequest,
         operation_id: `browser-complete-stale-${theme}`, expected_revision: 6 } }))
         .toMatchObject({ state: 'error', code: 'stale_review' });
-      expect(await exchange('complete_pm_request_task', { request: { ...completeRequest,
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: { ...completeRequest,
         operation_id: `browser-complete-reassessment-${theme}`, expected_revision: 6, review_generation: 2 } }))
         .toMatchObject({ state: 'error', code: 'reassessment_required' });
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
@@ -1867,12 +2012,12 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await page.reload();
       await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-      expect(await exchange('reopen_pm_request_task', { request })).toMatchObject({ state: 'error',
+      expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request })).toMatchObject({ state: 'error',
         code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
       expect(await exchange('load_pm_request_task', { task_id: taskId,
         receipt_operation_id: request.operation_id })).toEqual(reopened);
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
-      expect(await exchange('complete_pm_request_task', { request: completeRequest })).toMatchObject({ state: 'error',
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest })).toMatchObject({ state: 'error',
         code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
       expect(await exchange('load_pm_request_task', { task_id: taskId,
         receipt_operation_id: completeRequest.operation_id })).toEqual({ ...reopened, receipt: completed.receipt });
@@ -2249,12 +2394,109 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(criteriaSummary).toBeFocused();
       await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
       await info.attach(`T-TASK-CHILDREN ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
+      await detailButton.click();
+      const cancelReason = taskDetail.getByRole('textbox', { name: 'Reason for this task change', exact: true });
+      const cancelButton = taskDetail.getByRole('button', { name: 'Cancel task', exact: true });
+      await expect(cancelReason).toBeVisible();
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'true');
+      const beforeCancel = readFileSync(statePath, 'utf8');
+      await cancelButton.focus();
+      await page.keyboard.press('Enter');
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeCancel, 'blank reason never writes');
+      const cancelReasonText = 'Withdraw this request from tracking.\nKeep the original <literal> request and audit.';
+      await cancelReason.fill(cancelReasonText);
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'false');
+      await cancelButton.focus();
+      await expect(cancelButton).toBeInViewport({ ratio: 1 });
+      const cancelImage = info.outputPath(`task-cancel-${theme}-400.png`);
+      await chat.screenshot({ path: cancelImage });
+      await info.attach(`T-TASK-CANCEL ${theme} controls 400px`, { path: cancelImage, contentType: 'image/png' });
+      // Hold only the real outgoing cancellation. Apply a competing update on
+      // the same authenticated host, then release the original bytes unchanged.
+      await page.evaluate(() => {
+        const host = window as any;
+        for (const socket of new Set<WebSocket>(host.__gwtPlaywrightSockets || [])) {
+          if (socket.readyState !== WebSocket.OPEN || !new URL(socket.url).searchParams.has('repo_hash')) continue;
+          const originalSend = socket.send;
+          socket.send = function(data: string) {
+            const event = JSON.parse(String(data));
+            if (event.kind === 'cancel_pm_request_task') {
+              socket.send = originalSend;
+              host.__heldTaskCancellation = event;
+              host.__releaseTaskCancellation = () => originalSend.call(socket, data);
+              return;
+            }
+            return originalSend.call(socket, data);
+          };
+        }
+      });
+      await page.keyboard.press('Enter');
+      const held = await page.waitForFunction(() => (window as any).__heldTaskCancellation).then(handle => handle.jsonValue());
+      expect(held).toMatchObject({ kind: 'cancel_pm_request_task', task_key: rootKey,
+        request: { task_id: '', reason: cancelReasonText } });
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'true');
+      await expect(cancelReason).toHaveAttribute('readonly', '');
+      await page.keyboard.press('Enter');
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeCancel, 'pending cancellation is neither optimistic nor duplicated');
+      const competingUpdate = await exchange('update_pm_request_task', { request: {
+        operation_id: `cancel-competing-update-${theme}`, expected_revision: held.request.expected_revision,
+        reason: 'A competing browser corrects the assignee before cancellation arrives.',
+        task: { ...JSON.parse(beforeCancel).tasks[rootTask.draft.id].draft, assignee: 'Another reviewer' },
+      } });
+      expect(competingUpdate).toMatchObject({ state: 'ready', revision: held.request.expected_revision + 1 });
+      const competingBytes = readFileSync(statePath, 'utf8');
+      const releaseCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await page.evaluate(() => (window as any).__releaseTaskCancellation());
+      const conflict = await page.waitForFunction(({ id, cursor }) => (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.sequence > cursor && entry.payload.kind === 'pm_request_task' && entry.payload.request_id === id)?.payload,
+      { id: held.request_id, cursor: releaseCursor }, { timeout: 15_000 }).then(handle => handle.jsonValue());
+      exchanges.push({ request: held, response: conflict });
+      expect(conflict.result).toMatchObject({ state: 'error', code: 'conflict', current_revision: competingUpdate.revision });
+      await expect(taskDetail.locator('.pm-chat__task-cancel-status')).toContainText(conflict.result.message);
+      await expect(taskDetail).toContainText('last confirmed detail (stale)');
+      await expect(taskDetail).toContainText(original);
+      await expect(cancelReason).toHaveValue(cancelReasonText);
+      await expect(cancelButton).toBeFocused();
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'true');
+      expect(readFileSync(statePath, 'utf8')).toBe(competingBytes);
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).click();
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'false');
+      await expect(taskDetail).not.toContainText('last confirmed detail (stale)');
+      await expect(taskDetail).toContainText(`Selected snapshot revision ${competingUpdate.revision}.`);
+      await expect(cancelReason).toHaveValue(cancelReasonText);
+      await cancelButton.focus();
+      await page.keyboard.press('Enter');
+      await expect(taskDetail.locator('.pm-chat__task-cancel-status')).toContainText('This task is cancelled.');
+      await expect(cancelReason).not.toBeVisible();
+      await expect(taskDetail.getByRole('button', { name: 'Reopen task', exact: true })).not.toBeVisible();
+      const afterCancel = JSON.parse(readFileSync(statePath, 'utf8'));
+      const beforeConfirmedCancel = JSON.parse(competingBytes);
+      expect(afterCancel.revision).toBe(competingUpdate.revision + 1);
+      expect(afterCancel.tasks[rootTask.draft.id]).toMatchObject({ status: 'cancelled', completion: null });
+      expect(afterCancel.sources).toEqual(beforeConfirmedCancel.sources);
+      expect(afterCancel.tasks[childTask.draft.id]).toEqual(beforeConfirmedCancel.tasks[childTask.draft.id]);
+      expect(afterCancel.receipts.slice(0, -1)).toEqual(beforeConfirmedCancel.receipts);
+      expect(afterCancel.receipts.at(-1)).toMatchObject({ action: 'cancel', reason: cancelReasonText, actor: { kind: 'user' } });
+      expect(afterCancel.receipts.at(-1).actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      await expect(taskDetail).toContainText(cancelReasonText);
+      await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+      const reloadAfterCancel = taskDetail.getByRole('button', { name: 'Reload details', exact: true });
+      await expect(reloadAfterCancel).toBeFocused();
+      await expect(reloadAfterCancel).toBeInViewport({ ratio: 1 });
+      expect(await taskDetail.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const cancelledImage = info.outputPath(`task-cancel-confirmed-${theme}-400.png`);
+      await chat.screenshot({ path: cancelledImage });
+      await info.attach(`T-TASK-CANCEL ${theme} confirmed 400px`, { path: cancelledImage, contentType: 'image/png' });
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);
       throw error;
     } finally {
       try {
+        const incoming = await page.evaluate(() => (window as any).__gwtPlaywrightMessages);
+        const incomingPath = info.outputPath(`task-cancel-incoming-${theme}.json`);
+        writeFileSync(incomingPath, JSON.stringify(incoming));
+        await info.attach(`T-TASK-CANCEL ${theme} incoming`, { path: incomingPath, contentType: 'application/json' });
         await info.attach(`T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE ${theme} transport and persistence`, {
           body: JSON.stringify({ synthetic_fixture_seed: true, native_intake_proof: false,
             production_task_ui: true, read_only_overview: true, theme, seed, exchanges, console_page_errors: errors,

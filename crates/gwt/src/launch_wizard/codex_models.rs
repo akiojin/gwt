@@ -13,9 +13,10 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
+use time::Duration;
 
 /// One Codex picker row with the reasoning stops the model accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,7 +330,7 @@ const CHECK_INTERVAL_DAYS: i64 = 7;
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CheckState {
     #[serde(default)]
-    last_checked_at: Option<DateTime<Utc>>,
+    last_checked_at: Option<UtcTimestamp>,
 }
 
 fn check_state_path(repo_path: &Path) -> PathBuf {
@@ -357,7 +358,7 @@ pub enum WeeklyCheckOutcome {
 pub fn run_weekly_check(
     repo_path: &Path,
     saved_models: &[String],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> gwt_core::Result<WeeklyCheckOutcome> {
     let state_path = check_state_path(repo_path);
     std::fs::create_dir_all(state_path.parent().expect("project state directory"))?;
@@ -605,7 +606,7 @@ mod tests {
         let cache = temp.path().join("models_cache.json");
         let _guard = test_override::set(cache.clone());
         let reports = || gwt_core::pm_report::load_reports(&repo).unwrap().len();
-        let t0 = Utc::now();
+        let t0 = gwt_core::timestamp::UtcTimestamp::now();
 
         // Missing cache + no stale profile: snapshot vs snapshot, nothing to say.
         assert_eq!(
@@ -674,7 +675,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let cache = temp.path().join("models_cache.json");
         let _guard = test_override::set(cache.clone());
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let saved = ["retired-model".to_string()];
         assert_eq!(
             run_weekly_check(&repo, &saved, now).unwrap(),

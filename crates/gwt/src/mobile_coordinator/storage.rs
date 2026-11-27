@@ -20,6 +20,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const MAX_CREDENTIAL_BYTES: usize = 128 * 1024;
 
@@ -287,17 +288,28 @@ impl CoordinatorStore {
             projects: &'a [String],
             issued_at: u64,
             expires_at: u64,
-            secret: String,
+            secret: &'a str,
         }
-        let bytes = serde_json::to_vec(&PrivateCredential {
-            schema_version: 1,
-            identity,
-            binding,
-            projects: &record.projects,
-            issued_at: record.issued_at,
-            expires_at: record.expires_at,
-            secret: hex::encode(credential.secret_bytes()),
-        })
+        // Every buffer holding the encoded bearer is wiped on drop. The output is
+        // reserved up front so a normal-sized file is written without a reallocation
+        // that would free an unwiped copy.
+        let mut secret = Zeroizing::new([0u8; 64]);
+        hex::encode_to_slice(credential.secret_bytes(), &mut *secret)
+            .map_err(|_| CredentialError::InvalidRegistry)?;
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_CREDENTIAL_BYTES + 1));
+        serde_json::to_writer(
+            &mut *bytes,
+            &PrivateCredential {
+                schema_version: 1,
+                identity,
+                binding,
+                projects: &record.projects,
+                issued_at: record.issued_at,
+                expires_at: record.expires_at,
+                secret: std::str::from_utf8(&*secret)
+                    .map_err(|_| CredentialError::InvalidRegistry)?,
+            },
+        )
         .map_err(|_| CredentialError::InvalidRegistry)?;
         if bytes.len() > MAX_CREDENTIAL_BYTES {
             return Err(StoreError::CredentialTooLarge);
@@ -352,14 +364,16 @@ impl CoordinatorStore {
 /// trusted by the caller; the immediate directory and file are rechecked after
 /// reading. No registry lock or registration authority is acquired.
 #[cfg(unix)]
-pub(crate) fn read_private_credential(path: &Path) -> Result<Vec<u8>, StoreError> {
+pub(crate) fn read_private_credential(path: &Path) -> Result<Zeroizing<Vec<u8>>, StoreError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or(StoreError::UnsafeStorage)?;
     let directory = open_directory(parent)?;
     let file = open_private_file(path, false)?;
-    let mut bytes = Vec::new();
+    // One allocation large enough for the bounded read, so growth never frees an
+    // unwiped copy of the bearer.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_CREDENTIAL_BYTES + 1));
     (&file)
         .take(MAX_CREDENTIAL_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
@@ -375,7 +389,7 @@ pub(crate) fn read_private_credential(path: &Path) -> Result<Vec<u8>, StoreError
 }
 
 #[cfg(not(unix))]
-pub(crate) fn read_private_credential(_: &Path) -> Result<Vec<u8>, StoreError> {
+pub(crate) fn read_private_credential(_: &Path) -> Result<Zeroizing<Vec<u8>>, StoreError> {
     Err(StoreError::UnsupportedPrivateStorage)
 }
 
@@ -527,6 +541,29 @@ mod tests {
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let secret = hex::decode(data["secret"].as_str().unwrap()).unwrap();
         (data, secret)
+    }
+
+    fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    #[test]
+    fn private_credential_reads_are_zeroize_on_drop_without_reallocation() {
+        let dir = private_dir();
+        let mut store = CoordinatorStore::initialize(dir.path(), 100).unwrap();
+        let issued = store
+            .issue(
+                "https://coordinator.example",
+                Uuid::new_v4(),
+                &[ProjectKey::parse("0123456789abcdef").unwrap()],
+                200,
+                100,
+            )
+            .unwrap();
+        let bytes = read_private_credential(&issued.path).unwrap();
+        zeroizes_on_drop(&bytes);
+        // Growing a Vec frees the old allocation unwiped; the bounded read must
+        // land in one allocation that the wrapper wipes in full.
+        assert!(bytes.capacity() > MAX_CREDENTIAL_BYTES);
+        assert_eq!(*bytes, std::fs::read(&issued.path).unwrap());
     }
 
     #[test]

@@ -90,6 +90,18 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "agent.registry.reconcile",
+        aliases: &[],
+    },
+    Operation {
+        name: "agent.registry.restore_schema3",
+        aliases: &[],
+    },
+    Operation {
+        name: "agent.registry.status",
+        aliases: &[],
+    },
+    Operation {
         name: "board.config.set",
         aliases: &[],
     },
@@ -159,6 +171,30 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "daemon.subscribe",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.answer",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.attach",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.defer",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.merge",
+        aliases: &[],
+    },
+    Operation {
+        name: "decision.register",
         aliases: &[],
     },
     Operation {
@@ -464,6 +500,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["issue.monitor.review-verdict"],
     },
     Operation {
+        name: "issue.monitor.review_merged_evidence",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.schedule.read",
         aliases: &[],
     },
@@ -496,6 +536,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "issue.monitor.stop",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.verification.declare",
         aliases: &[],
     },
     Operation {
@@ -571,6 +615,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pane.layout.place",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.list",
         aliases: &[],
     },
@@ -619,6 +667,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.agent.add",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.approval.request",
         aliases: &[],
     },
@@ -628,6 +680,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pm.approval.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.auto_start.set",
         aliases: &[],
     },
     Operation {
@@ -671,6 +727,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.branch_freshness.refresh",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.status.set",
         aliases: &[],
     },
@@ -680,6 +740,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pm.report.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.theme.record",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.theme.list",
         aliases: &[],
     },
     Operation {
@@ -775,6 +843,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "project.open",
+        aliases: &[],
+    },
+    Operation {
         name: "provider.reset",
         aliases: &[],
     },
@@ -808,6 +880,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "release.update.defer",
+        aliases: &[],
+    },
+    Operation {
+        name: "repository.branch_protection.update",
         aliases: &[],
     },
     Operation {
@@ -946,6 +1022,10 @@ pub const OPERATIONS: &[Operation] = &[
         name: "worktree.gc_build_artifacts",
         aliases: &["worktree.gc-build-artifacts"],
     },
+    Operation {
+        name: "worktree.remove_merged",
+        aliases: &["worktree.remove-merged"],
+    },
 ];
 
 /// Canonical spellings only — the names worth suggesting.
@@ -958,6 +1038,72 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     OPERATIONS.iter().flat_map(|operation| {
         std::iter::once(operation.name).chain(operation.aliases.iter().copied())
     })
+}
+
+/// The help family an operation belongs to: everything before the first `.`,
+/// or the whole name for a bare operation such as `search`.
+pub fn family_of(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+/// Every help family the catalog implies, sorted and deduplicated.
+pub fn families() -> Vec<&'static str> {
+    canonical_names()
+        .map(family_of)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// The operation list of `gwtd --help <family>`, generated from the catalog
+/// (Issue #7522).
+///
+/// The family help texts are hand-written prose and drifted: 87 of the
+/// canonical operations were absent from them and twelve families had no help
+/// at all. Appending this section to every family help makes the listing
+/// complete by construction, so a newly dispatched operation is discoverable
+/// the moment `catalog_covers_every_dispatched_operation` forces it into the
+/// catalog. Aliases resolve but are never recommended, so only canonical
+/// names are printed. `None` for a family the catalog does not know.
+pub fn family_operations_section(family: &str) -> Option<String> {
+    let operations: Vec<&'static str> = canonical_names()
+        .filter(|name| family_of(name) == family)
+        .collect();
+    if operations.is_empty() {
+        return None;
+    }
+    let mut section = format!(
+        "All {family} operations ({}, generated from the operation catalog):\n",
+        operations.len()
+    );
+    for name in operations {
+        section.push_str(&format!("  {name}\n"));
+    }
+    Some(section)
+}
+
+/// The `Commands:` rows of the global `gwtd --help`.
+///
+/// `summaries` supplies the hand-written one-line description per family and
+/// the display order. A catalog family without a summary still gets a row, so
+/// no family can be reachable only by reading the dispatch source.
+pub fn family_index(summaries: &[(&str, &str)]) -> String {
+    let mut index = String::new();
+    for (family, summary) in summaries {
+        index.push_str(&format!("  {family:<11} {summary}\n"));
+    }
+    for family in families() {
+        if summaries.iter().any(|(described, _)| *described == family) {
+            continue;
+        }
+        let count = canonical_names()
+            .filter(|name| family_of(name) == family)
+            .count();
+        index.push_str(&format!(
+            "  {family:<11} {count} operation(s); see gwtd --help {family}\n"
+        ));
+    }
+    index
 }
 
 /// The `namespace.` an operation name sits in, or `None` for a bare name.
@@ -1115,6 +1261,109 @@ mod tests {
         assert!(
             phantom.is_empty(),
             "the catalog lists operations json_envelope.rs does not dispatch: {phantom:?}"
+        );
+    }
+
+    #[test]
+    fn gui_envelope_parity_ledger_tracks_frontend_events_and_catalog() {
+        use std::collections::BTreeSet;
+
+        let protocol = include_str!("../protocol.rs");
+        let (_, declaration) = protocol
+            .split_once("pub enum FrontendEvent {")
+            .expect("FrontendEvent declaration");
+        let (variants, _) = declaration.split_once("\n}").expect("FrontendEvent end");
+        // Direct variants start at the rustfmt enum indentation and use
+        // UpperCamelCase. Fields and nested attribute arguments do not.
+        let expected: BTreeSet<_> = variants
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|line| line.starts_with(|ch: char| ch.is_ascii_uppercase()))
+            .map(|line| {
+                line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .next()
+                    .expect("variant name")
+            })
+            .collect();
+        assert!(
+            !expected.is_empty(),
+            "FrontendEvent declaration no longer matches the scan"
+        );
+
+        let ledger = include_str!("../../../../docs/gui-envelope-parity.md");
+        let mut recorded = BTreeSet::new();
+        for row in ledger.lines().filter(|line| line.starts_with("| `")) {
+            let columns: Vec<_> = row.trim_matches('|').split('|').map(str::trim).collect();
+            let [event, classification, operations, reason] = columns.as_slice() else {
+                panic!("expected four cells: {row}");
+            };
+            let event = event.trim_matches('`');
+            assert!(recorded.insert(event), "duplicate FrontendEvent: {event}");
+            assert!(!reason.is_empty(), "missing rationale for {event}");
+            match *classification {
+                "対応" | "一部対応" => {
+                    for operation in operations.split(',').map(str::trim) {
+                        let operation = operation.trim_matches('`');
+                        assert!(
+                            canonical_names().any(|name| name == operation),
+                            "{event} references a noncanonical or missing operation: {operation}"
+                        );
+                    }
+                }
+                "GUI 内部" | "対象外" | "読み取り" => {
+                    assert_eq!(*operations, "—", "unexpected operation for {event}");
+                }
+                _ => panic!("unknown classification for {event}: {classification}"),
+            }
+        }
+        let missing: Vec<_> = expected.difference(&recorded).copied().collect();
+        let stale: Vec<_> = recorded.difference(&expected).copied().collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "FrontendEvent parity ledger drift: missing {missing:?}, stale {stale:?}"
+        );
+    }
+
+    /// Issue #7522: the generated section is the whole family, canonical
+    /// spellings only, and a bare operation is its own family.
+    #[test]
+    fn family_operations_section_lists_exactly_the_family() {
+        for family in families() {
+            let section = family_operations_section(family).expect("catalog family");
+            let listed: Vec<&str> = section.lines().skip(1).map(str::trim).collect();
+            let expected: Vec<&str> = canonical_names()
+                .filter(|name| family_of(name) == family)
+                .collect();
+            assert_eq!(listed, expected, "{family}");
+        }
+        assert_eq!(family_of("search"), "search");
+        assert_eq!(family_of("issue.spec.read"), "issue");
+        let pr = family_operations_section("pr").unwrap();
+        assert!(pr.contains("  pr.update_branch\n"), "{pr}");
+        assert!(
+            !pr.contains("pr.update-branch"),
+            "aliases stay unlisted: {pr}"
+        );
+        assert_eq!(family_operations_section("nonexistent"), None);
+    }
+
+    /// Issue #7522: a family nobody wrote a summary for still gets a row.
+    #[test]
+    fn family_index_adds_a_row_for_every_undescribed_family() {
+        let index = family_index(&[("issue", "Manage GitHub Issues"), ("lessons", "Alias")]);
+        assert!(index.starts_with("  issue       Manage GitHub Issues\n  lessons     Alias\n"));
+        assert_eq!(index.matches("\n  issue ").count(), 0, "{index}");
+        for family in families() {
+            assert!(
+                index
+                    .lines()
+                    .any(|line| line.starts_with(&format!("  {family} "))),
+                "{family} has no row: {index}"
+            );
+        }
+        assert!(
+            index.contains("  worktree    2 operation(s); see gwtd --help worktree\n"),
+            "{index}"
         );
     }
 

@@ -309,6 +309,8 @@ pub fn read_hook_doctor(
         "repair_plan": repair_plan,
         "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
         "health": health,
+        // Issue #7730: the user's registered hooks are audited with the rest.
+        "user_hooks": crate::user_hooks::audit(&input.worktree_root),
     });
     if purpose == Some(HookDoctorPurpose::ManagedBrowser) {
         payload["preflight"] = serde_json::to_value(read_managed_browser_preflight(&input))
@@ -519,7 +521,7 @@ fn read_managed_browser_preflight_with(
             result.reasons.push(PreflightReason::CompletionBlocked);
         }
         (Some(HookCompletionOutcome::Normal), Some(at))
-            if at >= runtime.updated_at && at <= chrono::Utc::now() =>
+            if at >= runtime.updated_at && at <= gwt_core::timestamp::UtcTimestamp::now() =>
         {
             result.normal_completion = PreflightCompletion::Normal;
         }
@@ -681,7 +683,8 @@ impl ManagedHookFailureSnapshot {
     pub fn read() -> Self {
         use gwt_core::error_ledger::ErrorKind;
 
-        let since = chrono::Utc::now() - chrono::Duration::hours(HOOK_FAILURE_RETENTION_HOURS);
+        let since = gwt_core::timestamp::UtcTimestamp::now()
+            - time::Duration::hours(HOOK_FAILURE_RETENTION_HOURS);
         let mut by_worktree: HashMap<PathBuf, WorktreeHookFailures> = HashMap::new();
         // `list_since` returns rows oldest first, so the last match wins.
         let rows = gwt_core::error_ledger::list_since(Some(since));
@@ -739,7 +742,7 @@ impl ManagedHookFailureSnapshot {
     pub fn runtime_state_updated_at(
         &self,
         path: &Path,
-    ) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    ) -> Option<gwt_core::timestamp::UtcTimestamp> {
         self.runtime_state(path).updated_at
     }
 
@@ -851,7 +854,10 @@ pub fn record_managed_hook_self_healed(worktree_root: &Path) -> io::Result<()> {
     if let Some(parent) = marker.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(marker, chrono::Utc::now().to_rfc3339())
+    fs::write(
+        marker,
+        gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+    )
 }
 
 fn audit_hook_profile(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
@@ -971,8 +977,7 @@ fn describe_hook_failure(row: &gwt_core::error_ledger::ErrorRecord, state: &str)
         "managed hook failure: {}/{} state={state} recorded_at={} (errors.list id={})",
         field("event"),
         field("handler"),
-        row.recorded_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        row.recorded_at.to_rfc3339_seconds(),
         row.id
     )
 }
@@ -1752,8 +1757,8 @@ static RUNTIME_STATES: OnceLock<Mutex<HashMap<PathBuf, Arc<CachedRuntimeState>>>
 #[derive(Debug)]
 struct CachedRuntimeState {
     stamp: Option<FileStamp>,
-    updated_at: Option<chrono::DateTime<chrono::FixedOffset>>,
-    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<gwt_core::timestamp::UtcTimestamp>,
+    completed_at: Option<gwt_core::timestamp::UtcTimestamp>,
     /// Missing files remain distinct from malformed or unreadable files.
     state: Option<Result<RuntimeStateReadModel, String>>,
 }
@@ -1789,11 +1794,10 @@ fn cached_runtime_state(path: &Path) -> Arc<CachedRuntimeState> {
                 value
                     .get(field)
                     .and_then(Value::as_str)
-                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .and_then(|at| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(at).ok())
             };
             runtime.updated_at = timestamp("updated_at");
-            runtime.completed_at =
-                timestamp("last_completed_hook_event_at").map(|at| at.with_timezone(&chrono::Utc));
+            runtime.completed_at = timestamp("last_completed_hook_event_at");
             serde_json::from_value(value).map_err(|error| error.to_string())
         }));
     }
@@ -1992,10 +1996,10 @@ pub(super) mod browser_preflight_tests {
             pid,
             started,
         );
-        runtime.updated_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+        runtime.updated_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::seconds(5);
         runtime.source_event = Some("PostToolUse".into());
         runtime.last_completed_hook_event_at =
-            Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+            Some(gwt_core::timestamp::UtcTimestamp::now() - time::Duration::seconds(1));
         runtime.last_completed_hook_outcome = Some(Normal);
         let path = gwt_agent::runtime_state_path(&sessions, &session.id);
         runtime.save(&path).unwrap();
@@ -2012,7 +2016,7 @@ pub(super) mod browser_preflight_tests {
     fn failure(
         input: &ManagedHookHealthInput,
         sid: Option<&str>,
-        at: chrono::DateTime<chrono::Utc>,
+        at: gwt_core::timestamp::UtcTimestamp,
     ) -> ErrorRecord {
         let mut row = ErrorRecord::new(
             ErrorKind::HookFailure,
@@ -2140,7 +2144,8 @@ pub(super) mod browser_preflight_tests {
         with_source(|input, _, path, _| {
             let dir = gwt_core::paths::gwt_error_ledger_dir();
             fs::create_dir_all(&dir).unwrap();
-            let old_day = (chrono::Utc::now() - chrono::Duration::days(3)).date_naive();
+            let old_day =
+                (gwt_core::timestamp::UtcTimestamp::now() - time::Duration::days(3)).utc_date();
             let ledger = dir.join(format!("errors.{old_day}.jsonl"));
             let bytes = b"{PRIVATE_BROKEN_ROW}\n";
             fs::write(&ledger, bytes).unwrap();
@@ -2164,7 +2169,9 @@ pub(super) mod browser_preflight_tests {
             fs::create_dir_all(&dir).unwrap();
             let source_before = fs::read(path).unwrap();
             for day in [
-                chrono::Utc::now().date_naive().to_string(),
+                gwt_core::timestamp::UtcTimestamp::now()
+                    .utc_date()
+                    .to_string(),
                 "unknown".into(),
             ] {
                 let ledger = dir.join(format!("errors.{day}.jsonl"));
@@ -2188,14 +2195,14 @@ pub(super) mod browser_preflight_tests {
             let at = runtime.last_completed_hook_event_at.unwrap();
             gwt_core::error_ledger::record(failure(input, Some(&session.id), at)).unwrap();
             for (outcome, completed) in [
-                (Some(Blocked), Some(at + chrono::Duration::seconds(1))),
+                (Some(Blocked), Some(at + time::Duration::seconds(1))),
                 (None, Some(at)),
                 (Some(Normal), None),
                 (Some(Normal), Some(at)),
-                (Some(Normal), Some(at - chrono::Duration::seconds(1))),
+                (Some(Normal), Some(at - time::Duration::seconds(1))),
                 (
                     Some(Normal),
-                    Some(runtime.updated_at - chrono::Duration::seconds(1)),
+                    Some(runtime.updated_at - time::Duration::seconds(1)),
                 ),
             ] {
                 let mut state = runtime.clone();
@@ -2218,7 +2225,7 @@ pub(super) mod browser_preflight_tests {
             let foreign = failure(
                 input,
                 Some("foreign-session"),
-                at + chrono::Duration::seconds(1),
+                at + time::Duration::seconds(1),
             );
             gwt_core::error_ledger::record(related).unwrap();
             gwt_core::error_ledger::record(foreign).unwrap();

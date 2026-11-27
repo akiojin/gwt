@@ -86,8 +86,8 @@ test.describe("Update modal", () => {
     await expect(modal).toHaveAttribute("data-state", "downloading");
     await inject({ ...autoApply, phase: "scheduled", grace_secs: 45 });
     await expect(modal).toHaveCount(0);
-    await expect(cta).toHaveText("Update v9.26.0 applies in 45 s — click to cancel");
-    await cta.click();
+    await expect(cta).toHaveText(/Update v9\.26\.0 applies in \d+ s/);
+    await page.getByRole("button", { name: "Cancel automatic update" }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__updateCancels)).toBe(1);
     await expect(cta).toHaveText("Cancelling automatic update…");
     await inject({ ...autoApply, phase: "cancelled" });

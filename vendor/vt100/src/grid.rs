@@ -199,6 +199,11 @@ impl Grid {
         self.scrollback_offset = rows.min(self.scrollback.len());
     }
 
+    pub fn clear_scrollback(&mut self) {
+        self.scrollback.clear();
+        self.scrollback_offset = 0;
+    }
+
     pub fn write_contents(&self, contents: &mut String) {
         let mut wrapping = false;
         for row in self.visible_rows() {
@@ -795,12 +800,17 @@ impl Grid {
         }
     }
 
-    pub fn scroll_up(&mut self, count: u16) {
+    pub fn scroll_up(&mut self, count: u16, allow_partial_scrollback: bool) {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
-            if self.scrollback_len > 0 && !self.scroll_region_active() {
+            // Line feeds in a top-anchored region enter xterm history even
+            // with a composer below it. Keep explicit CSI S behavior unchanged.
+            if self.scrollback_len > 0
+                && self.scroll_top == 0
+                && (allow_partial_scrollback || self.scroll_bottom == self.size.rows - 1)
+            {
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -840,10 +850,6 @@ impl Grid {
         self.pos.row >= self.scroll_top && self.pos.row <= self.scroll_bottom
     }
 
-    fn scroll_region_active(&self) -> bool {
-        self.scroll_top != 0 || self.scroll_bottom != self.size.rows - 1
-    }
-
     pub fn set_origin_mode(&mut self, mode: bool) {
         self.origin_mode = mode;
         self.set_pos(Pos { row: 0, col: 0 });
@@ -860,7 +866,7 @@ impl Grid {
         self.pos.row = self.pos.row.saturating_add(count);
         let lines = self.row_clamp_bottom(in_scroll_region);
         if in_scroll_region {
-            self.scroll_up(lines);
+            self.scroll_up(lines, true);
             lines
         } else {
             0

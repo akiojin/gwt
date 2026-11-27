@@ -567,7 +567,7 @@ pub(super) fn collect(project_root: &Path) -> FleetReport {
                     &mut state,
                     &project_root,
                 );
-                let now = chrono::Utc::now().to_rfc3339();
+                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
                 crate::scan_issue_monitor_candidates(&mut state, &candidates, &now);
                 serde_json::to_value(state.agent_status_at(&now).inbox)
                     .map_err(|error| error.to_string())
@@ -606,7 +606,7 @@ pub(super) fn collect(project_root: &Path) -> FleetReport {
             enrich_delivery(&project_root, &monitor, &mut entries);
             return FleetReport {
                 project_root,
-                observed_at: chrono::Utc::now().to_rfc3339(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 sources,
                 entries,
             };
@@ -719,7 +719,7 @@ pub(super) fn collect(project_root: &Path) -> FleetReport {
     ));
     FleetReport {
         project_root,
-        observed_at: chrono::Utc::now().to_rfc3339(),
+        observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         sources,
         entries,
     }

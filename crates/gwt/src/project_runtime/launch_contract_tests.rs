@@ -2012,7 +2012,7 @@ mod agent_endpoint_env_tests {
             session_binding_id: uuid::Uuid::new_v4().to_string(),
             initial_session_id: continuation_session_id.clone(),
             entrypoint: "resume".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         crate::cli::execution_state::prepare_successor(
             &predecessor.project,

@@ -46,7 +46,7 @@ impl Capture {
         })
     }
 
-    /// The arguments a headed run needs appended to its command line.
+    /// Evidence arguments for a command explicitly opted into a local headed run.
     ///
     /// Split out from [`Self::configure`] because a verification command is
     /// not always launched from a [`Command`]: Issue #4409 delegates it to the

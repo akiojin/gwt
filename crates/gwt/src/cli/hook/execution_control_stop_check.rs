@@ -135,7 +135,7 @@ pub(super) fn active_monitor_wait(
         return false;
     }
     let owner = record.owner_number;
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     match crate::daemon_publisher::read_issue_monitor_status(&resolved) {
         Ok(Some(value)) => {
             let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(value) else {
@@ -153,8 +153,10 @@ pub(super) fn active_monitor_wait(
                                     owner,
                                     wait.wait_control.as_ref(),
                                 )
-                                && chrono::DateTime::parse_from_rfc3339(&wait.expires_at)
-                                    .is_ok_and(|expires| expires > now)
+                                && gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(
+                                    &wait.expires_at,
+                                )
+                                .is_ok_and(|expires| expires > now)
                         })
                 })
         }
@@ -437,7 +439,7 @@ mod tests {
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(3590),
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: Some("verify".into()),
                 session_id: "sess-1".into(),
             },
@@ -494,7 +496,7 @@ mod tests {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
         monitor.complete_active_launch(3590, "tab::sess-1");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(worktree);
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &now);
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
         check(true);
@@ -516,7 +518,8 @@ mod tests {
         check(false);
 
         // Advance the stored anchor instead of sleeping through the wait cap.
-        let expired = (chrono::Utc::now() - chrono::Duration::hours(4)).to_rfc3339();
+        let expired =
+            (gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(4)).to_rfc3339();
         monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &expired);
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
         check(false);

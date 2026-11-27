@@ -21,7 +21,7 @@
 //! changing the control queue's lossless contract.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -77,6 +77,7 @@ pub(crate) enum IssueMonitorControlQueueError {
     Rejected,
     ConfigConflict,
     WaitNotLaunched,
+    WaitCapExpired,
     ScanAlreadyInFlight,
     Busy,
 }
@@ -93,6 +94,7 @@ impl IssueMonitorControlQueueError {
             Self::WaitNotLaunched => {
                 "Issues control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
             }
+            Self::WaitCapExpired => crate::runtime_daemon_events::ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR,
             Self::ScanAlreadyInFlight => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
             Self::Busy => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR,
         }
@@ -102,9 +104,24 @@ impl IssueMonitorControlQueueError {
 pub(crate) struct IssueMonitorControlCompletion {
     sender: Option<oneshot::Sender<Result<(), IssueMonitorControlQueueError>>>,
     _admission: OwnedSemaphorePermit,
+    receipt_id: Option<uuid::Uuid>,
+    committed_receipts: Arc<Mutex<VecDeque<uuid::Uuid>>>,
 }
 
 impl IssueMonitorControlCompletion {
+    pub(crate) fn record_durable_commit(&self) {
+        if let Some(id) = self.receipt_id {
+            let mut receipts = self
+                .committed_receipts
+                .lock()
+                .expect("Issues receipts mutex poisoned");
+            if receipts.len() == ISSUE_MONITOR_CONTROL_CAPACITY {
+                receipts.pop_front();
+            }
+            receipts.push_back(id);
+        }
+    }
+
     pub(crate) fn commit(mut self) {
         if let Some(sender) = self.sender.take() {
             let _ = sender.send(Ok(()));
@@ -121,6 +138,8 @@ impl IssueMonitorControlCompletion {
 pub(crate) struct IssueMonitorControlRequest {
     frame: DaemonFrame,
     completion: IssueMonitorControlCompletion,
+    /// When the daemon took the control from its connection (Issue #7758).
+    accepted_at: Instant,
 }
 
 /// Connection-bound proof that one GUI subscriber can materialize Issue
@@ -169,6 +188,10 @@ impl IssueMonitorControlRequest {
         &self.frame
     }
 
+    pub(crate) fn accepted_at(&self) -> Instant {
+        self.accepted_at
+    }
+
     pub(crate) fn into_parts(self) -> (DaemonFrame, IssueMonitorControlCompletion) {
         (self.frame, self.completion)
     }
@@ -196,6 +219,7 @@ pub struct BroadcastHub {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<DaemonFrame>>>>,
     issue_monitor_controls: Arc<IssueMonitorControlQueue>,
     issue_monitor_status: Arc<Mutex<Option<Value>>>,
+    committed_issue_monitor_receipts: Arc<Mutex<VecDeque<uuid::Uuid>>>,
     issue_monitor_materializers: Arc<AtomicUsize>,
     gui_windows: Arc<AtomicUsize>,
     gui_window_detached_at: Arc<Mutex<Option<Instant>>>,
@@ -207,6 +231,7 @@ impl Default for BroadcastHub {
             channels: Arc::new(Mutex::new(HashMap::new())),
             issue_monitor_controls: Arc::new(IssueMonitorControlQueue::new()),
             issue_monitor_status: Arc::new(Mutex::new(None)),
+            committed_issue_monitor_receipts: Arc::new(Mutex::new(VecDeque::new())),
             issue_monitor_materializers: Arc::new(AtomicUsize::new(0)),
             gui_windows: Arc::new(AtomicUsize::new(0)),
             gui_window_detached_at: Arc::new(Mutex::new(None)),
@@ -289,7 +314,13 @@ impl BroadcastHub {
     pub(crate) fn take_issue_monitor_control_receiver(
         &self,
     ) -> Option<mpsc::Receiver<IssueMonitorControlRequest>> {
-        if *self.issue_monitor_controls.state.borrow() != IssueMonitorControlState::Starting {
+        // Issue #7483: a startup that only ran out of budget keeps the
+        // receiver, so its background retry can still open the lane. A
+        // terminal block dropped the receiver and stays blocked.
+        if !matches!(
+            *self.issue_monitor_controls.state.borrow(),
+            IssueMonitorControlState::Starting | IssueMonitorControlState::RecoveryBlocked
+        ) {
             return None;
         }
         let receiver = self
@@ -313,6 +344,31 @@ impl BroadcastHub {
         self.issue_monitor_controls
             .state
             .send_replace(IssueMonitorControlState::RecoveryBlocked);
+    }
+
+    /// Refuse controls while authority recovery keeps retrying (Issue #7483).
+    /// Unlike the terminal block this retains the receiver, so the worker can
+    /// still claim it once a later attempt establishes authority.
+    pub(crate) fn mark_issue_monitor_control_recovery_retrying(&self) {
+        self.issue_monitor_controls
+            .state
+            .send_replace(IssueMonitorControlState::RecoveryBlocked);
+    }
+
+    /// Wait until the worker has claimed the control lane.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn wait_for_issue_monitor_control_ready(&self) -> bool {
+        let mut state = self.issue_monitor_controls.state.subscribe();
+        loop {
+            match *state.borrow_and_update() {
+                IssueMonitorControlState::Ready => return true,
+                IssueMonitorControlState::Closed => return false,
+                IssueMonitorControlState::Starting | IssueMonitorControlState::RecoveryBlocked => {}
+            }
+            if state.changed().await.is_err() {
+                return false;
+            }
+        }
     }
 
     pub(crate) fn close_issue_monitor_controls(&self) {
@@ -392,6 +448,7 @@ impl BroadcastHub {
         oneshot::Receiver<Result<(), IssueMonitorControlQueueError>>,
         IssueMonitorControlQueueError,
     > {
+        let accepted_at = Instant::now();
         let mut state = self.issue_monitor_controls.state.subscribe();
         match *state.borrow() {
             IssueMonitorControlState::RecoveryBlocked => {
@@ -423,6 +480,13 @@ impl BroadcastHub {
                 }
             }
         }
+        let receipt_id = match &frame {
+            DaemonFrame::Event { payload, .. } => payload
+                .get("ack_receipt_id")
+                .and_then(Value::as_str)
+                .and_then(|id| uuid::Uuid::try_parse(id).ok()),
+            _ => None,
+        };
         let (completion, receipt) = oneshot::channel();
         self.issue_monitor_controls
             .sender
@@ -431,11 +495,23 @@ impl BroadcastHub {
                 completion: IssueMonitorControlCompletion {
                     sender: Some(completion),
                     _admission: admission,
+                    receipt_id,
+                    committed_receipts: Arc::clone(&self.committed_issue_monitor_receipts),
                 },
+                accepted_at,
             })
             .await
             .map_err(|_| IssueMonitorControlQueueError::Closed)?;
         Ok(receipt)
+    }
+
+    pub(crate) fn has_issue_monitor_control_receipt(&self, id: &str) -> bool {
+        uuid::Uuid::try_parse(id).is_ok_and(|id| {
+            self.committed_issue_monitor_receipts
+                .lock()
+                .expect("Issues receipts mutex poisoned")
+                .contains(&id)
+        })
     }
 
     /// Publish `frame` to every subscriber currently registered on

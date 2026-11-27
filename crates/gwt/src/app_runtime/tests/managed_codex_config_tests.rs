@@ -2693,8 +2693,8 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
 
-    use chrono::TimeZone as _;
-    let completed_at = chrono::Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+    let completed_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
     let work_item = gwt_core::workspace_projection::WorkItem {
         id: "work-item-done".to_string(),
         title: "Test Done Item".to_string(),

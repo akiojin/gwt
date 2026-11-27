@@ -7,10 +7,12 @@ use std::{
     sync::OnceLock,
 };
 
-use chrono::{DateTime, TimeDelta, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 
 pub mod auto_report;
 use auto_report::{
@@ -69,7 +71,7 @@ pub enum FeedbackState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedbackRecord {
     pub id: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     pub input: FeedbackInput,
     pub context: FeedbackContext,
     pub state: FeedbackState,
@@ -468,7 +470,7 @@ pub enum StoredFeedback {
 #[derive(Serialize, Deserialize)]
 struct Receipt {
     id: String,
-    created_at: DateTime<Utc>,
+    created_at: UtcTimestamp,
 }
 
 impl FeedbackStore {
@@ -553,7 +555,7 @@ impl FeedbackStore {
     pub fn submit_auto(
         &self,
         report: SafeAutoReport,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
         self.submit_auto_intake(report, now, None, false)
     }
@@ -563,7 +565,7 @@ impl FeedbackStore {
     pub fn submit_auto_withheld(
         &self,
         report: SafeAutoReport,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         reason: AutoReason,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
         self.submit_auto_intake(report, now, Some(reason), false)
@@ -574,7 +576,7 @@ impl FeedbackStore {
     pub fn submit_owned_auto(
         &self,
         report: SafeAutoReport,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
         self.submit_auto_intake(report, now, None, true)
     }
@@ -582,7 +584,7 @@ impl FeedbackStore {
     pub fn submit_owned_auto_withheld(
         &self,
         report: SafeAutoReport,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         reason: AutoReason,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
         self.submit_auto_intake(report, now, Some(reason), true)
@@ -591,7 +593,7 @@ impl FeedbackStore {
     fn submit_auto_intake(
         &self,
         report: SafeAutoReport,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         withheld: Option<AutoReason>,
         owned: bool,
     ) -> io::Result<(AutoFeedbackRecord, bool)> {
@@ -969,7 +971,7 @@ impl FeedbackStore {
         &self,
         input: FeedbackInput,
         context: FeedbackContext,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> io::Result<(FeedbackRecord, bool)> {
         if input.title.trim().is_empty()
             || input.operation.trim().is_empty()
@@ -998,7 +1000,7 @@ impl FeedbackStore {
             .join(format!("{fingerprint}.json"));
         if index.exists() {
             let receipt: Receipt = serde_json::from_slice(&fs::read(&index)?)?;
-            if now.signed_duration_since(receipt.created_at) < TimeDelta::hours(1) {
+            if now.signed_duration_since(receipt.created_at) < Duration::hours(1) {
                 return Ok((self.read(&receipt.id)?, false));
             }
         }

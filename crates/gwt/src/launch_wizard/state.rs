@@ -10,12 +10,6 @@ impl LaunchWizardState {
                 .live_sessions
                 .iter()
                 .find(|session| session.session_id == entry.session_id)
-                .or_else(|| {
-                    context
-                        .live_sessions
-                        .iter()
-                        .find(|session| session.agent_id == entry.agent_id)
-                })
                 .map(|session| session.window_id.clone());
         }
     }
@@ -101,6 +95,8 @@ impl LaunchWizardState {
             settings_revisited: false,
             resolved_branch_name: None,
             open_branch_candidates: Vec::new(),
+            assignee_candidates: Vec::new(),
+            selected_assignee_id: None,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -488,7 +484,9 @@ impl LaunchWizardState {
             LaunchWizardAction::SetLaunchTarget { target } => {
                 self.set_launch_target(target);
             }
-            LaunchWizardAction::SetAgentMember { .. } => {}
+            LaunchWizardAction::SetAgentMember { agent_member_id } => {
+                self.select_assignee(&agent_member_id);
+            }
             LaunchWizardAction::SetAgent { agent_id } => {
                 self.set_agent_id(&agent_id);
             }
@@ -723,6 +721,11 @@ impl LaunchWizardState {
             LaunchWizardLaunchPath::ManualSetup => {}
         }
 
+        if self.issue_plan_blocks_submit() {
+            self.error = Some("Choose a registered agent that can take this launch".to_string());
+            return;
+        }
+
         if self.is_new_branch {
             let trimmed = self.branch_name.trim();
             if trimmed.is_empty() {
@@ -744,6 +747,13 @@ impl LaunchWizardState {
         // み発生する。即起動系（manual_setup_initialized=false）は経由しない（FR-129）。
         if self.manual_setup_initialized && self.runtime_context_resolved && !self.runtime_confirmed
         {
+            // Issue #7771: the plan stage holds the branch, so a changed
+            // branch asks again where the session can run before Confirm.
+            if self.issue_plan_active() && self.branch_changed_since_resolution() {
+                self.runtime_context_resolved = false;
+                self.finish_launch_request();
+                return;
+            }
             self.runtime_confirmed = true;
             return;
         }
@@ -865,6 +875,18 @@ impl LaunchWizardState {
     }
 
     fn use_start_method(&mut self, method: LaunchWizardStartMethodKind) {
+        // Issue #7771: only "Configure and start" walks the three stages. A
+        // launch that reuses saved settings or a session is not one of them,
+        // even after the stages were visited and left.
+        if self.issue_plan_enabled()
+            && !matches!(
+                method,
+                LaunchWizardStartMethodKind::ConfigureAndStart
+                    | LaunchWizardStartMethodKind::OpenShell
+            )
+        {
+            self.manual_setup_initialized = false;
+        }
         match method {
             LaunchWizardStartMethodKind::ConfigureAndStart => {
                 if !self.manual_setup_initialized {
@@ -875,6 +897,24 @@ impl LaunchWizardState {
                 self.start_method_selected = true;
                 self.runtime_confirmed = false;
                 self.settings_revisited = false;
+                self.step = LaunchWizardStep::LaunchTarget;
+                self.selected = step_default_selection(self.step, self);
+                self.completion = None;
+                if self.issue_plan_enabled() {
+                    // Sets the target and starts the assignee as its traits say.
+                    self.set_launch_target(LaunchTargetKind::Agent);
+                }
+            }
+            LaunchWizardStartMethodKind::OpenShell => {
+                if !self.issue_plan_enabled() {
+                    self.error = Some("Choose Configure and start to open a shell".to_string());
+                    return;
+                }
+                self.manual_setup_initialized = true;
+                self.start_method_selected = true;
+                self.runtime_confirmed = false;
+                self.settings_revisited = false;
+                self.set_launch_target(LaunchTargetKind::Shell);
                 self.step = LaunchWizardStep::LaunchTarget;
                 self.selected = step_default_selection(self.step, self);
                 self.completion = None;
@@ -1071,7 +1111,10 @@ impl LaunchWizardState {
         self.restore_agent_draft_or_defaults()
     }
 
-    fn apply_previous_agent_preferences(&mut self, profile: LaunchWizardPreviousProfile) {
+    pub(super) fn apply_previous_agent_preferences(
+        &mut self,
+        profile: LaunchWizardPreviousProfile,
+    ) {
         self.apply_saved_model(profile.model.as_deref());
         self.apply_restored_reasoning(profile.reasoning.clone());
         self.sync_reasoning_state();
@@ -1257,6 +1300,7 @@ impl LaunchWizardState {
             self.codex_speed = Default::default();
         } else {
             self.restore_agent_draft_or_defaults();
+            self.apply_assignee_profile();
         }
     }
 
@@ -1559,7 +1603,7 @@ impl LaunchWizardState {
 
     pub(super) fn reasoning_level_for_launch(&self) -> Option<&str> {
         match self.effective_agent_id() {
-            "codex" if !self.reasoning.is_empty() => Some(self.reasoning.as_str()),
+            "codex" | "agy" if !self.reasoning.is_empty() => Some(self.reasoning.as_str()),
             "grok"
                 if !self.reasoning.trim().is_empty()
                     && !self.reasoning.trim().eq_ignore_ascii_case("auto") =>
@@ -1920,7 +1964,8 @@ impl LaunchWizardState {
     }
 
     pub(super) fn agent_has_models(&self) -> bool {
-        self.launch_target_is_agent() && matches!(self.effective_agent_id(), "claude" | "codex")
+        self.launch_target_is_agent()
+            && matches!(self.effective_agent_id(), "claude" | "codex" | "agy")
     }
 
     pub(super) fn agent_uses_reasoning_step(&self) -> bool {
@@ -1933,6 +1978,7 @@ impl LaunchWizardState {
         self.effective_agent_id() == "grok"
             || (self.effective_agent_id() == "claude"
                 && is_claude_effort_capable_model(self.model.as_str()))
+            || (self.effective_agent_id() == "agy" && !self.current_reasoning_options().is_empty())
     }
 
     pub(super) fn has_docker_workflow(&self) -> bool {
@@ -2116,26 +2162,14 @@ impl LaunchWizardState {
     }
 
     pub(super) fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
-        if self.agent_is_codex() {
-            codex_reasoning_options_for_model(&self.model)
-        } else if self.effective_agent_id() == "grok" {
-            GROK_REASONING_OPTIONS.to_vec()
-        } else if self.effective_agent_id() == "claude"
-            && is_claude_opus_tier_model(self.model.as_str())
-        {
-            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
-            // `ultracode` is opt-in and only usable on Opus-tier models with
-            // Claude Code >= 2.1.154 and workflows enabled. It is the last
-            // non-default row, so removing it keeps every other index stable.
-            if !self.current_claude_ultracode_supported() {
-                options.retain(|option| option.stored_value != "ultracode");
-            }
-            options
-        } else if self.effective_agent_id() == "claude" && self.model == "sonnet" {
-            CLAUDE_SONNET_REASONING_OPTIONS.to_vec()
-        } else {
-            Vec::new()
+        if self.effective_agent_id() == "codex" && !self.launch_target_is_agent() {
+            return Vec::new();
         }
+        reasoning_options_for_agent_model(
+            self.effective_agent_id(),
+            &self.model,
+            self.current_claude_ultracode_supported(),
+        )
     }
 
     fn current_claude_ultracode_supported(&self) -> bool {
@@ -2250,7 +2284,6 @@ impl LaunchWizardState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
 
     use super::super::test_support::*;
     use super::*;
@@ -3591,7 +3624,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         codex.model = Some("gpt-6-luna".to_string());
@@ -3651,7 +3684,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =
@@ -3697,7 +3730,7 @@ mod tests {
                 "feature/old",
                 Path::new("/tmp/old-repo"),
                 gwt_agent::AgentId::Codex,
-                Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+                gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
                 None,
             );
             let previous_profiles =
@@ -3980,7 +4013,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =

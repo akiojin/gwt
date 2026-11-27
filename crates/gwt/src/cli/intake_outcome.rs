@@ -33,7 +33,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +99,7 @@ pub struct IntakeOutcome {
     /// `issue.spec.edit`, `intake.outcome.record`, …) — audit context for the
     /// Stop gate message and later inspection.
     pub source_operation: String,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
 }
 
 impl IntakeOutcome {
@@ -134,7 +134,7 @@ pub struct IntakeOutcomeState {
     /// FR-016 dirty marker: the latest user prompt time. Stop passes only
     /// when a valid outcome was recorded at or after this instant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub required_since: Option<DateTime<Utc>>,
+    pub required_since: Option<UtcTimestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<IntakeOutcome>,
 }
@@ -256,7 +256,7 @@ pub(super) fn run<E: CliEnv>(
                 number,
                 reason,
                 source_operation: "intake.outcome.record".to_string(),
-                recorded_at: Utc::now(),
+                recorded_at: gwt_core::timestamp::UtcTimestamp::now(),
             };
             record_outcome(&worktree, &session_id, outcome)
                 .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
@@ -313,7 +313,7 @@ pub(crate) fn auto_record_issue_operation(
         number: Some(number),
         reason: None,
         source_operation: source_operation.to_string(),
-        recorded_at: Utc::now(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     if let Err(error) = record_outcome(&worktree, &session_id, outcome) {
         tracing::warn!(%error, source_operation, "intake outcome auto-record failed");
@@ -323,10 +323,9 @@ pub(crate) fn auto_record_issue_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
-    fn t(hour: u32, minute: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 7, 16, hour, minute, 0).unwrap()
+    fn t(hour: u32, minute: u32) -> UtcTimestamp {
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 7, 16, hour, minute, 0).unwrap()
     }
 
     // T-070: roundtrip with session_id, kind, number, reason, source

@@ -205,6 +205,7 @@ pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
         return Ok(IssueCommand::SpecRepair {
             number,
             archive_comments: Vec::new(),
+            wrap_body: false,
         });
     }
 
@@ -462,6 +463,7 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::SpecRepair {
             number,
             archive_comments,
+            wrap_body,
         } => {
             let cache = Cache::new(env.cache_root());
             let ops = SpecOps::new(
@@ -470,9 +472,20 @@ pub(super) fn run<E: CliEnv>(
                 },
                 cache,
             );
+            let wrapped = if wrap_body {
+                Some(ops.wrap_unstructured_body(IssueNumber(number))?)
+            } else {
+                None
+            };
             let repaired = ops.repair_sections(IssueNumber(number))?;
             let archived = ops.archive_orphan_comments(IssueNumber(number), &archive_comments)?;
-            if repaired.is_empty() && archived.is_empty() {
+            if let Some(receipt) = &wrapped {
+                out.push_str(&format!(
+                    "wrapped the body of Issue #{number} as the spec section ({} bytes, sha256 {}, {}); plan / tasks can now be saved with issue.spec.edit\n",
+                    receipt.bytes, receipt.sha256, receipt.location
+                ));
+            }
+            if wrapped.is_none() && repaired.is_empty() && archived.is_empty() {
                 out.push_str(&format!(
                     "refreshed cache for Issue #{number}; no artifact needed repair\n"
                 ));
@@ -702,7 +715,7 @@ fn run_spec_lint<E: CliEnv>(
             marker_header: header,
             roundtrip,
         },
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
 
     out.push_str(&format!(
@@ -728,7 +741,7 @@ fn run_spec_lint<E: CliEnv>(
             .iter()
             .map(|section| (section.name.clone(), section_sha256(&section.content)))
             .collect();
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let captured = IntakeInspectionSnapshot::capture(number, hashes, &report, now)
             .with_context(directive_epoch, phase_slice, Vec::new());
         let ledger = FindingDispositionLedger::seed_from_lint(&report, now);
@@ -805,7 +818,7 @@ fn run_spec_inspection_complete<E: CliEnv>(
     let operability = crate::cli::artifact_operability::load(env.repo_path(), number)
         .ok()
         .flatten();
-    let observed_at = chrono::Utc::now();
+    let observed_at = gwt_core::timestamp::UtcTimestamp::now();
 
     let mut sections = Vec::new();
     for name in snapshot.section_hashes.keys() {

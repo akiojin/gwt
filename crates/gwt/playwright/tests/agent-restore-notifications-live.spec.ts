@@ -107,6 +107,7 @@ test.describe("retired automatic restore sources", () => {
     }, theme);
     let logDirectories: string[] = [];
     const fixture = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, env, preferences }) {
         env.RUST_LOG = "info,gwt.restore.admission=debug";
         execFileSync("git", ["update-ref", "refs/remotes/origin/develop", "HEAD"], { cwd: project, env });
@@ -182,10 +183,11 @@ test.describe("retired automatic restore sources", () => {
         await expect(drawer).toBeVisible();
         const skipped = drawer.locator(".notification-center__item")
           .filter({ hasText: "Automatic restore skipped: landed_worktree" });
-        await expect(skipped).toHaveCount(generation === 1 ? sources.length : 0);
+        await expect(skipped).toHaveCount(generation === 1 ? 1 : 0);
         if (generation === 1) {
-          expect(await skipped.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.level)))
-            .toEqual(sources.map(() => "info"));
+          await expect(skipped).toHaveAttribute("data-level", "info");
+          await expect(skipped.locator(".notification-center__count"))
+            .toHaveText(`×${sources.length}`);
         }
         await expect(drawer.locator('.notification-center__item[data-level="error"]')).toHaveCount(0);
         await expect(page.locator("#wizard-modal")).toBeHidden();
@@ -304,8 +306,8 @@ test("automatic restore errors stay in Notifications while manual errors open a 
         },
       }));
     }, restoreError);
-    await expect(bell.locator(".op-rail__badge")).toHaveText("1");
-    await expect(bell.locator(".op-rail__badge")).toHaveAttribute("data-has-error", "true");
+    await expect(bell.locator(".app-head__count")).toHaveText("1");
+    await expect(bell.locator(".app-head__count")).toHaveAttribute("data-has-error", "true");
     await expect(wizard).toBeHidden();
     await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
 
@@ -383,7 +385,7 @@ test("Issues fresh-session notifications retain each native conversation fallbac
           },
         }));
       }, message);
-      await expect(bell.locator(".op-rail__badge")).toHaveText(String(index + 1));
+      await expect(bell.locator(".app-head__count")).toHaveText(String(index + 1));
     }
 
     await bell.click();
@@ -439,7 +441,7 @@ test("degraded resume warnings retain the reason and Start Work recovery without
         },
       }));
     }, warning);
-    await expect(bell.locator(".op-rail__badge")).toHaveText("1");
+    await expect(bell.locator(".app-head__count")).toHaveText("1");
     await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
     await expect(page.locator("#wizard-modal")).toBeHidden();
 

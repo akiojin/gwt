@@ -497,6 +497,30 @@ fn read_snapshot(path: &Path) -> io::Result<MachineCapacitySnapshot> {
     serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)
 }
 
+/// Reuse the sampler's exact identities while the registry serializes new slots.
+/// This performs no process scan and takes no machine-policy writer lock.
+pub(crate) fn registry_assignment_census(
+) -> io::Result<Option<(Option<usize>, MachineSessionInventory)>> {
+    let snapshot = match read_snapshot(&snapshot_path()) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let now = epoch_seconds();
+    if !fresh(snapshot.observed_at, snapshot.expires_at, now)
+        || now.saturating_sub(snapshot.observed_at) >= SNAPSHOT_TTL_SECS
+    {
+        return Ok(None);
+    }
+    if !snapshot.inventory.uncertainties.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Machine Agent census is uncertain; wait for its next observation",
+        ));
+    }
+    Ok(Some((snapshot.machine_budget, snapshot.inventory)))
+}
+
 fn fresh(observed_at: u64, expires_at: u64, now: u64) -> bool {
     observed_at <= now && now < expires_at
 }
@@ -988,6 +1012,8 @@ impl RuntimeProbe {
             .last_cpu_sample
             .is_some_and(|sample| sample.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         let sampled = cpu_baseline_ready(&self.gui_identities, &current_gui, elapsed);
+        let same_gui_fresh = previous.gui_identities == current_gui
+            && fresh(previous.observed_at, previous.expires_at, now);
         let cpu = if gui.is_empty() {
             Some(0)
         } else if sampled {
@@ -995,12 +1021,13 @@ impl RuntimeProbe {
                 .iter()
                 .map(|process| f64::from(process.cpu_usage()) * 10.0)
                 .sum::<f64>();
-            millicores
-                .is_finite()
-                .then(|| millicores.max(0.0).ceil() as u64)
-        } else if previous.gui_identities == current_gui
-            && fresh(previous.observed_at, previous.expires_at, now)
-        {
+            millicores.is_finite().then(|| {
+                smoothed_gui_cpu(
+                    previous.gui_cpu_millicores.filter(|_| same_gui_fresh),
+                    millicores.max(0.0).ceil() as u64,
+                )
+            })
+        } else if same_gui_fresh {
             previous.gui_cpu_millicores
         } else {
             None
@@ -1050,6 +1077,22 @@ fn is_gui_process(path: &Path) -> bool {
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .is_some_and(|stem| stem.eq_ignore_ascii_case("gwt"))
+}
+
+/// Share of a GUI CPU rise applied per machine refresh (Issue #7922).
+const GUI_CPU_RISE_DIVISOR: u64 = 6;
+
+/// Issue #7922: the CPU budget is P cores minus GUI CPU, so a momentary GUI
+/// spike used to swing admission between 4 and 0 within minutes. A rise is
+/// absorbed over several refreshes (sustained load still converges in about
+/// two minutes); a fall applies at once so relief is never delayed.
+fn smoothed_gui_cpu(previous: Option<u64>, sample: u64) -> u64 {
+    match previous {
+        Some(previous) if sample > previous => {
+            previous + (sample - previous).div_ceil(GUI_CPU_RISE_DIVISOR)
+        }
+        _ => sample,
+    }
 }
 
 fn cpu_baseline_ready(
@@ -1952,6 +1995,34 @@ mod tests {
         ));
         assert!(!cpu_baseline_ready(&prior, &prior, false));
         assert!(!cpu_baseline_ready(&BTreeSet::new(), &prior, true));
+    }
+
+    /// Issue #7922: one heavy GUI sample (5.26 cores on 6 P cores) used to
+    /// drop the CPU budget straight to 0 and back within minutes.
+    #[test]
+    fn gui_cpu_spike_is_damped_but_relief_applies_at_once() {
+        let budget = |gui| {
+            calculate(&Inputs {
+                cores: Some(6),
+                gui: Some(gui),
+                ..Inputs::default()
+            })
+            .constraints[0]
+                .capacity
+        };
+        let spiked = smoothed_gui_cpu(Some(1_000), 5_260);
+        assert!(spiked < 2_000, "a single spike must be damped: {spiked}");
+        assert!(budget(spiked) >= Some(4));
+        let mut sustained = Some(1_000);
+        for _ in 0..30 {
+            sustained = Some(smoothed_gui_cpu(sustained, 5_260));
+        }
+        assert!(
+            sustained.unwrap() >= 5_000,
+            "sustained load still converges"
+        );
+        assert_eq!(smoothed_gui_cpu(Some(5_000), 800), 800);
+        assert_eq!(smoothed_gui_cpu(None, 5_260), 5_260);
     }
 
     #[test]

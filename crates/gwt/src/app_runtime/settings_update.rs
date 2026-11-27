@@ -776,7 +776,7 @@ impl AppRuntime {
                         offer_update = false;
                         result = gwt_core::update::UpdateState::Failed {
                             message: error,
-                            failed_at: chrono::Utc::now(),
+                            failed_at: gwt_core::timestamp::UtcTimestamp::now(),
                             retry_at: None,
                         };
                     }
@@ -914,6 +914,7 @@ impl AppRuntime {
                     auto_apply_updates: configured,
                     auto_apply_updates_effective: configured.unwrap_or(false),
                     update_drain: None,
+                    last_apply_result: gwt_core::update::load_update_apply_result(),
                 })
             }
         };

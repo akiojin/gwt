@@ -3,8 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::workspace_projection::{
     mutate_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
     WorkspaceProjection, WorkspaceStatusCategory,
@@ -44,7 +44,7 @@ pub(crate) fn handle_session_start() -> Result<(), HookError> {
     }
     ensure_coordination_assets_for_session(&session);
     let project_state_root = project_state_root_for_session(&session);
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let registered = mutate_workspace_projection(&project_state_root, |projection| {
         Ok(register_session_in_projection(projection, &session, now))
     })?;
@@ -97,7 +97,7 @@ fn coordination_assets_need_refresh(worktree: &Path) -> bool {
 pub(crate) fn register_session_in_projection(
     projection: &mut WorkspaceProjection,
     session: &Session,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> bool {
     if projection
         .agents
@@ -115,7 +115,7 @@ pub(crate) fn register_session_in_projection(
 
 fn workspace_agent_summary_from_session(
     session: &Session,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> WorkspaceAgentSummary {
     WorkspaceAgentSummary {
         session_id: session.id.clone(),
@@ -202,7 +202,7 @@ fn current_session_from_env() -> Result<Option<Session>, HookError> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+
     use fs2::FileExt;
     use gwt_agent::{AgentId, Session};
     use gwt_core::workspace_projection::{
@@ -213,7 +213,7 @@ mod tests {
     use super::*;
 
     fn projection_for(repo: &std::path::Path) -> WorkspaceProjection {
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         WorkspaceProjection {
             id: "ws-test".to_string(),
             project_root: repo.to_path_buf(),
@@ -259,7 +259,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         }
     }
 
@@ -269,7 +269,7 @@ mod tests {
         let repo = temp.path().join("repo");
         let mut projection = projection_for(&repo);
         let session = fresh_session(&repo);
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
 
         let inserted = register_session_in_projection(&mut projection, &session, now);
 
@@ -296,9 +296,13 @@ mod tests {
         assert!(register_session_in_projection(
             &mut projection,
             &session,
-            Utc::now()
+            gwt_core::timestamp::UtcTimestamp::now()
         ));
-        let second = register_session_in_projection(&mut projection, &session, Utc::now());
+        let second = register_session_in_projection(
+            &mut projection,
+            &session,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
 
         assert!(!second, "second registration should not re-insert");
         assert_eq!(projection.agents.len(), 1);
@@ -318,7 +322,11 @@ mod tests {
         existing.window_id = Some("win-7".to_string());
         projection.agents.push(existing);
 
-        let inserted = register_session_in_projection(&mut projection, &session, Utc::now());
+        let inserted = register_session_in_projection(
+            &mut projection,
+            &session,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
 
         assert!(!inserted);
         assert_eq!(projection.agents.len(), 1);
@@ -408,7 +416,7 @@ mod tests {
         let mut split = projection_for(&worktree);
         let mut split_agent = assigned_agent(&session.id, &worktree);
         split_agent.title_summary = Some("newer split purpose".to_string());
-        split_agent.updated_at = canonical.updated_at + chrono::Duration::seconds(1);
+        split_agent.updated_at = canonical.updated_at + time::Duration::seconds(1);
         split.agents.push(split_agent);
         save_workspace_projection(&worktree, &split).expect("save split projection");
 

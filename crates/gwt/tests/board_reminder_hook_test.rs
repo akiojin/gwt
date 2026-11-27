@@ -10,6 +10,8 @@
 //! - Reminder text carries the DO / DO-NOT guard clauses required by
 //!   FR-036.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use gwt::cli::hook::board_reminder;
 use serde_json::Value;
 use std::{ffi::OsString, path::Path};
@@ -86,7 +88,6 @@ fn post_tool_use_emits_nothing() {
 
 #[test]
 fn reminder_payload_shape_matches_claude_code_contract() {
-    use chrono::Utc;
     use gwt_agent::{AgentId, Session};
 
     with_isolated_home(|_| {
@@ -97,7 +98,7 @@ fn reminder_payload_shape_matches_claude_code_contract() {
             s
         };
 
-        let plan = board_reminder::compute_plan("UserPromptSubmit", &session, Utc::now())
+        let plan = board_reminder::compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .expect("UserPromptSubmit must produce output");
         let mut buf = Vec::new();
@@ -139,7 +140,6 @@ fn compute_plan_uses_invocation_context_for_projection_reuse() {
 
 #[test]
 fn stop_payload_uses_system_message_contract() {
-    use chrono::Utc;
     use gwt_agent::{AgentId, Session};
 
     with_isolated_home(|_| {
@@ -150,7 +150,7 @@ fn stop_payload_uses_system_message_contract() {
             s
         };
 
-        let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
+        let plan = board_reminder::compute_plan("Stop", &session, UtcTimestamp::now())
             .unwrap()
             .expect("Stop must produce output");
         let mut buf = Vec::new();
@@ -164,7 +164,6 @@ fn stop_payload_uses_system_message_contract() {
 
 #[test]
 fn issue_4359_autonomous_stop_requires_continuation_without_pm_reply() {
-    use chrono::Utc;
     use gwt_agent::{AgentId, LaunchRoute, Session};
     use gwt_core::coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind};
 
@@ -186,7 +185,7 @@ fn issue_4359_autonomous_stop_requires_continuation_without_pm_reply() {
             ),
         )
         .unwrap();
-        let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
+        let plan = board_reminder::compute_plan("Stop", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         let mut buf = Vec::new();
@@ -204,7 +203,7 @@ fn issue_4359_autonomous_stop_requires_continuation_without_pm_reply() {
         assert!(text.contains("PM default ruling (override available)"));
 
         session.launch_route = LaunchRoute::Manual;
-        let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
+        let plan = board_reminder::compute_plan("Stop", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         let mut buf = Vec::new();

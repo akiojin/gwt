@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs::{self, FileTimes},
     path::Path,
     time::{Duration, SystemTime},
 };
@@ -77,7 +77,7 @@ fn namespace(root: &Path, pid: u32, id: &str, modified: SystemTime) {
     fs::create_dir_all(&dir).unwrap();
     fs::write(&path, serde_json::to_vec(&runtime).unwrap()).unwrap();
     for path in [&path, &dir] {
-        filetime::set_file_mtime(path, modified.into()).unwrap();
+        set_mtime(path, modified);
     }
 }
 
@@ -166,14 +166,14 @@ fn runtime_gc_retains_uncertain_sidecars_and_pending_recovery() {
     }
     let corrupt = gwt_agent::runtime_state_path_for_pid(root.path(), 1, "corrupt");
     fs::write(&corrupt, "{").unwrap();
-    filetime::set_file_mtime(&corrupt, old.into()).unwrap();
+    set_mtime(&corrupt, old);
     let child = gwt_agent::runtime_state_path_for_pid(root.path(), 2, "child");
     let mut runtime = SessionRuntimeState::load(&child).unwrap();
     runtime.child_pid = Some(42);
     runtime.child_started_at = Some(1);
     runtime.save(&child).unwrap();
-    filetime::set_file_mtime(&child, old.into()).unwrap();
-    filetime::set_file_mtime(child.parent().unwrap(), old.into()).unwrap();
+    set_mtime(&child, old);
+    set_mtime(child.parent().unwrap(), old);
     fs::create_dir(root.path().join("execution-launch-recovery")).unwrap();
     fs::write(
         root.path().join("execution-launch-recovery/receipt.json"),
@@ -181,11 +181,10 @@ fn runtime_gc_retains_uncertain_sidecars_and_pending_recovery() {
     )
     .unwrap();
     fs::write(root.path().join("unreadable.toml"), "invalid").unwrap();
-    filetime::set_file_mtime(
+    set_mtime(
         gwt_agent::runtime_state_path_for_pid(root.path(), 5, "fresh-file"),
-        now.into(),
-    )
-    .unwrap();
+        now,
+    );
     let report = collect_stale_runtime_namespaces(root.path(), now, AGE, |pid| {
         if pid == 42 {
             None
@@ -217,7 +216,7 @@ fn runtime_gc_never_follows_namespace_or_sidecar_links() {
     let file = gwt_agent::runtime_state_path_for_pid(root.path(), 1, "linked");
     fs::remove_file(&file).unwrap();
     symlink(outside.path().join("proof.json"), file).unwrap();
-    filetime::set_file_mtime(root.path().join("runtime/1"), old.into()).unwrap();
+    set_mtime(root.path().join("runtime/1"), old);
     let report = collect_stale_runtime_namespaces(root.path(), now, AGE, |_| Some(false)).unwrap();
     assert_eq!(report.reclaimed, 0);
     assert_eq!(report.retained, 2);
@@ -286,4 +285,8 @@ fn runtime_gc_6000_stale_namespaces_leave_only_live_census_targets() {
         .collect();
     assert_eq!(remaining.len(), 8);
     assert!(remaining.iter().all(|pid| *pid > 6000));
+}
+
+fn set_mtime(path: impl AsRef<Path>, modified: SystemTime) {
+    fs::set_times(path, FileTimes::new().set_modified(modified)).unwrap();
 }

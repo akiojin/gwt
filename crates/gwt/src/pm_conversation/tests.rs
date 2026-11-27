@@ -55,12 +55,14 @@ fn native_record_excerpts_project_only_visible_conversation_text() {
                     id: user_id.into(),
                     role: PmConversationRole::User,
                     text: user_text.into(),
+                    timestamp: None,
                     source_key: Some(source_key.clone()),
                 },
                 PmConversationMessage {
                     id: assistant_id.into(),
                     role: PmConversationRole::Assistant,
                     text: "Assistant reply".into(),
+                    timestamp: None,
                     source_key: None,
                 },
             ],
@@ -183,6 +185,50 @@ fn codex_excludes_explicit_nonhuman_origins() {
 }
 
 #[test]
+fn reports_only_turns_are_hidden_in_both_native_conversations() {
+    const REPORTS_ONLY: &str = "[gwt] Reports only";
+    let codex_message = |id: &str, role: &str, text: &str| {
+        let block = if role == "user" {
+            "input_text"
+        } else {
+            "output_text"
+        };
+        json!({"type":"response_item","payload":{"type":"message","id":id,
+            "role":role,"content":[{"type":block,"text":text}]}})
+    };
+    for result in [
+        parse(
+            AgentId::ClaudeCode,
+            &[
+                claude_message("question", "user", json!(REPORTS_ONLY)),
+                claude_message("reply", "assistant", json!("Here is my answer.")),
+                claude_message("routine", "assistant", json!(REPORTS_ONLY)),
+                claude_message("completed", "assistant", json!("The work is complete.")),
+            ],
+        ),
+        parse(
+            AgentId::Codex,
+            &[
+                codex_meta(),
+                codex_message("question", "user", REPORTS_ONLY),
+                codex_message("reply", "assistant", "Here is my answer."),
+                codex_message("routine", "assistant", REPORTS_ONLY),
+                codex_message("completed", "assistant", "The work is complete."),
+            ],
+        ),
+    ] {
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["question", "reply", "completed"]
+        );
+    }
+}
+
+#[test]
 fn metadata_identity_is_required_before_text_is_disclosed() {
     let mut wrong = codex_meta();
     wrong["payload"]["id"] = json!("foreign");
@@ -226,6 +272,8 @@ fn known_internal_prompts_are_hidden_without_erasing_human_mentions() {
     let portable_wake = format!("[gwt] Scheduled supervision tick: reconcile now: read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close). {} {} {}", crate::pm_registry::PM_STEERING_WAKE_CLAUSE, crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE, crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE);
     let quoted_wake = format!("Explain this notification: {portable_wake}");
     let mixed_wake = format!("{portable_wake}\nこれは何を意味しますか？");
+    let combined_wake = format!("{portable_wake}\n$gwt-pm");
+    let mixed_combined_wake = format!("{portable_wake}\n説明してください\n$gwt-pm");
     let delivery = crate::pm_registry::protected_pm_delivery_prompt(
         "00000000-0000-4000-8000-000000000001",
         "injected",
@@ -241,6 +289,8 @@ fn known_internal_prompts_are_hidden_without_erasing_human_mentions() {
             claude_message("human", "user", json!("[gwt] please explain this prefix")),
             claude_message("quoted-wake", "user", json!(quoted_wake)),
             claude_message("mixed-wake", "user", json!(mixed_wake)),
+            claude_message("combined-wake", "user", json!(combined_wake)),
+            claude_message("mixed-combined-wake", "user", json!(mixed_combined_wake)),
         ],
     );
     assert_eq!(
@@ -253,6 +303,7 @@ fn known_internal_prompts_are_hidden_without_erasing_human_mentions() {
             "[gwt] please explain this prefix",
             quoted_wake.as_str(),
             mixed_wake.as_str(),
+            mixed_combined_wake.as_str(),
         ]
     );
 }
@@ -588,5 +639,46 @@ fn reader_does_not_reuse_another_identity_home_or_source() {
     assert_eq!(
         reader.read_for_session(&session).messages[0].text,
         "Other provider"
+    );
+}
+
+#[test]
+fn home_reads_older_pages_by_message_id_without_reparsing_the_transcript() {
+    let _env = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", home.path());
+    let dir = home.path().join("projects/project");
+    std::fs::create_dir_all(&dir).unwrap();
+    let records: Vec<_> = (0..251)
+        .map(|index| claude_message(&index.to_string(), "user", json!("Message")))
+        .collect();
+    std::fs::write(dir.join("conversation.jsonl"), lines(&records)).unwrap();
+    let mut session = Session::new(Path::new("/work/project"), "pm", AgentId::ClaudeCode);
+    session.agent_session_id = Some("conversation".to_owned());
+    let mut reader = PmConversationReader::default();
+
+    let latest = reader.read_home_page(&session, None);
+    assert_eq!(latest.latest.messages.len(), 50);
+    assert_eq!(latest.latest.messages[0].id, "201");
+    assert!(latest.has_older);
+    let processed = reader.processed_bytes;
+
+    let older = reader.read_home_page(&session, Some("201"));
+    assert_eq!(older.latest, latest.latest);
+    assert_eq!(older.older_messages.len(), 50);
+    assert_eq!(older.older_messages[0].id, "151");
+    assert_eq!(older.older_messages[49].id, "200");
+    assert!(older.has_older);
+
+    let first = reader.read_home_page(&session, Some("1"));
+    assert_eq!(first.older_messages.len(), 1);
+    assert_eq!(first.older_messages[0].id, "0");
+    assert!(!first.has_older);
+    assert_eq!(reader.processed_bytes, processed);
+    assert_eq!(
+        reader.read_for_session(&session).messages.len(),
+        MAX_MESSAGES
     );
 }

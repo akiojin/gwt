@@ -42,7 +42,7 @@ impl RunnerSpawner for RecordingSpawner {
 fn write_meta(index_root: &std::path::Path, repo_hash: &str, minutes_ago: i64) {
     let dir = index_root.join(repo_hash).join("issues");
     std::fs::create_dir_all(&dir).unwrap();
-    let now = chrono::Utc::now() - chrono::Duration::minutes(minutes_ago);
+    let now = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(minutes_ago);
     let meta = serde_json::json!({
         "schema_version": 1,
         "last_full_refresh": now.to_rfc3339(),
@@ -289,7 +289,7 @@ fn issue_index_refreshed_since_detects_completed_duplicate() {
     std::fs::create_dir_all(&issues_dir).unwrap();
 
     // No meta yet: nothing was refreshed.
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     assert!(!issue_index_refreshed_since(
         &index_root,
         "abc1234567890def",
@@ -313,7 +313,7 @@ fn issue_index_refreshed_since_detects_completed_duplicate() {
         issue_index_refreshed_since(
             &index_root,
             "abc1234567890def",
-            now - chrono::Duration::minutes(1)
+            now - time::Duration::minutes(1)
         ),
         "a refresh completed after our request must be detected"
     );
@@ -321,7 +321,7 @@ fn issue_index_refreshed_since_detects_completed_duplicate() {
         !issue_index_refreshed_since(
             &index_root,
             "abc1234567890def",
-            now + chrono::Duration::minutes(1)
+            now + time::Duration::minutes(1)
         ),
         "an older refresh must not satisfy a newer request"
     );
@@ -662,6 +662,6 @@ fn issue_index_refreshed_since_rejects_unparseable_timestamps() {
     assert!(!issue_index_refreshed_since(
         &index_root,
         "baadf00dbaadf00d",
-        chrono::Utc::now()
+        gwt_core::timestamp::UtcTimestamp::now()
     ));
 }

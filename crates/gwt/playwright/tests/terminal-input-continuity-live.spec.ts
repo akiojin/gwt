@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { openWorks } from "./_helpers/works-entry";
 
 const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
@@ -106,7 +107,7 @@ test("Issue #6806: ASCII, IME and paste reach the same real PTY once through thr
       await info.attach("failed-input-screen", { body: await page.screenshot(), contentType: "image/png" });
       throw error;
     } finally {
-      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await openWorks(page);
       for (const id of created.reverse()) {
         await sendLiveGwtEvent(page, { kind: "close_window", id });
         await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0, { timeout: 30_000 });

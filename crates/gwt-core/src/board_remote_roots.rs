@@ -22,13 +22,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{GwtError, Result},
     paths::{gwt_board_remote_roots_path, gwt_project_dir, gwt_repo_local_work_dir},
     repo_hash::detect_repo_hash,
+    timestamp::UtcTimestamp,
 };
 
 /// Reserved `key` for posts with no Workspace audience (broadcast / system).
@@ -52,7 +52,7 @@ pub struct RootMapping {
     /// Hash of the rendered root summary card, for change detection.
     #[serde(default)]
     pub card_hash: String,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 impl RootMapping {
@@ -213,16 +213,16 @@ fn ensure_gitattributes(repo_root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use std::time::{Duration, SystemTime};
 
-    fn mapping(key: &str, root_id: &str, at: i64, hash: &str) -> RootMapping {
+    fn mapping(key: &str, root_id: &str, at: u64, hash: &str) -> RootMapping {
         RootMapping {
             key: key.to_string(),
             provider: "slack".to_string(),
             channel: "CH".to_string(),
             root_id: root_id.to_string(),
             card_hash: hash.to_string(),
-            updated_at: Utc.timestamp_opt(at, 0).unwrap(),
+            updated_at: (SystemTime::UNIX_EPOCH + Duration::from_secs(at)).into(),
         }
     }
 
@@ -230,7 +230,14 @@ mod tests {
     fn append_then_find_returns_latest_per_key() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        append_root_mapping(root, &mapping("ws-a", "ts-1", 100, "h1")).unwrap();
+        let mut initial = mapping("ws-a", "ts-1", 100, "h1");
+        initial.updated_at = "1970-01-01T00:01:40.007980Z".parse().unwrap();
+        append_root_mapping(root, &initial).unwrap();
+        let wire = fs::read_to_string(gwt_board_remote_roots_path(root)).unwrap();
+        assert_eq!(
+            wire.trim_end(),
+            r#"{"key":"ws-a","provider":"slack","channel":"CH","root_id":"ts-1","card_hash":"h1","updated_at":"1970-01-01T00:01:40.007980Z"}"#
+        );
         append_root_mapping(root, &mapping("ws-b", "ts-2", 100, "h1")).unwrap();
         // A later append for ws-a (e.g. card update) supersedes the earlier one.
         append_root_mapping(root, &mapping("ws-a", "ts-1", 200, "h2")).unwrap();

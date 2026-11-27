@@ -8,6 +8,50 @@
 import { createFocusTrap } from "./focus-trap.js";
 import { createUiStateStore } from "./ui-state-store.js";
 
+// Issue #7248 AC-1: every stage the backend attaches to `update_apply_error`
+// (`null` is the stage-less legacy message). The CTA modal only opens for
+// the flow it is showing, so app.js records each of these in the
+// notification center and Settings status whatever the CTA status is.
+export const UPDATE_APPLY_FAILURE_STAGES = Object.freeze([
+  "Update check",
+  "Resolve release",
+  "Replace staged update",
+  "Download asset",
+  "Persist pending",
+  "Apply update",
+  "Restart now",
+  "Apply after agents finish",
+  null,
+]);
+
+function updateFailureReason(payload) {
+  return payload?.reason || payload?.message || "Unknown reason";
+}
+
+/** Notification-center row for one `update_apply_error` event. */
+export function updateApplyFailureNotice(payload) {
+  if (!payload) return null;
+  const stage = payload.stage || null;
+  return {
+    key: `update-apply-error:${stage || "unknown"}`,
+    title: stage ? `Update failed: ${stage}` : "Update failed",
+    message: updateFailureReason(payload),
+    details: `Log: ${payload.log_path || "~/.gwt/logs (update log)"}`,
+  };
+}
+
+/** Notification-center row for a settled apply that failed after restart. */
+export function updateApplyResultNotice(result) {
+  if (result?.outcome !== "failure") return null;
+  return {
+    key: `update-apply-result:${result.recorded_at}`,
+    title: `Update failed: v${result.from_version} → v${result.to_version}`,
+    message: `After restart: expected v${result.to_version}, observed v${result.observed_version}.`,
+    details: [result.message, `Recorded ${result.recorded_at}`, "Log: ~/.gwt/logs (update log)"]
+      .filter(Boolean).join("\n"),
+  };
+}
+
 export function createUpdateCtaController({
   document,
   send,
@@ -19,7 +63,7 @@ export function createUpdateCtaController({
   // ready/failed modal calls this with the latest version, letting the
   // user inspect the changelog before committing to a restart.
   openReleaseNotes = null,
-  // Issue #3906 AC-12: injectable clock so the draining minutes are testable.
+  // Injectable clock for the drain and auto-apply countdown.
   now = () => Date.now(),
   scheduleFrame,
 }) {
@@ -29,6 +73,7 @@ export function createUpdateCtaController({
   let pendingVersion = null;
   let pendingReadyReason = null;
   let status = "idle";
+  let autoApplyTimer;
   const availabilityModel = createUiStateStore(null);
   availabilityModel.subscribe(value => value, available => {
     if (available) renderUpdateState(available);
@@ -264,8 +309,10 @@ export function createUpdateCtaController({
   }
 
   function renderCta(nextStatus, text) {
+    clearTimeout(autoApplyTimer);
     status = nextStatus;
     const shell = ensureShell();
+    shell.querySelector("[data-update-cta-cancel]")?.remove();
     const cta = ensureCta(shell);
     cta.dataset.status = nextStatus;
     const stateClass =
@@ -402,9 +449,7 @@ export function createUpdateCtaController({
     }
   }
 
-  function updateFailureDetail(payload) {
-    return payload?.reason || payload?.message || "Unknown reason";
-  }
+  const updateFailureDetail = updateFailureReason;
 
   function handleUpdateState(event) {
     if (!event || (event.state !== "available" && event.state !== "up_to_date")) {
@@ -421,6 +466,7 @@ export function createUpdateCtaController({
       pendingVersion = null;
       pendingReadyReason = null;
       status = "idle";
+      clearTimeout(autoApplyTimer);
       autoApplyModel.update(() => null);
       stagedModel.update(() => null);
       progressModel.update(() => null);
@@ -449,7 +495,7 @@ export function createUpdateCtaController({
     if (status === "applying" && latestVersion === event.latest) {
       return;
     }
-    if (status === "ready" && pendingVersion === event.latest) {
+    if ((status === "ready" || status === "scheduled") && pendingVersion === event.latest) {
       return;
     }
     showAvailable(event.latest);
@@ -479,10 +525,7 @@ export function createUpdateCtaController({
     }
   }
 
-  // Issue #3906 AC-7 / AC-12 (#4076 AC-2 / AC-5): the backend's automatic
-  // apply phases. `scheduled` turns the CTA into the cancel control for the
-  // grace; `postponed` / `cancelled` withdraw it; `applying` precedes the
-  // graceful restart.
+  // Only the backend can withdraw the grace window or start the restart.
   function handleUpdateAutoApply(payload) {
     if (!payload?.version) return;
     autoApplyModel.update(() => ({
@@ -497,12 +540,13 @@ export function createUpdateCtaController({
     if (!version) return;
     switch (payload.phase) {
       case "scheduled": {
+        if (status === "scheduled" && pendingVersion === version) return;
         removeLegacyUpdateSurfaces();
         closeModal();
         if (checkRetry) checkRetry.hidden = true;
         pendingVersion = version;
         const grace = Number.isFinite(payload.grace_secs) ? payload.grace_secs : 60;
-        renderCta("scheduled", `Update v${version} applies in ${grace} s — click to cancel`);
+        showScheduledUpdate(version, grace);
         announceUpdateAvailable();
         return;
       }
@@ -528,6 +572,42 @@ export function createUpdateCtaController({
     }
   }
 
+  function showScheduledUpdate(version, grace) {
+    clearTimeout(autoApplyTimer);
+    status = "scheduled";
+    const shell = ensureShell();
+    removeDismiss();
+    document.getElementById("update-cta")?.remove();
+    shell.querySelector("[data-update-cta-cancel]")?.remove();
+    const notice = el("div", {
+      id: "update-cta",
+      className: "update-cta is-scheduled",
+      data: { status: "scheduled" },
+    });
+    const cancel = el("button", {
+      type: "button",
+      className: "update-cta update-cta__cancel",
+      data: { updateCtaCancel: "true" },
+      text: "Cancel automatic update",
+      onClick: () => {
+        if (status !== "scheduled" || !cancel.isConnected || cancel.disabled) return;
+        if (send({ kind: "cancel_update_auto_apply" }) === "unavailable") return;
+        cancel.disabled = true;
+        clearTimeout(autoApplyTimer);
+        notice.textContent = "Cancelling automatic update…";
+      },
+    });
+    shell.append(notice, cancel);
+
+    const deadline = now() + grace * 1000;
+    function renderRemaining() {
+      const remaining = Math.max(0, deadline - now());
+      notice.textContent = `Update v${version} applies in ${Math.ceil(remaining / 1000)} s`;
+      if (remaining > 0) autoApplyTimer = setTimeout(renderRemaining, remaining % 1000 || 1000);
+    }
+    renderRemaining();
+  }
+
   function handleUpdateApplyPendingPersisted(payload) {
     if (!payload || !payload.version) return;
     stagedModel.update(() => ({ version: payload.version, phase: "persisted" }));
@@ -546,15 +626,7 @@ export function createUpdateCtaController({
   }
 
   function handleClick() {
-    if (status === "applying") return;
-    if (status === "scheduled") {
-      // Issue #3906 AC-7: the CTA is the cancel control during the grace.
-      // The backend answers with `update_auto_apply` cancelled.
-      send({ kind: "cancel_update_auto_apply" });
-      const cta = document.getElementById("update-cta");
-      if (cta) cta.textContent = "Cancelling automatic update…";
-      return;
-    }
+    if (status === "applying" || status === "scheduled") return;
     if (status === "draining" && pendingVersion) {
       // Issue #3906 AC-13: "Apply now anyway" — the user's explicit override
       // of the drain, on the same graceful route as Restart now.

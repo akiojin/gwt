@@ -47,7 +47,7 @@ active. Register the skill lifecycle with the exit CLI:
 - JSON operation `build.start` with `params.spec:<n>` when the skill starts an implementation pass
 - JSON operation `build.phase` with `params.spec:<n>` and
   `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at each TDD milestone (logging only)
-- JSON operation `build.complete` with `params.spec:<n>` once the Ready PR Gate is satisfied for a releaseable slice and verification passed
+- JSON operation `build.complete` with `params.spec:<n>` and the delivered PR as `params.pr:<number>` once the Ready PR Gate is satisfied for a releaseable slice and verification passed (without `params.pr`, a head branch with 100 or more PRs is refused as a possibly truncated candidate list)
 - JSON operation `build.abort` with `params.spec:<n>` and `params.reason` when implementation cannot proceed without a product decision or blocking merge conflict
 
 The Stop-block handler honours Claude Code / Codex's built-in

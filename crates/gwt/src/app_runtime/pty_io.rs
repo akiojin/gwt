@@ -203,29 +203,28 @@ impl AppRuntime {
         let context = self.project_context(&self.window_lookup.get(id)?.tab_id)?;
         let state = self.project_state(&context)?;
         let mut reasons = Vec::new();
-        if state
-            .project_owner_health
-            .as_ref()
-            .is_some_and(|health| health.state != gwt::protocol::ProjectOwnerHealthState::Healthy)
-        {
-            reasons.push("owner is not Healthy");
+        if let Some(health) = state.project_owner_health.as_ref() {
+            use gwt::protocol::ProjectOwnerHealthState;
+            match health.state {
+                ProjectOwnerHealthState::Healthy => {}
+                ProjectOwnerHealthState::Connecting => {
+                    reasons.push("background process is connecting")
+                }
+                ProjectOwnerHealthState::Degraded => {
+                    reasons.push("background process connection is interrupted")
+                }
+                ProjectOwnerHealthState::Wedged => {
+                    reasons.push("background process is not responding")
+                }
+            }
         }
         if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity) {
-            reasons.push("owner identity mismatch");
+            reasons.push("background process connection changed");
         }
         if runtime.owner_pane_id.is_empty() {
-            reasons.push("owner pane unset");
+            reasons.push("target window is unavailable");
         }
-        (!reasons.is_empty()).then(|| {
-            format!(
-                "owner health: {:?}; {}",
-                state
-                    .project_owner_health
-                    .as_ref()
-                    .map(|health| &health.state),
-                reasons.join("; ")
-            )
-        })
+        (!reasons.is_empty()).then(|| reasons.join("; "))
     }
 
     fn warn_remote_command_recovery(
@@ -314,6 +313,9 @@ impl AppRuntime {
                     | OwnerCommand::Resize {
                         id, incarnation, ..
                     }
+                    | OwnerCommand::SwitchExecutionAccount {
+                        id, incarnation, ..
+                    }
                     | OwnerCommand::Close { id, incarnation }
                     | OwnerCommand::Stop { id, incarnation } => Some((id, incarnation)),
                     _ => None,
@@ -347,7 +349,7 @@ impl AppRuntime {
             let reason = reason.as_deref().unwrap_or(&pending.reason);
             self.warn_remote_command_recovery(id, reason, pending.attempts, waited);
             events.extend(self.remote_command_refusal(id, &pending.kind, format!(
-                "The project command could not be delivered: {reason}. Automatic recovery stopped after {} attempts and {} ms.",
+                "The command was not delivered to the window: {reason}. Automatic recovery stopped after {} attempts and {} ms. Reopen the window and check its state before repeating the command.",
                 pending.attempts, waited.as_millis()
             )));
         }
@@ -450,6 +452,12 @@ impl AppRuntime {
         kind: &super::RemoteRuntimeCommandKind,
         error: String,
     ) -> Vec<OutboundEvent> {
+        if let super::RemoteRuntimeCommandKind::AttachmentInput(operation) = kind {
+            return vec![operation.progress(
+                super::AttachmentProgressPhase::Failed,
+                Some("Attachment was not sent. Reload the current UI and try again."),
+            )];
+        }
         if let super::RemoteRuntimeCommandKind::Input {
             reply_client: Some(client_id),
             request_id,
@@ -472,6 +480,10 @@ impl AppRuntime {
             super::RemoteRuntimeCommandKind::Input { .. } => "input",
             super::RemoteRuntimeCommandKind::Resize => "resize",
             super::RemoteRuntimeCommandKind::Stop => "stop",
+            super::RemoteRuntimeCommandKind::SwitchExecutionAccount => "switch_execution_account",
+            super::RemoteRuntimeCommandKind::AttachmentInput(_) => {
+                unreachable!("attachment refusal returned above")
+            }
         };
         vec![OutboundEvent::project(
             key,
@@ -504,10 +516,26 @@ impl AppRuntime {
             .get(id)
             .and_then(|address| self.project_context(&address.tab_id))
         else {
-            return Vec::new();
+            return if matches!(&kind, super::RemoteRuntimeCommandKind::AttachmentInput(_)) {
+                self.remote_command_refusal(
+                    id,
+                    &kind,
+                    "The project execution is unavailable.".into(),
+                )
+            } else {
+                Vec::new()
+            };
         };
         let Some(state) = self.project_state(&context) else {
-            return Vec::new();
+            return if matches!(&kind, super::RemoteRuntimeCommandKind::AttachmentInput(_)) {
+                self.remote_command_refusal(
+                    id,
+                    &kind,
+                    "The project execution is unavailable.".into(),
+                )
+            } else {
+                Vec::new()
+            };
         };
         if let Some(reason) = self.remote_command_owner_problem(id).or_else(|| {
             (!runtime.pending_owner_commands.is_empty())
@@ -610,16 +638,31 @@ impl AppRuntime {
             self.begin_runtime_approval_resolution(&id);
         }
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())
+            let mut attachment_outcome = None;
+            let attachment = matches!(&kind, super::RemoteRuntimeCommandKind::AttachmentInput(_));
+            let command_runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            if command_runtime.is_err() {
+                if let super::RemoteRuntimeCommandKind::AttachmentInput(operation) = &kind {
+                    // This worker settled before even calling the private owner.
+                    proxy.send(UserEvent::Dispatch(vec![operation.progress(super::AttachmentProgressPhase::Failed,
+                        Some("Attachment input could not start. Reload the current UI."))]));
+                    return;
+                }
+            }
+            let result = command_runtime.map_err(|error| error.to_string())
                 .and_then(|runtime| {
                     runtime.block_on(async {
                         tokio::time::timeout(Duration::from_secs(120), client.command(command))
                             .await
                             .map_err(|_| "project command timed out".to_string())?
                             .and_then(|value| {
+                                if attachment {
+                                    let receipt: gwt::project_runtime::events::OwnerAttachmentInputReceipt =
+                                        serde_json::from_value(value).map_err(|error| error.to_string())?;
+                                    let observation = receipt.input_observation;
+                                    attachment_outcome = Some(receipt);
+                                    return Ok(observation);
+                                }
                                 value
                                     .get("input_observation")
                                     .filter(|value| !value.is_null())
@@ -640,6 +683,7 @@ impl AppRuntime {
                     incarnation,
                     kind,
                     approval_resolution_started,
+                    attachment_outcome,
                     input_command_id,
                     result,
                 },
@@ -691,9 +735,58 @@ impl AppRuntime {
             incarnation,
             kind,
             approval_resolution_started,
+            attachment_outcome,
             input_command_id,
             result,
         } = completion;
+        if let super::RemoteRuntimeCommandKind::AttachmentInput(operation) = &kind {
+            use gwt::project_runtime::events::OwnerAttachmentInputOutcome as Outcome;
+            let current = self.attachment_operation_is_current(operation)
+                && context == operation.context
+                && connection_id == operation.connection_id
+                && identity == operation.identity
+                && id == operation.id
+                && incarnation == operation.expected_target.runtime_incarnation;
+            let receipt = attachment_outcome.filter(|receipt| receipt.tag == "attachment_input_receipt"
+                && receipt.schema_version == 1 && receipt.pane_id == operation.owner_pane_id
+                && receipt.incarnation == operation.expected_target.runtime_incarnation
+                && receipt.session_id == operation.expected_target.session_id
+                && match receipt.outcome {
+                    Outcome::Written => receipt.reason.is_none(),
+                    Outcome::NotStarted => matches!(receipt.reason, Some(gwt::project_runtime::events::OwnerAttachmentInputReason::TargetUnavailable | gwt::project_runtime::events::OwnerAttachmentInputReason::WriterUnavailable)),
+                    Outcome::OutcomeUnknown => receipt.reason == Some(gwt::project_runtime::events::OwnerAttachmentInputReason::WriteUncertain),
+                });
+            let (phase, message) = match (current, result.is_ok(), receipt.as_ref().map(|r| r.outcome)) {
+                (true, true, Some(Outcome::Written)) => (super::AttachmentProgressPhase::Attached, None),
+                (true, true, Some(Outcome::NotStarted)) => (super::AttachmentProgressPhase::Failed,
+                    Some("Attachment was not sent. The original target or physical writer is unavailable.")),
+                _ => (super::AttachmentProgressPhase::OutcomeUnknown,
+                    Some("Attachment outcome unknown. Some bytes may have reached the original target. Do not resend automatically.")),
+            };
+            // A physical observation may update only this same producer. It is
+            // never the proof used to choose the public attachment outcome.
+            if current && result.is_ok() {
+                if let Some(observation) = receipt.and_then(|receipt| receipt.input_observation) {
+                    let runtime = self.runtimes.get_mut(&id).expect("fenced attachment input");
+                    if runtime
+                        .input_observation
+                        .is_none_or(|old| old.revision <= observation.revision)
+                    {
+                        runtime.has_unsent_user_input.store(
+                            observation.has_unsent_user_input || runtime.input_delivery_pending(),
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        runtime.observe_input(Some(observation));
+                    }
+                    if !observation.has_unsent_user_input
+                        && !self.runtimes[&id].input_delivery_pending()
+                    {
+                        self.flush_pending_pm_wake(&id);
+                    }
+                }
+            }
+            return vec![operation.progress(phase, message)];
+        }
         // A discarded lane has already reported its outcome. Ignore its late
         // completion even when the owner/runtime fence no longer matches.
         if input_command_id.is_some_and(|token| {
@@ -729,6 +822,13 @@ impl AppRuntime {
             }
             runtime.input_in_flight = None;
             runtime.input_in_flight_reply = None;
+        }
+        if let super::RemoteRuntimeCommandKind::Input {
+            reply_client: None,
+            request_id: Some(request_id),
+        } = &kind
+        {
+            self.settle_decision_answer(*request_id, result.is_ok());
         }
         let observation = match result {
             Err(error) => {
@@ -974,6 +1074,7 @@ impl AppRuntime {
             .unwrap_or_else(|| self.proxy.clone());
         let generations = Arc::clone(&self.window_lifecycle_generations);
         let task: WindowCloseFinalizerTask = Box::new(move || {
+            let mut owner_pane = None;
             let mut pm_outcome: Option<gwt::project_runtime::pm_delivery::PmLifecycleOutcome> =
                 None;
             let result = tokio::runtime::Builder::new_current_thread()
@@ -996,6 +1097,7 @@ impl AppRuntime {
                                 pending.owner_pane_id == runtime.owner_pane_id
                             })
                         }) {
+                            owner_pane = Some((runtime.owner_pane_id.clone(), runtime.incarnation));
                             let receipt = tokio::time::timeout(
                                 Duration::from_secs(120),
                                 runtime.client.command(
@@ -1012,6 +1114,12 @@ impl AppRuntime {
                             {
                                 return Err("project close receipt identity changed".into());
                             }
+                            if receipt["closed"] != true
+                                || receipt["explicit_stop"] == true
+                                || receipt["retained_window"] == true
+                            {
+                                return Err("project close did not remove the owned window".into());
+                            }
                             pm_outcome = receipt
                                 .get("pm_lifecycle")
                                 .filter(|value| !value.is_null())
@@ -1027,6 +1135,18 @@ impl AppRuntime {
                         Ok(())
                     })
                 });
+            if let Some((owner_pane_id, incarnation)) = owner_pane {
+                tracing::info!(
+                    target: "gwt.pane.teardown",
+                    stage = "owner_close_result",
+                    window_id = %window_id,
+                    owner_pane_id = %owner_pane_id,
+                    incarnation,
+                    ok = result.is_ok(),
+                    reason = result.as_ref().err().map_or("", String::as_str),
+                    "owner window close result"
+                );
+            }
             if let Some(reply) = peer_reply {
                 proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                     reply.client_id,
@@ -1038,13 +1158,18 @@ impl AppRuntime {
                 )]));
             }
             settle_window_lifecycle_generation(&generations, &window_id, closing_window_generation);
-            let pm_status = pm_outcome.as_ref().map(|outcome| {
-                gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
-                    &gwt_core::paths::gwt_sessions_dir(),
-                    &outcome.prefs,
-                    None,
-                )
-            });
+            let pm_status =
+                pm_outcome
+                    .as_ref()
+                    .zip(close_project_root.as_ref())
+                    .map(|(outcome, root)| {
+                        gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
+                            &gwt_core::paths::gwt_sessions_dir(),
+                            root,
+                            &outcome.prefs,
+                            None,
+                        )
+                    });
             let pm_deregistered = pm_outcome
                 .as_ref()
                 .is_some_and(|outcome| outcome.deregistered);
@@ -1283,7 +1408,7 @@ mod submit_split_tests {
         let repo = home.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
-        let body = "protected body";
+        let body = "protected body\n\nsecond paragraph\n";
         let prompt = pm_registry::protected_pm_delivery_prompt(operation_id, body).unwrap();
         let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
         pm_registry::prepare_pm_delivery_receipt(
@@ -1317,9 +1442,12 @@ mod submit_split_tests {
                 }
             } else {
                 body_writes.set(body_writes.get() + 1);
-                composer
-                    .borrow_mut()
-                    .push_str(std::str::from_utf8(bytes).unwrap());
+                let pasted = std::str::from_utf8(bytes)
+                    .unwrap()
+                    .strip_prefix("\x1b[200~")
+                    .and_then(|text| text.strip_suffix("\x1b[201~"))
+                    .expect("the complete multiline body is one bracketed paste");
+                composer.borrow_mut().push_str(pasted);
             }
             Ok(())
         };
@@ -1333,7 +1461,7 @@ mod submit_split_tests {
             )
         };
         let first =
-            drive_verified_pane_submit(&prompt, false, 2, &mut receive, |_| {}, verified).unwrap();
+            drive_verified_pane_submit(&prompt, true, 2, &mut receive, |_| {}, verified).unwrap();
         assert!(matches!(
             first,
             VerifiedPaneSubmitOutcome::Unverified { .. }

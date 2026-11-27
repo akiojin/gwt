@@ -626,7 +626,7 @@ async function launchAgent(page: Page, theme: string, index: number, before: str
     };
     let roster = await rosterRequest({ kind: "read" });
     const available = () => roster.members.filter((member: any) =>
-      member.agent_id === agentId && member.enabled && !member.assignment).length;
+      member.agent_id === agentId && !member.assignment).length;
     for (let added = 0; available() < paneCount && added < paneCount; added += 1) {
       roster = await rosterRequest({ kind: "add", agent_id: agentId }, roster.revision);
     }

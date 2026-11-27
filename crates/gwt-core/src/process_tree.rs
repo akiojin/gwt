@@ -179,7 +179,8 @@ mod windows_job {
                     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
                     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                     JOB_OBJECT_CPU_RATE_CONTROL, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
-                    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT,
+                    JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{
                     GetPriorityClass, OpenProcess, SetPriorityClass, WaitForSingleObject,
@@ -327,10 +328,18 @@ mod windows_job {
 
     impl WindowsJobObject {
         pub fn new() -> Result<Self, WindowsJobError> {
-            Self::create(None)
+            Self::create(None, false)
         }
 
-        fn create(name: Option<&str>) -> Result<Self, WindowsJobError> {
+        /// Like [`Self::new`], but a member may start a descendant outside
+        /// this Job with `CREATE_BREAKAWAY_FROM_JOB`. Only a resident process
+        /// that must outlive the bounded command may use it (Issue #7493);
+        /// every other descendant still dies with the Job.
+        pub fn new_allowing_breakaway() -> Result<Self, WindowsJobError> {
+            Self::create(None, true)
+        }
+
+        fn create(name: Option<&str>, allow_breakaway: bool) -> Result<Self, WindowsJobError> {
             let wide_name = name.map(|name| name.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
             let name = wide_name
                 .as_ref()
@@ -341,6 +350,9 @@ mod windows_job {
                 .map_err(|source| operation_error("CreateJobObjectW", source))?;
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if allow_breakaway {
+                info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            }
             let info_size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
             // SAFETY: `info` is the exact structure required by the selected
             // information class and remains alive for the duration of the call.
@@ -385,7 +397,7 @@ mod windows_job {
             // Only pane Jobs need cross-process observation. Deadline-bounded
             // child Jobs created with `new` remain private and unregistered.
             let name = format!("Local\\gwt-pane-{}", uuid::Uuid::new_v4());
-            let mut job = Self::create(Some(&name))?;
+            let mut job = Self::create(Some(&name), false)?;
             job.assign_process(process_id)?;
             job.registration =
                 Some(super::job_cpu::register(&name).map_err(WindowsJobError::Registration)?);
@@ -534,6 +546,15 @@ mod windows_job {
 
         /// Whether `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is currently armed.
         pub fn kill_on_close_enabled(&self) -> Result<bool, WindowsJobError> {
+            self.limit_enabled(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+        }
+
+        /// Whether a member may start a descendant outside this Job.
+        pub fn breakaway_allowed(&self) -> Result<bool, WindowsJobError> {
+            self.limit_enabled(JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+        }
+
+        fn limit_enabled(&self, limit: JOB_OBJECT_LIMIT) -> Result<bool, WindowsJobError> {
             let job = self.handle.expect("live Windows Job handle");
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             let info_size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
@@ -549,10 +570,7 @@ mod windows_job {
                 )
             }
             .map_err(|source| operation_error("QueryInformationJobObject", source))?;
-            Ok(
-                info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                    == JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            )
+            Ok(info.BasicLimitInformation.LimitFlags & limit == limit)
         }
 
         /// Request termination while retaining exact member handles for the
@@ -778,7 +796,14 @@ mod windows_job {
         /// succeed, `self` retains ownership so its armed `Drop` remains the
         /// failure-path safety net.
         pub fn release_without_termination(mut self) -> Result<(), WindowsJobError> {
-            let job = self.handle.expect("live Windows Job handle");
+            self.try_release_without_termination()
+        }
+
+        /// Relinquish the Job, retaining the handle if disarming it fails.
+        pub fn try_release_without_termination(&mut self) -> Result<(), WindowsJobError> {
+            let Some(job) = self.handle else {
+                return Ok(());
+            };
             let mut original = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             let info_size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
             // SAFETY: `original` is the exact buffer required by the selected
@@ -994,6 +1019,19 @@ mod tests {
         }
         .is_err());
         assert!(job.kill_on_close_enabled().unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_allows_breakaway_only_when_requested() {
+        let bounded = WindowsJobObject::new().expect("create job");
+        assert!(!bounded.breakaway_allowed().expect("query breakaway"));
+
+        let resident = WindowsJobObject::new_allowing_breakaway().expect("create job");
+        assert!(resident.breakaway_allowed().expect("query breakaway"));
+        assert!(resident
+            .kill_on_close_enabled()
+            .expect("query kill on close"));
     }
 
     #[cfg(windows)]

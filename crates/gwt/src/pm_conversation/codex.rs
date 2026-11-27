@@ -1,4 +1,5 @@
 use super::{same_path, PmConversationMessage, PmConversationRole};
+use gwt_skills::pm_guidance::REPORTS_ONLY_RESPONSE;
 use serde_json::Value;
 use std::path::Path;
 
@@ -54,7 +55,9 @@ pub(super) fn message(value: &Value) -> Result<Option<PmConversationMessage>, &'
         .filter_map(|block| block["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    if text.trim().is_empty() {
+    if text.trim().is_empty()
+        || (role == PmConversationRole::Assistant && text.trim() == REPORTS_ONLY_RESPONSE)
+    {
         return Ok(None);
     }
     let id = payload["id"]
@@ -65,6 +68,7 @@ pub(super) fn message(value: &Value) -> Result<Option<PmConversationMessage>, &'
         id: id.to_owned(),
         role,
         text,
+        timestamp: value["timestamp"].as_str().map(str::to_owned),
         source_key: None,
     }))
 }

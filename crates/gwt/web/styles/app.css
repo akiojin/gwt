@@ -1920,6 +1920,12 @@ body {
   cursor: pointer;
 }
 
+/* Issue #7988: the value is unknown until the first Issues status arrives. */
+.knowledge-monitor-switch[aria-disabled="true"] {
+  color: var(--color-text-disabled);
+  cursor: progress;
+}
+
 .knowledge-monitor-switch:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
@@ -2178,6 +2184,10 @@ body {
   font-family: var(--font-body);
   font-size: var(--type-sm);
   color: var(--color-text);
+}
+
+.issue-detail-subtask-item {
+  grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
 .issue-detail-ac-mark,
@@ -3311,6 +3321,24 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
 }
 
+/* SPEC #6476 T-005pf: on a phone the Profile list squeezed the editor to about
+   100px, the five-column environment grid needed 440px, and the controls were
+   24-36px. Stack the list above the editor, lay each variable out as a
+   two-column card, and make the controls 44px tap targets; the surface
+   scrolls vertically while the variable grid keeps its own scroll. */
+@media (max-width: 600px) {
+  .profile-root { overflow-y: auto; }
+  .profile-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; flex: 0 0 auto; }
+  .profile-list-pane { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .profile-editor-pane { overflow: visible; }
+  .profile-env-grid { max-height: 60vh; }
+  .profile-env-grid-head { display: none; }
+  .profile-env-grid-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .profile-env-result { grid-column: 1 / -1; }
+  .profile-root :is(button, input, select) { min-height: 44px; }
+  .profile-root .icon-button { min-width: 44px; }
+}
+
 .board-chat-shell {
   flex: 1;
   min-height: 0;
@@ -3838,6 +3866,16 @@ body {
 .toast-alerts__dismiss:hover {
   color: var(--color-text-strong);
 }
+/* SPEC #6476 T-005c: a 20px dismiss is too small to tap on a phone. The
+   negative block margins extend the 44px target into the item's top padding
+   and keep the title row at its original 20px, so the message stays close. */
+@media (max-width: 600px) {
+  .toast-alerts__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+    margin-block: calc(-1 * var(--space-2)) calc(var(--space-5) + var(--space-2) - 44px);
+  }
+}
 @keyframes toast-alerts-in {
   from {
     opacity: 0;
@@ -3859,29 +3897,6 @@ body {
    shell is the shared .op-drawer primitive; the history list is the shared
    toast-host stack mounted inside the drawer body. Rows keep the alerts
    level→accent rim so severity reads the same in both surfaces. */
-.op-rail__badge {
-  position: absolute;
-  top: var(--space-0-5);
-  right: var(--space-0-5);
-  min-width: var(--space-4);
-  height: var(--space-4);
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-pill);
-  background: var(--color-state-active);
-  color: var(--color-canvas);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 700;
-  line-height: var(--space-4);
-  text-align: center;
-  pointer-events: none;
-}
-.op-rail__badge[data-has-error="true"] {
-  background: var(--color-state-blocked);
-}
-.op-rail__item--notifications[data-has-error="true"] .op-rail__icon {
-  color: var(--color-state-blocked);
-}
 .notification-center-drawer {
   z-index: var(--z-notification-center);
   width: min(420px, 90vw);
@@ -3942,10 +3957,10 @@ body {
    --color-state-active): the accent means "current", not "urgent". */
 .notification-center__item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   grid-template-areas:
-    "severity headline time dismiss"
-    ".        message  message message";
+    "severity headline category time dismiss"
+    ".        message  message  message message";
   align-items: center;
   column-gap: var(--space-2);
   row-gap: var(--space-1);
@@ -4035,6 +4050,34 @@ body {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
 }
+/* Issue #7732 (SPEC #7007 item 211) — the category of a notice, on its row
+   and in the per-category counts above the list. The text names the category;
+   the color only repeats it. */
+.notification-center__categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+}
+.notification-center__category {
+  grid-area: category;
+  padding: 0 var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  white-space: nowrap;
+}
+.notification-center__category[data-category="decision"] {
+  color: var(--color-state-needs-input);
+}
+.notification-center__category[data-category="report"] {
+  color: var(--color-state-success);
+}
+.notification-center__category[data-category="info"] {
+  color: var(--color-text-muted);
+}
 /* A resolved row is done being triaged: it keeps its place in the history but
    its marker de-escalates to the quiet treatment. */
 .notification-center__item[data-resolved="true"] {
@@ -4077,6 +4120,21 @@ body {
 }
 .notification-center__dismiss:hover {
   color: var(--color-text-strong);
+}
+/* SPEC #6476 T-005nc: the drawer controls kept their 20-28px desktop sizes on
+   a phone. The triage row grows to the 44px dismiss; Details stays text-wide. */
+@media (max-width: 600px) {
+  .op-drawer__close,
+  .notification-center__clear,
+  .notification-center__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Keep the list-item display so the disclosure marker stays visible. */
+  .notification-center__details > summary {
+    line-height: 44px;
+  }
 }
 
 .attachment-progress {
@@ -4314,6 +4372,33 @@ body {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* SPEC #6476 T-005lg: on a phone the Logs refresh was 24px and the filters
+   32px tall, and the two columns left the detail pane a sliver. Make them 44px
+   tap targets and stack the timeline above the detail below 601px; a short
+   screen scrolls the surface instead of collapsing either pane. */
+@media (max-width: 600px) {
+  .logs-root { overflow-y: auto; }
+  .logs-root .workspace-toolbar-actions button,
+  .logs-filter-field :is(select, input) { min-width: 44px; min-height: 44px; }
+  .logs-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 1fr) minmax(120px, 1fr); }
+  .logs-timeline { border-right: 0; border-bottom: 1px solid var(--color-border); }
+}
+
+/* SPEC #6476 T-005ix: on a phone the Index search controls were 24-32px,
+   the filters squeezed into one row pushed the worktree select off screen,
+   and the result list and detail needed 580px side by side. Make the controls
+   44px tap targets, wrap the filters, and stack the detail below the list. */
+@media (max-width: 600px) {
+  .index-search-root { overflow-y: auto; }
+  .index-search-panel :is(input, select, button),
+  .index-health-panel button { min-height: 44px; }
+  .index-health-panel .icon-button { min-width: 44px; }
+  .index-filter-bar { flex-wrap: wrap; }
+  .index-scope-list { flex: 1 1 100%; }
+  .index-search-layout { grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(120px, 1fr); }
+  .index-result-list { border-right: 0; border-bottom: 1px solid var(--color-border); }
 }
 
 .branch-list-root {
@@ -5087,6 +5172,25 @@ body {
   margin-top: 10px;
 }
 
+/* SPEC #6476 T-005lw/T-005md: every modal kept its 19-38px desktop control
+   sizes on a phone. Checkboxes and toggles sit inside a label, so the label is
+   the target; 24px icon buttons also need the width. */
+@media (max-width: 600px) {
+  .modal-shell :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
+  .modal-shell label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  /* A summary stays a list-item (keeps its marker), so center it by line. */
+  .modal-shell summary {
+    line-height: 44px;
+  }
+
+  .modal-shell :is(.icon-button, .text-button) {
+    min-width: 44px;
+  }
+}
+
 .text-button {
   border: none;
   background: transparent;
@@ -5714,6 +5818,7 @@ body {
 
 /* Issue 4079 AC-2 — which pool candidate an Agent Settings save writes.
    (No `#` before the number: the token audits scan this block for hex colors.) */
+.launch-environment,
 .launch-pool-impact {
   display: flex;
   flex-direction: column;
@@ -5725,8 +5830,55 @@ body {
   background: var(--color-surface-raised, var(--color-surface));
 }
 
+.launch-environment__title,
 .launch-pool-impact__title {
   color: var(--color-text-strong);
+}
+
+/* Issue 7771 — the traits of a registered agent in the stages of a launch on
+   an Issue, and the row that names the assignee. */
+.assignee-traits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.assignee-trait {
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.assignee-trait b {
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.issue-plan-assignee {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.issue-plan-change-assignee {
+  justify-self: start;
+}
+/* end issue-plan */
+
+/* Issue 7652 — the note under the agent settings that says a launch's choices
+   are overrides for that launch. */
+.launch-override-note {
+  margin-top: 10px;
 }
 
 /* Issue 4911 — Issues settings form repeats the Agent Settings
@@ -6293,12 +6445,27 @@ body {
 /* Issue #4538: Hub (`/`) and route not-found pages. They replace the
    Operator shell, so the body owns scrolling and the canvas background. */
 body.route-body {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
   margin: 0;
   overflow: auto;
   background: var(--color-canvas);
   color: var(--color-text);
   font-family: var(--font-body);
+}
+
+/* Issue #7740: the shared header and footer keep their height when the page
+   is taller than the screen, and the footer rests at the bottom of a short
+   page. Their island wrappers are `display: contents`, so both are flex
+   items of the body. */
+.route-body .app-head,
+.route-body .app-foot {
+  flex-shrink: 0;
+}
+
+.route-body .app-foot {
+  margin-top: auto;
 }
 
 .gwt-hub,
@@ -6329,12 +6496,6 @@ body.route-body {
   font-weight: 700;
   letter-spacing: var(--tracking-display);
   text-transform: uppercase;
-}
-
-.gwt-hub__version {
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
 }
 
 .gwt-hub__actions {
@@ -6485,7 +6646,21 @@ body.route-body {
 
 /* SPEC #6476: keep phone tabs tappable and toolbar rows clear of each other. */
 @media (max-width: 600px) {
-  .issue-bridge-root .knowledge-state-filter button { min-height: 44px; }
+  .issue-bridge-root .knowledge-state-filter button,
+  .issue-bridge-root .knowledge-monitor-controls :is(button, input),
+  .issue-bridge-root .knowledge-search,
+  .issue-bridge-root .workspace-toolbar-actions button,
+  .issue-bridge-root .issue-queue-select,
+  .issue-bridge-root .knowledge-row-select,
+  .issue-bridge-root .knowledge-row-actions button,
+  .issue-bridge-root .knowledge-row-menu-item { min-height: 44px; }
+  .issue-bridge-root .knowledge-row-select { align-content: center; }
+  .issue-bridge-root .knowledge-row-menu > summary {
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
   .issue-bridge-root .workspace-toolbar-main { flex-basis: 100%; grid-template-columns: minmax(0, 1fr) max-content; }
   .issue-bridge-root .issue-filter-hint { grid-column: 1 / -1; }
 }
@@ -6606,6 +6781,23 @@ body.route-body {
 .issue-detail-tabs { flex-shrink: 0; padding: var(--space-2); }
 .issue-detail-provenance { color: var(--color-text-muted); font-size: var(--type-xs); }
 
+/* Issue #7729 (SPEC #7007 N-2): priority, autonomous target and sessions of one Issue. */
+.issue-detail-operations { display: flex; flex-direction: column; gap: var(--space-2); }
+.issue-detail-operation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.issue-detail-operation-copy { display: flex; flex-direction: column; gap: var(--space-0-5); min-width: 0; }
+.issue-detail-operation-title { color: var(--color-text); font-size: var(--type-sm); font-weight: 600; }
+.issue-detail-operation-status { color: var(--color-text-muted); font-size: var(--type-xs); overflow-wrap: anywhere; }
+.issue-detail-operation-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+
 /* Project execution health never replaces the browser connection indicator. */
 .project-owner-health {
   color: var(--color-text-muted);
@@ -6616,6 +6808,22 @@ body.route-body {
 .project-owner-health[data-state="degraded"],
 .project-owner-health[data-state="wedged"] { color: var(--color-state-blocked); }
 
+/* Issue #7728: the one project stop/start (Hub list and Settings). */
+.project-autonomy {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.project-autonomy__state {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+.project-autonomy__state[data-state="running"] { color: var(--color-state-active); }
+.project-autonomy__state[data-state="stop_pending"] { color: var(--color-state-needs); }
+.project-stop-subject { font-weight: 600; }
+
 .gwt-hub__orphan {
   display: flex;
   flex-wrap: wrap;
@@ -6625,6 +6833,670 @@ body.route-body {
 .gwt-hub__orphan-detail {
   color: var(--color-text-muted);
   font-size: var(--type-sm);
+}
+
+/* Issue #7639 (SPEC #7007 T-021): Home, the conversation with the Project
+   Manager, and the Projects view of the same page. Home fills the screen:
+   its head and composer stay put and only the timeline scrolls. */
+body.route-body--chat {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.gwt-hub-page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.gwt-hub-page > .gwt-hub__notice,
+.gwt-hub-page > .gwt-hub__error {
+  width: min(760px, calc(100vw - 2 * var(--space-4)));
+  margin: var(--space-3) auto 0;
+}
+
+.gwt-hub__search,
+.gwt-home__search {
+  width: 100%;
+  margin-bottom: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.gwt-hub__search:focus-visible,
+.gwt-home__search:focus-visible,
+.gwt-home__draft:focus-visible,
+.gwt-home__project:focus-visible,
+.gwt-home__timeline:focus-visible,
+.gwt-home__msg:focus-visible,
+.gwt-home button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* First-run setup (Issue #7731): the Hub's setup view. */
+.gwt-setup {
+  width: min(760px, calc(100vw - 2 * var(--space-4)));
+  margin: var(--space-6) auto;
+  padding: var(--space-6);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.gwt-setup__heading,
+.gwt-setup__title {
+  margin: 0;
+  color: var(--color-text-strong);
+}
+
+.gwt-setup__heading {
+  font-size: var(--type-xl);
+}
+
+.gwt-setup__title {
+  margin-top: var(--space-4);
+  font-size: var(--type-lg);
+}
+
+.gwt-setup__title:focus-visible,
+.gwt-setup__name:focus-visible,
+.gwt-setup__entry:focus-visible,
+.gwt-setup__choice:focus-within {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.gwt-setup__lead,
+.gwt-setup__note,
+.gwt-setup__reason,
+.gwt-setup__status {
+  margin: var(--space-2) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+}
+
+.gwt-setup__status:empty {
+  display: none;
+}
+
+.gwt-setup__reason {
+  color: var(--color-state-needs-input);
+}
+
+.gwt-setup__error {
+  margin: var(--space-3) 0 0;
+  color: var(--color-state-blocked);
+  font-size: var(--type-sm);
+}
+
+.gwt-setup__steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--type-xs);
+}
+
+.gwt-setup__steps li {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+}
+
+.gwt-setup__steps li[data-state="done"] {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.gwt-setup__steps li[data-state="current"] {
+  border-color: var(--color-state-active);
+  color: var(--color-text-strong);
+  font-weight: 600;
+}
+
+.gwt-setup__group {
+  margin-top: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.gwt-setup__group-title {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  font-weight: 600;
+}
+
+.gwt-setup__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.gwt-setup__row + .gwt-setup__row,
+.gwt-setup__group-title + .gwt-setup__row {
+  border-top: 1px solid var(--color-border);
+}
+
+.gwt-setup__row-text {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  min-width: 0;
+}
+
+.gwt-setup__row-title {
+  color: var(--color-text-strong);
+  font-weight: 600;
+}
+
+.gwt-setup__row-detail {
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+}
+
+.gwt-setup__badge {
+  padding: var(--space-0-5) var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  white-space: nowrap;
+}
+
+.gwt-setup__badge[data-state="done"] {
+  border-color: var(--color-state-success);
+  color: var(--color-text-strong);
+}
+
+.gwt-setup__badge[data-state="blocked"] {
+  border-color: var(--color-state-blocked);
+  color: var(--color-text-strong);
+}
+
+.gwt-setup__choices {
+  display: flex;
+  flex: 1 1 260px;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.gwt-setup__choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.gwt-setup__choice[data-checked="true"] {
+  border-color: var(--color-state-active);
+  color: var(--color-text-strong);
+}
+
+.gwt-setup__choice input {
+  accent-color: var(--color-state-active);
+}
+
+.gwt-setup__name {
+  flex: 1 1 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.gwt-setup__entries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.gwt-setup__entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-strong);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.gwt-setup__entry small {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.gwt-setup__entry:hover {
+  border-color: var(--color-focus-ring);
+}
+
+.gwt-setup__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.gwt-setup__buttons .wizard-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.gwt-home {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  width: min(760px, calc(100vw - 2 * var(--space-4)));
+  min-height: 0;
+  margin: 0 auto;
+}
+
+.gwt-home__head {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.gwt-home__face {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-role-pm);
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
+  font-weight: 700;
+}
+
+.gwt-home__meta .gwt-home__face {
+  width: 1.25rem;
+  height: 1.25rem;
+  font-size: var(--type-xs);
+}
+
+.gwt-home__name {
+  margin: 0;
+  color: var(--color-text-strong);
+  font-size: var(--type-md);
+  font-weight: 700;
+}
+
+.gwt-home__sub {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.gwt-home__waitjump {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-state-needs-input);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.gwt-home__waitjump:disabled {
+  color: var(--color-text-muted);
+  font-weight: 400;
+  text-decoration: none;
+  cursor: default;
+}
+
+.gwt-home__timeline {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-4) var(--space-1);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.gwt-home__msg {
+  max-width: min(88%, 40rem);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-elevated);
+}
+
+.gwt-home__msg p {
+  margin: 0 0 var(--space-2);
+  white-space: pre-wrap;
+}
+
+.gwt-home__msg > :last-child {
+  margin-bottom: 0;
+}
+
+.gwt-home__msg--pm {
+  align-self: flex-start;
+  border-inline-start: 2px solid var(--color-role-pm);
+  border-end-start-radius: var(--radius-sm);
+}
+
+.gwt-home__msg--me {
+  align-self: flex-end;
+  border-color: var(--color-focus-ring);
+  border-end-end-radius: var(--radius-sm);
+}
+
+.gwt-home__msg.is-highlighted {
+  border-color: var(--color-state-needs-input);
+  box-shadow: var(--shadow-1);
+}
+
+.gwt-home__msg .gwt-home__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  white-space: normal;
+}
+
+.gwt-home__meta-name {
+  color: var(--color-text-strong);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.gwt-home__subject {
+  flex-basis: 100%;
+}
+
+.gwt-home__chip {
+  padding: 0 var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.gwt-home__chip--waiting {
+  color: var(--color-state-needs-input);
+}
+
+.gwt-home__chip--done {
+  color: var(--color-state-done);
+}
+
+.gwt-home__reply {
+  margin-inline-start: auto;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.gwt-home__options,
+.gwt-home__guide {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.gwt-home__options .wizard-button {
+  height: auto;
+  min-height: 36px;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  white-space: normal;
+  text-align: start;
+}
+
+.gwt-home__guide {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.gwt-home__entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-strong);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.gwt-home__entry small {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.gwt-home__entry:hover {
+  border-color: var(--color-focus-ring);
+}
+
+.gwt-home__msg .gwt-home__status,
+.gwt-home__note,
+.gwt-home__composer-status {
+  margin: var(--space-2) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.gwt-home__msg .gwt-home__status--error,
+.gwt-home__note--error {
+  color: var(--color-state-blocked);
+}
+
+.gwt-home__composer-status:empty {
+  display: none;
+}
+
+.gwt-home__resolved {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.gwt-home__resolved .gwt-home__search {
+  margin-bottom: 0;
+}
+
+.gwt-home__settled {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.gwt-home__settled > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--type-sm);
+  cursor: pointer;
+}
+
+.gwt-home__settled-subject {
+  color: var(--color-text-strong);
+  font-weight: 700;
+}
+
+.gwt-home__settled-answer {
+  color: var(--color-text-muted);
+}
+
+.gwt-home__settled-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+.gwt-home__settled-body .text-button {
+  align-self: flex-start;
+}
+
+.gwt-home__composer {
+  flex-shrink: 0;
+  padding: var(--space-3) 0 var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.gwt-home__compose-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.gwt-home__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0;
+  margin: var(--space-2) 0;
+  list-style: none;
+}
+
+.gwt-home__attachments li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow-wrap: anywhere;
+}
+
+.gwt-home__attachments img {
+  width: 3rem;
+  height: 3rem;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+}
+
+.gwt-home__draft {
+  flex: 1 1 16rem;
+  min-width: 0;
+  min-height: 2.75rem;
+  max-height: 12rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  resize: vertical;
+}
+
+.gwt-home__project {
+  max-width: 14rem;
+  height: 36px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.gwt-home__replychip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  font-size: var(--type-xs);
+}
+
+.gwt-home__replychip-target {
+  display: flex;
+  flex: 1;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.gwt-home__replychip-target b {
+  overflow: hidden;
+  color: var(--color-text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gwt-home__replychip-clear {
+  padding: 0 var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Narrow screens: the name stays on one line and the subject takes its own
+   line (design item 247). */
+@media (max-width: 480px) {
+  .gwt-home__msg {
+    max-width: 100%;
+  }
 }
 
 /* GitHub label color is validated external metadata; layout uses Operator tokens. */

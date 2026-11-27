@@ -1,5 +1,7 @@
 //! Thread-scoped absolute deadlines for synchronous local operations.
 
+use crate::timestamp::UtcTimestamp;
+
 use std::{
     cell::Cell,
     fs::File,
@@ -171,6 +173,8 @@ pub struct NamedFileLock {
     file: File,
     holder_path: PathBuf,
     locked: bool,
+    /// A shared holder never wrote the single holder file and must not clear it.
+    shared: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -206,6 +210,32 @@ impl NamedFileLock {
         on_first_contention: impl FnMut(),
     ) -> io::Result<Self> {
         Self::acquire_with_observer(path, operation, true, on_first_contention)
+    }
+
+    /// Wait for shared ownership using the ambient operation deadline.
+    ///
+    /// Shared holders run together and exclude every exclusive holder. They
+    /// record no holder metadata: the one holder file cannot name several.
+    pub fn acquire_shared(path: &Path, operation: &str) -> io::Result<Self> {
+        let file = open_named_lock(path)?;
+        let holder_path = named_lock_holder_path(path);
+        let mut contention_observed = false;
+        lock_with_observer(&file, true, || contention_observed = true).map_err(|error| {
+            if contention_observed {
+                named_lock_error(&holder_path, operation, error)
+            } else {
+                io::Error::new(
+                    error.kind(),
+                    format!("{error}; operation={operation}; lock_contention=not_observed"),
+                )
+            }
+        })?;
+        Ok(Self {
+            file,
+            holder_path,
+            locked: true,
+            shared: true,
+        })
     }
 
     fn acquire_with_observer(
@@ -274,6 +304,48 @@ impl NamedFileLock {
         Self::acquire_with_observer(path, operation, false, || {})
     }
 
+    /// Acquire with the caller's wait limit. Probe once even when the limit
+    /// has elapsed, and return `WouldBlock` only after actual contention.
+    pub fn acquire_until(
+        path: &Path,
+        operation: &str,
+        deadline: Option<Instant>,
+    ) -> io::Result<Self> {
+        let file = open_named_lock(path)?;
+        let holder_path = named_lock_holder_path(path);
+        if let Some(deadline) = deadline {
+            #[cfg(any(test, feature = "test-support"))]
+            let mut observed = false;
+            loop {
+                match file.try_lock_exclusive() {
+                    Ok(()) => break,
+                    Err(error) if is_lock_contended(&error) => {
+                        #[cfg(any(test, feature = "test-support"))]
+                        if !observed {
+                            observed = true;
+                            notify_named_lock_contention(path);
+                        }
+                        let now = now();
+                        if now >= deadline {
+                            return Err(named_lock_error(
+                                &holder_path,
+                                operation,
+                                io::Error::new(io::ErrorKind::WouldBlock, error),
+                            ));
+                        }
+                        std::thread::sleep(
+                            LOCK_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            FileExt::lock_exclusive(&file)?;
+        }
+        Ok(Self::record(file, holder_path, operation))
+    }
+
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.
     pub fn try_acquire(path: &Path, operation: &str) -> io::Result<Self> {
         let file = open_named_lock(path)?;
@@ -294,11 +366,12 @@ impl NamedFileLock {
             file,
             holder_path,
             locked: true,
+            shared: false,
         };
         let holder = ObservedLockHolder {
             pid: std::process::id(),
             operation: operation.to_owned(),
-            acquired_at: chrono::Utc::now().to_rfc3339(),
+            acquired_at: UtcTimestamp::now().to_rfc3339(),
         };
         let recorded = (|| -> io::Result<()> {
             let bytes = serde_json::to_vec(&holder)?;
@@ -329,9 +402,11 @@ impl NamedFileLock {
         if !self.locked {
             return Ok(());
         }
-        if let Err(error) = std::fs::remove_file(&self.holder_path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                tracing::warn!(%error, "could not clear observational lock holder metadata");
+        if !self.shared {
+            if let Err(error) = std::fs::remove_file(&self.holder_path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!(%error, "could not clear observational lock holder metadata");
+                }
             }
         }
         let unlocked = FileExt::unlock(&self.file);
@@ -390,14 +465,14 @@ fn open_named_lock_holder(path: &Path) -> io::Result<File> {
 }
 
 fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io::Error {
-    named_lock_error_at(holder_path, operation, error, chrono::Utc::now())
+    named_lock_error_at(holder_path, operation, error, UtcTimestamp::now())
 }
 
 fn named_lock_error_at(
     holder_path: &Path,
     operation: &str,
     error: io::Error,
-    observed_at: chrono::DateTime<chrono::Utc>,
+    observed_at: UtcTimestamp,
 ) -> io::Error {
     // Bound diagnostic IO, and do not require valid metadata from old writers.
     // Issue #4975 AC-1: four distinct outcomes used to collapse into the same
@@ -433,16 +508,14 @@ fn named_lock_error_at(
         .unwrap_or("unknown");
     // Holder metadata remains observational. An invalid or future timestamp
     // cannot prove a hold duration; only the Work lock has this short budget.
-    let elapsed_ms = chrono::DateTime::parse_from_rfc3339(acquired_at)
+    let elapsed_ms = UtcTimestamp::parse_rfc3339(acquired_at).and_then(|acquired_at| {
+        u64::try_from(
+            observed_at
+                .signed_duration_since(acquired_at)
+                .whole_milliseconds(),
+        )
         .ok()
-        .and_then(|acquired_at| {
-            u64::try_from(
-                observed_at
-                    .signed_duration_since(acquired_at)
-                    .num_milliseconds(),
-            )
-            .ok()
-        });
+    });
     let hold_threshold_ms = (holder_operation
         == crate::workspace_projection::WORKSPACE_WORK_ITEMS_LOCK_OPERATION)
         .then_some(WORKSPACE_WORK_ITEMS_HOLD_THRESHOLD_MS);
@@ -487,14 +560,33 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
 /// timing and deadline behavior remain identical to [`lock_exclusive`].
 pub fn lock_exclusive_with_observer(
     file: &File,
+    on_first_contention: impl FnMut(),
+) -> io::Result<()> {
+    lock_with_observer(file, false, on_first_contention)
+}
+
+fn lock_with_observer(
+    file: &File,
+    shared: bool,
     mut on_first_contention: impl FnMut(),
 ) -> io::Result<()> {
+    let try_lock = || {
+        if shared {
+            FileExt::try_lock_shared(file)
+        } else {
+            FileExt::try_lock_exclusive(file)
+        }
+    };
     let Some(deadline) = current() else {
-        return match file.try_lock_exclusive() {
+        return match try_lock() {
             Ok(()) => Ok(()),
             Err(error) if is_lock_contended(&error) => {
                 on_first_contention();
-                FileExt::lock_exclusive(file)
+                if shared {
+                    FileExt::lock_shared(file)
+                } else {
+                    FileExt::lock_exclusive(file)
+                }
             }
             Err(error) => Err(error),
         };
@@ -504,7 +596,7 @@ pub fn lock_exclusive_with_observer(
         if now() >= deadline {
             return Err(deadline_error("file lock"));
         }
-        match file.try_lock_exclusive() {
+        match try_lock() {
             Ok(()) => {
                 if now() >= deadline {
                     FileExt::unlock(file)?;
@@ -546,6 +638,27 @@ fn deadline_error(operation: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_holders_run_together_and_exclude_exclusive_holders_both_ways() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("registry.lock");
+        let first = NamedFileLock::acquire_shared(&path, "reader").unwrap();
+        let second = NamedFileLock::acquire_shared(&path, "reader").unwrap();
+        assert!(NamedFileLock::try_acquire(&path, "writer").is_err());
+        first.unlock().unwrap();
+        assert!(NamedFileLock::try_acquire(&path, "writer").is_err());
+        second.unlock().unwrap();
+        let writer = NamedFileLock::try_acquire(&path, "writer").unwrap();
+        let _deadline = ScopedOperationDeadline::enter(now() + Duration::from_millis(100));
+        let error = NamedFileLock::acquire_shared(&path, "reader").unwrap_err();
+        assert!(is_deadline_expired(&error));
+        let message = error.to_string();
+        assert!(message.contains("operation=writer"), "{message}");
+        // The shared attempt left the exclusive holder's metadata in place.
+        assert!(named_lock_holder_path(&path).exists());
+        drop(writer);
+    }
 
     #[test]
     fn issue_6678_uncontended_pm_lock_does_not_emit_info_events() {
@@ -594,9 +707,7 @@ mod tests {
     fn named_file_lock_reports_elapsed_hold_time_and_workspace_threshold() {
         let directory = tempfile::tempdir().expect("tempdir");
         let holder_path = directory.path().join("lock.holder.json");
-        let observed_at = chrono::DateTime::parse_from_rfc3339("2026-10-12T00:00:06Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let observed_at = UtcTimestamp::parse_rfc3339("2026-10-12T00:00:06Z").unwrap();
         for (holder_operation, acquired_at, elapsed, threshold, exceeded) in [
             (
                 "workspace work items",
@@ -676,7 +787,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&holder_path).unwrap()).unwrap();
         assert_eq!(metadata["pid"], std::process::id());
         assert_eq!(metadata["operation"], "board.append");
-        chrono::DateTime::parse_from_rfc3339(metadata["acquired_at"].as_str().unwrap())
+        UtcTimestamp::parse_rfc3339(metadata["acquired_at"].as_str().unwrap())
             .expect("acquisition timestamp");
         let contender_path = path.clone();
         std::thread::spawn(move || {

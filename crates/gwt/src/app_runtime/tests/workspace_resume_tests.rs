@@ -5,22 +5,25 @@ fn bootstrap_defers_physical_restores_until_runtime_ownership_is_installed() {
     // Quit can discard PendingApp before the event loop installs its owner
     // subscribers. Bootstrap therefore prepares restores without starting a
     // physical process; StartupReady resumes Continue without waiting for UI.
-    let source = include_str!("../startup.rs");
-    let bootstrap = source
-        .split_once("pub(crate) fn bootstrap(&mut self)")
-        .expect("bootstrap implementation")
-        .1
-        .split_once("\n    }\n")
-        .expect("bootstrap boundary")
-        .0;
-    assert!(
-        !bootstrap.contains("self.start_window("),
-        "startup Quit must not inherit a shell launched before GUI ownership is installed"
-    );
-    assert!(
-        !bootstrap.contains("self.startup_auto_resume_ready_events()"),
-        "Continue must resume after GUI ownership is installed, including legacy PM restores"
-    );
+    let source = include_str!("../startup.rs").replace("\r\n", "\n");
+    for source in [source.clone(), source.replace('\n', "\r\n")] {
+        let source = source.replace("\r\n", "\n");
+        let bootstrap = source
+            .split_once("pub(crate) fn bootstrap(&mut self)")
+            .expect("bootstrap implementation")
+            .1
+            .split_once("\n    }\n")
+            .expect("bootstrap boundary")
+            .0;
+        assert!(
+            !bootstrap.contains("self.start_window("),
+            "startup Quit must not inherit a shell launched before GUI ownership is installed"
+        );
+        assert!(
+            !bootstrap.contains("self.startup_auto_resume_ready_events()"),
+            "Continue must resume after GUI ownership is installed, including legacy PM restores"
+        );
+    }
 }
 
 #[test]
@@ -78,8 +81,8 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         .expect("owner dispatch boundary")
         .0;
     let durable_recovery = owner_start
-        .find("super::startup::reconcile_durable_launches")
-        .expect("owner durable recovery");
+        .find("state.initialize_shared_registry()")
+        .expect("owner initialization calls durable recovery");
     let admission = owner_start
         .find("state.run(receiver)")
         .expect("owner admission loop");
@@ -87,6 +90,11 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         durable_recovery < admission,
         "actual owner recovery must precede restore and Monitor command admission"
     );
+    let initializer = owner_start
+        .split_once("fn initialize_shared_registry(")
+        .expect("owner initializer")
+        .1;
+    assert!(initializer.contains("super::startup::reconcile_durable_launches"));
     let readonly_selection = source
         .split_once("fn load_recovery_session(")
         .expect("GUI source read")
@@ -638,7 +646,8 @@ fn app_runtime_startup_auto_resume_restores_each_eligible_session() {
         session.restore_window_on_startup = true;
         session.record_hook_event("Stop");
         session.record_completed_stop();
-        session.last_activity_at = chrono::Utc::now() - chrono::Duration::seconds(index as i64);
+        session.last_activity_at =
+            gwt_core::timestamp::UtcTimestamp::now() - time::Duration::seconds(index as i64);
         session.updated_at = session.last_activity_at;
         session
             .save(&runtime.sessions_dir)
@@ -1100,7 +1109,8 @@ fn startup_restore_defers_1500_old_sessions_without_git_spawns() {
     for index in 0..1500 {
         let mut session = gwt_agent::Session::new(&repo, "work/history", gwt_agent::AgentId::Codex);
         session.id = format!("history-{index}");
-        session.last_activity_at = chrono::Utc::now() - chrono::Duration::days(3);
+        session.last_activity_at =
+            gwt_core::timestamp::UtcTimestamp::now() - time::Duration::days(3);
         let path = runtime.sessions_dir.join(format!("{}.toml", session.id));
         fs::write(&path, toml::to_string(&session).unwrap()).unwrap();
         fs::File::options()
@@ -1160,7 +1170,8 @@ fn startup_restore_update_marker_1500_sessions_bounds_git_spawns() {
             gwt_agent::AgentId::Codex,
         );
         session.id = format!("update-history-{index}");
-        session.last_activity_at = chrono::Utc::now() - chrono::Duration::days(3);
+        session.last_activity_at =
+            gwt_core::timestamp::UtcTimestamp::now() - time::Duration::days(3);
         fs::write(
             runtime.sessions_dir.join(format!("{}.toml", session.id)),
             toml::to_string(&session).unwrap(),
@@ -1567,7 +1578,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
         &[],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-worktree"));
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let cases = [
         ("session-fresh-1", "native-one", 1_i64),
         ("session-duplicate-native-one", "native-one", 2_i64),
@@ -1589,7 +1600,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
         session.restore_window_on_startup = true;
         session.record_hook_event("Stop");
         session.record_completed_stop();
-        session.last_activity_at = now - chrono::Duration::seconds(age_secs);
+        session.last_activity_at = now - time::Duration::seconds(age_secs);
         session.updated_at = session.last_activity_at;
         session
             .save(&runtime.sessions_dir)
@@ -1779,7 +1790,7 @@ fn app_runtime_resume_workspace_current_ignores_idle_stale_git_details() {
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -1889,9 +1900,7 @@ fn closed_issue_worktrees_remain_cleanup_workspaces_without_reopening_work() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
-    let at = chrono::DateTime::parse_from_rfc3339("2026-11-13T07:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
+    let at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-11-13T07:00:00Z").unwrap();
     let mut items = WorkItemsProjection::empty(at);
     for (number, close) in [
         (3447, WorkEventKind::Done),
@@ -2031,7 +2040,7 @@ fn app_runtime_active_work_projection_exposes_done_workspace_cleanup_candidate()
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -2079,7 +2088,7 @@ fn app_runtime_active_work_projection_does_not_spawn_git_for_cleanup_candidate()
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -2120,7 +2129,7 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             format!("work-process-free-{index}"),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some(format!("Process-free work {index}"));
         if index == 0 {
@@ -2264,7 +2273,7 @@ fn active_work_projection_592_rows_keep_shared_loader_counts_constant() {
     session
         .save(&runtime.sessions_dir)
         .expect("save one Session ledger entry");
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut projection = WorkItemsProjection::empty(now);
     for rows in [1, 592] {
         for index in projection.work_items.len()..rows {
@@ -2419,7 +2428,7 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             format!("work-missing-worktree-{index}"),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some(format!("Missing worktree work {index}"));
         event.agent_session_id = Some(session_id.clone());
@@ -2514,7 +2523,7 @@ fn active_work_projection_resumability_follows_published_branch_refs() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             format!("work-ref-snapshot-{index}"),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some(format!("Ref snapshot work {index}"));
         event.agent_session_id = Some(session_id.clone());
@@ -2607,7 +2616,7 @@ fn workspace_cleanup_failure_does_not_emit_done_work_item() {
         pr_url: Some("https://github.com/akiojin/gwt/pull/2828".to_string()),
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     let work_item_id = projection.id.clone();
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -2615,7 +2624,7 @@ fn workspace_cleanup_failure_does_not_emit_done_work_item() {
     let start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         &work_item_id,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
         .expect("record start");
@@ -2686,7 +2695,7 @@ fn app_runtime_active_work_projection_exposes_saved_pr_metadata_without_live_age
         pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
         pr_created_at: Some("2026-05-07T08:20:00Z".parse().expect("pr created_at")),
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -2739,7 +2748,7 @@ fn app_runtime_active_work_projection_hides_cleanup_candidate_for_live_agent_bra
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -2802,7 +2811,7 @@ fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -2880,7 +2889,7 @@ fn active_work_projection_592_container_rows_reuse_the_prepared_session_binding(
         .expect("rotate the disk Session after preparing the projection index");
     assert_eq!(rotated.capability_generation, 2);
 
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut event = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Update,
         "work-session-snapshot",

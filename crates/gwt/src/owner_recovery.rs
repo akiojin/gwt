@@ -93,7 +93,7 @@ pub fn collect(target: &OwnerRecoveryTarget, project_key: &str) -> Result<PathBu
     )?;
     let manifest = serde_json::json!({
         "target": target,
-        "collected_at": chrono::Utc::now().to_rfc3339(),
+        "collected_at": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         "cpu_samples": [before, after],
         "stack_file": "stack.txt",
         "delivery_warnings_file": "terminal-delivery-warnings.jsonl",
@@ -260,7 +260,7 @@ fn record_termination(
     writeln!(
         file,
         "{}",
-        serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "target": target, "event": event})
+        serde_json::json!({"at": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(), "target": target, "event": event})
     )
     .and_then(|_| file.sync_all())
     .map_err(|error| error.to_string())
@@ -301,7 +301,7 @@ fn cpu_sample(target: &OwnerRecoveryTarget) -> serde_json::Value {
         let process = system.process(pid).ok_or("daemon process disappeared")?;
         Ok::<_, String>(process.accumulated_cpu_time())
     })();
-    serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "cpu_time_ms": result.as_ref().ok(), "error": result.as_ref().err()})
+    serde_json::json!({"at": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(), "cpu_time_ms": result.as_ref().ok(), "error": result.as_ref().err()})
 }
 
 fn collect_stack(target: &OwnerRecoveryTarget, stack_path: &Path) -> String {

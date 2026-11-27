@@ -1,6 +1,5 @@
 use std::{fs, path::Path};
 
-use chrono::{TimeDelta, Utc};
 use gwt_core::feedback::auto_report::{
     AutoReason, KnownOperation, OwnedAutoPhase, OwnedAutoReason, OwnedCancelResult,
     OwnedCleanupObservation, OwnedExitObservation, SafeAutoReport,
@@ -9,16 +8,22 @@ use gwt_core::feedback::{
     requires_approval, FeedbackContext, FeedbackInput, FeedbackKind, FeedbackState, FeedbackStore,
 };
 use gwt_core::test_support::ScopedEnvVar;
+use gwt_core::timestamp::UtcTimestamp;
+use time::Duration;
 
 #[test]
 fn owned_attempt_registration_is_fresh_only_and_rejects_stale_writers() {
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
     let report = SafeAutoReport::current(KnownOperation::Search);
-    let (legacy, _) = store.submit_auto(report.clone(), Utc::now()).unwrap();
+    let (legacy, _) = store
+        .submit_auto(report.clone(), UtcTimestamp::now())
+        .unwrap();
     let legacy_path = store.path(&legacy.snapshot.id()).unwrap();
     let legacy_bytes = fs::read(&legacy_path).unwrap();
-    let (repeated, fresh) = store.submit_owned_auto(report, Utc::now()).unwrap();
+    let (repeated, fresh) = store
+        .submit_owned_auto(report, UtcTimestamp::now())
+        .unwrap();
     assert!(!fresh);
     assert!(repeated.owned.is_none());
     assert_eq!(fs::read(legacy_path).unwrap(), legacy_bytes);
@@ -28,7 +33,7 @@ fn owned_attempt_registration_is_fresh_only_and_rejects_stale_writers() {
     let (record, fresh) = store
         .submit_owned_auto(
             SafeAutoReport::current(KnownOperation::VerifyRun),
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .unwrap();
     assert!(fresh);
@@ -86,7 +91,7 @@ fn owned_attempt_registration_is_fresh_only_and_rejects_stale_writers() {
     let (failed, _) = store
         .submit_owned_auto(
             SafeAutoReport::current(KnownOperation::VerifyPlan),
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .unwrap();
     let failed_id = failed.snapshot.id();
@@ -112,7 +117,10 @@ fn owned_cancel_blocks_dispatch_and_retry_requires_exit_and_cleanup() {
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
     let (record, _) = store
-        .submit_owned_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .submit_owned_auto(
+            SafeAutoReport::current(KnownOperation::Search),
+            UtcTimestamp::now(),
+        )
         .unwrap();
     let id = record.snapshot.id();
     let attempt = uuid::Uuid::new_v4();
@@ -186,7 +194,10 @@ fn owned_commit_is_durable_and_remote_success_survives_unknown_cleanup() {
     let storage = dir.path().join("feedback");
     let store = FeedbackStore::new(storage.clone());
     let (record, _) = store
-        .submit_owned_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .submit_owned_auto(
+            SafeAutoReport::current(KnownOperation::Search),
+            UtcTimestamp::now(),
+        )
         .unwrap();
     let id = record.snapshot.id();
     let attempt = uuid::Uuid::new_v4();
@@ -264,7 +275,7 @@ fn owned_commit_is_durable_and_remote_success_survives_unknown_cleanup() {
     let (unfinished, _) = store
         .submit_owned_auto(
             SafeAutoReport::current(KnownOperation::HookHealth),
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .unwrap();
     let unfinished_id = unfinished.snapshot.id();
@@ -297,7 +308,7 @@ fn owned_retry_accepts_confirmed_no_sender_and_initial_withheld_receipts() {
     let (record, _) = store
         .submit_owned_auto_withheld(
             SafeAutoReport::current(KnownOperation::Search),
-            Utc::now(),
+            UtcTimestamp::now(),
             AutoReason::PolicyUnavailable,
         )
         .unwrap();
@@ -345,21 +356,26 @@ fn owned_receipt_schema_is_versioned_and_preserves_legacy_serialization() {
     struct LegacyAutoRecord {
         mode: String,
         snapshot: SafeAutoSnapshot,
-        created_at: chrono::DateTime<Utc>,
+        created_at: String,
         state: FeedbackState,
         issue_number: Option<u64>,
         error: Option<AutoReason>,
     }
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
+    let created_at = "2026-08-30T00:00:00.123456Z";
     let (legacy, _) = store
-        .submit_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .submit_auto(
+            SafeAutoReport::current(KnownOperation::Search),
+            created_at.parse().unwrap(),
+        )
         .unwrap();
     let path = store.path(&legacy.snapshot.id()).unwrap();
     let bytes = fs::read(&path).unwrap();
     let decoded: AutoFeedbackRecord = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(serde_json::to_vec_pretty(&decoded).unwrap(), bytes);
-    assert!(serde_json::from_slice::<LegacyAutoRecord>(&bytes).is_ok());
+    let legacy_reader: LegacyAutoRecord = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(legacy_reader.created_at, created_at);
     let mut owned: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     owned["owned"] = serde_json::json!({"version":"v1","attempt":null});
     fs::write(&path, serde_json::to_vec(&owned).unwrap()).unwrap();
@@ -384,7 +400,10 @@ fn owned_receipt_requires_consistent_exit_and_cleanup_observations() {
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
     let (record, _) = store
-        .submit_auto(SafeAutoReport::current(KnownOperation::Search), Utc::now())
+        .submit_auto(
+            SafeAutoReport::current(KnownOperation::Search),
+            UtcTimestamp::now(),
+        )
         .unwrap();
     let path = store.path(&record.snapshot.id()).unwrap();
     let mut value = serde_json::to_value(&record).unwrap();
@@ -419,7 +438,7 @@ fn auto_receipts_contain_only_safe_snapshots_and_dedupe_uncertain_indefinitely()
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
     let report = SafeAutoReport::current(KnownOperation::WorkspaceUpdate);
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let (mut record, fresh) = store.submit_auto(report.clone(), now).unwrap();
     assert!(fresh);
     assert_eq!(record.state, FeedbackState::Queued);
@@ -427,7 +446,7 @@ fn auto_receipts_contain_only_safe_snapshots_and_dedupe_uncertain_indefinitely()
     record.state = FeedbackState::Uncertain;
     record.error = Some(AutoReason::RemoteOutcomeUnknown);
     store.save_auto(&record).unwrap();
-    let (repeated, fresh) = store.submit_auto(report, now + TimeDelta::days(2)).unwrap();
+    let (repeated, fresh) = store.submit_auto(report, now + Duration::days(2)).unwrap();
     assert!(!fresh);
     assert_eq!(repeated, record);
     assert_eq!(repeated.snapshot, original_snapshot);
@@ -558,7 +577,7 @@ fn failed_report_and_issue_body_preserve_the_entire_refusal() {
     let store = FeedbackStore::new(dir.path().join("feedback"));
     let report = input();
     let (mut record, _) = store
-        .submit(report.clone(), context(dir.path()), Utc::now())
+        .submit(report.clone(), context(dir.path()), UtcTimestamp::now())
         .unwrap();
     record.state = FeedbackState::Failed;
     record.error = Some("akiojin/gwt: permission denied".into());
@@ -592,7 +611,7 @@ fn public_snapshot_masks_private_content_without_changing_the_local_report() {
     report.labels = vec!["private/label".into()];
     report.error_record_id = Some("SECRET_ID=hidden-id".into());
     let (record, _) = store
-        .submit(report.clone(), context(dir.path()), Utc::now())
+        .submit(report.clone(), context(dir.path()), UtcTimestamp::now())
         .unwrap();
     let public = record.public_snapshot();
     let rendered = format!("{}\n{}", public.input.title, public.render_issue());
@@ -643,7 +662,7 @@ fn public_snapshot_keeps_safe_refusal_bytes_without_truncation() {
         "拒否".repeat(1800)
     );
     let (record, _) = store
-        .submit(report.clone(), context(dir.path()), Utc::now())
+        .submit(report.clone(), context(dir.path()), UtcTimestamp::now())
         .unwrap();
     assert_eq!(
         record.public_snapshot().input.refusal.as_bytes(),
@@ -667,7 +686,9 @@ fn public_report_contains_only_gwt_diagnostics_and_no_source_identifiers() {
     report.workaround = Some("private-product: run `execution.status`".into());
     report.body = "Private monorepo uses a confidential framework".into();
     let original = report.clone();
-    let (mut record, _) = store.submit(report, context(&source), Utc::now()).unwrap();
+    let (mut record, _) = store
+        .submit(report, context(&source), UtcTimestamp::now())
+        .unwrap();
     let stored_id = record.id.clone();
     // A public nonce may coincidentally contain a private issue number.
     record.id = "00000000-0000-4000-8000-000000004781".into();
@@ -719,7 +740,7 @@ fn approval_explains_removed_categories_and_unreadable_mask_ratio() {
     report.reproduction = "unconfirmed".into();
     report.refusal = "/private/source.rs ".repeat(100);
     let (record, _) = store
-        .submit(report, context(dir.path()), Utc::now())
+        .submit(report, context(dir.path()), UtcTimestamp::now())
         .unwrap();
     let summary = record.public_snapshot().privacy_summary();
     assert!(summary.contains("file paths"));
@@ -736,7 +757,7 @@ fn masking_preserves_gwt_diagnostic_literals_and_large_numeric_values() {
     let mut report = input();
     report.refusal = "`workspace.update` rejected: timeout_ns=1000000000\n(http_status=409), code=authority_mismatch; exit_code=64\n`execution_id=366a102c-4096-4185-aa5b-f07683fed026`\n`state=active`\n```text\ngwtd: operation=workspace.update failed\nhttp_status=409\ncode=authority_mismatch\n```\n".into();
     let (record, _) = store
-        .submit(report.clone(), context(dir.path()), Utc::now())
+        .submit(report.clone(), context(dir.path()), UtcTimestamp::now())
         .unwrap();
     assert_eq!(record.public_snapshot().input.refusal, report.refusal);
 }
@@ -748,7 +769,7 @@ fn masking_removes_source_blocks_and_mixed_case_environment_values() {
     let mut report = input();
     report.refusal = "before\n```python\ncustomer_discount = 0.137\n```\n`customer_discount = 0.137`\nprivate_setting=confidential-value\nPrivateSetting=second-secret\nhttp_status=409 private_setting=third-secret\nPRIVATE_PIN=123456\nafter".into();
     let (record, _) = store
-        .submit(report, context(dir.path()), Utc::now())
+        .submit(report, context(dir.path()), UtcTimestamp::now())
         .unwrap();
     let public = record.public_snapshot();
     for hidden in [
@@ -778,7 +799,9 @@ fn masking_handles_punctuation_in_repository_names_and_other_branch_references()
     let mut report = input();
     report.reproduction =
         "In .private-product on branch confidential-release, call `execution.status`".into();
-    let (record, _) = store.submit(report, context(&root), Utc::now()).unwrap();
+    let (record, _) = store
+        .submit(report, context(&root), UtcTimestamp::now())
+        .unwrap();
     let text = record.public_snapshot().render_issue();
     assert!(!text.contains(".private-product"));
     assert!(!text.contains("confidential-release"));
@@ -792,7 +815,7 @@ fn public_snapshot_masks_complete_bearer_and_multiline_assignment_values() {
     let mut report = input();
     report.refusal = "before\r\nBearer abc+bearer-secret\r\nPRIVATE_SETTING = \"first-part\\\nmiddle\r\nmultiline-secret\"suffix-secret\r\nUNQUOTED=first unquoted-secret\r\nCONTINUED_LF=first\\\nlf-continuation-secret\r\nCONTINUED_CRLF=first\\\r\ncrlf-continuation-secret\r\nafter  ".into();
     let (record, _) = store
-        .submit(report.clone(), context(dir.path()), Utc::now())
+        .submit(report.clone(), context(dir.path()), UtcTimestamp::now())
         .unwrap();
     let public = record.public_snapshot().input.refusal;
     let leaked: Vec<_> = [
@@ -826,16 +849,16 @@ fn public_snapshot_masks_complete_bearer_and_multiline_assignment_values() {
 fn repeat_intake_reuses_one_receipt_within_an_hour_and_retains_old_reports() {
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let (first, new) = store.submit(input(), context(dir.path()), now).unwrap();
     assert!(new);
     let (repeat, new) = store
-        .submit(input(), context(dir.path()), now + TimeDelta::minutes(15))
+        .submit(input(), context(dir.path()), now + Duration::minutes(15))
         .unwrap();
     assert!(!new);
     assert_eq!(first.id, repeat.id);
     let (later, new) = store
-        .submit(input(), context(dir.path()), now + TimeDelta::hours(2))
+        .submit(input(), context(dir.path()), now + Duration::hours(2))
         .unwrap();
     assert!(new);
     assert_ne!(first.id, later.id);
@@ -847,7 +870,7 @@ fn repeat_intake_reuses_one_receipt_within_an_hour_and_retains_old_reports() {
 fn repeated_problem_with_new_evidence_retains_both_reports() {
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let original = input();
     let (first, _) = store
         .submit(original.clone(), context(dir.path()), now)
@@ -901,7 +924,7 @@ fn repeated_problem_with_new_evidence_retains_both_reports() {
         assert_eq!(additional.context, environment);
         assert_eq!(additional.input, report);
         let (repeat, fresh) = store
-            .submit(report, environment, now + TimeDelta::minutes(15))
+            .submit(report, environment, now + Duration::minutes(15))
             .unwrap();
         assert!(
             !fresh,

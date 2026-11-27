@@ -3,7 +3,7 @@ import { createUiStateStore } from "./ui-state-store.js";
 const count = (value) => (Number.isInteger(value) && value >= 0 ? value : 0);
 
 // SPEC 5016 AC-HS1: the single projection of the server aggregate. The tab
-// title, the status strip and the Works heading read only this value; no
+// title, the status strip and the Works and Agents headings read this value; no
 // surface recounts agents from its own input.
 export function projectAgentSummary(aggregate = {}) {
   return Object.freeze({
@@ -29,13 +29,13 @@ export function createProjectPageMetadata({
   let attentionSyncPending = false;
   function render() {
     if (!project) {
-      documentRef.title = "gwt — Hub";
+      documentRef.title = "gwt — Home";
       try { documentRef.querySelector('link[rel="icon"]')?.setAttribute("href", "data:,"); } catch { /* optional favicon */ }
       return;
     }
     const { unread = false } = model.read();
     const { running, block: blocked, error: errors } = summary.read();
-    documentRef.title = `${unread ? "● " : ""}${name} — RUN ${running} · BLOCK ${blocked} — gwt`;
+    documentRef.title = `${unread ? "● " : ""}${name} — ${running} running · ${blocked} blocked — gwt`;
     try {
       let icon = documentRef.querySelector('link[rel="icon"]');
       if (!icon) {

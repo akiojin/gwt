@@ -72,20 +72,26 @@ export function mountProjectExecutionStatus(container, model, { projectTitle = '
 
 export function createProjectViewReadiness({ document, projectKey, send, viewId = createProjectOperationId(),
   scheduleFrame = callback => typeof requestAnimationFrame === 'function' ? requestAnimationFrame(callback) : callback() }) {
-  let challenge = null, rendered = false, acknowledged = null, scheduled = false, connection = 0;
+  let challenge = null, rendered = false, acknowledged = null, scheduled = false, connection = 0, opened = false;
+  // Issue #7665: a page whose visible view was already registered is still
+  // open after its host restarts. A background tab is not a new open, and it
+  // receives no animation frame, so it re-registers without waiting for one.
+  const blocked = () => !rendered || !challenge || acknowledged === challenge.nonce
+    || (document.visibilityState === 'hidden' && !opened);
   function ready() {
-    if (!rendered || !challenge || acknowledged === challenge.nonce || document.visibilityState === 'hidden' || scheduled) return;
+    if (blocked() || scheduled) return;
     scheduled = true;
     const generation = connection;
-    scheduleFrame(() => {
+    (document.visibilityState === 'hidden' ? callback => callback() : scheduleFrame)(() => {
       if (generation !== connection) return;
       scheduled = false;
-      if (!rendered || !challenge || acknowledged === challenge.nonce || document.visibilityState === 'hidden') return;
+      if (blocked()) return;
       acknowledged = challenge.nonce;
+      opened = true;
       send({ kind: 'project_view_ready', generation: challenge.generation, nonce: challenge.nonce, view_id: viewId });
     });
   }
   return { challenge(value) { if (value?.project_key === projectKey) { challenge = value; ready(); } },
-    rendered() { rendered = true; ready(); }, visible: ready,
+    rendered() { rendered = true; ready(); }, visible: ready, closed() { opened = false; },
     connectionLost() { connection += 1; challenge = null; rendered = false; acknowledged = null; scheduled = false; } };
 }

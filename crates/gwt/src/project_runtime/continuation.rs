@@ -185,10 +185,8 @@ pub fn prepare_manual_successor_before_pane(
             }
         };
         if attempt.status != gwt::cli::execution_state::ContinuationAttemptStatus::Prepared {
-            return Err(format!(
-                "Manual successor operation is {:?}; reconcile before retrying",
-                attempt.status
-            ));
+            tracing::warn!(status = ?attempt.status, "manual successor is not prepared");
+            return Err("The next agent launch is not ready. No new agent was launched. Open Logs and review the previous launch before retrying.".into());
         }
         let identity = gwt::cli::execution_state::prepared_successor_execution_binding(
             &worktree,
@@ -222,6 +220,85 @@ pub fn prepare_manual_successor_before_pane(
         }
     }
     result
+}
+
+/// Cancel only this worker's Prepared Manual launch before a Session exists.
+/// The execution API holds owner and Session leases across absence and abort.
+pub(super) fn abort_unmaterialized_manual_successor(
+    project_root: &Path,
+    sessions_dir: &Path,
+    worktree: &Path,
+    binding: &gwt_agent::SessionExecutionBinding,
+    operation_id: &str,
+) -> Result<bool, String> {
+    use crate::cli::execution_state as execution;
+    use crate::session_launch::recovery::{self, DurableLaunchRecoveryKind};
+
+    let path =
+        crate::session_launch::durable_launch_recovery_path(sessions_dir, &binding.session_id)?;
+    let receipt: recovery::DurableLaunchRecoveryRecord =
+        serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let owner = receipt.owner()?;
+    if receipt.session_id != binding.session_id
+        || receipt.repo_hash != binding.repo_hash
+        || owner.kind.as_str() != binding.owner_kind
+        || owner.number != binding.owner_number
+        || !path_matches(&receipt.project_root, project_root)
+        || !path_matches(&receipt.worktree_path, worktree)
+        || receipt.expected_binding.is_some()
+        || !matches!(&receipt.kind, DurableLaunchRecoveryKind::FreshSuccessor { operation_id: id }
+            if id == operation_id)
+    {
+        return Ok(false);
+    }
+    let Some(attempt) =
+        execution::continuation_attempt_for_operation(worktree, owner, operation_id)
+            .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    if attempt.status != execution::ContinuationAttemptStatus::Prepared
+        || attempt.request.initial_session_id != binding.session_id
+        || !execution::continuation_attempt_execution_binding_matches(
+            worktree,
+            owner,
+            &attempt,
+            &binding.session_id,
+            &binding.identity,
+        )
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(gwt_agent::runtime_state_path(
+        sessions_dir,
+        &binding.session_id,
+    )) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    }
+    execution::abort_successor_if_session_missing_with(
+        worktree,
+        owner,
+        &attempt.request,
+        "Manual launch cancelled before Session materialization",
+        sessions_dir,
+        &binding.session_id,
+        || {
+            if recovery::clear_durable_launch_recovery_if_matches(sessions_dir, &receipt)
+                .map_err(std::io::Error::other)?
+            {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    "Manual launch recovery receipt changed before cleanup",
+                ))
+            }
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub fn manual_successor_stable_component(prefix: &str, operation_id: &str) -> String {
@@ -422,7 +499,7 @@ pub fn prepare_fresh_execution_launch_session_start(
                         &pending.worktree_path,
                         &pending.operation_id,
                         |projection, work_items, _| {
-                            let now = chrono::Utc::now();
+                            let now = gwt_core::timestamp::UtcTimestamp::now();
                             let events = apply_workspace_launch_for_current_work(
                                 &pending.project_root,
                                 projection,
@@ -1401,7 +1478,7 @@ pub fn transact_pending_continue_work_with_activation(
                         created_by_start_work: active_session.branch_name.starts_with("work/"),
                     },
                     live_session_ids,
-                    now: chrono::Utc::now(),
+                    now: gwt_core::timestamp::UtcTimestamp::now(),
                 },
             );
             Ok(((), vec![event]))
@@ -1953,7 +2030,7 @@ impl ContinueWorkCoordinator<'_> {
         let resume_context = WorkspaceResumeContext {
             title: non_empty_workspace_text(Some(&item.title)),
             owner: non_empty_workspace_text(item.owner.as_deref())
-                .or_else(|| Some(format!("Issue #{}", owner.number))),
+                .or_else(|| Some(owner.canonical_work_owner_label())),
             summary: non_empty_workspace_text(item.summary.as_deref())
                 .or_else(|| non_empty_workspace_text(item.intent.as_deref())),
             next_action: item.latest_next_action().map(str::to_string),
@@ -2739,9 +2816,10 @@ impl ContinueWorkCoordinator<'_> {
                         ));
                     }
                     Ok((resolution, _)) => {
-                        return Err(ContinueWorkFailure::conflict(format!(
-                            "The committed continuation has no matching Work transaction: {resolution:?}"
-                        )));
+                        tracing::warn!(?resolution, "committed continuation has no matching Work transaction");
+                        return Err(ContinueWorkFailure::conflict(
+                            "The continuation could not be confirmed in Work history. Further continuation is paused. Open Logs and review the continuation error before retrying."
+                        ));
                     }
                     Err(error) => {
                         return Err(ContinueWorkFailure::conflict(format!(
@@ -3629,7 +3707,7 @@ impl ContinueWorkCoordinator<'_> {
                 &predecessor_binding,
             ));
         }
-        let requested_at = chrono::Utc::now();
+        let requested_at = gwt_core::timestamp::UtcTimestamp::now();
         let replaces_active_generation = takeover_owner.is_some();
         let execution =
             PendingContinueWorkExecution::Successor(gwt::cli::execution_state::SuccessorRequest {
@@ -3864,8 +3942,9 @@ pub fn active_profile_grok_home_for_continuation(
     source_session: &gwt_agent::Session,
     launch_cwd: &Path,
 ) -> Option<PathBuf> {
-    let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
+    let (effective_env, _) = gwt_agent::LaunchEnvironment::for_project(
         profile_config_path,
+        launch_cwd,
         source_session.runtime_target,
     )
     .ok()?
