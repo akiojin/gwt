@@ -891,6 +891,43 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     expect(pageErrors).toEqual([]);
   });
 
+  test("failed update notification identifies the release and where to retry", async ({ page }, info) => {
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await page.evaluate(() => {
+      const send = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        const request = typeof data === "string" ? JSON.parse(data) : null;
+        if (request?.kind === "open_release_notes") {
+          queueMicrotask(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "release_notes_payload",
+            id: request.id,
+            current_version: "9.98.0",
+            entries: [{ version: "9.99.0", sections: [] }, { version: "9.98.0", sections: [] }],
+          } })));
+          return;
+        }
+        send.call(this, data);
+      };
+    });
+    await inject(page, {
+      kind: "issue_monitor_toast",
+      level: "error",
+      issue_number: null,
+      message: "Update to v9.99.0 failed: still running v9.98.0 (attempt 1). Click the version label to open Release Notes and retry.",
+    });
+    await page.locator("#op-notifications-button").click();
+    const drawer = page.locator("#notification-center");
+    await expect(drawer).toContainText("Update to v9.99.0 failed: still running v9.98.0");
+    await expect(drawer).toContainText("Click the version label to open Release Notes and retry.");
+    await drawer.screenshot({ path: info.outputPath("update-failure-notification.png") });
+    await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+    await page.locator("#app-version").click();
+    const releaseNotes = page.locator("#release-notes-window");
+    await releaseNotes.locator('.release-notes-sidebar-item[data-version="9.99.0"]').click();
+    await expect(releaseNotes.getByRole("button", { name: "Update to v9.99.0", exact: true })).toBeVisible();
+  });
+
   test("scheduled update shows the remaining grace and cancels from its own button", async ({ page }, testInfo) => {
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);

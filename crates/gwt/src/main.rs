@@ -5676,6 +5676,7 @@ mod tests {
             attempt: 1,
             recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             message: Some("previous helper failed".into()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
         assert!(admission.begin_resolution());

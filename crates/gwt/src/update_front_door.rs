@@ -673,6 +673,9 @@ fn stage_graceful_update_apply_with_ops<T>(
         let _lock = gwt_core::update::pending_update_manifest_lock(
             &gwt_core::update::pending_update_dir(),
         )?;
+        if gwt_core::update::load_update_resume_marker().is_some() {
+            return Err("An update is already awaiting restart.".to_string());
+        }
         if respect_defer {
             let current = gwt_core::update::load_pending_update_manifest().ok_or_else(|| {
                 "Pending update with a valid payload is no longer staged.".to_string()
@@ -728,6 +731,7 @@ fn stage_graceful_update_apply_with_ops<T>(
                 attempt: marker.attempt,
                 recorded_at: UtcTimestamp::now().to_rfc3339(),
                 message: Some(err.clone()),
+                notify_on_gui_startup: false,
             };
             if let Err(error) = gwt_core::update::persist_update_apply_result(&result) {
                 gwt_core::update::log_update_event(
@@ -1683,6 +1687,55 @@ mod poll_state_tests {
             gwt_core::update::load_pending_update_manifest().is_none(),
             "the pending manifest is consumed after the helper is spawned"
         );
+    }
+
+    #[test]
+    fn graceful_installer_apply_settles_against_the_restarted_version() {
+        use gwt_core::update::UpdateApplyOutcome;
+
+        for (observed_version, expected_outcome) in [
+            ("9.31.0", UpdateApplyOutcome::Success),
+            ("9.30.0", UpdateApplyOutcome::Failure),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let mut manifest = staged_manifest_in(home.path());
+            let path = home.path().join("gwt.dmg");
+            std::fs::write(&path, b"installer fixture").unwrap();
+            manifest.payload = PreparedPayload::Installer {
+                path: path.clone(),
+                kind: InstallerKind::MacDmg,
+            };
+            gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+            let mut ops = FakeUpdateApplyOps::portable(path);
+            let marker = sample_resume_marker();
+            super::stage_graceful_update_apply_with_ops(
+                &mut ops,
+                manifest,
+                &marker,
+                Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+                Vec::new(),
+                42,
+                false,
+                true,
+                || Ok(()),
+            )
+            .unwrap();
+            assert!(ops.spawned_installer);
+            assert!(!ops.spawned_portable);
+            let settlement = gwt_core::update::settle_update_resume_marker(
+                observed_version,
+                UtcTimestamp::now(),
+            )
+            .expect("installer apply marker");
+            assert_eq!(settlement.marker, marker);
+            assert_eq!(settlement.result.outcome, expected_outcome);
+            assert_eq!(settlement.result.observed_version, observed_version);
+            assert_eq!(
+                settlement.result,
+                gwt_core::update::load_update_apply_result().unwrap()
+            );
+        }
     }
 
     #[test]

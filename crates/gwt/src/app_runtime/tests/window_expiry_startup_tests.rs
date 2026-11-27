@@ -1661,6 +1661,38 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
     );
 }
 
+#[test]
+fn bootstrap_reports_a_failed_update_already_settled_by_the_cli() {
+    let home = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(home.path().join("gwt-home"));
+    let (_, mut runtime) = update_resume_fixture(home.path(), "work/update-cli-failure");
+    let marker = gwt_core::update::UpdateResumeMarker {
+        from_version: env!("CARGO_PKG_VERSION").into(),
+        to_version: "9.999.0".into(),
+        started_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+        restart_args: vec!["update".into()],
+        projects: Vec::new(),
+        attempt: 1,
+    };
+    gwt_core::update::persist_update_resume_marker(&marker).unwrap();
+    let cli_result = gwt_core::update::settle_cli_update_resume_marker(
+        env!("CARGO_PKG_VERSION"),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    )
+    .unwrap()
+    .result;
+    assert!(gwt_core::update::load_update_resume_marker().is_none());
+
+    runtime.bootstrap();
+    let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(toasts[0].0, "error");
+    assert_eq!(toasts[0].1, cli_result.notice());
+    assert!(toasts[0].1.contains("open Release Notes and retry"));
+    assert!(gwt_core::update::take_cli_update_resume_notice().is_none());
+}
+
 // Issue #4075 AC-1: startup writes the managed key into the profile-derived
 // `~/.codex/config.toml` when it is absent.
 #[test]

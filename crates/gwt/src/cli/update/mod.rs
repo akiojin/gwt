@@ -10,7 +10,10 @@ mod ops;
 #[cfg(test)]
 mod tests;
 
-use gwt_core::update::{InstallerKind, PreparedPayload, UpdateState};
+use gwt_core::timestamp::UtcTimestamp;
+use gwt_core::update::{
+    self, InstallerKind, PreparedPayload, UpdateApplyOutcome, UpdateResumeMarker, UpdateState,
+};
 
 use ops::{RealUpdateCliOps, UpdateCliOps};
 
@@ -150,7 +153,21 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
                 return RunOutcome::Code(1);
             };
 
-            if let Err(error) = ops.write_restart_args_file(&args_file, ops.current_args()) {
+            let _manifest_lock =
+                match update::pending_update_manifest_lock(&update::pending_update_dir()) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        ops.write_stderr(&format!("Failed to apply update: {error}\n"));
+                        return RunOutcome::Code(1);
+                    }
+                };
+            if update::load_update_resume_marker().is_some() {
+                ops.write_stderr("An update is already awaiting restart. Let it finish before applying another update.\n");
+                return RunOutcome::Code(1);
+            }
+
+            let restart_args = ops.current_args();
+            if let Err(error) = ops.write_restart_args_file(&args_file, restart_args.clone()) {
                 ops.write_stderr(&format!("Failed to write restart args: {error}\n"));
                 return RunOutcome::Code(1);
             }
@@ -166,6 +183,19 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
             } else {
                 current_exe.clone()
             };
+
+            let marker = UpdateResumeMarker {
+                from_version: current,
+                to_version: latest.clone(),
+                started_at: UtcTimestamp::now().to_rfc3339(),
+                restart_args,
+                projects: Vec::new(),
+                attempt: 1,
+            };
+            if let Err(error) = update::persist_update_resume_marker(&marker) {
+                ops.write_stderr(&format!("Failed to apply update: {error}\n"));
+                return RunOutcome::Code(1);
+            }
 
             let old_pid = std::process::id();
             let result = match payload {
@@ -193,6 +223,9 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
                 }
                 Err(error) => {
                     ops.write_stderr(&format!("Failed to apply update: {error}\n"));
+                    if let Err(cleanup) = update::clear_update_resume_marker() {
+                        ops.write_stderr(&format!("{cleanup}\n"));
+                    }
                     RunOutcome::Code(1)
                 }
             }
@@ -205,6 +238,28 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
 /// Returns the process exit code (0 = success, non-zero = error).
 pub fn run(cmd: UpdateRunMode) -> i32 {
     let mut ops = RealUpdateCliOps::default();
+    let settlement = if ops.is_ci() {
+        None
+    } else {
+        update::settle_cli_update_resume_marker(env!("CARGO_PKG_VERSION"), UtcTimestamp::now())
+    };
+    if let Some(settlement) = settlement {
+        let result = settlement.result;
+        let message = format!("{}\n", result.notice());
+        let code = match result.outcome {
+            UpdateApplyOutcome::Success => {
+                ops.write_stdout(&message);
+                0
+            }
+            UpdateApplyOutcome::Failure => {
+                ops.write_stderr(&message);
+                1
+            }
+        };
+        if cmd == UpdateRunMode::Apply {
+            return code;
+        }
+    }
     match run_with(&mut ops, cmd) {
         RunOutcome::Code(code) => code,
         RunOutcome::ExitSuccess => std::process::exit(0),

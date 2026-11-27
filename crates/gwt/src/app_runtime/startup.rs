@@ -2450,6 +2450,13 @@ impl AppRuntime {
         let Some(settlement) =
             gwt_core::update::settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now)
         else {
+            if let Some(result) = gwt_core::update::take_cli_update_resume_notice() {
+                let level = match result.outcome {
+                    gwt_core::update::UpdateApplyOutcome::Success => "info",
+                    gwt_core::update::UpdateApplyOutcome::Failure => "error",
+                };
+                self.pending_update_resume_notice = Some((level.to_string(), result.notice()));
+            }
             return;
         };
         let marker_projects = settlement

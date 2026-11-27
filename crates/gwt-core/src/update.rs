@@ -214,10 +214,7 @@ pub fn persist_pending_update_manifest_in(
     dir: &Path,
     manifest: &PendingUpdateManifest,
 ) -> Result<(), String> {
-    let lock = open_pending_update_manifest_lock(dir)?;
-    fs2::FileExt::lock_exclusive(&lock)
-        .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
-    let _lock = PendingUpdateManifestLock { file: lock };
+    let _lock = wait_for_pending_update_manifest_lock(dir)?;
     let mut staged = manifest.clone();
     if let Some(current) =
         load_pending_update_manifest_in(dir).filter(|current| current.version == staged.version)
@@ -264,6 +261,13 @@ pub fn pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestL
     let lock = open_pending_update_manifest_lock(dir)?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .map_err(|e| format!("Pending-update manifest is busy or cannot be locked: {e}"))?;
+    Ok(PendingUpdateManifestLock { file: lock })
+}
+
+fn wait_for_pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestLock, String> {
+    let lock = open_pending_update_manifest_lock(dir)?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .map_err(|e| format!("Failed to lock pending-update manifest: {e}"))?;
     Ok(PendingUpdateManifestLock { file: lock })
 }
 
@@ -446,9 +450,9 @@ pub struct UpdateResumeProject {
     pub update_drain: bool,
 }
 
-/// Issue #4038 (AC-3): what the GUI was doing right before it quit to apply an
-/// update, written to `~/.gwt/update-resume/marker.json` before the helper is
-/// spawned and consumed by the next bootstrap. Its presence is the only
+/// What the application was doing right before it quit to apply an update,
+/// written to `~/.gwt/update-resume/marker.json` before the helper is spawned
+/// and consumed by the next bootstrap. Its presence is the only
 /// signal that a launch is the tail of an apply rather than a cold start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateResumeMarker {
@@ -542,6 +546,21 @@ pub struct UpdateApplyResult {
     pub recorded_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The CLI settled the marker before the GUI could report the outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notify_on_gui_startup: bool,
+}
+
+impl UpdateApplyResult {
+    pub fn notice(&self) -> String {
+        match self.outcome {
+            UpdateApplyOutcome::Success => format!("Updated to v{}", self.to_version),
+            UpdateApplyOutcome::Failure => format!(
+                "Update to v{} failed: still running v{} (attempt {}). Click the version label to open Release Notes and retry.",
+                self.to_version, self.observed_version, self.attempt
+            ),
+        }
+    }
 }
 
 /// `~/.gwt/updates/apply-result.json`.
@@ -705,14 +724,10 @@ impl UpdateResumeSettlement {
     /// Human-readable notification-center line for this settle.
     pub fn notice(&self) -> String {
         match &self.outcome {
-            UpdateResumeOutcome::Applied => format!(
-                "Updated to v{}; execution resumed",
-                self.marker.to_version
-            ),
-            UpdateResumeOutcome::VersionMismatch { observed_version } => format!(
-                "Update to v{} failed: still running v{} (attempt {}); execution resumed without the update",
-                self.marker.to_version, observed_version, self.marker.attempt
-            ),
+            UpdateResumeOutcome::Applied => {
+                format!("Updated to v{}; execution resumed", self.marker.to_version)
+            }
+            UpdateResumeOutcome::VersionMismatch { .. } => self.result.notice(),
         }
     }
 }
@@ -724,12 +739,35 @@ pub fn settle_update_resume_marker(
     current_version: &str,
     now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
-    let settlement = settle_update_resume_marker_in(
-        &update_resume_dir(),
-        &crate::paths::gwt_updates_dir(),
-        current_version,
-        now,
-    )?;
+    settle_update_resume_at_startup(current_version, now, false)
+}
+
+/// The restarted update command can settle only a CLI attempt. The GUI owns
+/// the drain holds and session restore information in its own markers.
+pub fn settle_cli_update_resume_marker(
+    current_version: &str,
+    now: UtcTimestamp,
+) -> Option<UpdateResumeSettlement> {
+    settle_update_resume_at_startup(current_version, now, true)
+}
+
+fn settle_update_resume_at_startup(
+    current_version: &str,
+    now: UtcTimestamp,
+    cli_startup: bool,
+) -> Option<UpdateResumeSettlement> {
+    let resume_dir = update_resume_dir();
+    load_update_resume_marker_in(&resume_dir)?;
+    let settlement = {
+        let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir()).ok()?;
+        settle_update_resume_marker_for_startup(
+            &resume_dir,
+            &crate::paths::gwt_updates_dir(),
+            current_version,
+            now,
+            cli_startup,
+        )?
+    };
     if matches!(
         settlement.outcome,
         UpdateResumeOutcome::VersionMismatch { .. }
@@ -744,6 +782,22 @@ pub fn settle_update_resume_marker(
     Some(settlement)
 }
 
+/// Consume a result notification when the CLI already settled its marker.
+pub fn take_cli_update_resume_notice() -> Option<UpdateApplyResult> {
+    let result = load_update_apply_result()?;
+    if !result.notify_on_gui_startup {
+        return None;
+    }
+    let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir()).ok()?;
+    let mut result = load_update_apply_result()?;
+    if !result.notify_on_gui_startup {
+        return None;
+    }
+    result.notify_on_gui_startup = false;
+    persist_update_apply_result(&result).ok()?;
+    Some(result)
+}
+
 /// Test-friendly variant of [`settle_update_resume_marker`].
 pub fn settle_update_resume_marker_in(
     resume_dir: &Path,
@@ -751,7 +805,20 @@ pub fn settle_update_resume_marker_in(
     current_version: &str,
     now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
+    settle_update_resume_marker_for_startup(resume_dir, updates_dir, current_version, now, false)
+}
+
+fn settle_update_resume_marker_for_startup(
+    resume_dir: &Path,
+    updates_dir: &Path,
+    current_version: &str,
+    now: UtcTimestamp,
+    cli_startup: bool,
+) -> Option<UpdateResumeSettlement> {
     let marker = load_update_resume_marker_in(resume_dir)?;
+    if cli_startup && marker.restart_args.first().map(String::as_str) != Some("update") {
+        return None;
+    }
     let normalize = |v: &str| v.trim().trim_start_matches('v').to_string();
     let observed_version = normalize(current_version);
     let applied = observed_version == normalize(&marker.to_version);
@@ -766,6 +833,7 @@ pub fn settle_update_resume_marker_in(
                 attempt: marker.attempt,
                 recorded_at: now.to_rfc3339(),
                 message: None,
+                notify_on_gui_startup: cli_startup,
             },
         )
     } else {
@@ -784,6 +852,7 @@ pub fn settle_update_resume_marker_in(
                     "expected v{} after restart but the running binary is v{observed_version}",
                     normalize(&marker.to_version)
                 )),
+                notify_on_gui_startup: cli_startup,
             },
         )
     };
@@ -792,6 +861,7 @@ pub fn settle_update_resume_marker_in(
             "fail",
             &[("stage", "record_apply_result"), ("reason", &err)],
         );
+        return None;
     }
     let marker_write = clear_update_resume_marker_in(resume_dir);
     if let Err(err) = marker_write {
@@ -3367,6 +3437,7 @@ mod tests {
             attempt: 1,
             recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
 
@@ -3438,6 +3509,7 @@ mod tests {
             attempt: 1,
             recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
         let periodic = manager.clone();
@@ -6359,6 +6431,8 @@ mod tests {
         };
         persist_update_resume_marker(&marker).unwrap();
         let now = UtcTimestamp::now();
+        assert!(settle_cli_update_resume_marker(env!("CARGO_PKG_VERSION"), now).is_none());
+        assert_eq!(load_update_resume_marker(), Some(marker));
         let result = settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).unwrap();
         assert!(matches!(
             result.outcome,
