@@ -1,0 +1,7 @@
+gwt_sha=6a15eebcb697bb20364fe29819b8a83ce245df04
+gwtd 9.178.0
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B8132
+Apple M5 Max
+2026-11-27T17:21:18Z

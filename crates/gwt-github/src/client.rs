@@ -72,6 +72,7 @@ pub enum IssueState {
 pub enum IssueCloseReason {
     Completed,
     NotPlanned,
+    Duplicate(IssueNumber),
 }
 
 impl IssueCloseReason {
@@ -80,11 +81,12 @@ impl IssueCloseReason {
         match self {
             Self::Completed => "completed",
             Self::NotPlanned => "not_planned",
+            Self::Duplicate(_) => "duplicate",
         }
     }
 
-    /// Parse an operation parameter. Accepts the REST spellings plus the
-    /// hyphenated form agents type by habit.
+    /// Parse a reason that needs no other arguments. A duplicate requires a
+    /// target Issue number and must be constructed with that number.
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "completed" => Some(Self::Completed),
@@ -94,7 +96,7 @@ impl IssueCloseReason {
     }
 
     /// Every accepted spelling, for refusal messages.
-    pub const ACCEPTED: [&'static str; 2] = ["completed", "not_planned"];
+    pub const ACCEPTED: [&'static str; 3] = ["completed", "not_planned", "duplicate"];
 }
 
 /// Snapshot of a single Issue including its body and every artifact comment.

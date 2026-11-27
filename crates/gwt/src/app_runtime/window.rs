@@ -373,6 +373,7 @@ impl AppRuntime {
             return vec![OutboundEvent::project(
                 project_key,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "warn".to_string(),

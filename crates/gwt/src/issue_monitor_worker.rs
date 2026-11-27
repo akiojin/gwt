@@ -4016,7 +4016,8 @@ fn advance_one_autonomous_issue(
                         .find(|issue| issue.number == issue_number)
                         .and_then(|issue| issue.body.clone())
                         .map(|body| {
-                            crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
+                            crate::issue_monitor_gate::classify_acceptance_criteria(&body)
+                                .review_required_ids()
                         })
                         .unwrap_or_default();
                     // Issue #3933 (review follow-up): every readback the dispatch
@@ -4044,21 +4045,24 @@ fn advance_one_autonomous_issue(
                         .find(|issue| issue.number == issue_number)
                         .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
                         .unwrap_or_default();
-                    // Issue #7942 AC-1: a SPEC slice PR is reviewed against the
-                    // slice section its body names, not the parent SPEC's AC.
+                    // Issue #7942 AC-1/AC-4: a SPEC PR is a slice. It is reviewed
+                    // against the slice its body names, or — when no slice can be
+                    // identified — on code defects and a slice-declaration
+                    // finding, never against the parent SPEC's AC.
                     let slice = if linked_issue_kind == crate::LinkedIssueKind::Spec {
                         let pr_body = run_budgeted_readback_stage(
                             IssueMonitorScanStage::PrDiffReadback,
                             || gwt_git::pr_status::try_fetch_pr_body(repo_path, pr),
                         )?;
-                        issues
+                        let spec = issues
                             .iter()
                             .find(|issue| issue.number == issue_number)
                             .and_then(|issue| issue.body.as_deref())
-                            .zip(pr_body.as_deref())
-                            .and_then(|(spec, pr_body)| {
-                                crate::issue_monitor_review::slice_review_scope(spec, pr_body)
-                            })
+                            .unwrap_or_default();
+                        Some(crate::issue_monitor_review::spec_pr_review_scope(
+                            spec,
+                            pr_body.as_deref().unwrap_or_default(),
+                        ))
                     } else {
                         None
                     };

@@ -20357,7 +20357,7 @@ impl IssueMonitorState {
         {
             return None;
         }
-        self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw)
+        self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw, true)
     }
 
     pub(crate) fn apply_merged_evidence_review_verdict(
@@ -20376,7 +20376,10 @@ impl IssueMonitorState {
         {
             return None;
         }
-        let passed = self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw)?;
+        // A merged-evidence review exists to judge the external evidence, so
+        // it defers nothing.
+        let passed =
+            self.apply_bound_review_verdict(issue_number, reviewed_sha, verdict_raw, false)?;
         let record = self.autonomous_record_mut(issue_number);
         record.end_merged_evidence_review(if passed {
             MergedEvidenceReviewOutcome::Pass
@@ -20394,13 +20397,22 @@ impl IssueMonitorState {
         issue_number: u64,
         reviewed_sha: &str,
         verdict_raw: &str,
+        defer_external: bool,
     ) -> Option<bool> {
         let record = self.autonomous_records.get(&issue_number)?;
         // Reject a verdict that is not for the SHA we are reviewing.
         if record.reviewed_sha.as_deref() != Some(reviewed_sha) {
             return None;
         }
-        let required = record
+        // Issue #7954: criteria confirmed after merge are neither required
+        // nor allowed to fail a pre-merge review.
+        let deferred = record
+            .acceptance_snapshot
+            .as_ref()
+            .filter(|_| defer_external)
+            .map(|snapshot| snapshot.external_verification_ids())
+            .unwrap_or_default();
+        let required: Vec<String> = record
             .review_criteria
             .clone()
             .or_else(|| {
@@ -20409,8 +20421,15 @@ impl IssueMonitorState {
                     .as_ref()
                     .map(|snapshot| snapshot.ids.clone())
             })
-            .unwrap_or_default();
-        let outcome = crate::issue_monitor_review::evaluate_review_verdict(verdict_raw, &required);
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| !deferred.contains(id))
+            .collect();
+        let outcome = crate::issue_monitor_review::evaluate_review_verdict_with_deferred(
+            verdict_raw,
+            &required,
+            &deferred,
+        );
         let passed = matches!(
             outcome,
             crate::issue_monitor_review::ReviewGateOutcome::Pass
@@ -55567,6 +55586,58 @@ mod tests {
         assert_eq!(
             monitor.autonomous_record(7).unwrap().review_passed,
             Some(false)
+        );
+    }
+
+    /// Issue #7954 AC-2 / AC-3: criteria confirmed after merge do not decide
+    /// a pre-merge review; every other criterion stays fail-closed.
+    #[test]
+    fn issue_7954_external_verification_criteria_do_not_fail_the_review() {
+        use crate::issue_monitor_gate::classify_acceptance_criteria;
+        use crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA;
+        let body = "## Acceptance Criteria\n- [ ] AC-1: implement\n- [ ] AC-2: test\n\
+                    - [ ] AC-3: PM checks develop [main-verification]\n";
+        let verdict = |criteria: &str, overall: &str| {
+            format!(
+                r#"{{"schema":"{REVIEW_VERDICT_SCHEMA}","overall":"{overall}","criteria":[{criteria}]}}"#
+            )
+        };
+        let review = |raw: &str| {
+            let mut monitor = autonomous_state();
+            monitor.capture_acceptance_snapshot(7, classify_acceptance_criteria(body).snapshot());
+            monitor.begin_review(7, 99, "abc123");
+            monitor.apply_review_verdict(7, "abc123", raw)
+        };
+        let ac1 = r#"{"id":"AC-1","verdict":"pass"}"#;
+        let ac2 = r#"{"id":"AC-2","verdict":"pass"}"#;
+        let ac3_fail = r#"{"id":"AC-3","verdict":"fail"}"#;
+
+        assert_eq!(
+            review(&verdict(&format!("{ac1},{ac2},{ac3_fail}"), "fail")),
+            Some(true),
+            "AC-2: only the external criterion failed"
+        );
+        assert_eq!(
+            review(&verdict(&format!("{ac1},{ac2}"), "pass")),
+            Some(true)
+        );
+        assert_eq!(
+            review(&verdict(&format!("{ac1},{ac3_fail}"), "fail")),
+            Some(false),
+            "AC-3: a missing untagged criterion still fails"
+        );
+        assert_eq!(
+            review(&verdict(
+                &format!(r#"{ac1},{{"id":"AC-2","verdict":"fail"}},{ac3_fail}"#),
+                "fail"
+            )),
+            Some(false),
+            "AC-3: a failed untagged criterion still fails"
+        );
+        assert_eq!(
+            review(&verdict(&format!("{ac1},{ac2}"), "fail")),
+            Some(false),
+            "an overall fail without a deferred failure still fails"
         );
     }
 

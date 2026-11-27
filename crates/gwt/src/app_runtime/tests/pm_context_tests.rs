@@ -2049,6 +2049,7 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
         .pm_sessions
         .insert(repo.clone(), "pm-successor".to_string());
     let stale_status = BackendEvent::IssueMonitorToast {
+        host_notice: false,
         notification_transition: None,
         notification_transition_id: None,
         level: "error".to_string(),

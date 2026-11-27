@@ -747,6 +747,7 @@ fn project_notification_monitor_replay_is_suppressed_and_close_revokes_native() 
     let event = OutboundEvent::project(
         context.project_key.clone(),
         BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: Some(
                 gwt::issue_monitor::MonitorNotificationTransition::NeedsHuman,
             ),
