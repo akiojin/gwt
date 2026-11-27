@@ -29,7 +29,7 @@ pub fn grok_home() -> Option<PathBuf> {
     std::env::var_os("GROK_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
+        .or_else(|| crate::paths::home_dir().map(|home| home.join(".grok")))
 }
 
 /// Resolve the store root from the environment that will actually be passed

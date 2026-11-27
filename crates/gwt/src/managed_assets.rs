@@ -251,7 +251,7 @@ pub fn cleanup_worktree_with_codex_project_trust<T>(
     let Some(config_path) = process_stable_codex_config_path_for_worktree_with(
         worktree,
         std::env::var_os("CODEX_HOME").as_deref(),
-        dirs::home_dir().as_deref(),
+        gwt_core::paths::home_dir().as_deref(),
     ) else {
         return cleanup();
     };
@@ -277,7 +277,7 @@ pub fn cleanup_worktree_with_codex_project_trust<T>(
 pub fn garbage_collect_shared_codex_hook_trust() -> io::Result<usize> {
     let Some(config_path) = process_stable_codex_config_path_with(
         std::env::var_os("CODEX_HOME").as_deref(),
-        dirs::home_dir().as_deref(),
+        gwt_core::paths::home_dir().as_deref(),
     ) else {
         return Ok(0);
     };

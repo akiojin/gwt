@@ -1506,7 +1506,7 @@ pub fn maybe_register_codex_managed_hook_trust_for_launch(
                 child_cwd,
                 &config.env_vars,
                 HostEnvKeySemantics::native(),
-                dirs::home_dir().as_deref(),
+                gwt_core::paths::home_dir().as_deref(),
             ) {
                 Ok(path) => path,
                 Err(error) => {
@@ -1852,7 +1852,7 @@ pub fn register_codex_managed_project_trust_for_resolved_launch(
         config,
         docker_binding,
         std::env::var_os("CODEX_HOME").as_deref(),
-        dirs::home_dir().as_deref(),
+        gwt_core::paths::home_dir().as_deref(),
     )
 }
 

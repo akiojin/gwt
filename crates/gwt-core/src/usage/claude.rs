@@ -498,7 +498,7 @@ pub fn claude_home() -> Option<PathBuf> {
             return Some(PathBuf::from(dir));
         }
     }
-    dirs::home_dir().map(|h| h.join(".claude"))
+    crate::paths::home_dir().map(|h| h.join(".claude"))
 }
 
 /// Locate the transcript file for a session id under `~/.claude/projects/*`.

@@ -21,6 +21,15 @@ pub fn gwt_home_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `dirs::home_dir` that honours a test's thread-local `ScopedGwtHome` pin.
+///
+/// Production readers that must keep the platform `dirs` resolution call this
+/// instead of `dirs::home_dir()` (SPEC #4072 FR-003); without a pin it is
+/// exactly `dirs::home_dir()`.
+pub fn home_dir() -> Option<PathBuf> {
+    gwt_home_override().or_else(dirs::home_dir)
+}
+
 /// Resolve the user-home root, isolating Cargo test executables by default.
 pub fn user_home() -> Option<PathBuf> {
     if let Some(home) = gwt_home_override() {
@@ -423,12 +432,14 @@ mod tests {
         );
     }
 
-    /// A generic HOME override is honoured by the shared resolver as well.
+    /// A generic HOME override is honoured by the shared resolver and by the
+    /// `dirs::home_dir` seam (SPEC #4072 AC-3) as well.
     #[test]
     fn a_generic_home_override_drives_user_home() {
         let home = tempfile::tempdir().unwrap();
         let _home = crate::env::ScopedEnvOverride::set("HOME", home.path());
         assert_eq!(user_home(), Some(home.path().to_path_buf()));
+        assert_eq!(home_dir(), Some(home.path().to_path_buf()));
     }
 
     #[cfg(unix)]

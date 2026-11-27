@@ -14,6 +14,9 @@ use crate::{
     },
 };
 
+/// `dirs::home_dir` that honours a test's `ScopedGwtHome` pin (SPEC #4072).
+pub use gwt_config::home::home_dir;
+
 /// Return the gwt home directory (`~/.gwt/`), sharing settings' test isolation.
 pub fn gwt_home() -> PathBuf {
     let home = gwt_config::home::user_home().expect("home directory must be resolvable");

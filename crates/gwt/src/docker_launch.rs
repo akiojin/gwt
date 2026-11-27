@@ -403,9 +403,9 @@ pub fn register_codex_managed_hook_trust_in_docker(
 
 fn resolve_user_home_dir() -> Result<PathBuf, String> {
     let home = if cfg!(windows) {
-        std::env::var("USERPROFILE")
+        gwt_core::env::var("USERPROFILE")
     } else {
-        std::env::var("HOME")
+        gwt_core::env::var("HOME")
     }
     .map(PathBuf::from)
     .map_err(|_| "Could not determine home directory".to_string())?;

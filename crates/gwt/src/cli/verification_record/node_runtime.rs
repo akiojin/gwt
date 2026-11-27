@@ -40,7 +40,7 @@ pub(super) fn prepare(
     }
     if let Some(nvm) = std::env::var_os("NVM_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".nvm")))
+        .or_else(|| gwt_core::paths::home_dir().map(|home| home.join(".nvm")))
     {
         if let Ok(versions) = std::fs::read_dir(nvm.join("versions/node")) {
             directories.extend(versions.flatten().map(|entry| entry.path().join("bin")));

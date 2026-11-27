@@ -346,7 +346,7 @@ fn home_directory(environment: &HashMap<String, String>) -> Option<std::path::Pa
                 .filter(|value| !value.is_empty())
                 .cloned()
         })
-        .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| gwt_core::env::var("HOME").ok())
         .map(std::path::PathBuf::from)
 }
 
@@ -456,7 +456,7 @@ fn register_install_directory_on_shell_path(
         .get("HOME")
         .filter(|value| !value.is_empty())
         .cloned()
-        .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| gwt_core::env::var("HOME").ok())
     else {
         return ShellPathRegistration::Skipped;
     };

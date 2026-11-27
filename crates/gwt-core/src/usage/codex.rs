@@ -374,7 +374,7 @@ pub fn codex_home() -> Option<PathBuf> {
             return Some(PathBuf::from(dir));
         }
     }
-    dirs::home_dir().map(|h| h.join(".codex"))
+    crate::paths::home_dir().map(|h| h.join(".codex"))
 }
 
 /// Find the most recently modified `rollout-*.jsonl` under `<home>/sessions`.

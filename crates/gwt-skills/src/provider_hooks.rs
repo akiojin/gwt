@@ -418,8 +418,8 @@ pub fn hermes_source_home(worktree: &Path) -> Option<PathBuf> {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
+    gwt_core::env::var_os("HOME")
+        .or_else(|| gwt_core::env::var_os("USERPROFILE"))
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
