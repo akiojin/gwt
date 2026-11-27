@@ -18,6 +18,7 @@ export const UPDATE_APPLY_FAILURE_STAGES = Object.freeze([
   "Replace staged update",
   "Download asset",
   "Persist pending",
+  "Cancel download",
   "Apply update",
   "Restart now",
   "Apply after agents finish",
