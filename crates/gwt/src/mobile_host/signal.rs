@@ -34,7 +34,8 @@ pub enum BrowserSignal {
         #[serde(default)]
         sdp_m_line_index: Option<u16>,
     },
-    EndOfCandidates,
+    /// A struct variant so that `deny_unknown_fields` rejects extra fields.
+    EndOfCandidates {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -110,7 +111,7 @@ impl SignalSequence {
                 return Err(SignalError::TooManyCandidates)
             }
             BrowserSignal::Candidate { .. } => self.candidates += 1,
-            BrowserSignal::EndOfCandidates => self.ended = true,
+            BrowserSignal::EndOfCandidates {} => self.ended = true,
         }
         Ok(signal)
     }
@@ -156,7 +157,7 @@ mod tests {
             })
         );
         let end = json!({"type":"end_of_candidates"}).to_string();
-        assert_eq!(sequence.accept(&end), Ok(BrowserSignal::EndOfCandidates));
+        assert_eq!(sequence.accept(&end), Ok(BrowserSignal::EndOfCandidates {}));
         // Nothing follows the end of candidates.
         assert_eq!(
             sequence.accept(&candidate("c")),
@@ -174,6 +175,7 @@ mod tests {
             json!({"type":"offer","sdp":"v=0","project":"p"}).to_string(),
             json!({"type":"offer","sdp":""}).to_string(),
             json!({"type":"offer"}).to_string(),
+            json!({"type":"end_of_candidates","x":1}).to_string(),
         ] {
             let mut sequence = SignalSequence::default();
             assert_eq!(
