@@ -918,14 +918,11 @@ fn pm_runtime_receives_only_role_skills_and_their_command_aliases() {
         "gwt-coordination",
         "gwt-discussion",
         "gwt-feedback",
-        "gwt-issue-search",
         "gwt-plan-spec",
         "gwt-pm",
-        "gwt-project-search",
         "gwt-register-issue",
         "gwt-register-spec",
         "gwt-search",
-        "gwt-spec-search",
     ];
     for (agent, provider) in [
         (AgentId::ClaudeCode, ".claude"),
@@ -1238,16 +1235,11 @@ fn non_pm_worktree_never_receives_gwt_pm_guidance() {
                 "gwt-execute",
                 "gwt-feedback",
                 "gwt-fix-issue",
-                "gwt-issue-search",
                 "gwt-manage-pr",
-                "gwt-memory-search",
                 "gwt-plan-spec",
-                "gwt-project-index",
-                "gwt-project-search",
                 "gwt-register-issue",
                 "gwt-register-spec",
                 "gwt-search",
-                "gwt-spec-search",
                 "gwt-verify",
             ]
         );

@@ -271,7 +271,7 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
 - 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は JSON operation `memory.add` でマシンローカルの work-notes memory に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。legacy lessons alias も同じ work-notes memory に追記される。
-- 同種の作業を始める前に work-notes memory を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search` の JSON payload `scopes:["memory"]` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
+- 同種の作業を始める前に work-notes memory を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search` の JSON payload `scopes:["memory"]` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
 

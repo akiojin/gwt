@@ -1900,7 +1900,7 @@ withheld からの回復では設定を戻すか既知 operation を報告し、
 SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャンクとして一度だけ格納します。
 `gwtd` JSON `search` の `scopes:["specs"]` は SPEC、`scopes:["issues"]` は
 通常 Issue、`scopes:["specs","issues"]` は両方を検索します。既定では両種と他の検索
-スコープを含みます。`gwt-spec-search` / `gwt-issue-search` も同じフィルターを使います。
+スコープを含みます。`gwt-search` スキルも同じフィルターを使います。
 どちらかのスコープを再構築すると、ローカル Issue キャッシュから旧索引を移行します。
 旧 SPEC 専用ストアは参照されなくなるため、手動で削除する必要はありません。
 

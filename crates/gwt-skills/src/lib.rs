@@ -603,10 +603,6 @@ mod tests {
             "missing gwt-arch-review skill dir"
         );
         assert!(dirs.contains(&"gwt-search"), "missing gwt-search skill dir");
-        assert!(
-            dirs.contains(&"gwt-memory-search"),
-            "missing gwt-memory-search skill dir"
-        );
         assert!(dirs.contains(&"gwt-agent"), "missing gwt-agent skill dir");
         assert!(
             dirs.contains(&"gwt-manage-pr"),
@@ -672,10 +668,6 @@ mod tests {
             "missing gwt-search.md command"
         );
         assert!(
-            files.contains(&"gwt-memory-search.md"),
-            "missing gwt-memory-search.md command"
-        );
-        assert!(
             files.contains(&"gwt-agent.md"),
             "missing gwt-agent.md command"
         );
@@ -733,12 +725,24 @@ mod tests {
     fn repo_does_not_keep_unmanaged_local_search_assets() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
 
-        for relative in [
-            ".claude/commands/gwt-file-search.md",
-            ".claude/commands/gwt-issue-search.md",
-            ".claude/skills/gwt-file-search",
-            ".codex/skills/gwt-file-search",
+        // Issue #4741: scope-only search skills are folded into gwt-search.
+        let mut retired = vec![
+            ".claude/commands/gwt-file-search.md".to_string(),
+            ".claude/skills/gwt-file-search".to_string(),
+            ".codex/skills/gwt-file-search".to_string(),
+        ];
+        for skill in [
+            "gwt-spec-search",
+            "gwt-issue-search",
+            "gwt-project-search",
+            "gwt-memory-search",
+            "gwt-project-index",
         ] {
+            retired.push(format!(".claude/commands/{skill}.md"));
+            retired.push(format!(".claude/skills/{skill}"));
+            retired.push(format!(".codex/skills/{skill}"));
+        }
+        for relative in &retired {
             assert!(
                 std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
                 "unexpected unmanaged local asset {relative}"
@@ -752,21 +756,24 @@ mod tests {
         assert_no_gwt_hook_scripts(&workspace_root, ".codex");
     }
 
+    // Issue #4741 AC-4: gwt-search is the single search entrypoint, so its
+    // always-loaded description must name every corpus scope.
     #[test]
-    fn search_commands_route_issue_queries_through_unified_gwt_search() {
-        for command in [
-            include_str!("../../../.claude/commands/gwt-project-index.md"),
-            include_str!("../../../.claude/commands/gwt-project-search.md"),
-            include_str!("../../../.claude/commands/gwt-spec-search.md"),
+    fn gwt_search_description_names_each_search_scope() {
+        for skill in [
+            include_str!("../../../.claude/skills/gwt-search/SKILL.md"),
+            include_str!("../../../.codex/skills/gwt-search/SKILL.md"),
         ] {
-            assert!(
-                command.contains("/gwt:gwt-search {\"query\":\"...\",\"scopes\":[\"issues\"]}"),
-                "expected unified issue-search routing through JSON-scoped gwt-search"
-            );
-            assert!(
-                !command.contains("/gwt:gwt-issue-search"),
-                "unexpected legacy gwt-issue-search command reference"
-            );
+            let description = skill
+                .lines()
+                .find_map(|line| line.strip_prefix("description: "))
+                .expect("gwt-search description");
+            for scope in ["`specs`", "`issues`", "`files`", "`files_docs`", "`memory`"] {
+                assert!(
+                    description.contains(scope),
+                    "gwt-search description must name scope {scope}: {description}"
+                );
+            }
         }
     }
 
@@ -1171,8 +1178,8 @@ mod tests {
         }
 
         for relative in [
-            ".claude/skills/gwt-issue-search/SKILL.md",
-            ".codex/skills/gwt-issue-search/SKILL.md",
+            ".claude/skills/gwt-search/SKILL.md",
+            ".codex/skills/gwt-search/SKILL.md",
         ] {
             let issue_search_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -1735,7 +1742,6 @@ mod tests {
             "gwt-build-spec",
             "gwt-arch-review",
             "gwt-search",
-            "gwt-memory-search",
             "gwt-agent",
             "gwt-manage-pr",
         ] {

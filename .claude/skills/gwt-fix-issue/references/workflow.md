@@ -2,11 +2,9 @@
 
 ## Transition alias
 
-`gwt-fix-issue` is a temporary alias for `gwt-execute`. If this skill is invoked
+`gwt-fix-issue` is an alias for `gwt-execute`. If this skill is invoked
 with `#N` or an Issue URL, continue as `$gwt-execute #N` and load
 the matching `gwt-execute/SKILL.md` asset from the active provider skill tree.
-Keep this file only for transition compatibility during the one-release alias
-window.
 
 Public task entrypoint for resolving an existing GitHub Issue.
 
