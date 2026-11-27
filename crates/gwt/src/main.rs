@@ -5904,6 +5904,7 @@ mod tests {
     #[test]
     fn cancel_update_discards_late_release_selection_resolution() {
         let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![], None);
         let key = ("manual".to_string(), "99.0.0".to_string());
         let cancelled = Arc::new(());

@@ -5394,7 +5394,7 @@ mod tests {
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nab")
                 .unwrap();
-            wait_for_chunk.recv_timeout(Duration::from_secs(5)).unwrap();
+            wait_for_chunk.recv().unwrap();
             cancel.send_replace(true);
             assert_eq!(
                 stream.read(&mut buffer).unwrap(),
@@ -5405,9 +5405,9 @@ mod tests {
         let mgr = UpdateManager::new()
             .with_updates_dir(temp.path().to_path_buf())
             .with_api_base_url(serve_payload_metadata(&asset_url, b"abcd"));
-        let mut received = Some(received);
-        let error = mgr
-            .prepare_update_cancellable(
+        let error = {
+            let mut received = Some(received);
+            mgr.prepare_update_cancellable(
                 "99.0.0",
                 &asset_url,
                 &mut |downloaded, _| {
@@ -5417,7 +5417,8 @@ mod tests {
                 },
                 Some(cancelled),
             )
-            .unwrap_err();
+            .unwrap_err()
+        };
         server.join().unwrap();
         assert_eq!(error, "Update download cancelled");
         assert_eq!(
