@@ -2857,21 +2857,7 @@ fn try_refresh_issue_monitor_candidate_number(
     repo: &str,
     issue_number: u64,
 ) -> Result<IssueMonitorIssue, IssueMonitorScanFailure> {
-    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
-        .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
-    let number = IssueNumber(issue_number);
-    run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
-        crate::issue_cache::refresh_issue_cache_entry_from_remote(repo_path, &cache_root, number)
-    })?;
-    let entry = Cache::new(cache_root).load_entry(number).ok_or_else(|| {
-        IssueMonitorScanFailure::new(
-            IssueMonitorScanStage::CandidateLoad,
-            format!(
-                "issue #{number} has no cache entry after a targeted refresh",
-                number = issue_number
-            ),
-        )
-    })?;
+    let entry = refresh_issue_monitor_candidate_cache_entry(repo_path, owner, repo, issue_number)?;
     // The previous-result fallback scans this candidate again before claiming
     // it. A fresh revision must carry fresh launch prerequisites as well:
     // retaining old labels/readiness can bypass a newly added hold or missing
@@ -2904,6 +2890,26 @@ fn try_refresh_issue_monitor_candidate_number(
         url: None,
         readiness,
         updated_at: Some(entry.snapshot.updated_at.0),
+    })
+}
+
+fn refresh_issue_monitor_candidate_cache_entry(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    issue_number: u64,
+) -> Result<CacheEntry, IssueMonitorScanFailure> {
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
+        .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
+    let number = IssueNumber(issue_number);
+    run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+        crate::issue_cache::refresh_issue_cache_entry_from_remote(repo_path, &cache_root, number)
+    })?;
+    Cache::new(cache_root).load_entry(number).ok_or_else(|| {
+        IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::CandidateLoad,
+            format!("issue #{issue_number} has no cache entry after a targeted refresh"),
+        )
     })
 }
 
@@ -4416,6 +4422,29 @@ pub(crate) fn load_cached_issue_monitor_dependency_candidates_with_roots(
     roots: impl IntoIterator<Item = u64>,
     mut before_load: impl FnMut(u64) -> Result<(), String>,
 ) -> Result<Vec<IssueMonitorIssue>, String> {
+    load_issue_monitor_dependency_candidates(roots, |number| {
+        before_load(number)?;
+        Ok(load_cached_issue_monitor_candidate(cache_root, number))
+    })
+}
+
+pub(crate) fn refresh_issue_monitor_dependency_candidates(
+    repo_path: &Path,
+    roots: impl IntoIterator<Item = u64>,
+) -> Result<Vec<IssueMonitorIssue>, String> {
+    let (owner, repo) =
+        github_remote_owner_and_repo(repo_path).map_err(|error| error.to_string())?;
+    load_issue_monitor_dependency_candidates(roots, |number| {
+        refresh_issue_monitor_candidate_cache_entry(repo_path, &owner, &repo, number)
+            .map(|entry| Some(cached_issue_monitor_candidate(entry)))
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn load_issue_monitor_dependency_candidates(
+    roots: impl IntoIterator<Item = u64>,
+    mut load: impl FnMut(u64) -> Result<Option<IssueMonitorIssue>, String>,
+) -> Result<Vec<IssueMonitorIssue>, String> {
     let mut pending: BTreeSet<_> = roots.into_iter().collect();
     let mut seen = BTreeSet::new();
     let mut issues = Vec::new();
@@ -4423,8 +4452,7 @@ pub(crate) fn load_cached_issue_monitor_dependency_candidates_with_roots(
         if !seen.insert(number) {
             continue;
         }
-        before_load(number)?;
-        if let Some(issue) = load_cached_issue_monitor_candidate(cache_root, number) {
+        if let Some(issue) = load(number)? {
             pending.extend(
                 crate::issue_monitor::parse_issue_monitor_dependencies(
                     issue.body.as_deref().unwrap_or(""),

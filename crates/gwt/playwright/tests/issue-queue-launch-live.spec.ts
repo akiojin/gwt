@@ -3219,6 +3219,7 @@ request.catch(() => {});
       await refresh.click();
       await expect(progress).toHaveText("#43 · Slot returned. Waiting to resume…", { timeout: 30_000 });
       await expect(progress).not.toContainText("Next issue");
+      await expect(agents.getByRole("button", { name: "Continue saved work", exact: true })).toHaveCount(0);
       await info.attach(`shared-save-return-pending-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
 
       await sendLiveGwtEvent(secondPage, { kind: "terminal_input", id: otherWindow, data: "GWT_FIXTURE_EXIT\r" });

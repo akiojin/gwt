@@ -157,6 +157,12 @@ pub struct AgentSwitchSnapshot {
 }
 
 impl AgentSwitchIntent {
+    pub(crate) fn accepts_runtime_exit_receipt(&self) -> bool {
+        self.stage == AgentSwitchStage::StoppingCurrent
+            || (self.stage == AgentSwitchStage::Unknown
+                && self.request.disposition == AgentSwitchDisposition::SwitchToTarget)
+    }
+
     pub(crate) fn has_admission_pin(&self) -> bool {
         matches!(
             self.stage,
@@ -746,6 +752,9 @@ impl IssueMonitorPrefs {
             claim_is_active, claim_is_queued, extract_claim_comments,
         };
 
+        if self.launch_auto {
+            return Err("Save-and-return requires Manual Agent launch settings".into());
+        }
         let owner = intent
             .source
             .assignment
@@ -830,6 +839,9 @@ impl IssueMonitorPrefs {
                 return Err("Source Issue changed after dependency review".into());
             }
             monitor.observe_dependency_completions(observations);
+            if proposed.is_some() && !monitor.switch_ack_blocker_observations_complete(owner) {
+                return Err("One or more declared blockers changed after dependency review; retry the acknowledgement".into());
+            }
         }
         if monitor.issue_is_closed(owner) {
             return Err("Source Issue closure has not been reconciled".into());
@@ -880,9 +892,7 @@ impl IssueMonitorPrefs {
         // Continue Work keeps its existing authority and liveness checks.
         matches!(
             intent.stage,
-            AgentSwitchStage::Unknown
-                | AgentSwitchStage::LaunchingNext
-                | AgentSwitchStage::Returned
+            AgentSwitchStage::Unknown | AgentSwitchStage::LaunchingNext
         ) && intent.checkpoint.is_some()
             && intent.source.assignment.host_id == host
             && intent
@@ -1196,6 +1206,26 @@ impl IssueMonitorPrefs {
             intents,
             request_id: None,
         }
+    }
+}
+
+impl IssueMonitorState {
+    fn switch_ack_blocker_observations_complete(&self, owner: u64) -> bool {
+        self.dependency_facts.get(&owner).is_some_and(|owner| {
+            owner.declarations.blocked_by.iter().all(|&blocker| {
+                self.dependency_facts.get(&blocker).is_some_and(|facts| {
+                    self.dependency_completions.contains_key(&blocker)
+                        && match facts.state {
+                            IssueMonitorIssueState::Closed => {
+                                self.dependency_closed_observation_is_current(blocker)
+                            }
+                            IssueMonitorIssueState::Open => {
+                                matches!(self.dependency_outcome(blocker, None), Some(Some(_)))
+                            }
+                        }
+                })
+            })
+        })
     }
 }
 
@@ -1927,7 +1957,7 @@ mod tests {
             .transition_agent_switch(&operation, AgentSwitchStage::Returned, None)
             .unwrap();
         assert!(!returned.has_admission_pin());
-        assert!(prefs.can_resume_agent_switch_source(&returned, "host"));
+        assert!(!prefs.can_resume_agent_switch_source(&returned, "host"));
         assert!(prefs.cancel_agent_switch(&operation).is_err());
         let resuming = prefs
             .transition_agent_switch(&operation, AgentSwitchStage::Resuming, None)
@@ -1940,6 +1970,79 @@ mod tests {
             .recover_agent_switches_after_restart("host")
             .is_empty());
         assert_eq!(prefs.agent_switch_intents[&operation], resuming);
+    }
+
+    #[test]
+    fn agent_switch_save_and_return_rejects_auto_before_source_stop() {
+        let (mut prefs, _, mut intent) = fixture();
+        intent.request.disposition = AgentSwitchDisposition::SaveAndReturn;
+        intent.request.target_issue_number = None;
+        prefs.launch_auto = true;
+        assert_eq!(
+            prefs.validate_agent_switch_return_condition(Path::new("."), &intent, None, None),
+            Err("Save-and-return requires Manual Agent launch settings".into()),
+        );
+    }
+
+    #[test]
+    fn save_and_return_ack_requires_current_evidence_for_every_declared_blocker() {
+        let issue = |number, body: Option<&str>| IssueMonitorIssue {
+            number,
+            body: body.map(str::to_owned),
+            author_login: None,
+            title: format!("Issue {number}"),
+            labels: Vec::new(),
+            state: IssueMonitorIssueState::Open,
+            url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-10-27T00:00:00Z".into()),
+        };
+        let owner = issue(41, Some("Blocked-by: #42 #43"));
+        let first = issue(42, None);
+        let mut second = issue(43, None);
+        let observations = BTreeMap::from([
+            (
+                42,
+                IssueMonitorDependencyObservation::new(&first, Some(false)),
+            ),
+            (
+                43,
+                IssueMonitorDependencyObservation::new(&second, Some(false)),
+            ),
+        ]);
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        second.updated_at = Some("2026-10-27T00:01:00Z".into());
+        monitor.observe_dependency_candidates(&[owner.clone(), first.clone(), second.clone()]);
+        monitor.observe_dependency_completions(&observations);
+        assert_eq!(monitor.dependency_outcome(42, None), Some(Some(false)));
+        assert_eq!(monitor.dependency_outcome(43, None), None);
+        assert!(!monitor.switch_ack_blocker_observations_complete(41));
+
+        second.state = IssueMonitorIssueState::Closed;
+        let closed = IssueMonitorDependencyObservation::new(&second, Some(true));
+        monitor.observe_dependency_candidates(&[owner, first, second]);
+        monitor.observe_dependency_completions(&BTreeMap::from([
+            (42, observations[&42].clone()),
+            (43, closed),
+        ]));
+        assert!(monitor.switch_ack_blocker_observations_complete(41));
+    }
+
+    #[test]
+    fn unknown_targetless_switch_cannot_accept_an_exit_receipt_or_return_its_slot() {
+        let (mut prefs, _, mut intent) = fixture();
+        intent.stage = AgentSwitchStage::Unknown;
+        assert!(intent.accepts_runtime_exit_receipt());
+        intent.request.disposition = AgentSwitchDisposition::SaveAndReturn;
+        intent.request.target_issue_number = None;
+        assert!(!intent.accepts_runtime_exit_receipt());
+        assert!(intent.has_admission_pin());
+        intent.runtime_exit_confirmed = true;
+        let operation = intent.request.operation_id.clone();
+        prefs.agent_switch_intents.insert(operation.clone(), intent);
+        assert!(prefs
+            .transition_agent_switch(&operation, AgentSwitchStage::Returned, None)
+            .is_err());
     }
 
     #[test]

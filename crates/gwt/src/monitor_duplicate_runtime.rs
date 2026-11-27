@@ -755,11 +755,8 @@ fn apply_requested_runtime_stops(
                         &crate::issue_monitor_prefs_path_for_repo_path(project_root),
                         |prefs| {
                             for intent in prefs.agent_switch_intents.values_mut() {
-                                if matches!(
-                                    intent.stage,
-                                    crate::issue_monitor::AgentSwitchStage::StoppingCurrent
-                                        | crate::issue_monitor::AgentSwitchStage::Unknown
-                                ) && intent.runtime_stop.as_ref() == Some(request)
+                                if intent.accepts_runtime_exit_receipt()
+                                    && intent.runtime_stop.as_ref() == Some(request)
                                     && intent.checkpoint.is_some()
                                 {
                                     intent.runtime_exit_confirmed = true;
