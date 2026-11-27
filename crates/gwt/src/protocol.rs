@@ -3326,6 +3326,10 @@ pub enum BackendEvent {
         level: String,
         message: String,
         issue_number: Option<u64>,
+        /// Issue #3922: true only for host-wide notices that reach every page;
+        /// project pages label every other toast with their own project name.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        host_notice: bool,
     },
     AttachmentProgress {
         id: String,

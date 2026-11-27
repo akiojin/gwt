@@ -1056,6 +1056,7 @@ impl AppRuntime {
             vec![OutboundEvent::project(
                 context.project_key,
                 gwt::BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     level: "error".into(),
                     message,
                     issue_number: None,
@@ -1158,6 +1159,7 @@ impl AppRuntime {
                 } => event_proxy.send(UserEvent::Dispatch(vec![OutboundEvent::project(
                     project_key.clone(),
                     gwt::protocol::BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         level,
                         message,
                         issue_number,

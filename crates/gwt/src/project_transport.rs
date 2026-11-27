@@ -156,6 +156,7 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::All,
             event: BackendEvent::IssueMonitorToast {
+                host_notice: true,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: level.into(),
@@ -4943,6 +4944,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let event = BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "error".into(),

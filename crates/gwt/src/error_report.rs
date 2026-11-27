@@ -306,6 +306,7 @@ mod tests {
     fn error_toast_backend_event_is_written_to_the_ledger() {
         let (_dir, _home) = isolated_home();
         record_backend_event(&BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "error".into(),
@@ -361,6 +362,7 @@ mod tests {
     fn info_toasts_are_not_recorded() {
         let (_dir, _home) = isolated_home();
         record_backend_event(&BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "info".into(),
@@ -386,6 +388,7 @@ mod tests {
     fn duplicate_error_toasts_within_five_seconds_are_not_repeated() {
         let (_dir, _home) = isolated_home();
         let event = BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "error".into(),
@@ -424,6 +427,7 @@ mod tests {
         };
         append_record(backend_event_record(&launch_failed, None).unwrap(), false);
         let toast = BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "error".into(),
