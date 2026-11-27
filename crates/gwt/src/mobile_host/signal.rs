@@ -14,6 +14,17 @@
 //! answer after the browser's offer, then its own trickled candidates (within
 //! the same bounds) and their end. A Host signal that breaks this wire rejects
 //! the whole connection, in both directions.
+//!
+//! A connection that claimed an invite ([`SignalSequence::claimed`]) may also
+//! pair once, after the Host answered (so both DTLS fingerprints are fixed):
+//! the browser's `{"type":"pair_request","name","public_key","project"}`, the
+//! Host's `{"type":"pair_challenge","request_id","signing_payload"}` and the
+//! browser's `{"type":"pair_proof","request_id","signature"}`, in that order.
+//! The key (65-byte raw P-256 point) and signature (64-byte `r‖s`) travel as
+//! unpadded base64url; the signing payload is the Host's exact JSON text. The
+//! end of candidates stops only candidates. A reconnected device's connection
+//! never pairs. Neither the request nor the proof is checked here beyond its
+//! shape: the Host authority verifies them.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +36,16 @@ pub const MAX_CANDIDATES: usize = 128;
 pub const MAX_CANDIDATE_BYTES: usize = 1024;
 /// Bound of a candidate's media stream identification tag.
 pub const MAX_SDP_MID_BYTES: usize = 64;
+/// Bound of the device name a pairing request carries.
+pub const MAX_PAIR_NAME_BYTES: usize = 256;
+/// Bound of the Project a pairing request names.
+pub const MAX_PAIR_PROJECT_BYTES: usize = 4096;
+/// Bound of the pairing request ID the Host challenges with.
+pub const MAX_REQUEST_ID_BYTES: usize = 64;
+/// A raw uncompressed P-256 public key.
+const PUBLIC_KEY_BYTES: usize = 65;
+/// A fixed-size P-256 ECDSA signature (`r‖s`).
+const SIGNATURE_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -41,6 +62,25 @@ pub enum BrowserSignal {
     },
     /// A struct variant so that `deny_unknown_fields` rejects extra fields.
     EndOfCandidates {},
+    PairRequest {
+        name: String,
+        #[serde(deserialize_with = "base64url")]
+        public_key: Vec<u8>,
+        project: String,
+    },
+    PairProof {
+        request_id: String,
+        #[serde(deserialize_with = "base64url")]
+        signature: Vec<u8>,
+    },
+}
+
+fn base64url<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    use base64::Engine as _;
+    let text = String::deserialize(deserializer)?;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text)
+        .map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -59,7 +99,8 @@ pub enum SignalError {
 
 /// A signal the Host sends to a browser, encoded as `{"type":"answer","sdp"}`,
 /// `{"type":"candidate","candidate","sdp_mid"?,"sdp_m_line_index"?}` or
-/// `{"type":"end_of_candidates"}`.
+/// `{"type":"end_of_candidates"}`, or a claimed connection's
+/// `{"type":"pair_challenge","request_id","signing_payload"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostSignal {
@@ -74,11 +115,29 @@ pub enum HostSignal {
         sdp_m_line_index: Option<u16>,
     },
     EndOfCandidates {},
+    PairChallenge {
+        request_id: String,
+        signing_payload: String,
+    },
 }
 
-/// The signal state of one browser connection, in both directions.
+/// How far a connection's pairing has gone.
+#[derive(Debug, Default)]
+enum Pairing {
+    /// A reconnected device's connection: no pairing.
+    #[default]
+    Refused,
+    Open,
+    Requested,
+    Challenged(String),
+    Proved,
+}
+
+/// The signal state of one browser connection, in both directions. The
+/// default is a reconnected device's connection, which never pairs.
 #[derive(Debug, Default)]
 pub struct SignalSequence {
+    pairing: Pairing,
     offered: bool,
     candidates: usize,
     ended: bool,
@@ -89,6 +148,14 @@ pub struct SignalSequence {
 }
 
 impl SignalSequence {
+    /// The state of a connection that claimed an invite: it may pair once.
+    pub fn claimed() -> Self {
+        Self {
+            pairing: Pairing::Open,
+            ..Self::default()
+        }
+    }
+
     /// Parse the next relayed payload. Any failure rejects the connection, so
     /// every later payload is [`SignalError::Rejected`].
     pub fn accept(&mut self, payload: &str) -> Result<BrowserSignal, SignalError> {
@@ -138,12 +205,38 @@ impl SignalSequence {
             {
                 return Err(SignalError::Invalid)
             }
+            BrowserSignal::PairRequest {
+                name,
+                public_key,
+                project,
+            } if name.is_empty()
+                || name.len() > MAX_PAIR_NAME_BYTES
+                || project.is_empty()
+                || project.len() > MAX_PAIR_PROJECT_BYTES
+                || public_key.len() != PUBLIC_KEY_BYTES =>
+            {
+                return Err(SignalError::Invalid)
+            }
+            BrowserSignal::PairProof { signature, .. } if signature.len() != SIGNATURE_BYTES => {
+                return Err(SignalError::Invalid)
+            }
             _ => {}
         }
-        if self.ended {
-            return Err(SignalError::OutOfOrder);
-        }
-        match signal {
+        match &signal {
+            BrowserSignal::PairRequest { .. } => {
+                if !self.answered || !matches!(self.pairing, Pairing::Open) {
+                    return Err(SignalError::OutOfOrder);
+                }
+                self.pairing = Pairing::Requested;
+            }
+            BrowserSignal::PairProof { request_id, .. } => match &self.pairing {
+                Pairing::Challenged(challenged) if challenged == request_id => {
+                    self.pairing = Pairing::Proved
+                }
+                Pairing::Challenged(_) => return Err(SignalError::Invalid),
+                _ => return Err(SignalError::OutOfOrder),
+            },
+            _ if self.ended => return Err(SignalError::OutOfOrder),
             BrowserSignal::Offer { .. } if self.offered => return Err(SignalError::OutOfOrder),
             BrowserSignal::Offer { .. } => self.offered = true,
             _ if !self.offered => return Err(SignalError::OutOfOrder),
@@ -169,16 +262,29 @@ impl SignalSequence {
             {
                 return Err(SignalError::Invalid)
             }
+            HostSignal::PairChallenge {
+                request_id,
+                signing_payload,
+            } if request_id.is_empty()
+                || request_id.len() > MAX_REQUEST_ID_BYTES
+                || signing_payload.is_empty() =>
+            {
+                return Err(SignalError::Invalid)
+            }
             _ => {}
         }
         let payload = serde_json::to_string(signal).map_err(|_| SignalError::Invalid)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(SignalError::TooLarge);
         }
-        if self.host_ended {
-            return Err(SignalError::OutOfOrder);
-        }
         match signal {
+            HostSignal::PairChallenge { request_id, .. } => {
+                if !matches!(self.pairing, Pairing::Requested) {
+                    return Err(SignalError::OutOfOrder);
+                }
+                self.pairing = Pairing::Challenged(request_id.clone());
+            }
+            _ if self.host_ended => return Err(SignalError::OutOfOrder),
             HostSignal::Answer { .. } if !self.offered || self.answered => {
                 return Err(SignalError::OutOfOrder)
             }
@@ -472,6 +578,209 @@ mod tests {
         assert_eq!(
             sequence.send(&host_candidate("c")),
             Err(SignalError::TooManyCandidates)
+        );
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn pair_request(public_key: &[u8]) -> String {
+        json!({"type":"pair_request","name":"Phone","public_key":b64(public_key),"project":"p"})
+            .to_string()
+    }
+
+    fn pair_proof(request_id: &str, signature: &[u8]) -> String {
+        json!({"type":"pair_proof","request_id":request_id,"signature":b64(signature)}).to_string()
+    }
+
+    fn pair_challenge(request_id: &str) -> HostSignal {
+        HostSignal::PairChallenge {
+            request_id: request_id.to_string(),
+            signing_payload: r#"["gwt-mobile-pair-v1"]"#.to_string(),
+        }
+    }
+
+    /// A claimed connection after the Host answered: both fingerprints are fixed.
+    fn answered_claim() -> SignalSequence {
+        let mut sequence = SignalSequence::claimed();
+        assert!(sequence.accept(&offer()).is_ok());
+        assert!(sequence.send(&answer("v=0")).is_ok());
+        sequence
+    }
+
+    #[test]
+    fn a_claimed_connection_pairs_once_in_order_on_the_fixed_wire() {
+        let mut sequence = answered_claim();
+        // The end of candidates stops only candidates, never the pairing.
+        let end = json!({"type":"end_of_candidates"}).to_string();
+        assert!(sequence.accept(&end).is_ok());
+        assert!(sequence.send(&HostSignal::EndOfCandidates {}).is_ok());
+        assert_eq!(
+            sequence.accept(&pair_request(&[4; 65])),
+            Ok(BrowserSignal::PairRequest {
+                name: "Phone".to_string(),
+                public_key: vec![4; 65],
+                project: "p".to_string(),
+            })
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(&sequence.send(&pair_challenge("r1")).unwrap()).unwrap();
+        assert_eq!(
+            sent,
+            json!({"type":"pair_challenge","request_id":"r1",
+                   "signing_payload":r#"["gwt-mobile-pair-v1"]"#})
+        );
+        assert_eq!(
+            sequence.accept(&pair_proof("r1", &[7; 64])),
+            Ok(BrowserSignal::PairProof {
+                request_id: "r1".to_string(),
+                signature: vec![7; 64],
+            })
+        );
+        // One proof per connection.
+        assert_eq!(
+            sequence.accept(&pair_proof("r1", &[7; 64])),
+            Err(SignalError::OutOfOrder)
+        );
+    }
+
+    #[test]
+    fn pairing_follows_its_order() {
+        // No pairing request before the Host answered.
+        let mut sequence = SignalSequence::claimed();
+        assert!(sequence.accept(&offer()).is_ok());
+        assert_eq!(
+            sequence.accept(&pair_request(&[4; 65])),
+            Err(SignalError::OutOfOrder)
+        );
+
+        // One pairing request per connection.
+        let mut sequence = answered_claim();
+        assert!(sequence.accept(&pair_request(&[4; 65])).is_ok());
+        assert_eq!(
+            sequence.accept(&pair_request(&[4; 65])),
+            Err(SignalError::OutOfOrder)
+        );
+
+        // No challenge before the request, and one challenge per request.
+        let mut sequence = answered_claim();
+        assert_eq!(
+            sequence.send(&pair_challenge("r1")),
+            Err(SignalError::OutOfOrder)
+        );
+        let mut sequence = answered_claim();
+        assert!(sequence.accept(&pair_request(&[4; 65])).is_ok());
+        assert!(sequence.send(&pair_challenge("r1")).is_ok());
+        assert_eq!(
+            sequence.send(&pair_challenge("r1")),
+            Err(SignalError::OutOfOrder)
+        );
+
+        // No proof before the challenge.
+        let mut sequence = answered_claim();
+        assert!(sequence.accept(&pair_request(&[4; 65])).is_ok());
+        assert_eq!(
+            sequence.accept(&pair_proof("r1", &[7; 64])),
+            Err(SignalError::OutOfOrder)
+        );
+
+        // A reconnected (not claimed) connection never pairs.
+        let mut sequence = SignalSequence::default();
+        assert!(sequence.accept(&offer()).is_ok());
+        assert!(sequence.send(&answer("v=0")).is_ok());
+        assert_eq!(
+            sequence.accept(&pair_request(&[4; 65])),
+            Err(SignalError::OutOfOrder)
+        );
+        assert_eq!(sequence.accept(&offer()), Err(SignalError::Rejected));
+    }
+
+    #[test]
+    fn pairing_messages_are_bounded() {
+        let request = |fields: serde_json::Value| {
+            let mut message = json!({"type":"pair_request","name":"Phone",
+                                     "public_key":b64(&[4; 65]),"project":"p"});
+            for (key, value) in fields.as_object().unwrap() {
+                message[key] = value.clone();
+            }
+            message.to_string()
+        };
+        for payload in [
+            pair_request(&[4; 64]),
+            pair_request(&[4; 66]),
+            request(json!({"public_key":"!!"})),
+            request(json!({"public_key":base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD, [4; 65])})),
+            request(json!({"name":""})),
+            request(json!({"name":"n".repeat(MAX_PAIR_NAME_BYTES + 1)})),
+            request(json!({"project":""})),
+            request(json!({"project":"p".repeat(MAX_PAIR_PROJECT_BYTES + 1)})),
+            request(json!({"extra":1})),
+        ] {
+            let mut sequence = answered_claim();
+            assert_eq!(
+                sequence.accept(&payload),
+                Err(SignalError::Invalid),
+                "{payload}"
+            );
+            assert_eq!(
+                sequence.accept(&pair_request(&[4; 65])),
+                Err(SignalError::Rejected)
+            );
+        }
+        let at_bounds = request(json!({"name":"n".repeat(MAX_PAIR_NAME_BYTES),
+                                       "project":"p".repeat(MAX_PAIR_PROJECT_BYTES)}));
+        assert!(answered_claim().accept(&at_bounds).is_ok());
+
+        let challenged = || {
+            let mut sequence = answered_claim();
+            assert!(sequence.accept(&pair_request(&[4; 65])).is_ok());
+            assert!(sequence.send(&pair_challenge("r1")).is_ok());
+            sequence
+        };
+        for payload in [
+            pair_proof("r2", &[7; 64]),
+            pair_proof("r1", &[7; 63]),
+            pair_proof("r1", &[7; 65]),
+            json!({"type":"pair_proof","request_id":"r1","signature":"!!"}).to_string(),
+            json!({"type":"pair_proof","request_id":"r1","signature":b64(&[7; 64]),"x":1})
+                .to_string(),
+        ] {
+            assert_eq!(
+                challenged().accept(&payload),
+                Err(SignalError::Invalid),
+                "{payload}"
+            );
+        }
+
+        let requested = || {
+            let mut sequence = answered_claim();
+            assert!(sequence.accept(&pair_request(&[4; 65])).is_ok());
+            sequence
+        };
+        assert_eq!(
+            requested().send(&pair_challenge("")),
+            Err(SignalError::Invalid)
+        );
+        assert!(requested()
+            .send(&pair_challenge(&"r".repeat(MAX_REQUEST_ID_BYTES)))
+            .is_ok());
+        assert_eq!(
+            requested().send(&pair_challenge(&"r".repeat(MAX_REQUEST_ID_BYTES + 1))),
+            Err(SignalError::Invalid)
+        );
+        let empty = HostSignal::PairChallenge {
+            request_id: "r1".to_string(),
+            signing_payload: String::new(),
+        };
+        let mut sequence = requested();
+        assert_eq!(sequence.send(&empty), Err(SignalError::Invalid));
+        // A Host violation rejects the browser's side too.
+        assert_eq!(
+            sequence.accept(&pair_proof("r1", &[7; 64])),
+            Err(SignalError::Rejected)
         );
     }
 

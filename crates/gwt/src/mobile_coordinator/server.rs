@@ -1401,6 +1401,56 @@ mod tests {
                     .unwrap(),
                 json!({"type":"answer","sdp":"v=0"})
             );
+            // The claimed browser pairs on the same wire: its request and proof
+            // reach the Host decoded, and the Host's challenge reaches it.
+            let b64 = |bytes: &[u8]| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+            };
+            let request = json!({"type":"pair_request","name":"Phone",
+                                 "public_key":b64(&[4; 65]),"project":PROJECT})
+            .to_string();
+            let request = json!({"type":"signal","payload":request}).to_string();
+            bounded(browser.send(Message::text(request))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::PairRequest {
+                        name: "Phone".to_string(),
+                        public_key: vec![4; 65],
+                        project: PROJECT.to_string(),
+                    }
+                })
+            );
+            let challenge = OutboundSignal {
+                connection_id,
+                signal: HostSignal::PairChallenge {
+                    request_id: "r1".to_string(),
+                    signing_payload: "[]".to_string(),
+                },
+            };
+            bounded(signals.send(challenge)).await.ok().unwrap();
+            let relayed = next_json(&mut browser).await;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                json!({"type":"pair_challenge","request_id":"r1","signing_payload":"[]"})
+            );
+            let proof = json!({"type":"pair_proof","request_id":"r1","signature":b64(&[7; 64])})
+                .to_string();
+            let proof = json!({"type":"signal","payload":proof}).to_string();
+            bounded(browser.send(Message::text(proof))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::PairProof {
+                        request_id: "r1".to_string(),
+                        signature: vec![7; 64],
+                    }
+                })
+            );
             bounded(browser.close(None)).await.unwrap();
             assert_eq!(
                 bounded(connections.recv()).await,
@@ -2580,6 +2630,7 @@ mod tests {
         let client_host = credential.identity().host_id;
         let (stop, stopping) = watch::channel(false);
         let (events, mut connections) = mpsc::channel(8);
+        let (signals, outbound) = mpsc::channel(1);
         let client = {
             let authority = Arc::clone(&authority);
             let tls = fixture.client_config();
@@ -2592,7 +2643,7 @@ mod tests {
                     tcp,
                     stopping,
                     mpsc::channel(1).1,
-                    mpsc::channel(1).1,
+                    outbound,
                     events,
                 )
                 .await
@@ -2662,7 +2713,42 @@ mod tests {
                 real_wall(),
             )
             .is_ok());
-        bounded(browser.close(None)).await.unwrap();
+        // A reconnected device never pairs: after its offer and the Host's
+        // answer, a pairing request closes the connection unreported.
+        {
+            use crate::mobile_host::registration_client::OutboundSignal;
+            use crate::mobile_host::signal::{BrowserSignal, HostSignal};
+            let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+            let offer = json!({"type":"signal","payload":offer}).to_string();
+            bounded(browser.send(Message::text(offer))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::Offer {
+                        sdp: "v=0".to_string()
+                    }
+                })
+            );
+            let answer = OutboundSignal {
+                connection_id,
+                signal: HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                },
+            };
+            bounded(signals.send(answer)).await.ok().unwrap();
+            assert_eq!(next_json(&mut browser).await["type"], "signal");
+            let public_key = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([4; 65])
+            };
+            let request = json!({"type":"pair_request","name":"Phone",
+                                 "public_key":public_key,"project":PROJECT})
+            .to_string();
+            let request = json!({"type":"signal","payload":request}).to_string();
+            bounded(browser.send(Message::text(request))).await.unwrap();
+        }
+        assert!(closed(&mut browser).await);
         assert_eq!(
             bounded(connections.recv()).await,
             Some(ConnectionEvent::Closed { connection_id })
