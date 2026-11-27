@@ -37,13 +37,30 @@ pub use schedule::{
     AgentScheduleAction, AgentScheduleReason, AgentScheduleSnapshot, AgentScheduledIssue,
 };
 pub use switch::{
-    mutate_project_agent_switch, AgentSwitchAction, AgentSwitchCheckpoint, AgentSwitchIntent,
-    AgentSwitchRequest, AgentSwitchSnapshot, AgentSwitchSource, AgentSwitchStage, AgentSwitchView,
+    mutate_project_agent_switch, AgentSwitchAction, AgentSwitchCheckpoint, AgentSwitchDisposition,
+    AgentSwitchIntent, AgentSwitchRequest, AgentSwitchResumeCondition, AgentSwitchSnapshot,
+    AgentSwitchSource, AgentSwitchStage, AgentSwitchView,
+};
+pub(crate) use switch::{
+    mutate_project_agent_switch_as_pm, refresh_agent_switch_return_dependencies,
 };
 pub use switch_checkpoint::{
-    observe_agent_switch_checkpoint_cwd, observe_agent_switch_cwd, verify_switch_continuation,
-    verify_switch_git_checkpoint, AgentSwitchCwdObservation,
+    load_switch_resume_source, observe_agent_switch_checkpoint_cwd, observe_agent_switch_cwd,
+    verify_switch_continuation, verify_switch_git_checkpoint, AgentSwitchCwdObservation,
 };
+
+fn saved_switch_resume(
+    intents: &BTreeMap<String, AgentSwitchIntent>,
+    number: u64,
+) -> Option<&AgentSwitchIntent> {
+    intents.values().find(|intent| {
+        intent.source.assignment.issue_number == Some(number)
+            && matches!(
+                intent.stage,
+                AgentSwitchStage::Returned | AgentSwitchStage::Resuming
+            )
+    })
+}
 
 mod urgent;
 pub use urgent::{
@@ -1544,6 +1561,10 @@ fn dedupe_launch_profile_pool(
 }
 
 impl IssueMonitorPrefs {
+    pub(crate) fn saved_switch_resume(&self, number: u64) -> Option<&AgentSwitchIntent> {
+        saved_switch_resume(&self.agent_switch_intents, number)
+    }
+
     /// Admission ignores inactive automatic drains and the staged version's
     /// host-wide defer. Saved configuration remains available for diagnostics.
     pub(crate) fn effective_update_drain(&self) -> Option<&IssueMonitorUpdateDrain> {
@@ -1618,6 +1639,11 @@ impl IssueMonitorPrefs {
     ) -> Vec<IssueMonitorLaunchProfile> {
         let pool = self.launch_profile_pool();
         let host = crate::process::current_hostname();
+        let saved = self.saved_switch_resume(issue_number);
+        let allowed = |tool: &str| {
+            usable(tool)
+                && saved.is_none_or(|intent| intent.source_agent_id.as_deref() == Some(tool))
+        };
         let delivery_member = self
             .pending_launch_deliveries
             .iter()
@@ -1628,8 +1654,10 @@ impl IssueMonitorPrefs {
             .reservations
             .iter()
             .find(|entry| entry.issue_number == issue_number && entry.host_id == host);
-        let scheduled =
-            delivery_member.or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
+        let scheduled = saved
+            .map(|intent| intent.request.member_id.as_str())
+            .or(delivery_member)
+            .or_else(|| reservation.map(|entry| entry.agent_member_id.as_str()));
         if let Some(roster) = &self.agent_roster {
             let Ok(store) = crate::execution_environments::load() else {
                 return Vec::new();
@@ -1649,7 +1677,7 @@ impl IssueMonitorPrefs {
                     })
                     .filter_map(|member| {
                         let candidate =
-                            self.member_candidate_with_store(&store, &pool, member, &usable)?;
+                            self.member_candidate_with_store(&store, &pool, member, &allowed)?;
                         (project_order
                             || scheduled.is_some()
                             || store.agent_priority_ids(&member.agent_member_id).is_some()
@@ -1661,6 +1689,19 @@ impl IssueMonitorPrefs {
                     })
                     .collect();
             }
+        }
+        if let Some(intent) = saved {
+            return self
+                .agent_roster
+                .iter()
+                .flat_map(|roster| &roster.members)
+                .filter(|member| self.registered_member_can_take(member, scheduled, issue_number))
+                .filter_map(|member| self.legacy_member_candidate(&pool, member))
+                .filter(|profile| {
+                    intent.source_agent_id.as_deref() == Some(profile.agent_id.as_str())
+                        && allowed(&profile.agent_id)
+                })
+                .collect();
         }
         let Some(primary) = pool
             .first()
@@ -12361,7 +12402,21 @@ impl IssueMonitorState {
             }
             self.active_launches.clear();
             self.pending_launches.clear();
-            self.pending_launch_deliveries.clear();
+            self.pending_launch_deliveries.retain(|delivery| {
+                saved_switch_resume(&self.agent_switch_intents, delivery.issue_number).is_some_and(
+                    |intent| {
+                        intent.stage == AgentSwitchStage::Resuming
+                            && intent.resume_delivery_id.as_ref() == Some(&delivery.delivery_id)
+                    },
+                )
+            });
+            // Preserve exact delivery evidence across OFF. It cannot start a
+            // new materializer, but may be needed to reconcile a spawn in flight.
+            self.active_launches.extend(
+                self.pending_launch_deliveries
+                    .iter()
+                    .map(|delivery| delivery.issue_number),
+            );
             self.queued_launch_session_strategies.clear();
             self.clear_launched_window_bindings();
         }
@@ -15327,6 +15382,15 @@ impl IssueMonitorState {
         let launches = self.active_launches.clone();
         let mut expired = Vec::new();
         for issue_number in launches {
+            if self
+                .saved_switch_resume(issue_number)
+                .is_some_and(|intent| intent.stage == AgentSwitchStage::Resuming)
+            {
+                if self.expire_saved_switch_resume(issue_number, now, &is_process_alive) {
+                    expired.push(issue_number);
+                }
+                continue;
+            }
             let held = self.process_held_issues.contains(&issue_number);
             if held
                 && (self.launched_windows.contains_key(&issue_number)
@@ -15435,6 +15499,93 @@ impl IssueMonitorState {
         expired
     }
 
+    fn expire_saved_switch_resume(
+        &mut self,
+        number: u64,
+        now: &str,
+        is_process_alive: &impl Fn(u32) -> bool,
+    ) -> bool {
+        let Some(intent) = self.saved_switch_resume(number) else {
+            return false;
+        };
+        let Some(delivery) = self.pending_launch_deliveries.iter().find(|delivery| {
+            delivery.issue_number == number
+                && Some(&delivery.delivery_id) == intent.resume_delivery_id.as_ref()
+                && Some(&intent.request.member_id) == delivery.agent_member_id.as_ref()
+        }) else {
+            return false;
+        };
+        let expires_at = self
+            .claim_diagnostics
+            .get(&number)
+            .filter(|diagnostic| diagnostic.claim_id.as_deref() == Some(&delivery.claim_id))
+            .and_then(|diagnostic| diagnostic.expires_at.as_deref());
+        if intent.source.assignment.host_id != crate::process::current_hostname()
+            || expires_at
+                .zip(parse_rfc3339_utc(now))
+                .is_none_or(|(expires, now)| {
+                    parse_rfc3339_utc(expires).is_none_or(|expires| expires > now)
+                })
+            || delivery
+                .materializer_pid
+                .is_none_or(|pid| pid == 0 || is_process_alive(pid))
+            || delivery.materialized_window_id.is_some()
+            || delivery.workspace_durable_window_id.is_some()
+            || self.has_monitor_pane_for_issue(number)
+            || self.process_held_issues.contains(&number)
+            || self.has_observed_monitor_runtime(number)
+        {
+            return false;
+        }
+        let operation = intent.request.operation_id.clone();
+        let member_id = intent.request.member_id.clone();
+        let Some(roster) = self.agent_roster.as_mut() else {
+            return false;
+        };
+        let Some(member) = roster
+            .members
+            .iter_mut()
+            .find(|member| member.agent_member_id == member_id)
+        else {
+            return false;
+        };
+        if let Some(assignment) = member.assignment.as_ref() {
+            // No established Session or possible replacement owner may be
+            // released through recovery of a pre-materialization reservation.
+            if assignment.issue_number != Some(number)
+                || assignment.delivery_id.as_deref() != Some(&delivery.delivery_id)
+                || assignment.project_key != self.agent_registry_project_key
+                || assignment.host_id != crate::process::current_hostname()
+                || assignment.session_id.is_some()
+                || assignment.host_pid == 0
+                || is_process_alive(assignment.host_pid)
+            {
+                return false;
+            }
+            let Some(revision) = roster.revision.checked_add(1) else {
+                return false;
+            };
+            member.assignment = None;
+            roster.revision = revision;
+        }
+        let intent = self
+            .agent_switch_intents
+            .get_mut(&operation)
+            .expect("checked saved switch");
+        intent.stage = AgentSwitchStage::Returned;
+        intent.resume_delivery_id = None;
+        intent.reason =
+            Some("The previous resume claim expired before a Session was created.".into());
+        self.release_confirmed_claim_for_issue(number);
+        self.clear_active_tracking(number);
+        self.set_inbox_state(number, MonitorInboxState::Queued);
+        if self.terminal_queue_contains(number) && !self.queue.contains(&number) {
+            self.queue.push_back(number);
+            self.apply_priority_order_to_queue();
+        }
+        true
+    }
+
     /// An ACK is not evidence of a running pane when a newer owning-tab canvas
     /// proves it absent. Keep the normal registration grace for existing panes
     /// and fail closed on missing observation or live/uncertain process evidence.
@@ -15534,6 +15685,12 @@ impl IssueMonitorState {
         previous: Option<&PendingIssueMonitorLaunchDelivery>,
     ) -> Vec<IssueMonitorDependencyObservation> {
         let mut pending = vec![owner];
+        if let Some(condition) = self
+            .saved_switch_resume(owner)
+            .and_then(|intent| intent.resume_condition.as_ref())
+        {
+            pending.extend(condition.blocker_numbers.iter().copied());
+        }
         let mut reachable = BTreeSet::new();
         while let Some(number) = pending.pop() {
             if reachable.insert(number) {
@@ -15607,14 +15764,55 @@ impl IssueMonitorState {
 
     fn dependency_is_done(&self, number: u64) -> bool {
         self.issue_is_closed(number)
-            || self.merged_issues.contains(&number)
             || self.dependency_closed_observation_is_current(number)
+            || self.dependency_is_merged_or_released(number)
+    }
+
+    fn dependency_is_merged_or_released(&self, number: u64) -> bool {
+        self.merged_issues.contains(&number)
             || self.inbox_item(number).is_some_and(|item| {
                 matches!(
                     item.state,
                     MonitorInboxState::Merged | MonitorInboxState::Released
                 )
             })
+    }
+
+    fn saved_switch_resume(&self, number: u64) -> Option<&AgentSwitchIntent> {
+        saved_switch_resume(&self.agent_switch_intents, number)
+    }
+
+    fn saved_switch_dependencies_ready(
+        &self,
+        number: u64,
+        condition: &AgentSwitchResumeCondition,
+        delivery: Option<&PendingIssueMonitorLaunchDelivery>,
+    ) -> bool {
+        let Some(owner) = self.dependency_facts.get(&number) else {
+            return false;
+        };
+        owner.state == IssueMonitorIssueState::Open
+            && !condition.blocker_numbers.is_empty()
+            && condition
+                .blocker_numbers
+                .iter()
+                .chain(&owner.declarations.blocked_by)
+                .all(|&blocker| self.saved_switch_dependency_done(blocker, delivery))
+    }
+
+    fn saved_switch_dependency_done(
+        &self,
+        blocker: u64,
+        delivery: Option<&PendingIssueMonitorLaunchDelivery>,
+    ) -> bool {
+        self.dependency_facts.get(&blocker).is_some_and(|facts| {
+            if facts.state == IssueMonitorIssueState::Closed {
+                self.dependency_closed_observation_is_current(blocker)
+            } else {
+                self.dependency_is_merged_or_released(blocker)
+                    || self.dependency_outcome(blocker, delivery) == Some(Some(true))
+            }
+        })
     }
 
     fn dependency_reaches(
@@ -15718,6 +15916,15 @@ impl IssueMonitorState {
         number: u64,
         delivery: Option<&PendingIssueMonitorLaunchDelivery>,
     ) -> Option<String> {
+        if let Some(intent) = self.saved_switch_resume(number) {
+            if intent.source.assignment.host_id != crate::process::current_hostname()
+                || !intent.resume_condition.as_ref().is_some_and(|condition| {
+                    self.saved_switch_dependencies_ready(number, condition, delivery)
+                })
+            {
+                return Some("Saved Work is waiting for confirmed dependency completion".into());
+            }
+        }
         let status = self.dependency_status(number, delivery)?;
         (!status.blocked_by.is_empty()).then(|| {
             format!(
@@ -15735,12 +15942,10 @@ impl IssueMonitorState {
     /// Known blockers use the existing completion batch before claimable
     /// candidates are selected. They consume no claim capacity themselves.
     pub fn dependency_probe_candidates(&self, active_cap: usize) -> Vec<u64> {
-        if !self.gui_connected
-            || !self.config.enabled
-            || self.effective_max_active_agents().min(active_cap) == 0
-        {
+        if !self.gui_connected || !self.config.enabled {
             return Vec::new();
         }
+        let probe_normal = self.effective_max_active_agents().min(active_cap) != 0;
         // Pending claims already reserve their slots. A new scan invalidates
         // their old observations too, so retries need fresh dependency probes
         // even when no capacity remains for another claim.
@@ -15766,7 +15971,24 @@ impl IssueMonitorState {
                         .flatten()
                     }),
             )
+            .filter(|_| probe_normal)
             .flat_map(|status| status.blocked_by.into_iter().map(|blocker| blocker.number))
+            .chain(
+                self.agent_switch_intents
+                    .values()
+                    .filter(|intent| {
+                        matches!(
+                            intent.stage,
+                            AgentSwitchStage::Returned | AgentSwitchStage::Resuming
+                        ) && intent.source.assignment.host_id == crate::process::current_hostname()
+                    })
+                    .filter_map(|intent| intent.resume_condition.as_ref())
+                    .flat_map(|condition| condition.blocker_numbers.iter().copied())
+                    .filter(|number| {
+                        self.dependency_facts.contains_key(number)
+                            && !self.saved_switch_dependency_done(*number, None)
+                    }),
+            )
             .filter(|number| !self.dependency_completions.contains_key(number))
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -22491,6 +22713,16 @@ impl IssueMonitorState {
         if self.delivered_verification_launch_held(delivery.issue_number) {
             return false;
         }
+        if self
+            .saved_switch_resume(delivery.issue_number)
+            .is_some_and(|intent| {
+                !self.config.enabled
+                    || (intent.stage == AgentSwitchStage::Resuming
+                        && window_id != delivery.materializer_window_id.as_deref())
+            })
+        {
+            return false;
+        }
         // Cold prefs restore no candidates, so configured labels need a refresh.
         if self
             .inbox_item(delivery.issue_number)
@@ -22790,6 +23022,8 @@ impl IssueMonitorState {
                     && self.retry_ready_for_saved_profile(issue_number, now)
                     && self.launch_source_exclusion(issue_number).is_none()
                     && self.scan_dependency_exclusion(issue_number).is_none()
+                    && (self.saved_switch_resume(issue_number).is_none()
+                        || self.agent_schedule_launch_exclusion(issue_number).is_none())
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_monitor_pane_for_issue(issue_number)
                     && !self.open_pr_launch_held(issue_number)
@@ -22837,7 +23071,19 @@ impl IssueMonitorState {
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
-        let launch_session_strategy = self.take_launch_session_strategy(issue_number);
+        let saved_return = self
+            .saved_switch_resume(issue_number)
+            .filter(|intent| intent.stage == AgentSwitchStage::Returned);
+        let saved_member = saved_return.map(|intent| intent.request.member_id.clone());
+        let saved_context = saved_return
+            .and_then(|intent| intent.resume_condition.as_ref())
+            .map(|condition| format!("{}\n{}", condition.reason, condition.next_action));
+        let requested_strategy = self.take_launch_session_strategy(issue_number);
+        let launch_session_strategy = if saved_member.is_some() {
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        } else {
+            requested_strategy
+        };
         // Issue #3757 / SPEC #3165 FR-134: the confirmed claim and its durable
         // delivery are the exact transition that starts the fresh lifecycle.
         // Consume the recovery fence here, never by comparing timestamps.
@@ -22847,7 +23093,8 @@ impl IssueMonitorState {
             .released_failures
             .remove(&issue_number)
             .filter(|release| release.operator_requested && !release.reason.trim().is_empty())
-            .map(|release| release.reason);
+            .map(|release| release.reason)
+            .or(saved_context);
         // Issue #4077 AC-1: remember who owns this claim comment. The launch
         // accounting below is cleared the moment the launch ends; the comment
         // is not, and releasing it needs the exact pair.
@@ -22872,9 +23119,10 @@ impl IssueMonitorState {
             .iter()
             .any(|delivery| delivery.delivery_id == delivery_id)
         {
-            let agent_member_id = self
-                .scheduled_agent_member_id(issue_number)
-                .map(str::to_owned);
+            let agent_member_id = saved_member.or_else(|| {
+                self.scheduled_agent_member_id(issue_number)
+                    .map(str::to_owned)
+            });
             let dependency_observations =
                 self.dependency_observations_for_delivery(issue_number, None);
             self.pending_launch_deliveries
@@ -22918,6 +23166,16 @@ impl IssueMonitorState {
         confirmed_at: Option<&str>,
     ) -> bool {
         let window_id = window_id.into();
+        if self
+            .saved_switch_resume(issue_number)
+            .is_some_and(|intent| {
+                intent.stage != AgentSwitchStage::Resuming
+                    || delivery_id.is_none()
+                    || intent.resume_delivery_id.as_deref() != delivery_id
+            })
+        {
+            return false;
+        }
         // A delivery ACK confirms its pane; replacing a running launch first
         // requires the ordinary stop/retry transition to revoke that binding.
         // In particular, an ACK delayed past exact ECR-holder repair cannot
@@ -22972,7 +23230,17 @@ impl IssueMonitorState {
             return false;
         }
         if let Some(index) = consumed_delivery_index {
-            self.pending_launch_deliveries.remove(index);
+            if let Some(delivery) = self.pending_launch_deliveries.remove(index) {
+                if let Some(intent) = self.agent_switch_intents.values_mut().find(|intent| {
+                    intent.stage == AgentSwitchStage::Resuming
+                        && intent.source.assignment.issue_number == Some(issue_number)
+                        && intent.resume_delivery_id.as_deref() == Some(&delivery.delivery_id)
+                        && delivery.agent_member_id.as_deref() == Some(&intent.request.member_id)
+                }) {
+                    intent.stage = AgentSwitchStage::Completed;
+                    intent.reason = None;
+                }
+            }
         }
         if let Some(confirmation) = self.launch_confirmations.get_mut(&issue_number) {
             confirmation.tier = confirmed_tier;
@@ -22995,6 +23263,17 @@ impl IssueMonitorState {
             return false;
         };
         let same_materializer = delivery.materializer_id.as_deref() == Some(materializer_id);
+        if self
+            .saved_switch_resume(issue_number)
+            .is_some_and(|intent| {
+                intent.stage == AgentSwitchStage::Resuming
+                    && (!same_materializer
+                        || delivery.materializer_window_id.as_deref()
+                            != Some(materializer_window_id))
+            })
+        {
+            return false;
+        }
         if !same_materializer
             && delivery
                 .materializer_pid
@@ -23463,6 +23742,34 @@ impl IssueMonitorState {
                                 != materializer_id)
                     {
                         return false;
+                    }
+                    let resumable = self.saved_switch_resume(issue_number).filter(|intent| {
+                        intent.stage == AgentSwitchStage::Resuming
+                            && intent.resume_delivery_id.as_deref() == Some(delivery_id)
+                    });
+                    if let Some(intent) = resumable {
+                        let delivery = &self.pending_launch_deliveries[index];
+                        let released = self.agent_roster.as_ref().is_some_and(|roster| {
+                            roster.members.iter().any(|member| {
+                                member.agent_member_id == intent.request.member_id
+                                    && member.assignment.is_none()
+                            })
+                        });
+                        if !released
+                            || delivery.materialized_window_id.is_some()
+                            || delivery.workspace_durable_window_id.is_some()
+                            || self.has_observed_monitor_runtime(issue_number)
+                        {
+                            return false;
+                        }
+                        let operation = intent.request.operation_id.clone();
+                        let intent = self
+                            .agent_switch_intents
+                            .get_mut(&operation)
+                            .expect("checked saved switch");
+                        intent.stage = AgentSwitchStage::Returned;
+                        intent.resume_delivery_id = None;
+                        intent.reason = Some(message.clone());
                     }
                     self.pending_launch_deliveries.remove(index);
                 }
@@ -25410,6 +25717,31 @@ impl IssueMonitorState {
         now: &str,
         settlement: IssueMonitorExecutionSettlement,
     ) -> IssueMonitorStopOutcome {
+        self.stop_exact_launch(target, reason, now, settlement, false)
+    }
+
+    pub(crate) fn stop_for_save_and_return(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+        now: &str,
+    ) -> IssueMonitorStopOutcome {
+        self.stop_exact_launch(
+            target,
+            "Saved checkpoint return",
+            now,
+            IssueMonitorExecutionSettlement::Active,
+            true,
+        )
+    }
+
+    fn stop_exact_launch(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+        reason: &str,
+        now: &str,
+        settlement: IssueMonitorExecutionSettlement,
+        save_and_return: bool,
+    ) -> IssueMonitorStopOutcome {
         let issue_number = target.issue_number;
 
         if self.released_completed_reason(issue_number).is_some() {
@@ -25428,7 +25760,8 @@ impl IssueMonitorState {
         let live_window = match self.resolve_exact_launch(target, StopIdentityMatch::Operator) {
             Ok(window_id) => window_id,
             Err(IssueMonitorStopMismatch::NotRunning)
-                if self.failed_issues.contains_key(&issue_number)
+                if !save_and_return
+                    && self.failed_issues.contains_key(&issue_number)
                     && !self.active_launches.contains(&issue_number)
                     && !self.launched_claims.contains_key(&issue_number)
                     && !self.launched_windows.contains_key(&issue_number)
@@ -25467,6 +25800,13 @@ impl IssueMonitorState {
         self.release_confirmed_claim_for_issue(issue_number);
         self.revoke_launch_binding(issue_number);
         self.record_autonomous_heartbeat(issue_number, now);
+        if save_and_return {
+            self.clear_active_tracking(issue_number);
+            self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+            return IssueMonitorStopOutcome::Stopped {
+                window_id: live_window.unwrap_or_default(),
+            };
+        }
         // A pending delivery has no executing Session yet: its owner's terminal
         // ledger can still describe the predecessor, never this new launch.
         if matches!(
@@ -45981,6 +46321,155 @@ mod tests {
             vec![44],
             "comment examples inside fences cannot hide later declarations"
         );
+    }
+
+    fn returned_work_intent() -> AgentSwitchIntent {
+        let operation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let window = "source-window";
+        serde_json::from_value(serde_json::json!({
+            "request": {
+                "operation_id": operation,
+                "member_id": "member",
+                "expected_roster_revision": 1,
+                "disposition": "save_and_return"
+            },
+            "source": {
+                "assignment": {
+                    "reservation_id": "old-reservation",
+                    "issue_number": 42,
+                    "host_id": crate::process::current_hostname(),
+                    "host_pid": 1
+                },
+                "window_id": window,
+                "claim_id": "old-claim",
+                "confirmation": {
+                    "window_id": window,
+                    "confirmed_at": "2026-11-27T00:00:00Z"
+                }
+            },
+            "stage": "returned",
+            "resume_condition": {
+                "blocker_numbers": [44],
+                "reason": "waiting for the prerequisite",
+                "next_action": "continue the saved work"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn returned_work_requires_current_positive_dependency_evidence() {
+        let mut owner = issue(42);
+        owner.body = Some("Blocked-by: #44".into());
+        let mut blocker = issue(44);
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let intent = returned_work_intent();
+        monitor
+            .agent_switch_intents
+            .insert(intent.request.operation_id.clone(), intent);
+        monitor.observe_dependency_candidates(&[owner]);
+        assert!(monitor.launch_dependency_exclusion(42).is_some());
+        monitor.observe_dependency_candidate(&blocker);
+        monitor.record_dependency_completion(44, None);
+        assert!(monitor.launch_dependency_exclusion(42).is_some());
+
+        let completed = monitor.dependency_observation(44, Some(true)).unwrap();
+        monitor.observe_dependency_completions(&BTreeMap::from([(44, completed.clone())]));
+        assert!(monitor.launch_dependency_exclusion(42).is_none());
+        blocker.updated_at = Some("2026-11-27T01:00:00Z".into());
+        blocker.body = Some("Blocked-by: #42".into());
+        monitor.observe_dependency_candidate(&blocker);
+        monitor.observe_dependency_completions(&BTreeMap::from([(44, completed)]));
+        assert!(monitor.launch_dependency_exclusion(42).is_some());
+
+        monitor.transition_issue_closure(
+            44,
+            IssueClosureState::Reopened,
+            IssueClosureEvidence::ExplicitRevision,
+            Some("2026-11-27T02:00:00Z".into()),
+        );
+        blocker.state = IssueMonitorIssueState::Closed;
+        monitor.observe_dependency_candidate(&blocker);
+        assert!(monitor.launch_dependency_exclusion(42).is_some());
+        blocker.updated_at = Some("2026-11-27T03:00:00Z".into());
+        monitor.observe_dependency_candidate(&blocker);
+        assert!(monitor.launch_dependency_exclusion(42).is_none());
+    }
+
+    #[test]
+    fn saved_work_restart_releases_only_an_expired_unmaterialized_resume() {
+        let created = "2026-11-27T00:00:00Z";
+        let expires = "2026-11-27T00:10:00Z";
+        let mut prefs = IssueMonitorPrefs::default();
+        let mut intent = returned_work_intent();
+        let operation = intent.request.operation_id.clone();
+        intent.stage = AgentSwitchStage::Resuming;
+        intent.resume_delivery_id = Some("resume-delivery".into());
+        prefs.agent_switch_intents.insert(operation.clone(), intent);
+        prefs.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "revision": 5,
+                "members": [{
+                    "agent_member_id": "member", "name": "Agent", "created_at": created,
+                    "assignment": {
+                        "reservation_id": "resume-reservation", "issue_number": 42,
+                        "delivery_id": "resume-delivery", "host_pid": 42,
+                        "host_id": crate::process::current_hostname()
+                    }
+                }]
+            }))
+            .unwrap(),
+        );
+        prefs.pending_launch_deliveries.push(
+            serde_json::from_value(serde_json::json!({
+                "issue_number": 42, "branch_name": "work/issue-42",
+                "linked_issue_kind": LinkedIssueKind::Issue,
+                "delivery_id": "resume-delivery", "agent_member_id": "member",
+                "claim_id": "resume-claim", "claim_owner": "host/session",
+                "materializer_id": "materializer", "materializer_pid": 42,
+                "materializer_window_id": "resume-window", "created_at": created
+            }))
+            .unwrap(),
+        );
+        prefs.claim_diagnostics.insert(
+            42,
+            IssueMonitorClaimDiagnostics {
+                claim_id: Some("resume-claim".into()),
+                expires_at: Some(expires.into()),
+                ..Default::default()
+            },
+        );
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        if !monitor.active_launches.contains(&42) {
+            monitor.active_launches.push(42);
+        }
+        assert!(monitor
+            .expire_stale_unbound_launches_with(created, |_| false)
+            .is_empty());
+        assert!(monitor
+            .expire_stale_unbound_launches_with(expires, |_| true)
+            .is_empty());
+        monitor.pending_launch_deliveries[0].materialized_window_id = Some("resume-window".into());
+        assert!(monitor
+            .expire_stale_unbound_launches_with(expires, |_| false)
+            .is_empty());
+        monitor.pending_launch_deliveries[0].materialized_window_id = None;
+        assert_eq!(
+            monitor.expire_stale_unbound_launches_with(expires, |_| false),
+            [42]
+        );
+        assert_eq!(
+            monitor.agent_switch_intents[&operation].stage,
+            AgentSwitchStage::Returned
+        );
+        assert!(monitor.agent_roster.unwrap().members[0]
+            .assignment
+            .is_none());
+        assert!(monitor.pending_launch_deliveries.is_empty());
     }
 
     #[test]

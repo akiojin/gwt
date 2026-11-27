@@ -1,7 +1,9 @@
 //! Cooperative switching beside the fixed project's physical runtime owner.
 use super::agent_dispatch::PtyWriterEntry;
 use crate as gwt;
-use gwt::issue_monitor::{AgentSwitchAction, AgentSwitchIntent, AgentSwitchStage};
+use gwt::issue_monitor::{
+    AgentSwitchAction, AgentSwitchDisposition, AgentSwitchIntent, AgentSwitchStage,
+};
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -79,6 +81,8 @@ pub(super) fn drive_pending(
                                 | AgentSwitchStage::Completed
                                 | AgentSwitchStage::Failed
                                 | AgentSwitchStage::Unknown
+                                | AgentSwitchStage::Returned
+                                | AgentSwitchStage::Resuming
                         ) {
                             prefs
                                 .transition_agent_switch(
@@ -125,6 +129,8 @@ fn local_pending_switches(
                     | AgentSwitchStage::Cancelled
                     | AgentSwitchStage::Failed
                     | AgentSwitchStage::Unknown
+                    | AgentSwitchStage::Returned
+                    | AgentSwitchStage::Resuming
             )
     })
 }
@@ -145,7 +151,9 @@ fn checkpoint_input_revision(
         )
     })?;
     if stage == AgentSwitchStage::CheckpointVerified && saved != Some(current) {
-        return Err(switch_io("New input invalidated the saved checkpoint. Current work is kept; request another switch."));
+        return Err(switch_io(
+            "New input invalidated the saved checkpoint. Current work is kept; request another switch.",
+        ));
     }
     Ok(current)
 }
@@ -170,6 +178,8 @@ fn recover_previous_host_intents(root: &Path) -> io::Result<()> {
                         | AgentSwitchStage::Cancelled
                         | AgentSwitchStage::Failed
                         | AgentSwitchStage::Unknown
+                        | AgentSwitchStage::Returned
+                        | AgentSwitchStage::Resuming
                 )
                 && intent.runtime_stop.as_ref().is_none_or(|proof| {
                     switch_host_was_replaced(proof.host_pid, proof.host_started_at)
@@ -226,8 +236,21 @@ impl Drop for SwitchTickGuard {
 fn checkpoint_prompt(intent: &AgentSwitchIntent) -> String {
     let operation = &intent.request.operation_id;
     let source = intent.source.assignment.issue_number.unwrap_or_default();
-    let target = intent.request.target_issue_number;
-    format!("GWT checkpoint request {operation}: save the current Issue #{source} before switching this member to Issue #{target}. Continue only the current owner in this process. Read issue.monitor.switch.read for this exact operation before acting. Save only while it is checkpointing; if absent, cancelled, failed or unknown, keep current and clear any declared wait without saving for this request. If already verified, do not save it again. Prepare a coherent checkpoint with your ordinary verification, commit and push workflow; never mark unrun checks PASS. First post a Board handoff for Issue #{source} containing the exact UUID token {operation} and the continuation; confirm its link in your canonical Work. Then record the final workspace.update with status=idle, summary containing the same UUID, nonempty progress_summary and next_action, so the saved Work remains Paused after Board reflection. Commit and push the source changes and immutable Work shards, leaving tracked/untracked state clean. Then call gwtd JSON operation issue.monitor.switch.ack with operation_id={operation}, head=<actual HEAD SHA>, work_id=<your canonical Work ID>, board_entry_id=<the handoff entry ID>. The Host independently verifies these records and the live upstream. Do not complete or block the unfinished execution, kill a process, or start Issue #{target} in this provider. Declare issue.monitor.wait with number={source} and resume_condition=switch cancelled or saved work resumed, then end the turn after ACK; keep the source unchanged. If a coherent checkpoint cannot be saved, report the reason and keep current.\r")
+    let (purpose, resume, next_issue) = match intent.request.target_issue_number {
+        Some(target) => (
+            format!("before switching this member to Issue #{target}"),
+            "",
+            format!("Issue #{target}"),
+        ),
+        None => (
+            "before returning this member's slot".into(),
+            " Include resume_condition with blocker_numbers (the source Issue's declared incomplete blockers), reason, and next_action.",
+            "another Issue".into(),
+        ),
+    };
+    format!(
+        "GWT checkpoint request {operation}: save the current Issue #{source} {purpose}. Continue only the current owner in this process. Read issue.monitor.switch.read for this exact operation before acting. Save only while it is checkpointing; if absent, cancelled, failed or unknown, keep current and clear any declared wait without saving for this request. If already verified, do not save it again. Prepare a coherent checkpoint with your ordinary verification, commit and push workflow; never mark unrun checks PASS. First post a Board handoff for Issue #{source} containing the exact UUID token {operation} and the continuation; confirm its link in your canonical Work. Then record the final workspace.update with status=idle, summary containing the same UUID, nonempty progress_summary and next_action, so the saved Work remains Paused after Board reflection. Commit and push the source changes and immutable Work shards, leaving tracked/untracked state clean. Then call gwtd JSON operation issue.monitor.switch.ack with operation_id={operation}, head=<actual HEAD SHA>, work_id=<your canonical Work ID>, board_entry_id=<the handoff entry ID>.{resume} The Host independently verifies these records and the live upstream. Do not complete or block the unfinished execution, kill a process, or start {next_issue} in this provider. Declare issue.monitor.wait with number={source} and resume_condition=switch cancelled or saved work resumed, then end the turn after ACK; keep the source unchanged. If a coherent checkpoint cannot be saved, report the reason and keep current.\r"
+    )
 }
 
 /// Observe the completed body write in an explicitly armed isolated fixture.
@@ -433,6 +456,7 @@ fn checkpoint_saved(intent: &AgentSwitchIntent, sessions: &Path) -> io::Result<(
 fn prepare_switch_target(
     root: &Path,
     intent: &AgentSwitchIntent,
+    number: u64,
 ) -> io::Result<(
     gwt::IssueMonitorState,
     Vec<super::installation::IssueMonitorAdmissionFileStamp>,
@@ -445,7 +469,6 @@ fn prepare_switch_target(
         .map_err(|error| pending(error.to_string()))?;
     let cache_root = gwt::issue_cache::issue_cache_root_for_repo_path(root)
         .unwrap_or_else(|| gwt::issue_cache::issue_cache_root_for_repo_slug(&owner, &repo));
-    let number = intent.request.target_issue_number;
     let cached =
         gwt::issue_monitor_worker::load_cached_issue_monitor_candidate(&cache_root, number)
             .ok_or_else(|| {
@@ -527,14 +550,28 @@ fn drive_switch(
     {
         return Ok(false);
     }
+    let target_issue = intent.request.target_issue_number;
     if matches!(intent.stage, Requested | Checkpointing | CheckpointVerified)
         && (!current.agent_switch_source_unchanged(intent, &host)
-            || !current.agent_switch_target_available(intent, &host))
+            || !current.agent_switch_destination_available(root, intent, &host))
     {
+        let reason = match intent.request.disposition {
+            AgentSwitchDisposition::SwitchToTarget => {
+                "The current assignment or next plan changed. Current work is kept; refresh plans."
+            }
+            AgentSwitchDisposition::SaveAndReturn => {
+                "The current assignment or return dependencies changed. Current work is kept."
+            }
+        };
         gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
             if prefs.agent_switch_intents.get(&intent.request.operation_id) == Some(intent) {
-                prefs.transition_agent_switch(&intent.request.operation_id, Failed,
-                    Some("The current assignment or next plan changed. Current work is kept; refresh plans.".into())).map_err(switch_io)?;
+                prefs
+                    .transition_agent_switch(
+                        &intent.request.operation_id,
+                        Failed,
+                        Some(reason.into()),
+                    )
+                    .map_err(switch_io)?;
             }
             Ok(())
         })?;
@@ -584,8 +621,13 @@ fn drive_switch(
             set_switch_reason(root, intent, &checkpoint_activity_reason(&activity))?;
             return Ok(false);
         }
-        let (target_planning, target_dependencies) =
-            prepare_switch_target(root, intent).inspect_err(|_| *target_waited = true)?;
+        let target_planning = target_issue
+            .map(|number| prepare_switch_target(root, intent, number))
+            .transpose()
+            .inspect_err(|_| *target_waited = true)?;
+        let target_dependencies = target_planning
+            .as_ref()
+            .map_or(&[][..], |(_, dependencies)| dependencies.as_slice());
         let reservation = match Arc::clone(&entry.handle).reserve_input_transaction() {
             Ok(reservation) => reservation,
             Err(_) => {
@@ -611,13 +653,16 @@ fn drive_switch(
                             || entry.handle.has_unsent_user_input()
                             || entry.handle.ordinary_input_revision() != Some(revision)
                         {
-                            return Err(io::Error::new(io::ErrorKind::WouldBlock, "Waiting for the current turn and input to settle. Current work is kept."));
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "Waiting for the current turn and input to settle. Current work is kept.",
+                            ));
                         }
                         let (saved, _) = gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
                             if prefs.agent_switch_intents.get(&intent.request.operation_id)
                                 != Some(intent)
                                 || !prefs.agent_switch_source_unchanged(intent, &host)
-                                || !prefs.agent_switch_target_available(intent, &host)
+                                || !prefs.agent_switch_destination_available(root, intent, &host)
                             {
                                 return Err(switch_io("Switch changed before checkpoint delivery"));
                             }
@@ -740,7 +785,10 @@ fn drive_switch(
                     if !exact_writer_is_current(writers, intent, entry)
                         || !current_switch_runtime(root, intent, sessions).unwrap_or(false)
                     {
-                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "Waiting for a complete idle activity observation; current work is kept"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "Waiting for a complete idle activity observation; current work is kept",
+                        ));
                     }
                     let activity = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
                         &proof.execution_identity.worktree_path,
@@ -762,23 +810,33 @@ fn drive_switch(
                             return Err(io::Error::new(io::ErrorKind::WouldBlock,
                                 "Next issue changed before stop; current work is kept"));
                         }
-                        let mut target = target_planning.clone();
-                        target.rebase_daemon_driver_prefs(prefs);
-                        let reasons = target.agent_switch_target_exclusions(intent);
-                        if !reasons.is_empty() {
-                            return Err(io::Error::new(io::ErrorKind::WouldBlock, format!("Next issue is no longer ready; current work is kept: {}", reasons.join("; "))));
+                        if let Some((target, _)) = &target_planning {
+                            let mut target = target.clone();
+                            target.rebase_daemon_driver_prefs(prefs);
+                            let reasons = target.agent_switch_target_exclusions(intent);
+                            if !reasons.is_empty() {
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, format!("Next issue is no longer ready; current work is kept: {}", reasons.join("; "))));
+                            }
+                        } else if !prefs.agent_switch_destination_available(root, intent, &host) {
+                            return Err(switch_io("Source dependency or eligibility changed before return; current work is kept"));
                         }
                         prefs.transition_agent_switch(&intent.request.operation_id, StoppingCurrent,
                             Some("Current work is saved. Waiting for the previous runtime to exit…".into())).map_err(switch_io)?;
                         let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
-                        if !monitor.terminal_queue_move(intent.request.target_issue_number, 0, &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()) {
-                            return Err(switch_io("The target is no longer queued; current work is kept"));
+                        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
+                        if let Some(number) = target_issue {
+                            if !monitor.terminal_queue_move(number, 0, &now) {
+                                return Err(switch_io("The target is no longer queued; current work is kept"));
+                            }
                         }
                         let target = gwt::issue_monitor::IssueMonitorStopTarget { issue_number: proof.issue_number,
                             window_id: Some(intent.source.window_id.clone()), claim_id: Some(intent.source.claim_id.clone()),
                             delivery_id: intent.source.assignment.delivery_id.clone() };
-                        if !matches!(monitor.stop_only_with_settlement(&target, "Saved checkpoint switch", &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
-                            gwt::IssueMonitorExecutionSettlement::Active), gwt::IssueMonitorStopOutcome::Stopped { .. }) {
+                        let stopped = match intent.request.disposition {
+                            AgentSwitchDisposition::SwitchToTarget => monitor.stop_only_with_settlement(&target, "Saved checkpoint switch", &now, gwt::IssueMonitorExecutionSettlement::Active),
+                            AgentSwitchDisposition::SaveAndReturn => monitor.stop_for_save_and_return(&target, &now),
+                        };
+                        if !matches!(stopped, gwt::IssueMonitorStopOutcome::Stopped { .. }) {
                             return Err(switch_io("Exact source could not be stopped"));
                         }
                         *prefs = monitor.prefs();
@@ -809,7 +867,9 @@ fn drive_switch(
                 saved.runtime_stop.as_ref() == Some(proof) && saved.runtime_exit_confirmed
             });
         if !exited || !entry.handle.tree_exit_confirmed() {
-            return Err(switch_io("Current work is saved, but the previous runtime's exit is unconfirmed. Continue saved work to check its current state."));
+            return Err(switch_io(
+                "Current work is saved, but the previous runtime's exit is unconfirmed. Continue saved work to check its current state.",
+            ));
         }
         drop(reservation);
         retire(AgentSwitchSourceExited {
@@ -819,6 +879,11 @@ fn drive_switch(
         });
         return Ok(true);
     }
+    let Some(target_issue) = target_issue else {
+        // SaveAndReturn is finalized only by the exact reaped-member
+        // release. A census or the stop receipt alone cannot return a slot.
+        return Ok(false);
+    };
     if intent.stage == StoppingCurrent && intent.runtime_exit_confirmed {
         // Normal admission still chooses the provider and enforces all readiness/claim gates.
         let _ = gwt::agent_names::read_project_roster(root, sessions).map_err(switch_io)?;
@@ -831,11 +896,13 @@ fn drive_switch(
                 prefs.clone(),
             );
             if !monitor.terminal_queue_move(
-                intent.request.target_issue_number,
+                target_issue,
                 0,
                 &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             ) {
-                return Err(switch_io("Saved work is paused; the target is no longer queued. Open saved work in Works."));
+                return Err(switch_io(
+                    "Saved work is paused; the target is no longer queued. Open saved work in Works.",
+                ));
             }
             *prefs = monitor.prefs();
             prefs
@@ -861,7 +928,7 @@ fn drive_switch(
                 let launched = member
                     .and_then(|member| member.assignment.as_ref())
                     .is_some_and(|assignment| {
-                        assignment.issue_number == Some(intent.request.target_issue_number)
+                        assignment.issue_number == Some(target_issue)
                             && assignment.project_key.as_deref().is_none_or(|key| {
                                 prefs.agent_registry_project_key.as_deref() == Some(key)
                             })
@@ -870,12 +937,12 @@ fn drive_switch(
                     })
                     && prefs
                         .launch_confirmations
-                        .get(&intent.request.target_issue_number)
+                        .get(&target_issue)
                         .is_some_and(|confirmation| {
                             prefs.launch_bindings.get(&confirmation.window_id)
-                                == Some(&intent.request.target_issue_number)
+                                == Some(&target_issue)
                                 && prefs.launched_issues.iter().any(|launch| {
-                                    launch.issue_number == intent.request.target_issue_number
+                                    launch.issue_number == target_issue
                                         && launch.window_id == confirmation.window_id
                                 })
                         });
@@ -884,7 +951,7 @@ fn drive_switch(
                 } else if prefs
                     .failed_issues
                     .iter()
-                    .any(|failure| failure.issue_number == intent.request.target_issue_number)
+                    .any(|failure| failure.issue_number == target_issue)
                 {
                     prefs.transition_agent_switch(&intent.request.operation_id, Unknown, Some("The next issue could not start. Previous work is saved; resume it from Works.".into())).map_err(switch_io)?;
                 }

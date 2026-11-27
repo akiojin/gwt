@@ -329,7 +329,16 @@ pub(super) fn run_with_data<E: CliEnv>(
             head,
             work_id,
             board_entry_id,
-        } => run_monitor_switch_ack(env, &operation_id, &head, &work_id, &board_entry_id, out)?,
+            resume_condition,
+        } => run_monitor_switch_ack(
+            env,
+            &operation_id,
+            &head,
+            &work_id,
+            &board_entry_id,
+            resume_condition,
+            out,
+        )?,
         IssueCommand::MonitorQueuePush {
             project_root,
             issue_numbers,
@@ -1866,7 +1875,7 @@ fn run_monitor_switch<E: CliEnv>(
             "Switch requests and cancellations require the registered project PM".into(),
         ));
     }
-    let snapshot = crate::issue_monitor::mutate_project_agent_switch(
+    let snapshot = crate::issue_monitor::mutate_project_agent_switch_as_pm(
         &root,
         &gwt_core::paths::gwt_sessions_dir(),
         action,
@@ -1947,6 +1956,7 @@ fn run_monitor_switch_ack<E: CliEnv>(
     head: &str,
     work_id: &str,
     board_entry_id: &str,
+    resume_condition: Option<crate::issue_monitor::AgentSwitchResumeCondition>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
@@ -1980,6 +1990,31 @@ fn run_monitor_switch_ack<E: CliEnv>(
     let initial = crate::load_issue_monitor_prefs(&path).map_err(io_as_api_error)?;
     let stop = switch_ack_runtime_for_caller(&initial, operation_id, &identity)
         .map_err(io_as_api_error)?;
+    let intent = &initial.agent_switch_intents[operation_id];
+    let resume_observations = if intent.stage
+        == crate::issue_monitor::AgentSwitchStage::Checkpointing
+        && intent.request.disposition == crate::issue_monitor::AgentSwitchDisposition::SaveAndReturn
+    {
+        crate::issue_monitor::refresh_agent_switch_return_dependencies(
+            context.project_state_root(),
+            &intent.source,
+        )
+        .map_err(|error| io_as_api_error(io::Error::other(error)))?
+    } else {
+        Default::default()
+    };
+    let checkpoint = crate::issue_monitor::AgentSwitchCheckpoint {
+        verified_head: head.into(),
+        work_id: work_id.into(),
+        board_entry_id: board_entry_id.into(),
+    };
+    let resume = resume_condition.map(|condition| {
+        (
+            condition,
+            context.project_state_root(),
+            &resume_observations,
+        )
+    });
     let snapshot = super::execution_state::with_current_active_session_execution_identity_lease(
         &gwt_core::paths::gwt_sessions_dir(), &identity, || -> io::Result<crate::issue_monitor::AgentSwitchSnapshot> {
             crate::issue_monitor::verify_switch_git_checkpoint(context.worktree(), head)?;
@@ -1990,9 +2025,9 @@ fn run_monitor_switch_ack<E: CliEnv>(
                 if switch_ack_runtime_for_caller(prefs, operation_id, &identity)? != stop {
                     return Err(io::Error::other("Switch runtime identity changed before checkpoint acknowledgement"));
                 }
-                prefs.verify_agent_switch_checkpoint(operation_id, crate::issue_monitor::AgentSwitchCheckpoint {
-                    verified_head: head.into(), work_id: work_id.into(), board_entry_id: board_entry_id.into(),
-                }, stop.clone(), &crate::process::current_hostname()).map_err(io::Error::other)
+                prefs.verify_agent_switch_checkpoint(
+                    operation_id, checkpoint, stop.clone(), &crate::process::current_hostname(), resume,
+                ).map_err(io::Error::other)
             })?;
             Ok(saved.agent_switch_snapshot(gwt_core::paths::project_scope_hash(context.project_state_root()).as_str()))
         },

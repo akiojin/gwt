@@ -2446,13 +2446,14 @@ pub(super) fn prepare_issue_monitor_spawn_capacity(
         project_root,
     ))
     .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
+    let dependency_roots = monitor_dependency_roots(&prefs, issue_number);
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
     crate::issue_monitor_worker::bind_issue_monitor_source_repository(&mut monitor, project_root);
     if let Some(cache_root) = crate::issue_cache::issue_cache_root_for_repo_path(project_root) {
-        let issues = crate::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates(
+        let issues = crate::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates_with_roots(
             &cache_root,
-            issue_number,
+            dependency_roots,
             |number| {
                 let source = cache_root.join(number.to_string());
                 for path in [source.join("meta.json"), source.join("body.md")] {
@@ -2491,6 +2492,17 @@ pub(super) fn prepare_issue_monitor_spawn_capacity(
     }
     monitor.refresh_agent_capacity(project_root);
     Ok(monitor)
+}
+
+fn monitor_dependency_roots(prefs: &crate::IssueMonitorPrefs, issue_number: u64) -> Vec<u64> {
+    let mut roots = vec![issue_number];
+    if let Some(condition) = prefs
+        .saved_switch_resume(issue_number)
+        .and_then(|intent| intent.resume_condition.as_ref())
+    {
+        roots.extend_from_slice(&condition.blocker_numbers);
+    }
+    roots
 }
 
 pub fn prepare_host_update_drain_launch_hold(
@@ -2711,22 +2723,14 @@ impl IssueMonitorLaunchClaimInput {
         prefs: crate::IssueMonitorPrefs,
         host_started_at: Option<u64>,
     ) -> bool {
+        let (sources, saved_switch) = self.claim_sources(&prefs);
         let mut preflight =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         crate::issue_monitor_worker::bind_issue_monitor_source_repository(
             &mut preflight,
             &self.project_root,
         );
-        if let Some(issue) = crate::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
-            .and_then(|cache_root| {
-                crate::issue_monitor_worker::load_cached_issue_monitor_candidate(
-                    &cache_root,
-                    self.issue_number,
-                )
-            })
-        {
-            preflight.record_candidate(issue);
-        }
+        self.observe_claim_sources(&mut preflight, sources, saved_switch);
         self.observe_windows(&mut preflight, host_started_at);
         preflight.claim_launch_delivery(
             self.issue_number,
@@ -2736,6 +2740,51 @@ impl IssueMonitorLaunchClaimInput {
             &self.materializer_window_id,
             crate::process::is_host_process_alive,
         )
+    }
+
+    fn claim_sources(
+        &self,
+        prefs: &crate::IssueMonitorPrefs,
+    ) -> (Vec<crate::IssueMonitorIssue>, bool) {
+        let saved_switch = prefs.saved_switch_resume(self.issue_number).is_some();
+        let Some(cache_root) =
+            crate::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
+        else {
+            return (Vec::new(), saved_switch);
+        };
+        let sources = if saved_switch {
+            crate::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates_with_roots(
+                &cache_root,
+                monitor_dependency_roots(prefs, self.issue_number),
+                |_| Ok(()),
+            )
+            .unwrap_or_default()
+        } else {
+            crate::issue_monitor_worker::load_cached_issue_monitor_candidate(
+                &cache_root,
+                self.issue_number,
+            )
+            .into_iter()
+            .collect()
+        };
+        (sources, saved_switch)
+    }
+
+    fn observe_claim_sources(
+        &self,
+        monitor: &mut crate::IssueMonitorState,
+        sources: Vec<crate::IssueMonitorIssue>,
+        saved_switch: bool,
+    ) {
+        if saved_switch {
+            monitor.observe_dependency_candidates(&sources);
+        }
+        if let Some(issue) = sources
+            .into_iter()
+            .find(|issue| issue.number == self.issue_number)
+        {
+            monitor.record_candidate(issue);
+        }
     }
 
     pub fn claim_with_publishers(
@@ -2817,20 +2866,20 @@ impl IssueMonitorLaunchClaimInput {
                 }
             }
             Err(error) if error.allows_local_fallback() => {
-                let source = crate::issue_cache::issue_cache_root_for_repo_path(project_root)
-                    .and_then(|cache_root| {
-                        crate::issue_monitor_worker::load_cached_issue_monitor_candidate(
-                            &cache_root,
-                            issue_number,
-                        )
-                    });
+                let prefs = crate::load_issue_monitor_prefs(
+                    &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+                )
+                .map_err(|error| {
+                    crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        format!("launch delivery capacity read failed: {error}"),
+                    )
+                })?;
+                let (sources, saved_switch) = self.claim_sources(&prefs);
                 commit_local_issue_monitor_control_with_timeout(
                     project_root,
                     self.fallback_timeout,
                     |monitor| {
-                        if let Some(source) = source {
-                            monitor.record_candidate(source);
-                        }
+                        self.observe_claim_sources(monitor, sources, saved_switch);
                         self.observe_windows(monitor, host_started_at);
                         monitor.claim_launch_delivery(
                             issue_number,
@@ -3156,6 +3205,7 @@ pub(crate) fn prepare_owner_agent_admission(
             Ok::<_, String>((member_id, prefs))
         })
         .transpose()?;
+    let mut saved_switch_source = None;
     if let Some(issue_number) = issue_monitor_issue_number {
         let prepared = prepared.as_mut().expect("Monitor admission");
         prepared.revalidate_if_needed(&IssueMonitorSpawnAdmissionInput {
@@ -3165,6 +3215,40 @@ pub(crate) fn prepare_owner_agent_admission(
             target_branch: config.branch.clone().unwrap_or_default(),
             issue_link_cache_dir: input.issue_link_cache_dir.into(),
         })?;
+        if !review_dispatch {
+            saved_switch_source = crate::issue_monitor::load_switch_resume_source(
+                &prepared.monitor.prefs(),
+                input.project_root,
+                input.sessions_dir,
+                issue_number,
+                launch_feedback_context
+                    .as_ref()
+                    .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()),
+            )?;
+            if let Some(source) = saved_switch_source.as_ref() {
+                let valid_mode = match config.session_mode {
+                    gwt_agent::SessionMode::Resume => config
+                        .resume_session_id
+                        .as_deref()
+                        .zip(source.exact_resume_session_id())
+                        .is_some_and(|(actual, saved)| actual == saved),
+                    gwt_agent::SessionMode::Normal => config.resume_session_id.is_none(),
+                    _ => false,
+                };
+                if config.agent_id != source.agent_id
+                    || config.predecessor_session_id.as_deref() != Some(&source.id)
+                    || config.branch.as_deref() != Some(&source.branch)
+                    || config.working_dir.as_deref().is_none_or(|path| {
+                        !crate::launch_runtime::same_worktree_path(path, &source.worktree_path)
+                    })
+                    || !valid_mode
+                {
+                    return Err(
+                        "Issues launch no longer matches the exact saved Work source".into(),
+                    );
+                }
+            }
+        }
         if monitor_requested_tier.is_none() {
             if let Some((member_id, prefs)) = &fresh_member_prefs {
                 let matches = crate::agent_registry::member_profile(prefs, member_id).is_some_and(
@@ -3602,6 +3686,7 @@ pub(crate) fn prepare_owner_agent_admission(
         // saved-window restore entrypoint. Bind it to the same persisted member,
         // including when that member now has a different tool for future work.
         let quick_start_source = if input.restore_source.is_none()
+            && saved_switch_source.is_none()
             && config.session_mode == gwt_agent::SessionMode::Resume
         {
             config
@@ -3641,14 +3726,21 @@ pub(crate) fn prepare_owner_agent_admission(
         } else {
             None
         };
-        let member = if let Some(source) = input.restore_source.or(quick_start_source.as_ref()) {
-            crate::agent_names::reserve_project_member_for_session(
+        let member = if let Some(source) = input
+            .restore_source
+            .or(saved_switch_source.as_ref())
+            .or(quick_start_source.as_ref())
+        {
+            crate::agent_names::reserve_project_member_for_session_delivery(
                 input.project_root,
                 input.sessions_dir,
                 &reservation_id,
                 config.linked_issue_number,
                 roster_spec_number,
                 source,
+                launch_feedback_context
+                    .as_ref()
+                    .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()),
             )?
         } else {
             crate::agent_names::reserve_project_member_for_agent(

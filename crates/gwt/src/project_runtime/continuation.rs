@@ -447,6 +447,34 @@ pub fn prepare_fresh_execution_launch_session_start(
     {
         return Err("the Prepared Host capability could not be promoted".to_string());
     }
+    let saved_switch_work = if let Some(feedback) =
+        pending.launch_feedback_context.as_ref().filter(|feedback| {
+            feedback.issue_monitor_launch_binding_issue_number() == Some(pending.owner.number)
+                && feedback.issue_monitor_delivery_id.is_some()
+        }) {
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            &pending.project_root,
+        ))
+        .map_err(|error| error.to_string())?;
+        prefs
+            .saved_switch_resume(pending.owner.number)
+            .map(|intent| {
+                if intent.stage != gwt::issue_monitor::AgentSwitchStage::Resuming
+                    || intent.resume_delivery_id != feedback.issue_monitor_delivery_id
+                    || intent.resume_delivery_id.is_none()
+                {
+                    return Err("Saved Work resume delivery changed before readiness");
+                }
+                intent
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.work_id.clone())
+                    .ok_or("Saved Work resume checkpoint is unavailable")
+            })
+            .transpose()?
+    } else {
+        None
+    };
 
     #[cfg(any(test, feature = "test-gh-guard"))]
     super::agent_frontend::run_owner_fresh_work_commit_test_hook(
@@ -500,6 +528,25 @@ pub fn prepare_fresh_execution_launch_session_start(
                         &pending.operation_id,
                         |projection, work_items, _| {
                             let now = gwt_core::timestamp::UtcTimestamp::now();
+                            if let Some(expected) = saved_switch_work.as_deref() {
+                                let owner = super::workspace::workspace_owner_label(pending.owner);
+                                let current = gwt_core::workspace_projection::current_work_id_for_launch(
+                                    work_items,
+                                    &pending.project_root,
+                                    Some(&active_session.branch_name),
+                                    Some(&active_session.worktree_path),
+                                    Some(&owner),
+                                )?;
+                                if current.as_deref() != Some(expected) || !work_items.work_items.iter().any(|work| {
+                                    work.id == expected
+                                        && !work.discarded
+                                        && work.status_category == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+                                }) {
+                                    return Err(gwt_core::error::GwtError::Other(
+                                        "Saved Work changed before continue readiness".into(),
+                                    ));
+                                }
+                            }
                             let events = apply_workspace_launch_for_current_work(
                                 &pending.project_root,
                                 projection,

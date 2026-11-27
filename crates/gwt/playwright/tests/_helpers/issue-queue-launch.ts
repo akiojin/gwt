@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import type { TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchSetup } from "./exact-relaunch";
@@ -17,6 +17,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   initialComments?: Record<number, { body: string; updated_at: string }[]>;
   monitorPreferences?: Record<string, unknown>;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
+  switchResumeCondition?: NonNullable<ExactRelaunchSetup["switching"]>["resumeCondition"];
   targetRefreshGate?: boolean;
   /** Issue #7451: a second repository and Host under the same HOME. */
   secondProject?: { issueNumbers: number[] };
@@ -101,7 +102,9 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       selected.updatedAt = new Date().toISOString();
       result = selected.labels;
     } else if (request.method === "GET" && /^\/repos\/fixture\/queue(?:-b)?\/issues(?:\?|$)/.test(request.url || "")) {
-      result = issues.filter(value => value.repo === repositoryOf(request.url || "")).map(restIssue);
+      const url = request.url ?? "";
+      result = issues.filter(value => value.repo === repositoryOf(url)
+        && (!options.switchResumeCondition || !url.includes("state=open") || value.state === "OPEN")).map(restIssue);
     } else if (request.method === "GET" && /^\/repos\/fixture\/queue(?:-b)?\/issues\/\d+(?:\?|$)/.test(request.url || "")) {
       const number = Number(request.url!.split("/").at(-1)!.split("?")[0]);
       const selected = issues.find(value => value.number === number);
@@ -197,7 +200,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       terminalConvergence: options.terminalConvergence,
       freshNativeIds: !!options.switching || !!options.terminalConvergence,
       switching: options.switching ? { sourceIssueNumber: issue.number,
-        positive: !!options.positive } : undefined,
+        positive: !!options.positive, resumeCondition: options.switchResumeCondition } : undefined,
       monitorPreferences: {
         enabled: true, autonomous_mode: options.autonomousMode ?? false, auto_close_merged_issues: false,
         auto_apply_updates: false, terminal_queue_auto_refill: false,
@@ -209,6 +212,11 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
           await writeFile(join(home, ".gwt/config.toml"), "[agent]\nterminal_close_grace_secs = 1\n");
         projectState = preferences;
         projectLogs = join(preferences, "..", "logs");
+        if (options.switchResumeCondition) {
+          await writeFile(join(preferences, "pm.json"), JSON.stringify({ settings: {
+            auto_start: false, launch_profile: { agent_id: "codex" },
+          } }));
+        }
         if (options.secondProject) {
           // The second Host reads the same HOME; only its project root differs.
           secondEnv = { ...env, GWT_PROJECT_ROOT: secondProject };
@@ -281,12 +289,13 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
         const gh = `#!${process.execPath}
 const fs=require('node:fs');const a=process.argv.slice(2);const text=a.join(' ');
 fs.appendFileSync(${JSON.stringify(ghLog)},JSON.stringify(a)+'\\n');
-const issues=${JSON.stringify(issues)};
+const issueFile=${JSON.stringify(join(home, "fixture-issues.json"))};
+const issues=fs.existsSync(issueFile)?JSON.parse(fs.readFileSync(issueFile,'utf8')):${JSON.stringify(issues)};
 const selected=issues.find(issue=>issue.number===Number(a[2]))||issues[0];
 if(a[0]==='--version'){console.log('gh version 2.80.0');process.exit(0);}
 if(a[0]==='auth'){if(a[1]==='token')console.log('fixture-only');process.exit(0);}
 if(a.includes('--include'))process.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n');
-if(a[0]==='api' && text.includes('/issues?')){const repo=text.includes('repos/fixture/queue-b/')?'queue-b':'queue';console.log(JSON.stringify(/[?&]page=1(?:&| |$)/.test(text)?issues.filter(issue=>issue.repo===repo):[]));process.exit(0);}
+if(a[0]==='api' && text.includes('/issues?')){const repo=text.includes('repos/fixture/queue-b/')?'queue-b':'queue';console.log(JSON.stringify(/[?&]page=1(?:&| |$)/.test(text)?issues.filter(issue=>issue.repo===repo${options.switchResumeCondition ? "&&(!text.includes('state=open')||issue.state==='OPEN')" : ""}):[]));process.exit(0);}
 if(a[0]==='api' && text.includes('/pulls?')){console.log('[]');process.exit(0);}
 if(a[0]==='issue'&&a[1]==='view'){
 ${options.targetRefreshGate ? `
@@ -528,6 +537,14 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
       return observations;
     },
     commentsForIssue: (number: number) => (issueComments.get(number) ?? []).map(comment => ({ ...comment })),
+    async updateIssue(number: number, change: { body?: string; state?: "OPEN" | "CLOSED" }) {
+      const selected = issues.find(value => value.number === number);
+      if (!selected) throw new Error(`Cannot update unknown fixture Issue ${number}`);
+      Object.assign(selected, change, { updatedAt: new Date().toISOString() });
+      const path = join(active.home, "fixture-issues.json");
+      await writeFile(`${path}.tmp`, JSON.stringify(issues));
+      await rename(`${path}.tmp`, path);
+    },
     actorEvents: async () => (await readFile(join(active.home, "switch-actor.jsonl"), "utf8").catch(() => ""))
       .split("\n").filter(Boolean).map(line => JSON.parse(line)),
     processAlive: (pid: number) => {

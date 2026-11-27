@@ -1246,6 +1246,7 @@ pub(crate) fn assignment_is_busy(
 
 struct DeadProjectAssignments {
     assignments: Vec<AgentMemberAssignment>,
+    roster_revision: Option<u64>,
     _leases: gwt_agent::SessionPathLeases,
 }
 
@@ -1306,6 +1307,7 @@ fn dead_project_assignments(
     sessions_dir: &Path,
 ) -> Result<DeadProjectAssignments, String> {
     let prefs = crate::load_issue_monitor_prefs(path).map_err(|error| error.to_string())?;
+    let roster_revision = prefs.agent_roster.as_ref().map(|roster| roster.revision);
     let assignments: Vec<_> = prefs
         .agent_roster
         .into_iter()
@@ -1348,6 +1350,7 @@ fn dead_project_assignments(
         .collect();
     Ok(DeadProjectAssignments {
         assignments,
+        roster_revision,
         _leases: leases,
     })
 }
@@ -1356,14 +1359,15 @@ fn unpinned_dead_assignments(
     prefs: &crate::IssueMonitorPrefs,
     dead: &[AgentMemberAssignment],
 ) -> Vec<AgentMemberAssignment> {
-    // A switch's source remains uncertain until its exact runtime exit is
-    // confirmed. Recheck under the prefs writer lock: the pin can appear after
-    // physical absence was observed without changing the assignment itself.
+    // Save-and-return needs the exact release as well as physical exit.
+    // Recheck under the writer lock in case the pin appeared after observation.
     dead.iter()
         .filter(|assignment| {
             !prefs.agent_switch_intents.values().any(|intent| {
                 intent.has_admission_pin()
-                    && !intent.runtime_exit_confirmed
+                    && (intent.request.disposition
+                        == crate::issue_monitor::AgentSwitchDisposition::SaveAndReturn
+                        || !intent.runtime_exit_confirmed)
                     && &intent.source.assignment == *assignment
             })
         })
@@ -1518,6 +1522,26 @@ pub fn reserve_project_member_for_session(
     spec_number: Option<u64>,
     session: &gwt_agent::Session,
 ) -> Result<AgentMember, String> {
+    reserve_project_member_for_session_delivery(
+        root,
+        sessions_dir,
+        reservation_id,
+        issue_number,
+        spec_number,
+        session,
+        None,
+    )
+}
+
+pub(crate) fn reserve_project_member_for_session_delivery(
+    root: &Path,
+    sessions_dir: &Path,
+    reservation_id: &str,
+    issue_number: Option<u64>,
+    spec_number: Option<u64>,
+    session: &gwt_agent::Session,
+    delivery_id: Option<&str>,
+) -> Result<AgentMember, String> {
     crate::agent_registry::ensure_active_for_project(root).map_err(|error| error.to_string())?;
     gwt_agent::with_session_path_lease(sessions_dir, &session.id, |state| {
         let gwt_agent::SessionPathState::Present(saved) = state else {
@@ -1543,7 +1567,7 @@ pub fn reserve_project_member_for_session(
             reservation_id,
             issue_number,
             spec_number,
-            None,
+            delivery_id,
             Some(&member),
             Some(session.agent_id.command()),
             None,
@@ -1618,6 +1642,44 @@ fn reserve_project_member_inner(
     let dead = dead_project_assignments(root, &path, sessions_dir)?;
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(root, prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
+        use crate::issue_monitor::AgentSwitchStage;
+        let resume = if let Some((intent, delivery_id)) = issue_number
+            .and_then(|number| prefs.saved_switch_resume(number))
+            .zip(delivery_id)
+        {
+            let confirmed_delivery = prefs.pending_launch_deliveries.iter().any(|pending| {
+                Some(pending.issue_number) == issue_number
+                    && pending.delivery_id == delivery_id
+                    && pending.agent_member_id.as_deref() == Some(&intent.request.member_id)
+                    && pending.materializer_id.is_some()
+                    && prefs.claim_identities.iter().any(|claim| {
+                        claim.issue_number == pending.issue_number
+                            && claim.claim_id == pending.claim_id
+                            && claim.owner == pending.claim_owner
+                    })
+            });
+            if !prefs.enabled || prefs.launch_auto || !confirmed_delivery
+                || prefs.agent_roster.as_ref().map(|roster| roster.revision) != dead.roster_revision
+                || intent.source.assignment.host_id != host
+                || !intent.runtime_exit_confirmed
+                || intent.checkpoint.is_none()
+                || intent.resume_condition.is_none()
+                || intent.source_agent_id.as_ref() != requested_tool.as_ref()
+                || restored_session.is_none_or(|session| {
+                    intent.source.assignment.session_id.as_deref() != Some(&session.id)
+                })
+                || inherited_member_id != Some(intent.request.member_id.as_str())
+                || selected_member_id.is_some_and(|id| id != intent.request.member_id)
+                || (intent.stage == AgentSwitchStage::Resuming
+                    && intent.resume_delivery_id.as_deref() != Some(delivery_id))
+            {
+                return Err(std::io::Error::other("Saved Work resume admission changed"));
+            }
+            Some((intent.request.operation_id.clone(), intent.request.member_id.clone()))
+        } else {
+            None
+        };
+        let inherited_member_id = resume.as_ref().map(|(_, member)| member.as_str()).or(inherited_member_id);
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
         let listed = requested_tool.as_deref().is_some_and(|tool| {
             prefs.environment_lists_tool(tool)
@@ -1639,8 +1701,10 @@ fn reserve_project_member_inner(
             .or_else(|| prefs.launch_profile_pool().into_iter().find(|profile| runs(profile, tool)))
             .and_then(|profile| profile.agent_member_id)));
         let switch_exclusions: std::collections::BTreeMap<_, _> = prefs.agent_roster.as_ref().expect("initialized roster").members.iter().filter_map(|member| {
-            prefs.agent_switch_admission_exclusion(issue_number, &member.agent_member_id,
-                inherited_member_id == Some(member.agent_member_id.as_str()), &host).map(|reason| (member.agent_member_id.clone(), reason))
+            prefs.agent_switch_admission_exclusion_except(issue_number, &member.agent_member_id,
+                inherited_member_id == Some(member.agent_member_id.as_str()), &host,
+                resume.as_ref().map(|(operation, _)| operation.as_str()))
+                .map(|reason| (member.agent_member_id.clone(), reason))
         }).collect();
         if let Some(reason) = inherited_member_id.and_then(|member| switch_exclusions.get(member)) {
             return Err(std::io::Error::other(reason.clone()));
@@ -1691,7 +1755,9 @@ fn reserve_project_member_inner(
                 ));
             }
             let result = roster.members[index].clone();
-            prefs.abandon_agent_switch_for_source_resume(issue_number, &result.agent_member_id, inherited_member_id == Some(result.agent_member_id.as_str()), &host);
+            if resume.is_none() {
+                prefs.abandon_agent_switch_for_source_resume(issue_number, &result.agent_member_id, inherited_member_id == Some(result.agent_member_id.as_str()), &host);
+            }
             return Ok(result);
         }
         for member in &mut roster.members {
@@ -1786,7 +1852,17 @@ fn reserve_project_member_inner(
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("Agent roster revision exhausted"))?;
         if let Some(number) = issue_number { prefs.agent_issue_schedule.consume(&host, number)?; }
-        prefs.abandon_agent_switch_for_source_resume(issue_number, &result.agent_member_id, inherited_member_id == Some(result.agent_member_id.as_str()), &host);
+        if let Some((operation, _)) = resume {
+            let intent = prefs.agent_switch_intents.get_mut(&operation).expect("checked saved switch");
+            if intent.stage != AgentSwitchStage::Returned || intent.resume_delivery_id.is_some() {
+                return Err(std::io::Error::other("Saved Work resume already reserved"));
+            }
+            intent.stage = AgentSwitchStage::Resuming;
+            intent.resume_delivery_id = delivery_id.map(str::to_owned);
+            intent.reason = None;
+        } else {
+            prefs.abandon_agent_switch_for_source_resume(issue_number, &result.agent_member_id, inherited_member_id == Some(result.agent_member_id.as_str()), &host);
+        }
         Ok(result)
     })
     .map_err(|error| error.to_string())?;
@@ -2052,6 +2128,16 @@ pub fn release_project_member(
         }
     }
     crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        if prefs.agent_switch_intents.values().any(|intent| {
+            intent.request.disposition
+                == crate::issue_monitor::AgentSwitchDisposition::SaveAndReturn
+                && intent.has_admission_pin()
+                && intent.source.assignment == observed
+        }) {
+            return Err(std::io::Error::other(
+                "Saved Work return is waiting for an exact reaped-member release",
+            ));
+        }
         if let Some(roster) = prefs.agent_roster.as_mut() {
             if let Some(member) = roster.members.iter_mut().find(|member| {
                 member.agent_member_id == member_id && member.assignment.as_ref() == Some(&observed)
@@ -2078,6 +2164,8 @@ pub(crate) fn release_reaped_project_member(
     reservation_id: &str,
     pty: &gwt_terminal::PtyHandle,
 ) -> Result<(), String> {
+    use crate::issue_monitor::{AgentSwitchDisposition, AgentSwitchStage};
+
     if crate::pm_registry::is_canonical_pm_worktree(&captured.worktree_path) {
         return release_reaped_pm_member(root, sessions_dir, captured, Some(reservation_id), pty);
     }
@@ -2137,13 +2225,14 @@ pub(crate) fn release_reaped_project_member(
     let member_id = crate::agent_registry::resolve_member_id_in_source(&project_key, member_id)
         .map_err(|error| error.to_string())?;
     gwt_agent::with_session_path_lease(sessions_dir, &captured.id, |state| {
-        match state {
+        let terminal_session = match state {
             gwt_agent::SessionPathState::Missing => {
                 if !missing_session_is_absent(sessions_dir, &captured.id)? {
                     return Err(std::io::Error::other(
                         "Agent reservation retains unconfirmed runtime evidence",
                     ));
                 }
+                false
             }
             gwt_agent::SessionPathState::Present(current)
                 if current.created_at == captured.created_at
@@ -2158,6 +2247,10 @@ pub(crate) fn release_reaped_project_member(
                         "Agent reservation retains live or uncertain runtime evidence",
                     ));
                 }
+                matches!(
+                    current.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                ) && !current.restore_window_on_startup
             }
             gwt_agent::SessionPathState::Present(_) if captured_assignment.is_some() => {
                 return Err(std::io::Error::other(
@@ -2166,7 +2259,7 @@ pub(crate) fn release_reaped_project_member(
             }
             gwt_agent::SessionPathState::Present(_) => return Ok(()),
             gwt_agent::SessionPathState::Error(error) => return Err(error),
-        }
+        };
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let Some(roster) = prefs.agent_roster.as_mut() else {
                 if captured_assignment.is_some() {
@@ -2206,23 +2299,60 @@ pub(crate) fn release_reaped_project_member(
                 }
                 return Ok(());
             };
-            if prefs.agent_switch_intents.values().any(|intent| {
+            if let Some(intent) = prefs.agent_switch_intents.values().find(|intent| {
                 intent.has_admission_pin()
                     && !intent.runtime_exit_confirmed
                     && member.assignment.as_ref() == Some(&intent.source.assignment)
             }) {
-                if captured_assignment.is_some() {
+                if captured_assignment.is_some()
+                    || intent.request.disposition == AgentSwitchDisposition::SaveAndReturn
+                {
                     return Err(std::io::Error::other(
                         "Reaped Agent reservation is pinned; retry cleanup",
                     ));
                 }
                 return Ok(());
             }
+            let returned_operation = prefs
+                .agent_switch_intents
+                .values()
+                .find(|intent| {
+                    intent.request.disposition == AgentSwitchDisposition::SaveAndReturn
+                        && intent.stage == AgentSwitchStage::StoppingCurrent
+                        && intent.request.member_id == member_id
+                        && member.assignment.as_ref() == Some(&intent.source.assignment)
+                })
+                .map(|intent| {
+                    if !terminal_session
+                        || !intent.runtime_stop.as_ref().is_some_and(|proof| {
+                            pty.process_id() == Some(proof.child_pid)
+                                && gwt_agent::SessionExecutionIdentity::from_session(captured)
+                                    .is_ok_and(|identity| {
+                                        identity.as_ref() == Some(&proof.execution_identity)
+                                    })
+                        })
+                    {
+                        return Err(std::io::Error::other(
+                            "Saved Work return requires the captured reaped runtime and terminal Session",
+                        ));
+                    }
+                    Ok(intent.request.operation_id.clone())
+                })
+                .transpose()?;
             member.assignment = None;
             roster.revision = roster
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| std::io::Error::other("Agent roster revision exhausted"))?;
+            if let Some(operation) = returned_operation {
+                prefs
+                    .transition_agent_switch(
+                        &operation,
+                        AgentSwitchStage::Returned,
+                        Some("The source slot was returned. Saved work is waiting for its dependencies.".into()),
+                    )
+                    .map_err(std::io::Error::other)?;
+            }
             Ok(())
         })?;
         Ok(())
@@ -2881,6 +3011,19 @@ mod tests {
         assert_eq!(
             unpinned_dead_assignments(&prefs, &observed_dead),
             observed_dead
+        );
+        let mut saved = serde_json::to_value(&prefs.agent_switch_intents["switch"]).unwrap();
+        saved["request"]["disposition"] = serde_json::json!("save_and_return");
+        saved["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("target_issue_number");
+        prefs
+            .agent_switch_intents
+            .insert("switch".into(), serde_json::from_value(saved).unwrap());
+        assert!(
+            unpinned_dead_assignments(&prefs, &observed_dead).is_empty(),
+            "generic reconciliation cannot substitute for the captured return release"
         );
     }
 
