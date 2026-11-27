@@ -1,0 +1,66 @@
+{
+  "n": 10,
+  "results": [
+    {
+      "index": 1,
+      "route_ms": 75.205584,
+      "send_to_log_observed_ms": 102,
+      "timed_out": false
+    },
+    {
+      "index": 2,
+      "route_ms": 60.898165999999996,
+      "send_to_log_observed_ms": 102,
+      "timed_out": false
+    },
+    {
+      "index": 3,
+      "route_ms": 59.761042,
+      "send_to_log_observed_ms": 103,
+      "timed_out": false
+    },
+    {
+      "index": 4,
+      "route_ms": 42.182291,
+      "send_to_log_observed_ms": 102,
+      "timed_out": false
+    },
+    {
+      "index": 5,
+      "route_ms": 62.259333,
+      "send_to_log_observed_ms": 102,
+      "timed_out": false
+    },
+    {
+      "index": 6,
+      "route_ms": 74.025542,
+      "send_to_log_observed_ms": 103,
+      "timed_out": false
+    },
+    {
+      "index": 7,
+      "route_ms": 60.071125,
+      "send_to_log_observed_ms": 101,
+      "timed_out": false
+    },
+    {
+      "index": 8,
+      "route_ms": 65.69512499999999,
+      "send_to_log_observed_ms": 102,
+      "timed_out": false
+    },
+    {
+      "index": 9,
+      "route_ms": 74.37316700000001,
+      "send_to_log_observed_ms": 104,
+      "timed_out": false
+    },
+    {
+      "index": 10,
+      "route_ms": 63.720457999999994,
+      "send_to_log_observed_ms": 102,
+      "timed_out": false
+    }
+  ],
+  "hub_error_messages": []
+}
