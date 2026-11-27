@@ -1,4 +1,4 @@
-//! SPEC #3836 — design phase for the Issue Monitor.
+//! SPEC #3836 — design phase for Issues.
 //!
 //! Pure decisions only: which phase an Issue launches in, whether a `fix` is
 //! large enough to need design first, whether a design phase produced enough
