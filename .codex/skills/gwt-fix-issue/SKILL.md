@@ -5,13 +5,12 @@ description: Use when an existing GitHub Issue number or URL needs a fix.
 
 ## When to use
 
-Compatibility entrypoint for an existing Issue. Continue through [gwt-execute](../gwt-execute/SKILL.md) with the same owner; use registration only for new intake.
+Alias for [gwt-execute](../gwt-execute/SKILL.md): `#N` or an Issue URL continues as `$gwt-execute #N`. This alias carries no workflow of its own and does not create another execution lifetime.
 
 ## Completion
 
-Prove the root cause, classify specification alignment, and deliver the direct fix through TDD, verification, Ready PR, and CI auto-merge. Record the PR and remaining work; a pushed commit alone does not complete the Issue.
+Completion is defined entirely by `gwt-execute`.
 
 ## References
 
-- For investigation, specification routing, verification, and closure: [workflow](references/workflow.md).
-- For the constraint review: [router audit](references/router-audit.md).
+- For the alias constraint: [router audit](references/router-audit.md).

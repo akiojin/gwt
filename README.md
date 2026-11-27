@@ -2037,8 +2037,7 @@ entrypoints are:
   `gwt-spec` Issues
 - `gwt-plan-spec` — implementation planning for an approved SPEC
 - `gwt-execute` — TDD-oriented implementation from `#N` or an approved task
-- `gwt-build-spec` / `gwt-fix-issue` — one-release transition aliases to
-  `gwt-execute`
+- `gwt-build-spec` / `gwt-fix-issue` — aliases that forward to `gwt-execute`
 - `gwt-manage-pr` — PR create/check/fix lifecycle
 - `gwt-arch-review` — architecture review and improvement routing
 - `gwt-search` — unified semantic search

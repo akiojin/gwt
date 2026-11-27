@@ -903,7 +903,7 @@ mod tests {
             let register_spec = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                register_spec.contains("Transition alias")
+                register_spec.contains("Alias for [gwt-register-issue]")
                     && register_spec.contains("gwt-register-issue"),
                 "expected gwt-register-spec to route through gwt-register-issue: {relative}"
             );
@@ -918,44 +918,6 @@ mod tests {
                 && issue_command.contains("SPEC"),
             "expected gwt-register-issue command to describe duplicate-search-first routing"
         );
-
-        for relative in [
-            ".claude/skills/gwt-fix-issue/SKILL.md",
-            ".codex/skills/gwt-fix-issue/SKILL.md",
-        ] {
-            let issue_skill = read_asset_contract(workspace_root.join(relative))
-                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
-            assert!(
-                issue_skill.contains("JSON operations `issue.view` and `issue.comments`"),
-                "expected canonical issue.view/comments JSON guidance in {relative}"
-            );
-            assert!(
-                issue_skill.contains("JSON operation `issue.comment`"),
-                "expected canonical issue.comment JSON guidance in {relative}"
-            );
-            assert!(
-                issue_skill.contains("inspect_issue.py"),
-                "expected inspect_issue helper guidance in {relative}"
-            );
-            assert!(
-                issue_skill.contains("gwt-build-spec") && issue_skill.contains("gwt-discussion"),
-                "expected visible build/discussion handoff guidance in {relative}"
-            );
-            for required in ["push-only", "not completion", "gwt-manage-pr", "PR URL"] {
-                assert!(
-                    issue_skill.contains(required),
-                    "{relative} must prevent push-only false completion claims: {required}"
-                );
-            }
-            assert!(
-                issue_skill.contains("current user's language"),
-                "expected language contract in {relative}"
-            );
-            assert!(
-                !issue_skill.contains("Load `.claude/skills/gwt-issue/SKILL.md`"),
-                "unexpected retired gwt-issue dependency in {relative}"
-            );
-        }
 
         for relative in [
             ".claude/skills/gwt-execute/SKILL.md",
@@ -1044,7 +1006,7 @@ mod tests {
             let alias_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                alias_skill.contains("Transition alias") && alias_skill.contains("gwt-execute"),
+                alias_skill.contains("Alias for [gwt-execute]"),
                 "expected legacy execute skill to route through gwt-execute: {relative}"
             );
         }
@@ -1529,18 +1491,6 @@ mod tests {
             pr_command.contains("conflicting") || pr_command.contains("behind"),
             "expected gwt-manage-pr command wrapper to mention conflict/behind fix routing"
         );
-
-        for relative in [
-            ".claude/skills/gwt-fix-issue/scripts/inspect_issue.py",
-            ".codex/skills/gwt-fix-issue/scripts/inspect_issue.py",
-        ] {
-            let inspect_issue_script = read_asset_contract(workspace_root.join(relative))
-                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
-            assert!(
-                !inspect_issue_script.contains("Fetch issue metadata via gh issue view."),
-                "unexpected direct gh issue view docstring in {relative}"
-            );
-        }
     }
 
     #[test]
@@ -2000,9 +1950,8 @@ mod tests {
             ".claude/skills/gwt-discussion/references/registration.md",
             ".claude/skills/gwt-plan-spec/SKILL.md",
             ".codex/skills/gwt-plan-spec/SKILL.md",
-            ".claude/skills/gwt-build-spec/SKILL.md",
-            ".codex/skills/gwt-build-spec/SKILL.md",
-            ".claude/skills/gwt-build-spec/references/completion-gate.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
             ".claude/skills/gwt-plan-spec/references/quality-gate.md",
         ] {
             let content = read_asset_contract(workspace_root.join(relative))
@@ -2500,12 +2449,12 @@ mod tests {
     }
 
     #[test]
-    fn build_spec_delegates_verification_to_gwt_verify() {
+    fn execute_delegates_verification_to_gwt_verify() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
 
         for relative in [
-            ".claude/skills/gwt-build-spec/SKILL.md",
-            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
         ] {
             let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -2671,12 +2620,6 @@ mod tests {
             ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
             ".claude/skills/gwt-execute/SKILL.md",
             ".codex/skills/gwt-execute/SKILL.md",
-            ".claude/skills/gwt-build-spec/SKILL.md",
-            ".codex/skills/gwt-build-spec/SKILL.md",
-            ".claude/skills/gwt-build-spec/references/completion-gate.md",
-            ".codex/skills/gwt-build-spec/references/completion-gate.md",
-            ".claude/skills/gwt-fix-issue/SKILL.md",
-            ".codex/skills/gwt-fix-issue/SKILL.md",
         ] {
             let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -2750,12 +2693,6 @@ mod tests {
             ".codex/skills/gwt-manage-pr/SKILL.md",
             ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
             ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
-            ".claude/skills/gwt-build-spec/SKILL.md",
-            ".codex/skills/gwt-build-spec/SKILL.md",
-            ".claude/skills/gwt-build-spec/references/completion-gate.md",
-            ".codex/skills/gwt-build-spec/references/completion-gate.md",
-            ".claude/skills/gwt-fix-issue/SKILL.md",
-            ".codex/skills/gwt-fix-issue/SKILL.md",
         ] {
             let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -2950,11 +2887,11 @@ mod tests {
     }
 
     #[test]
-    fn build_spec_phase_3_requires_user_verification_only_on_owner_request() {
+    fn execute_requires_user_verification_only_on_owner_request() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
-            ".claude/skills/gwt-build-spec/SKILL.md",
-            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
         ] {
             let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
@@ -3158,17 +3095,16 @@ mod tests {
     }
 
     #[test]
-    fn build_spec_does_not_treat_draft_pr_as_completion() {
+    fn execute_does_not_treat_draft_pr_as_completion() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
-            ".claude/skills/gwt-build-spec/SKILL.md",
-            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
         ] {
             let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
-                "Draft PR",
-                "does not satisfy",
+                "Draft PRs are prohibited",
                 "Ready PR Gate",
                 "releaseable slice",
             ] {

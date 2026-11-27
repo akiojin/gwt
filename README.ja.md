@@ -1846,7 +1846,7 @@ Bundled workflow skills は active worktree の `.claude/skills`、
   `gwt-spec` Issue を作成する
 - `gwt-plan-spec` — 承認済み SPEC の implementation planning
 - `gwt-execute` — `#N` または承認済み task からの TDD-oriented implementation
-- `gwt-build-spec` / `gwt-fix-issue` — 1 release cycle の transition alias
+- `gwt-build-spec` / `gwt-fix-issue` — `gwt-execute` へ転送する alias
 - `gwt-manage-pr` — PR create/check/fix lifecycle
 - `gwt-arch-review` — architecture review と改善 routing
 - `gwt-search` — unified semantic search
