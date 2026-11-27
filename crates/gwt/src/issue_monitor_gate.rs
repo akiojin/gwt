@@ -91,22 +91,31 @@ impl AcceptanceCriteria {
                     .peekable();
                 matching.peek().is_some()
                     && matching.all(|(_, text)| {
-                        let text = text.to_ascii_lowercase();
-                        let tagged = [
-                            "(release-verification)",
-                            "[release-verification]",
-                            "(main-verification)",
-                            "[main-verification]",
-                            "(host-verification)",
-                            "[host-verification]",
-                        ]
-                        .iter()
-                        .any(|tag| text.contains(tag));
+                        let tagged = is_external_verification_text(text);
                         external |= tagged;
+                        let text = text.to_ascii_lowercase();
                         tagged || text.contains("(measurement)") || text.contains("[measurement]")
                     })
             })
             && external
+    }
+
+    /// Issue #7954: ids whose every criterion text carries an external
+    /// verification tag. Those are confirmed after merge, so a pre-merge
+    /// independent review cannot prove them.
+    pub fn external_verification_ids(&self) -> Vec<String> {
+        external_verification_ids(&self.ids, &self.criterion_texts)
+    }
+
+    /// Issue #7954 AC-1: the ids an independent review must cover — every id
+    /// except the externally verified ones.
+    pub fn review_required_ids(&self) -> Vec<String> {
+        let external = self.external_verification_ids();
+        self.ids
+            .iter()
+            .filter(|id| !external.contains(id))
+            .cloned()
+            .collect()
     }
 
     /// Actionable rejection reason naming the missing element (Issue #3930
@@ -155,6 +164,15 @@ pub struct AcceptanceSnapshot {
 }
 
 impl AcceptanceSnapshot {
+    /// Issue #7954: externally verified ids of the launch snapshot. A legacy
+    /// snapshot without criterion text defers nothing (fail-closed).
+    pub fn external_verification_ids(&self) -> Vec<String> {
+        self.criterion_texts
+            .as_ref()
+            .map(|texts| external_verification_ids(&self.ids, texts))
+            .unwrap_or_default()
+    }
+
     /// Fail-closed equality: the current criteria match the snapshot iff they
     /// carry the same ids and text (order-independent), with a known text
     /// snapshot and the same visual-surface flag. Checkbox state is ignored.
@@ -180,6 +198,36 @@ impl AcceptanceSnapshot {
         have.sort();
         want == have
     }
+}
+
+/// Issue #7954: explicit tags for criteria confirmed after merge (release,
+/// `main`, or another host). Never inferred from prose.
+fn is_external_verification_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "(release-verification)",
+        "[release-verification]",
+        "(main-verification)",
+        "[main-verification]",
+        "(host-verification)",
+        "[host-verification]",
+    ]
+    .iter()
+    .any(|tag| text.contains(tag))
+}
+
+fn external_verification_ids(ids: &[String], texts: &[(String, String)]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| {
+            let mut matching = texts.iter().filter(|(criterion_id, _)| criterion_id == *id);
+            let mut any = false;
+            matching.all(|(_, text)| {
+                any = true;
+                is_external_verification_text(text)
+            }) && any
+        })
+        .cloned()
+        .collect()
 }
 
 /// Heading lines (case-insensitive, trimmed of leading `#`/spaces) that open the
@@ -689,6 +737,18 @@ pub fn route_autonomous_gate(inputs: &AutonomousGateInputs) -> GateAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_7954_review_required_ids_exclude_external_verification() {
+        let c = classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [ ] AC-1: implement\n- [ ] AC-2: PM checks main [main-verification]\n- [ ] AC-3: Windows (host-verification)\n- [ ] AC-4: release [release-verification]\n- [ ] AC-5: observe (measurement)\n",
+        );
+        assert_eq!(c.review_required_ids(), ["AC-1", "AC-5"]);
+        assert_eq!(
+            c.snapshot().external_verification_ids(),
+            ["AC-2", "AC-3", "AC-4"]
+        );
+    }
 
     #[test]
     fn issue_7536_only_explicit_external_verification_can_wait() {
