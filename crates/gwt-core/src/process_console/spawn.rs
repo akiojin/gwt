@@ -78,7 +78,17 @@ thread_local! {
 static SPAWN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(any(test, feature = "test-support"))]
-type SpawnReadyHook = (Duration, Box<dyn FnOnce() + Send>);
+type SpawnReadyHook = (ReadyBudget, Box<dyn FnOnce() + Send>);
+
+/// How a readiness hook places the deadline once the fixture is ready.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+enum ReadyBudget {
+    /// The production split: collection ends at the cleanup reserve.
+    Shared(Duration),
+    /// Collection expires at readiness; only cleanup gets this window.
+    StopAtReadiness { cleanup: Duration },
+}
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -94,6 +104,32 @@ pub fn with_spawn_ready_for_tests<T>(
     ready: impl FnOnce() + Send + 'static,
     run: impl FnOnce() -> T,
 ) -> T {
+    with_ready_hook(ReadyBudget::Shared(budget), Box::new(ready), run)
+}
+
+/// Expire the next synchronous deadline spawn as soon as the fixture signals
+/// readiness, giving only the real tree termination and reap `cleanup`.
+/// A reap verdict then reflects termination, not how much of a shared budget
+/// a loaded host left for cleanup.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_spawn_stopped_at_ready_for_tests<T>(
+    cleanup: Duration,
+    ready: impl FnOnce() + Send + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    with_ready_hook(
+        ReadyBudget::StopAtReadiness { cleanup },
+        Box::new(ready),
+        run,
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn with_ready_hook<T>(
+    budget: ReadyBudget,
+    ready: Box<dyn FnOnce() + Send>,
+    run: impl FnOnce() -> T,
+) -> T {
     struct Restore(Option<SpawnReadyHook>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -101,7 +137,7 @@ pub fn with_spawn_ready_for_tests<T>(
         }
     }
     let _restore =
-        Restore(TEST_SPAWN_READY.with(|slot| slot.borrow_mut().replace((budget, Box::new(ready)))));
+        Restore(TEST_SPAWN_READY.with(|slot| slot.borrow_mut().replace((budget, ready))));
     run()
 }
 
@@ -565,17 +601,29 @@ async fn spawn_logged_inner(
     #[cfg(any(test, feature = "test-support"))]
     let ready_hook = deadline.and_then(|_| TEST_SPAWN_READY.with(|slot| slot.borrow_mut().take()));
     #[cfg(any(test, feature = "test-support"))]
+    let mut stopped_at_ready = None;
+    #[cfg(any(test, feature = "test-support"))]
     let deadline = match ready_hook {
-        Some((budget, ready)) => {
+        Some((ReadyBudget::Shared(budget), ready)) => {
             ready();
             Some(Instant::now() + budget)
         }
+        Some((ReadyBudget::StopAtReadiness { cleanup }, ready)) => {
+            ready();
+            let ready_at = Instant::now();
+            stopped_at_ready = Some(ready_at);
+            // test-hygiene: allow-wall-clock-deadline test seam: collection already expired at readiness; the caller's window bounds only real cleanup
+            Some(ready_at + cleanup)
+        }
         None => deadline,
     };
+    #[cfg(not(any(test, feature = "test-support")))]
+    let stopped_at_ready = None;
+    let collection_deadline =
+        stopped_at_ready.or_else(|| deadline.map(deadline_before_cleanup_reserve));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let forward_output = options.forward_output;
-    let collection_deadline = deadline.map(deadline_before_cleanup_reserve);
     let wait_started = Instant::now();
     let collected = {
         let collect = async {
@@ -2378,10 +2426,11 @@ mod tests {
         let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
         let ready_parent = parent_file.clone();
         let ready_descendant = descendant_file.clone();
-        let error = with_spawn_ready_for_tests(
-            // Reserve the full 1s cleanup grace for the positive reap case;
-            // a 1s fixture budget only leaves 250ms on a loaded Windows host.
-            Duration::from_secs(5),
+        // Expire at observed readiness and give termination and reap the hang
+        // guard: the shared budget's 1s cleanup reserve was not enough on a
+        // loaded Windows runner (#4740), and that reserve is not under test here.
+        let error = with_spawn_stopped_at_ready_for_tests(
+            crate::deadline_budget::HANG_GUARD,
             move || {
                 let parent = wait_for_pid_file_windows(&ready_parent);
                 let descendant = wait_for_pid_file_windows(&ready_descendant);
