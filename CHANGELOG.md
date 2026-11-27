@@ -1,6 +1,79 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.179.0] - 2026-11-27
+
+### Bug Fixes
+
+- **gui:** 台帳ロード前に PM 名をウィンドウのカタログ名で描画しない
+- **monitor:** 返却済み Work の待機表示を状態に合わせる
+- **monitor:** Switch 要求の対象指定をデコード時に検証する
+- **monitor:** 保存返却と再開の依存および割当を再検証する
+- **monitor:** 返却後の再開を Monitor の配送に限定する
+- **gwtd:** Pm.message.send を pm / pane / 全体 help から発見できるようにする (#4061)
+- **gui:** Issues 通知にプロジェクト名を表示し発生元プロジェクトを区別できるようにする (#3922)
+- **github:** Resolve the target of duplicate issue closes
+- **review:** 独立レビューの必須 criterion から外部検証タグ付き AC を除外する
+- **test:** Override キーの Windows 大小無視・分割呼び出し検出・文字列内マーカー拒否・空 pin を直す (#4072)
+- **update:** インストール済みバンドルの版数で更新を判定し、helper の適用段階を記録する (#3807)
+- **update:** 再接続時の staged CTA もインストール済みバンドルの版数で判定する (#3807)
+- **review:** Slice を特定できない SPEC PR を親 AC で判定しない
+- **review:** Slice 判定のレビュー文脈に PR 本文を含める
+
+### Documentation
+
+- **perf:** 性能改善の完了条件と計測の自己劣化検証手順を定める (#3820)
+- **perf:** Project open の暫定値と計装の健全性を記録する (#3820)
+- **perf:** 計測できなかった性能経路の理由と条件を記録する (#3820)
+- **issue-monitor:** 設計フェーズモジュールの旧称を Issues に揃える (#3836)
+- **perf:** T-006 証跡の旧サーフェス名を Issues に揃える (#3820)
+
+### Features
+
+- **monitor:** 保存済み Work の共有枠返却と再開を追加する
+- **issue-monitor:** 設計フェーズの起動判定・完了 gate・AC 正規化を純関数として追加 (#3836)
+- **test:** テスト env 差し替えを汎用 thread-local override と process-env ガードに集約する (#4072)
+- **mobile:** 承認済み端末のreconnect接続をHost台帳の端末へ結び付ける
+
+### Miscellaneous Tasks
+
+- **skills:** Scopes 違いだけの検索スキル 5 本を gwt-search に統合し alias の期限切れ表現を削除
+- **skills:** Transition alias 3 本を転送ヘッダのみに縮小し旧本文を削除
+- **work:** HTTP-EXPIRY の Work 終端イベントを記録する
+- **work:** Issue 4740 の Work イベントを記録する
+- **work:** HYGIENE-DATA の Work イベントを記録する
+- **work:** WINREAP の Work イベントを記録する
+- **work:** WINREAP の配信精算を記録する
+- **work:** Issue #4740 の継続実行を精算する
+- **work:** SPEC #4740 の PR 関連付けを記録する
+- **work:** Issue #4489 の作業イベントを記録
+- **work:** Issue #7954 の Work 記録を更新する
+- **work:** Issue #7942 の Work 記録を追加
+- **work:** Issue #7942 の Work 記録を更新
+- **work:** Issue #7942 の Work 記録を更新
+- **work:** Issue 5447 の PM 引継ぎを記録
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** SPEC #4740 の PR #8035 関連付けを記録する
+- **work:** Issue #3807 の作業記録を追加する
+- **work:** Issue #8006 の契約記録の Work 履歴を追加
+- **work:** SPEC #4740 の PR #8037 関連付けを記録する
+- **work:** Issue #7942 の Work 記録を更新
+
+### Testing
+
+- **gui:** PM 名が台帳ロード前に描画されないことを headed E2E で固定
+- **hook:** Grok-build の UserPromptSubmit / Stop 実 payload を fixture に追加する
+- **hook:** Pin real provider payload contracts
+- **hygiene:** 合成データの短い Duration を理由付き宣言へ移し baseline を縮める (#4740)
+- **process:** Windows の reap 判定を cleanup 予算の残量から切り離す (#4740)
+- **process:** サイレント実行の期限を子プロセス登録後に失効させる (#4740)
+- **process:** Cleanup の猶予を仮想時刻で検証する (#4740)
+- **hygiene:** Gwt-git に process env 書き込みを置きガードの RED を確認する (#4072)
+- **hygiene:** ガード RED 確認用の process env 書き込みを取り除く (#4072)
+- **process:** ツリー停止の猶予を仮想時刻で検証する (#4740)
+- **process:** 期限切れの起動拒否から時間差を外す (#4740)
+
 ## [9.178.0] - 2026-11-27
 
 ### Bug Fixes

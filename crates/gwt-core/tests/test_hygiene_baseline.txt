@@ -35,7 +35,6 @@ short-wall-clock|crates/gwt-core/src/index_coordinator.rs|lease_extension_pushes
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|wait_until
 short-wall-clock|crates/gwt-core/src/operation_deadline.rs|contended_file_lock_stops_at_the_shared_deadline
 short-wall-clock|crates/gwt-core/src/process_console/hub.rs|snapshot_all_is_time_sorted
-short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|expired_deadline_does_not_spawn_child
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit
 short-wall-clock|crates/gwt-core/src/test_support.rs|write_executable_script_is_immediately_executable_under_concurrent_forks
 short-wall-clock|crates/gwt-core/src/update.rs|wait_for_pid_exit_times_out_while_process_runs
