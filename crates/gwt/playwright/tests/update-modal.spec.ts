@@ -23,7 +23,10 @@ test("cancelled download ignores late readiness and accepts a fresh retry", asyn
   const version = "99.0.0";
   const requests: Record<string, unknown>[] = [];
   let send: (event: Record<string, unknown>) => void;
-  await page.routeWebSocket(/\/ws\?.*repo_hash=/, socket => {
+  await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+    // The Project page also opens a Hub socket for host-wide state.
+    // Keep both fixture sockets local and inject updates on the Project one.
+    if (!new URL(socket.url()).searchParams.has("repo_hash")) return;
     send = event => socket.send(JSON.stringify(event));
     socket.onMessage(message => {
       if (typeof message === "string") requests.push(JSON.parse(message));
