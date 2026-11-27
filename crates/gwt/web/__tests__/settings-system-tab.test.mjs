@@ -1942,3 +1942,60 @@ test("Issue #7646: Application settings link to the agent ledger without editing
   assert.doesNotMatch(settingsSource, /kind:\s*"(add|rest|activate|rename|move|remove|select_pm|set_pm_eligibility)"/,
     "Settings sends no member change");
 });
+
+// Issue #7248 AC-2: the last apply result and this session's last apply error
+// stay visible in Settings status with a route to the update log.
+test("issue #7248: Settings update status shows the last apply result and the last apply error", () => {
+  const { surface, body, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const panel = () => body.querySelector("[data-update-settings-status]");
+  surface.applyGlobalUpdateSettings({ project_root: "/projects/A", status: {
+    auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null,
+    last_apply_result: {
+      outcome: "failure", from_version: "1.0.0", to_version: "1.1.0", observed_version: "1.0.0",
+      attempt: 2, recorded_at: "2026-11-11T00:00:00Z", message: "version mismatch",
+    },
+  } });
+  flush();
+  const result = panel().querySelector("[data-update-last-apply-result]");
+  assert.ok(result, "the last apply result has its own line");
+  assert.equal(result.getAttribute("role"), "alert");
+  assert.match(result.textContent, /Last update: Failed · v1\.0\.0 → v1\.1\.0 · expected v1\.1\.0, observed v1\.0\.0 · 2026-11-11T00:00:00Z/);
+  assert.match(result.textContent, /version mismatch/);
+  const openLog = panel().querySelector("[data-update-open-log]");
+  assert.ok(openLog, "a failed apply links to the update log");
+  openLog.click();
+  assert.deepEqual(sent.at(-1), { kind: "open_update_log" });
+
+  surface.applyUpdateApplyFailure({ stage: "Download asset", reason: "network down", log_path: "/logs/update.log" });
+  flush();
+  const error = panel().querySelector("[data-update-last-apply-error]");
+  assert.ok(error, "an in-session failure reaches Settings whatever the CTA status");
+  assert.match(error.textContent, /Last apply error: Download asset — network down · /);
+  panel().querySelector("[data-update-open-log]").click();
+  assert.deepEqual(sent.at(-1), { kind: "open_update_log", log_path: "/logs/update.log" });
+
+  surface.applyGlobalUpdateSettings({ project_root: "/projects/A", status: {
+    auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null,
+    last_apply_result: {
+      outcome: "success", from_version: "1.0.0", to_version: "1.1.0", observed_version: "1.1.0",
+      attempt: 1, recorded_at: "2026-11-12T00:00:00Z",
+    },
+  } });
+  flush();
+  assert.match(panel().querySelector("[data-update-last-apply-result]").textContent,
+    /Last update: Succeeded · v1\.0\.0 → v1\.1\.0 · observed v1\.1\.0 · 2026-11-12T00:00:00Z/);
+  assert.ok(panel().querySelector("[data-update-last-apply-error]"), "a later success keeps the session error visible");
+});
+
+test("issue #7248: Settings update status says when no apply has been recorded", () => {
+  const { surface, body, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  surface.applyGlobalUpdateSettings({ project_root: "/projects/A", status: {
+    auto_apply_updates: false, auto_apply_updates_effective: false, update_drain: null,
+  } });
+  flush();
+  const panel = body.querySelector("[data-update-settings-status]");
+  assert.match(panel.querySelector("[data-update-last-apply-result]").textContent, /Last update: none recorded/);
+  assert.equal(panel.querySelector("[data-update-open-log]"), null);
+});
