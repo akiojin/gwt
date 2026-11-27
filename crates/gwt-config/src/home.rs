@@ -3,21 +3,22 @@
 //! This lives below gwt-core so settings and runtime paths cannot disagree.
 
 use std::{
-    cell::RefCell,
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     sync::OnceLock,
 };
 
-thread_local! {
-    static HOME_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
+/// Key the shared thread-local override (SPEC #4072) uses for the user home.
+const HOME_KEY: &str = "HOME";
 
 /// Leaf prefix of the per-command temporary directory verify.run creates.
 pub const VERIFICATION_COMMAND_TEMP_PREFIX: &str = "gwt-verify-";
 
 pub fn gwt_home_override() -> Option<PathBuf> {
-    HOME_OVERRIDE.with(|home| home.borrow().clone())
+    crate::env::override_for(HOME_KEY)
+        .flatten()
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Resolve the user-home root, isolating Cargo test executables by default.
@@ -26,8 +27,8 @@ pub fn user_home() -> Option<PathBuf> {
         return Some(home);
     }
     let home = resolve_config_home_dir(
-        std::env::var_os("HOME"),
-        std::env::var_os("USERPROFILE"),
+        crate::env::var_os(HOME_KEY),
+        crate::env::var_os("USERPROFILE"),
         dirs::home_dir,
     );
     if is_test_process() {
@@ -281,8 +282,7 @@ fn resolved_path(path: &Path) -> Option<PathBuf> {
 /// Thread-local user-home override shared by every gwt crate.
 #[cfg(any(test, feature = "test-support"))]
 pub struct ScopedGwtHome {
-    previous: Option<PathBuf>,
-    _not_send: std::marker::PhantomData<*const ()>,
+    _home: crate::env::ScopedEnvOverride,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -294,16 +294,8 @@ impl ScopedGwtHome {
             "test HOME isolation: ScopedGwtHome requires a temporary home"
         );
         Self {
-            previous: HOME_OVERRIDE.with(|home| home.replace(Some(path.to_path_buf()))),
-            _not_send: std::marker::PhantomData,
+            _home: crate::env::ScopedEnvOverride::set(HOME_KEY, path),
         }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Drop for ScopedGwtHome {
-    fn drop(&mut self) {
-        HOME_OVERRIDE.with(|home| home.replace(self.previous.take()));
     }
 }
 
@@ -417,6 +409,26 @@ mod tests {
         assert_ne!(std::thread::spawn(user_home).join().unwrap(), user_home());
         drop(outer);
         assert_eq!(user_home(), initial);
+    }
+
+    /// SPEC #4072 FR-002: ScopedGwtHome is the generic keyed override, so a
+    /// scoped HOME pin is what `crate::env::var_os("HOME")` reports too.
+    #[test]
+    fn scoped_home_rides_on_the_generic_env_override() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        assert_eq!(
+            crate::env::var_os("HOME"),
+            Some(home.path().as_os_str().to_os_string())
+        );
+    }
+
+    /// A generic HOME override is honoured by the shared resolver as well.
+    #[test]
+    fn a_generic_home_override_drives_user_home() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::env::ScopedEnvOverride::set("HOME", home.path());
+        assert_eq!(user_home(), Some(home.path().to_path_buf()));
     }
 
     #[cfg(unix)]

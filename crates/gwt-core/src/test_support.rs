@@ -180,6 +180,9 @@ impl Drop for EnvLockGuard {
 
 // One lower-layer override must drive both core paths and global settings.
 pub use gwt_config::home::{gwt_home_override, ScopedGwtHome};
+// SPEC #4072 FR-001: pin any variable for the current thread only. Production
+// code reads it through `gwt_core::env::var` / `var_os`.
+pub use gwt_config::env::ScopedEnvOverride;
 
 /// RAII guard that sets or removes one environment variable and restores the
 /// previous value on drop. Hold the [`env_lock`] mutex for the guard's whole

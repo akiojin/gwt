@@ -12,6 +12,8 @@ pub mod config;
 pub mod coordination;
 pub mod daemon;
 pub mod daemon_pipe_name;
+/// Environment reads that honour thread-local test overrides (SPEC #4072 FR-001).
+pub use gwt_config::env;
 pub mod deadline_budget;
 pub mod decision_queue;
 pub mod error;

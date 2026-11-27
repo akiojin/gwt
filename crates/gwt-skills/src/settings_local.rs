@@ -1,7 +1,6 @@
 //! Generate `.claude/settings.local.json` with gwt-managed Claude hooks.
 
 use std::{
-    cell::RefCell,
     fs, io,
     io::Write,
     path::{Path, PathBuf},
@@ -684,17 +683,16 @@ pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-thread_local! {
-    static HOOK_BIN_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
 /// The hook binary pinned for the current thread by [`ScopedHookBin`], if any.
 ///
 /// Public materialization and in-process tests use this per-thread seam to
 /// choose the binary generated hook commands embed without changing the
-/// process-global `GWT_HOOK_BIN` (#4057, #3839).
+/// process-global `GWT_HOOK_BIN` (#4057, #3839). It is the shared keyed
+/// override (SPEC #4072), not a seam of its own.
 pub fn hook_bin_override() -> Option<String> {
-    HOOK_BIN_OVERRIDE.with(|value| value.borrow().clone())
+    gwt_config::env::override_for(GWT_HOOK_BIN_ENV)
+        .flatten()
+        .map(|value| value.to_string_lossy().into_owned())
 }
 
 /// RAII guard that pins the hook binary for the current thread only.
@@ -702,26 +700,19 @@ pub fn hook_bin_override() -> Option<String> {
 /// Prefer this over setting `GWT_HOOK_BIN` in in-process tests. Environment
 /// variables are process-global, so one parallel test's pin leaks into every
 /// materialization running at the same time — and outlives the tempdir it
-/// pointed at (#4057). Mirrors `gwt_core::test_support::ScopedGwtHome`.
+/// pointed at (#4057). A thin alias of `gwt_config::env::ScopedEnvOverride`
+/// for `GWT_HOOK_BIN`, like `gwt_core::test_support::ScopedGwtHome` for HOME.
 /// Public materialization also holds this guard across its synchronous
 /// provider generators so they share one selected fallback (#3839).
 pub struct ScopedHookBin {
-    previous: Option<String>,
+    _bin: gwt_config::env::ScopedEnvOverride,
 }
 
 impl ScopedHookBin {
     pub fn set(bin: impl AsRef<std::ffi::OsStr>) -> Self {
-        let next = bin.as_ref().to_string_lossy().into_owned();
-        let previous = HOOK_BIN_OVERRIDE.with(|value| value.replace(Some(next)));
-        Self { previous }
-    }
-}
-
-impl Drop for ScopedHookBin {
-    fn drop(&mut self) {
-        HOOK_BIN_OVERRIDE.with(|value| {
-            value.replace(self.previous.take());
-        });
+        Self {
+            _bin: gwt_config::env::ScopedEnvOverride::set(GWT_HOOK_BIN_ENV, bin.as_ref()),
+        }
     }
 }
 
@@ -738,7 +729,7 @@ pub(crate) fn gwt_hook_bin_path() -> String {
     if let Some(bin) = hook_bin_override() {
         return bin;
     }
-    if let Ok(v) = std::env::var(GWT_HOOK_BIN_ENV) {
+    if let Ok(v) = gwt_config::env::var(GWT_HOOK_BIN_ENV) {
         if !v.is_empty() {
             return v;
         }
@@ -3215,6 +3206,22 @@ mod tests {
             .expect("join override probe thread");
         assert_eq!(seen_on_other_thread, None);
         assert_eq!(hook_bin_override().as_deref(), Some("/main/thread/gwtd"));
+    }
+
+    /// SPEC #4072 FR-002: ScopedHookBin is the generic keyed override for
+    /// `GWT_HOOK_BIN`, not a separate thread-local seam.
+    #[test]
+    fn scoped_hook_bin_rides_on_the_generic_env_override() {
+        let _override = ScopedHookBin::set("/generic/override/gwtd");
+        assert_eq!(
+            gwt_config::env::var(GWT_HOOK_BIN_ENV).as_deref(),
+            Ok("/generic/override/gwtd")
+        );
+        drop(_override);
+        let _generic =
+            gwt_config::env::ScopedEnvOverride::set(GWT_HOOK_BIN_ENV, "/via/generic/gwtd");
+        assert_eq!(hook_bin_override().as_deref(), Some("/via/generic/gwtd"));
+        assert_eq!(gwt_hook_bin_path(), "/via/generic/gwtd");
     }
 
     #[test]

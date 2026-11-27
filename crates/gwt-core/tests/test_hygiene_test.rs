@@ -27,6 +27,13 @@
 //!   `test_support::checked_socket_path`. This detects TMPDIR-dependent fixtures
 //!   on Linux before they exceed the shorter macOS/BSD limit. Use the shared
 //!   `socket_tempdir` root instead of fixing each test with its own `/tmp` path.
+//! * **(E) process-env writes** — `env::set_var` / `remove_var` /
+//!   `ScopedEnvVar::set|unset` in test code, even under the env lock
+//!   (SPEC #4072). Production readers never take the lock, so the value leaks
+//!   into whatever they read concurrently. Tests pin a value per thread with
+//!   `ScopedEnvOverride` / `ScopedGwtHome` and production reads through
+//!   `gwt_core::env`. Existing sites live in `process_env_baseline.txt`;
+//!   an exception names its Issue: `allow-process-env #<issue> <reason>`.
 //!
 //! Existing violations are grandfathered in `test_hygiene_baseline.txt`, one
 //! line per `<rule>|<file>|<context>`. The baseline only shrinks: a violation
@@ -66,12 +73,33 @@ fn baseline_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_hygiene_baseline.txt")
 }
 
+/// SPEC #4072 grandfathers its process-env writes in a ledger of their own, so
+/// the SPEC #4551 baseline above keeps its "never append" rule intact.
+fn process_env_baseline_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/process_env_baseline.txt")
+}
+
+/// The ledger that grandfathers `rule`'s existing violations.
+fn baseline_path_for(rule: Rule) -> PathBuf {
+    if rule == Rule::ProcessEnvWrite {
+        process_env_baseline_path()
+    } else {
+        baseline_path()
+    }
+}
+
 fn read_baseline() -> BTreeSet<String> {
-    let text = fs::read_to_string(baseline_path()).expect("read test hygiene baseline");
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_string)
+    [baseline_path(), process_env_baseline_path()]
+        .iter()
+        .flat_map(|path| {
+            fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -186,12 +214,29 @@ fn runtime_behavior_modules_are_scanned_as_whole_file_test_code() {
 // depending on whatever the workspace happens to contain today.
 // ---------------------------------------------------------------------------
 
+/// Findings for every rule except [`Rule::ProcessEnvWrite`]. Every env write
+/// also trips that ledger rule, so the older fixtures, which count findings of
+/// their own rule, stay focused; its own fixtures use [`scan_fixture_for`].
 fn scan_fixture(text: &str) -> Vec<hygiene::Finding> {
     scan_source(
         "crates/demo/tests/demo.rs",
         text,
         SourceKind::WholeFileIsTest,
     )
+    .into_iter()
+    .filter(|finding| finding.rule != Rule::ProcessEnvWrite)
+    .collect()
+}
+
+fn scan_fixture_for(rule: Rule, text: &str) -> Vec<hygiene::Finding> {
+    scan_source(
+        "crates/demo/tests/demo.rs",
+        text,
+        SourceKind::WholeFileIsTest,
+    )
+    .into_iter()
+    .filter(|finding| finding.rule == rule)
+    .collect()
 }
 
 #[test]
@@ -685,6 +730,86 @@ fn rewrites_path() {
     assert!(findings.is_empty(), "unexpected findings: {findings:?}");
 }
 
+// ---------------------------------------------------------------------------
+// SPEC #4072 (FR-004/005, AC-5, AC-8): tests must not write process env at
+// all, locked or not. Pin a value with gwt_core::test_support::ScopedEnvOverride
+// and read it through gwt_core::env, or pass it to a child with Command::env.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn process_env_writes_are_reported_even_under_the_shared_lock() {
+    let findings = scan_fixture_for(
+        Rule::ProcessEnvWrite,
+        r#"
+#[test]
+fn rewrites_env() {
+    let _guard = env_lock().lock().unwrap();
+    std::env::set_var("X", "1");
+    env::remove_var("HOME");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _path = gwt_core::test_support::ScopedEnvVar::unset(
+        "PATH",
+    );
+}
+"#,
+    );
+
+    assert_eq!(
+        findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+        vec![5, 6, 7, 8],
+        "unexpected findings: {findings:?}"
+    );
+    assert!(findings.iter().all(|f| f.context == "rewrites_env"));
+}
+
+#[test]
+fn thread_local_overrides_and_child_env_are_not_process_env_writes() {
+    let findings = scan_fixture_for(
+        Rule::ProcessEnvWrite,
+        r#"
+#[test]
+fn isolates() {
+    let _home = ScopedGwtHome::set(temp.path());
+    let _x = ScopedEnvOverride::set("X", "1");
+    let _bin = ScopedHookBin::set("/tmp/gwtd");
+    Command::new("gwtd").env("PATH", "/tmp").env_remove("HOME");
+    let _read = std::env::var("X");
+}
+"#,
+    );
+
+    assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+}
+
+#[test]
+fn a_process_env_exception_needs_an_issue_number_and_a_reason() {
+    let declared = scan_fixture_for(
+        Rule::ProcessEnvWrite,
+        r#"
+#[test]
+fn probes_the_real_process_env() {
+    // test-hygiene: allow-process-env #4072 exercises std::env itself
+    std::env::set_var("X", "1");
+}
+"#,
+    );
+    assert!(declared.is_empty(), "unexpected findings: {declared:?}");
+
+    for marker in [
+        "// test-hygiene: allow-process-env",
+        "// test-hygiene: allow-process-env exercises std::env itself",
+        "// test-hygiene: allow-process-env #4072",
+    ] {
+        let undeclared = scan_fixture_for(
+            Rule::ProcessEnvWrite,
+            &format!(
+                "#[test]\nfn probe() {{\n    {marker}\n    std::env::set_var(\"X\", \"1\");\n}}\n"
+            ),
+        );
+        assert_eq!(undeclared.len(), 1, "`{marker}` must not silence the gate");
+    }
+}
+
 #[test]
 fn only_cfg_test_blocks_are_scanned_in_crate_sources() {
     let text = r#"
@@ -780,6 +905,27 @@ fn no_new_short_wall_clock_durations_in_test_code() {
 #[test]
 fn no_new_unlocked_process_env_mutations_in_test_code() {
     assert_no_new_violations(Rule::UnlockedProcessEnv);
+}
+
+#[test]
+fn no_new_process_env_writes_in_test_code() {
+    // FR-005: list the declared exceptions so they stay visible in CI output.
+    let root = workspace_root();
+    let marker = "test-hygiene: allow-process-env";
+    for source in target_sources(&root) {
+        let text = fs::read_to_string(root.join(&source.relative_path)).unwrap_or_default();
+        for (index, line) in text.lines().enumerate() {
+            if let Some(at) = line.find(marker) {
+                println!(
+                    "process-env exception: {}:{} {}",
+                    source.relative_path,
+                    index + 1,
+                    line[at + marker.len()..].trim()
+                );
+            }
+        }
+    }
+    assert_no_new_violations(Rule::ProcessEnvWrite);
 }
 
 #[test]
@@ -963,7 +1109,7 @@ fn the_baseline_only_shrinks() {
     assert!(
         stale.is_empty(),
         "{} baseline entr(ies) no longer match a violation. Delete these lines from \
-         crates/gwt-core/tests/test_hygiene_baseline.txt:\n{}\n",
+         crates/gwt-core/tests/test_hygiene_baseline.txt or process_env_baseline.txt:\n{}\n",
         stale.len(),
         stale
             .iter()
@@ -975,7 +1121,13 @@ fn the_baseline_only_shrinks() {
 
 #[test]
 fn the_baseline_is_well_formed_and_sorted() {
-    let text = fs::read_to_string(baseline_path()).expect("read test hygiene baseline");
+    for path in [baseline_path(), process_env_baseline_path()] {
+        assert_ledger_is_well_formed_and_sorted(&path);
+    }
+}
+
+fn assert_ledger_is_well_formed_and_sorted(path: &Path) {
+    let text = fs::read_to_string(path).expect("read test hygiene baseline");
     let entries: Vec<&str> = text
         .lines()
         .map(str::trim)
@@ -989,9 +1141,12 @@ fn the_baseline_is_well_formed_and_sorted() {
             3,
             "baseline entry must be `<rule>|<file>|<context>`: {entry}"
         );
-        assert!(
-            Rule::from_id(fields[0]).is_some(),
-            "unknown rule id in baseline entry: {entry}"
+        let rule = Rule::from_id(fields[0]);
+        assert!(rule.is_some(), "unknown rule id in baseline entry: {entry}");
+        assert_eq!(
+            baseline_path_for(rule.unwrap()),
+            path,
+            "baseline entry is in the wrong ledger: {entry}"
         );
         assert!(
             !fields[1].is_empty() && !fields[2].is_empty(),
@@ -1026,19 +1181,46 @@ fn the_baseline_is_well_formed_and_sorted() {
 #[test]
 #[ignore = "maintenance helper: rewrites test_hygiene_baseline.txt"]
 fn regenerate_the_baseline() {
-    let keys: BTreeSet<String> = scan_workspace()
-        .iter()
-        .map(hygiene::Finding::baseline_key)
-        .collect();
+    let findings = scan_workspace();
+    for (path, header, process_env) in [
+        (baseline_path(), BASELINE_HEADER, false),
+        (
+            process_env_baseline_path(),
+            PROCESS_ENV_BASELINE_HEADER,
+            true,
+        ),
+    ] {
+        let keys: BTreeSet<String> = findings
+            .iter()
+            .filter(|finding| (finding.rule == Rule::ProcessEnvWrite) == process_env)
+            .map(hygiene::Finding::baseline_key)
+            .collect();
 
-    let mut text = String::from(BASELINE_HEADER);
-    for key in &keys {
-        text.push_str(key);
-        text.push('\n');
+        let mut text = String::from(header);
+        for key in &keys {
+            text.push_str(key);
+            text.push('\n');
+        }
+        fs::write(&path, text).expect("write test hygiene baseline");
+        eprintln!("wrote {} entr(ies) to {}", keys.len(), path.display());
     }
-    fs::write(baseline_path(), text).expect("write test hygiene baseline");
-    eprintln!("wrote {} baseline entr(ies)", keys.len());
 }
+
+const PROCESS_ENV_BASELINE_HEADER: &str = "\
+# Grandfathered process-env writes in test code (SPEC #4072, rule process-env-write).
+#
+# Format: process-env-write|<file>|<context>
+#
+# This list only shrinks. Do not append to it: pin the value for the current
+# thread with gwt_core::test_support::ScopedEnvOverride (HOME: ScopedGwtHome)
+# and read it through gwt_core::env, or pass it to a child with Command::env.
+# A genuine exception is declared inline with its Issue and reason:
+# `// test-hygiene: allow-process-env #<issue> <reason>`.
+#
+# Once a listed context stops writing process env, delete its row or the gate
+# fails. Regenerate after a bulk migration with:
+# cargo test -p gwt-core --test test_hygiene_test -- --ignored regenerate_the_baseline
+";
 
 const BASELINE_HEADER: &str = "\
 # Grandfathered test-hygiene violations (SPEC #4551).
@@ -1075,6 +1257,7 @@ mod hygiene {
         NativeWatcherDeadline,
         ProductionProbeDeadline,
         UncheckedSocketBind,
+        ProcessEnvWrite,
     }
 
     impl Rule {
@@ -1085,6 +1268,7 @@ mod hygiene {
                 Rule::NativeWatcherDeadline => "native-watcher-deadline",
                 Rule::ProductionProbeDeadline => "production-probe-deadline",
                 Rule::UncheckedSocketBind => "unchecked-socket-bind",
+                Rule::ProcessEnvWrite => "process-env-write",
             }
         }
 
@@ -1095,6 +1279,7 @@ mod hygiene {
                 "native-watcher-deadline" => Some(Rule::NativeWatcherDeadline),
                 "production-probe-deadline" => Some(Rule::ProductionProbeDeadline),
                 "unchecked-socket-bind" => Some(Rule::UncheckedSocketBind),
+                "process-env-write" => Some(Rule::ProcessEnvWrite),
                 _ => None,
             }
         }
@@ -1106,6 +1291,7 @@ mod hygiene {
                 Rule::NativeWatcherDeadline => "test-hygiene: allow-native-watcher-deadline",
                 Rule::ProductionProbeDeadline => "test-hygiene: allow-production-probe-deadline",
                 Rule::UncheckedSocketBind => "test-hygiene: allow-unchecked-socket-bind",
+                Rule::ProcessEnvWrite => "test-hygiene: allow-process-env",
             }
         }
 
@@ -1147,6 +1333,17 @@ mod hygiene {
                     "through test_support::checked_socket_path(&path), so nested TMPDIR\n",
                     "cannot silently break macOS/BSD. A test of the OS path boundary\n",
                     "itself may declare // test-hygiene: allow-unchecked-socket-bind <reason>"
+                ),
+                Rule::ProcessEnvWrite => concat!(
+                    "Tests must not write the process environment, even under env_lock:\n",
+                    "production readers do not take the lock, so a sibling test reads\n",
+                    "the value mid-flight (SPEC #4072). Pin it for this thread instead:\n",
+                    "    let _x = gwt_core::test_support::ScopedEnvOverride::set(\"X\", v);\n",
+                    "and read it in production through gwt_core::env::var / var_os\n",
+                    "(HOME: ScopedGwtHome). Pass values to a child with Command::env.\n",
+                    "If the process env itself is the subject, declare it with an Issue:\n",
+                    "    // test-hygiene: allow-process-env #<issue> <reason>\n",
+                    "Existing sites are grandfathered in process_env_baseline.txt."
                 ),
             }
         }
@@ -1658,6 +1855,7 @@ mod hygiene {
                 Rule::NativeWatcherDeadline,
                 Rule::ProductionProbeDeadline,
                 Rule::UncheckedSocketBind,
+                Rule::ProcessEnvWrite,
             ] {
                 let violates = if rule == Rule::UncheckedSocketBind {
                     unchecked_binds.contains(&index)
@@ -1722,6 +1920,7 @@ mod hygiene {
             Rule::NativeWatcherDeadline => native_watcher_regex().is_match(code),
             Rule::ProductionProbeDeadline => production_probe_regex().is_match(code),
             Rule::UncheckedSocketBind => false, // Complete calls are checked in scan_source.
+            Rule::ProcessEnvWrite => process_env_write_regex().is_match(code),
         }
     }
 
@@ -1734,6 +1933,10 @@ mod hygiene {
             candidates.push(raw[index - 1]);
         }
         candidates.iter().any(|line| match line.find(marker) {
+            // SPEC #4072 FR-005: a process-env exception names its Issue too.
+            Some(at) if rule == Rule::ProcessEnvWrite => {
+                issue_reason_regex().is_match(&line[at + marker.len()..])
+            }
             Some(at) => !line[at + marker.len()..].trim().is_empty(),
             None => false,
         })
@@ -2028,6 +2231,19 @@ mod hygiene {
         RE.get_or_init(|| {
             Regex::new(r"\benv::(?:set_var|remove_var|set_current_dir)\s*\(").expect("valid regex")
         })
+    }
+
+    fn process_env_write_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"\b(?:env::(?:set_var|remove_var)|ScopedEnvVar\s*::\s*(?:set|unset))\s*\(")
+                .expect("valid regex")
+        })
+    }
+
+    fn issue_reason_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"^\s+#\d+\s+\S").expect("valid regex"))
     }
 
     fn fn_declaration_regex() -> &'static Regex {
