@@ -373,15 +373,64 @@ pub struct SliceReviewScope {
 
 const SLICE_SECTION_MAX_BYTES: usize = 8_000;
 
-/// Issue #7942 AC-1: identify the slice a PR delivers. The first `T-…` id the
-/// PR body names that has a heading section with an `Acceptance` line in the
-/// SPEC text wins. `None` (fail-closed onto the parent criteria) when the PR
-/// names no such slice.
+/// Issue #7942 AC-4: the review criterion of a SPEC PR whose slice cannot be
+/// identified. It is judged on code defects and on the PR body declaring its
+/// slice — never on the parent SPEC's acceptance criteria.
+pub const UNDECLARED_SLICE_CRITERION: &str = "slice-declaration";
+
+/// Issue #7942 AC-1/AC-4: identify the slice a PR delivers. An explicit
+/// `Slice: T-…` line in the PR body wins, scoped to that id's heading section
+/// or task lines in the SPEC. Otherwise the first `T-…` id the PR body names
+/// that has a heading section with an `Acceptance` line in the SPEC wins.
+/// `None` when the PR names no such slice.
 pub fn slice_review_scope(spec_text: &str, pr_body: &str) -> Option<SliceReviewScope> {
+    if let Some(slice_id) = declared_slice_id(pr_body) {
+        let section = slice_section(spec_text, &slice_id, false)
+            .or_else(|| slice_task_lines(spec_text, &slice_id))
+            .unwrap_or_else(|| {
+                "(the SPEC has no section or task line for this slice; judge it by the \
+                 scope the PR body states)"
+                    .to_string()
+            });
+        return Some(SliceReviewScope { slice_id, section });
+    }
     slice_ids_in(pr_body)
         .into_iter()
-        .find_map(|id| slice_section(spec_text, &id).map(|section| (id, section)))
+        .find_map(|id| slice_section(spec_text, &id, true).map(|section| (id, section)))
         .map(|(slice_id, section)| SliceReviewScope { slice_id, section })
+}
+
+/// Issue #7942 AC-4: the review scope of a SPEC PR. Every SPEC PR is a slice;
+/// when its slice cannot be identified it is reviewed under
+/// [`UNDECLARED_SLICE_CRITERION`] instead of the parent SPEC's AC.
+pub fn spec_pr_review_scope(spec_text: &str, pr_body: &str) -> SliceReviewScope {
+    slice_review_scope(spec_text, pr_body).unwrap_or_else(|| SliceReviewScope {
+        slice_id: UNDECLARED_SLICE_CRITERION.to_string(),
+        section: String::new(),
+    })
+}
+
+fn declared_slice_id(pr_body: &str) -> Option<String> {
+    pr_body.lines().find_map(|line| {
+        let line = line
+            .trim_start()
+            .trim_start_matches(['-', '*', '+'])
+            .trim_start()
+            .replace(['*', '`'], "");
+        let head = line.get(..6)?;
+        if !head.eq_ignore_ascii_case("slice:") {
+            return None;
+        }
+        slice_ids_in(&line[6..]).into_iter().next()
+    })
+}
+
+fn slice_task_lines(spec_text: &str, slice_id: &str) -> Option<String> {
+    let lines: Vec<&str> = spec_text
+        .lines()
+        .filter(|line| slice_ids_in(line).iter().any(|id| id == slice_id))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn slice_ids_in(text: &str) -> Vec<String> {
@@ -407,7 +456,7 @@ fn heading_level(line: &str) -> Option<usize> {
     (level > 0 && line[level..].starts_with(' ')).then_some(level)
 }
 
-fn slice_section(spec_text: &str, slice_id: &str) -> Option<String> {
+fn slice_section(spec_text: &str, slice_id: &str, require_acceptance: bool) -> Option<String> {
     let lines: Vec<&str> = spec_text.lines().collect();
     lines.iter().enumerate().find_map(|(index, line)| {
         let level = heading_level(line)?;
@@ -426,7 +475,7 @@ fn slice_section(spec_text: &str, slice_id: &str) -> Option<String> {
                 .to_ascii_lowercase()
                 .starts_with("acceptance")
         });
-        if !has_acceptance {
+        if require_acceptance && !has_acceptance {
             return None;
         }
         let mut section = body.join("\n");
@@ -445,6 +494,19 @@ fn slice_section(spec_text: &str, slice_id: &str) -> Option<String> {
 /// the only required criterion; the parent SPEC's acceptance criteria are
 /// delivered by later slices and never fail this PR on their own.
 pub fn build_slice_review_prompt(spec_number: u64, scope: &SliceReviewScope) -> String {
+    if scope.slice_id == UNDECLARED_SLICE_CRITERION {
+        return format!(
+            "This PR delivers one slice of SPEC #{spec_number}, but its slice could not be \
+             identified. Judge criterion {id:?} against code defects in the diff \
+             (correctness, regressions, missing tests) and against whether the PR body \
+             declares its slice. The parent SPEC's acceptance criteria (AC-*) are NOT the \
+             pass criteria of this slice PR: never FAIL it only because parent criteria \
+             remain unchecked. If the PR body has no `Slice: T-…` line naming the slice it \
+             delivers, FAIL {id:?} with evidence asking the PR body to add one. Report \
+             criterion id {id:?}.",
+            id = UNDECLARED_SLICE_CRITERION,
+        );
+    }
     format!(
         "This PR delivers slice {id} of SPEC #{spec_number}. Judge criterion {id} against \
          that slice section's Acceptance below AND against code defects in the diff \
@@ -687,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_without_a_known_slice_keeps_parent_criteria() {
+    fn pr_without_a_known_slice_section_is_unresolved() {
         assert_eq!(slice_review_scope(SLICE_SPEC, "fix: T-999 typo"), None);
         assert_eq!(slice_review_scope(SLICE_SPEC, "T-003l1az-1 only"), None);
         let no_acceptance = "## T-1: plan only\nGoal: x\n";
@@ -703,5 +765,45 @@ mod tests {
         assert!(prompt.contains("code defects"));
         assert!(prompt.contains("NOT the pass criteria"));
         assert!(prompt.contains("UNTRUSTED"));
+    }
+
+    // Issue #7942 AC-4: PR #8029 named `T-1`, which SPEC #4072 has no
+    // Acceptance-lined section for; PR #8036 first named the later slice
+    // `T-004`. Neither may be judged against the parent SPEC's AC.
+    #[test]
+    fn unresolved_slice_pr_is_never_judged_by_parent_acceptance() {
+        let spec_4072 = "## 受け入れ基準\n- [ ] AC-1: 全テスト\n\n## T-1: Phase A\nGoal: x\n";
+        let spec_3836 =
+            "## 受け入れ基準\n- [ ] AC-1: x\n\n## tasks\n- [x] T-001 parser\n- [ ] T-004 UI\n";
+        for (spec, pr_body) in [
+            (spec_4072, "SPEC #4072 Phase A: T-1 の env 読み取り"),
+            (spec_3836, "SPEC #3836 Slice 1。T-004 以降は後続。"),
+        ] {
+            let scope = spec_pr_review_scope(spec, pr_body);
+            assert_eq!(scope.slice_id, UNDECLARED_SLICE_CRITERION, "{pr_body}");
+            let prompt = build_slice_review_prompt(1, &scope);
+            assert!(prompt.contains("NOT the pass criteria"));
+            assert!(
+                prompt.contains("Slice: T-"),
+                "asks the PR body to declare its slice"
+            );
+            assert!(prompt.contains("code defects"));
+            assert!(!prompt.contains("AC-1"), "parent AC is not in scope");
+        }
+    }
+
+    #[test]
+    fn declared_slice_wins_without_an_acceptance_section() {
+        let spec_4072 = "## T-1: Phase A\nGoal: env 読み取り\n\n## T-2: Phase B\nGoal: z\n";
+        let scope = spec_pr_review_scope(spec_4072, "概要\n- Slice: T-1\n");
+        assert_eq!(scope.slice_id, "T-1");
+        assert!(scope.section.contains("env 読み取り"));
+        assert!(!scope.section.contains("Phase B"));
+
+        let spec_3836 = "## tasks\n- [x] T-001 parser\n- [ ] T-004 UI\n";
+        let scope = spec_pr_review_scope(spec_3836, "T-004 以降は後続。\n**Slice:** T-001\n");
+        assert_eq!(scope.slice_id, "T-001");
+        assert!(scope.section.contains("T-001 parser"));
+        assert!(!scope.section.contains("T-004 UI"));
     }
 }

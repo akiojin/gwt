@@ -33,6 +33,7 @@ Rules:
 <!-- GUIDE: Ready for review requires a releaseable slice, no known blockers, completed acceptance for this PR scope, and pre-PR verification evidence. Draft PRs are prohibited. Repair unmet gates before creating the PR. -->
 
 - State: Ready for review
+- Slice: {SPEC PRs only: the `T-…` id of the slice this PR delivers; the independent review judges that slice instead of the parent SPEC's AC. Remove this line for non-SPEC PRs.}
 - Releaseable slice: {yes/no + reason}
 - Known blockers: {None or list}
 - Remaining acceptance: {None or list}
