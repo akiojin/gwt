@@ -1678,14 +1678,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cleanup_future_is_abandoned_after_grace() {
-        let completed = tokio::time::timeout(
-            Duration::from_secs(2),
-            run_cleanup_with_grace(Duration::from_millis(20), std::future::pending()),
+        let completed = run_cleanup_with_grace(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_secs(1)),
         )
-        .await
-        .expect("cleanup grace must bound a stalled cleanup future");
+        .await;
 
         assert!(!completed, "stalled cleanup must report incomplete");
     }
@@ -2101,51 +2100,49 @@ mod tests {
             .join()
             .unwrap();
             assert!(trace.contents().is_empty());
-            runtime.block_on(async {
-                let (success_program, success_args) = echo_command();
-                spawn_logged(
+            let (success_program, success_args) = echo_command();
+            runtime
+                .block_on(spawn_logged(
                     &supplied_hub,
                     ProcessKind::IndexRunner,
                     success_program,
                     &success_args,
                     SpawnOptions::new("secret label ghp_abcdef0123456789").forward_output(false),
-                )
-                .await
+                ))
                 .expect("silent success");
 
-                let (timeout_program, timeout_args) = if cfg!(windows) {
-                    (
-                        "cmd".to_string(),
-                        vec!["/C".to_string(), "ping -n 4 127.0.0.1 >NUL".to_string()],
-                    )
-                } else {
-                    (
-                        "sh".to_string(),
-                        vec!["-c".to_string(), "sleep 3".to_string()],
-                    )
-                };
-                let timeout = spawn_logged_with_deadline(
-                    &supplied_hub,
-                    ProcessKind::IndexRunner,
-                    timeout_program,
-                    &timeout_args,
-                    SpawnOptions::new("private timeout path C:\\secret").forward_output(false),
-                    Instant::now() + Duration::from_millis(150),
-                )
-                .await
-                .expect_err("silent timeout");
-                assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+            let (timeout_program, timeout_args): (&str, &[&str]) = if cfg!(windows) {
+                ("ping", &["-t", "127.0.0.1"])
+            } else {
+                ("sh", &["-c", "while :; do sleep 60; done"])
+            };
+            let timeout = with_spawn_stopped_at_ready_for_tests(
+                crate::deadline_budget::HANG_GUARD,
+                || {},
+                || {
+                    runtime.block_on(spawn_logged_with_deadline(
+                        &supplied_hub,
+                        ProcessKind::IndexRunner,
+                        timeout_program,
+                        timeout_args,
+                        SpawnOptions::new("private timeout path C:\\secret").forward_output(false),
+                        Instant::now(),
+                    ))
+                },
+            )
+            .expect_err("silent timeout");
+            assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+            assert!(deadline_evidence(&timeout).interrupted_child_reaped());
 
-                spawn_logged(
+            runtime
+                .block_on(spawn_logged(
                     &supplied_hub,
                     ProcessKind::IndexRunner,
                     "this-binary-does-not-exist-silent-process-test",
                     &[] as &[&str],
                     SpawnOptions::new("private missing executable").forward_output(false),
-                )
-                .await
+                ))
                 .expect_err("silent spawn failure");
-            });
         });
 
         assert!(
